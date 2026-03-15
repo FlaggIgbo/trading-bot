@@ -1,0 +1,44 @@
+# =============================================================================
+# Kalshi Trading Bot Configuration
+# =============================================================================
+# Override with env vars: MARKETS (comma-separated), POLL_INTERVAL_SECONDS
+
+# Markets to watch: list of market tickers or series tickers
+# Examples: KALSHI_YES (elections), KXHIGHNY (weather), KXBTC-25MAR15 (BTC)
+markets:
+  - KXBTCD
+  - KXETHD
+  - KXSOLD
+  - KXINXU
+
+# How often to poll markets (seconds)
+poll_interval_seconds: 60
+
+# yfinance tickers: Kalshi series → Yahoo Finance ticker (no API key required)
+# See https://github.com/ranaroussi/yfinance for ticker formats
+yfinance_tickers:
+  KXBTCD: "BTC-USD"
+  KXETHD: "ETH-USD"
+  KXSOLD: "SOL-USD"
+  KXINXU: "^GSPC"    # S&P 500
+
+# Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
+strategy:
+  min_edge: 0.10   # Min edge (10%) to recommend buy. historical_p - market_price >= edge
+  days_to_expiry: 30   # For volatility model (log-normal)
+  skip_buy_no_above_cushion: 0.1   # Skip BUY NO on "above X" when current_price > X * (1+cushion). Sells existing NO positions that violate.
+  sell_losing_pct: 0.55   # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
+  limit_dip_pct: 0.05     # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
+  intraday_other_min_p_win: 0.90   # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)
+  # use_kelly: true   # Use Kelly criterion for position sizing (when true)
+  # kelly_fraction: 0.25   # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer)
+  # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
+  # blacklist: ["KXINXU"]   # Exclude these series (optional)
+  # buy_yes_below: 0.30   # bot.py: buy YES when price < 30 cents
+  # buy_no_below: 0.30    # bot.py: buy NO when price < 30 cents
+
+# Order execution (Kalshi) - balance-aware, 4xx-resilient
+trading:
+  dry_run: false   # false = place real orders when strategy triggers
+  max_pct_of_balance: 0.20    # use at most 20% of balance per order
+  min_contracts: 1   # skip if capped count < this
