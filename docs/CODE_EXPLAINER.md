@@ -369,6 +369,10 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `p_lose_blend_market_max_weight` | `p_lose_blend_market_max_weight` | 0.5 | Max market weight in P(lose) blend at expiry |
 | `p_lose_blend_market_half_life_days` | `p_lose_blend_market_half_life_days` | 0.5 | Half-life for market-weight decay |
 | `use_intraday_empirical` | `use_intraday_empirical` | true | Use 1h prices at resolution hour for intraday empirical |
+| `use_kelly` | `use_kelly` | true | Kelly criterion for position sizing; reduces size for farther-OTM (lower P(win)) |
+| `kelly_fraction` | `kelly_fraction` | 0.25 | Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer) |
+| `use_kelly` | `use_kelly` | true | Kelly criterion for position sizing; reduces size for farther-OTM (lower P(win)) |
+| `kelly_fraction` | `kelly_fraction` | 0.25 | Fractional Kelly (0.25 = quarter-Kelly; safer than full Kelly) |
 
 ---
 

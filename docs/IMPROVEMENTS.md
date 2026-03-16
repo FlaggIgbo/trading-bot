@@ -13,7 +13,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | Balance-aware order execution           | Freqtrade                               | ✓ `create_order_safe`, `max_pct_of_balance`                                                                                                                                                                                                              |
 | Low-balance limit fallback              | Freqtrade                               | ✓ `min_balance_for_limit_fallback_cents` — place 1-contract limit instead of skipping when balance is low                                                                                                                                                |
 | Config-driven strategy                  | Freqtrade, Gekko                        | ✓ `config.yaml` strategy, min_edge                                                                                                                                                                                                                       |
-| Kelly criterion position sizing         | Freqtrade, Stock-Prediction-Models      | ✓ `strategy.use_kelly`, `kelly_fraction`                                                                                                                                                                                                                 |
+| Kelly criterion position sizing         | Freqtrade, Stock-Prediction-Models      | ✓ `strategy.use_kelly`, `kelly_fraction` (default 0.25); reduces size for farther-OTM contracts (lower P(win)); enabled by default in config                                                                                                                                                                                                                 |
 | Whitelist / blacklist                   | Freqtrade                               | ✓ `strategy.whitelist`, `strategy.blacklist`                                                                                                                                                                                                             |
 | File logging for run history            | Freqtrade                               | ✓ `--log` or `--log DIR`; eval_YYYYMMDDHH.log per hour, append within hour                                                                                                                                                                                |
 | Systematic edges (arbitrage)            | QuantPedia                              | ✓ Intra-exchange + inter-exchange (Kalshi↔Gemini) arb; `min_arb_fee`, `enable_intra_arb`, `enable_inter_arb`                                                                                                                                             |
@@ -119,7 +119,7 @@ Run our evaluation logic on _historical_ market snapshots instead of live data. 
 ### 2. ~~Kelly Criterion Position Sizing~~ ✓ Done
 
 ~~Instead of fixed `count=10`, size positions by edge and bankroll.~~
-Config: `strategy.use_kelly`, `kelly_fraction` (quarter-Kelly). `_kelly_count()` in compare_historical.py.
+Config: `strategy.use_kelly`, `kelly_fraction` (quarter-Kelly). `_kelly_count()` in compare_historical.py. Reduces position size for farther-OTM contracts (lower P(win)). Enabled by default.
 
 ### 3. ~~Whitelist / Blacklist~~ ✓ Done
 

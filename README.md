@@ -446,6 +446,17 @@ easy_win_min_p_win: 0.90 # Model must say P(win) >= this for easy-win
 easy_win_min_market_p: 0.85 # Market must be in ballpark (yes_bid or no_bid >= this)
 ```
 
+### Kelly criterion (position sizing)
+
+**In plain English:** The bot uses the Kelly criterion (when `use_kelly: true`, the default) to size positions: higher P(win) and better odds → more contracts; lower P(win) (e.g. farther out-of-the-money) → fewer contracts. This automatically reduces size for strikes farther from the current price. Uses fractional Kelly (`kelly_fraction: 0.25`) for a more conservative bet size.
+
+**Config** (`config.yaml` → `strategy`):
+
+```yaml
+use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts
+kelly_fraction: 0.25 # Quarter-Kelly (safer; full Kelly can be aggressive)
+```
+
 ### Absolute winner (slam-dunk buys)
 
 **In plain English:** When we have a near-certainty—e.g. buying at 1¢ when our model says 95%+ chance of winning—the bot will buy more than one contract, up to a configurable cap. It respects your USD balance on both Kalshi and Gemini: each platform's balance is checked before allocation and at order placement; insufficient funds cause the order to be skipped (not placed) with a log message.

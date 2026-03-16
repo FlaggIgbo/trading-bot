@@ -77,8 +77,8 @@ strategy:
   # P(lose) blend: incorporate market odds; weight increases as we approach resolution (markets more accurate near expiry)
   p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
-  # use_kelly: true   # Use Kelly criterion for position sizing (when true)
-  # kelly_fraction: 0.25   # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer)
+  use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
+  kelly_fraction: 0.25 # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer; full Kelly can be aggressive)
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # blacklist: ["KXINXU"]   # Exclude these series (optional)
   # buy_yes_below: 0.30   # bot.py: buy YES when price < 30 cents
