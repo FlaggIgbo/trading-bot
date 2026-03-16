@@ -43,6 +43,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Calibration loss weighting**       | —                                       | ✓ `strategy.calibration_loss_weight` (default 1.5); losers weighted higher in calibration; `get_calibration_stats()` uses weighted wins/loses for bucket and by_direction_side win rates. Learn more from mistakes. |
 | **Sell and re-buy losers**            | —                                       | ✓ `strategy.enable_sell_and_rebuy`; when selling a losing position (LIKELY_LOSE or rec flip), optionally re-buy same contract at current price if model still sees edge; bypasses min 5¢ rule for re-entry. Kalshi + Gemini. |
 | **P(lose) with market odds blend**    | —                                       | ✓ `_compute_p_lose()` blends model (hist_p) with Kalshi/Gemini market odds; market weight increases as we approach resolution (more accurate near expiry). Config: `p_lose_blend_market_max_weight` (0.5), `p_lose_blend_market_half_life_days` (0.5). |
+| **Easy win (aligned high-confidence)** | —                                       | ✓ When model and market both say ~90%+ (aligned), use `min_edge_easy_win` (0.01 = 1¢) instead of `min_edge` — buy if any profit after fees. Config: `enable_easy_win`, `min_edge_easy_win`, `easy_win_min_p_win`, `easy_win_min_market_p`. |
 
 ---
 

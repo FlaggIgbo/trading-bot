@@ -297,7 +297,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 |----------|------|-----------|---------|
 | `_empirical_probability` | compare_historical | `(closes, threshold, direction) -> float` | Fraction of closes above (direction="above") or below (direction="below") threshold. |
 | `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda) -> float \| None` | Log-normal P(S>K) or P(S<K) using historical vol; EWMA variance when use_ewma. |
-| `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Prefers larger edge when both qualify. |
+| `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win: when model+market both ≥90%, uses min_edge_easy_win (e.g. 1¢) instead. Prefers larger edge when both qualify. |
 | `_recommend_strict` | compare_historical | `(hist_p, market_yes, min_p_win, min_edge, fee) -> str` | Same as _recommend but also requires hist_p ≥ min_p_win for YES (or 1-hist_p ≥ min_p_win for NO). For non-standard intraday. |
 | `_extract_strike` | compare_historical | `(market) -> (threshold, direction)` | Parse floor/cap from market API or title regex ("above $X", "below $Y"). |
 | `_get_closes_for_empirical` | compare_historical | `(yf_ticker, days_back, closes_daily, market, sp, cfg) -> list[float]` | For intraday + use_intraday_empirical: return intraday prices at resolution hour; else daily closes. |
@@ -338,6 +338,10 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `ewma_lambda` | `ewma_lambda` | 0.94 | EWMA decay (RiskMetrics-style) |
 | `intraday_other_min_p_win` | `intraday_other_min_p_win` | 0.90 | For non-5pm/4pm intraday: require P(win)≥90% |
 | `intraday_other_min_p_win_with_vol` | `intraday_other_min_p_win_with_vol` | 0.80 | Same but when --use-volatility |
+| `enable_easy_win` | `enable_easy_win` | true | Buy when model+market aligned (90%+) with relaxed min_edge |
+| `min_edge_easy_win` | `min_edge_easy_win` | 0.01 | Min profit (1¢) when easy-win; 0 = any profit after fees |
+| `easy_win_min_p_win` | `easy_win_min_p_win` | 0.90 | Model P(win) ≥ this for easy-win |
+| `easy_win_min_market_p` | `easy_win_min_market_p` | 0.85 | Market price ≥ this (same ballpark) for easy-win |
 | `min_arb_fee` | `min_arb_fee` | 0.02 | Min edge for arb (yes+no < 1−fee) |
 | `min_yes_price` | `min_yes_price` | 0.05 | Skip BUY YES when yes_bid < 5¢ |
 | `min_no_price` | `min_no_price` | 0.05 | Skip BUY NO when no_bid < 5¢ |
