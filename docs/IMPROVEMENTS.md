@@ -35,6 +35,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **BUY YES/NO preference**               | —                                       | ✓ When both YES and NO have edge, `_recommend()` prefers whichever yields the larger net return                                                                                                                                                        |
 | **Contradictory-position avoidance**    | —                                       | ✓ `_filter_contradictory_buys()` skips BUYs that would conflict with kept positions OR other pending BUYs on same underlying + resolution (Kalshi + Gemini). E.g. NO on SOL<$83 and YES on SOL≥$92 are mutually exclusive; keeps higher-edge when both sides compete. Arb (YES+NO same contract) allowed.                                                    |
 | **Gemini hourly events**               | —                                       | ✓ `get_crypto_events()` fetches both `crypto` (daily/weekly) and `hourly` categories; BTC, ETH, SOL, XRP at 1am EDT etc.                                                                                                                                   |
+| **Gemini position sell (losers)**      | Kalshi sell logic                       | ✓ Evaluates Gemini positions (like Kalshi) and sells contracts we judge as losers: REC_LIKELY_LOSE, rec flip (BUY YES→now BUY NO), or REC_RULE_VIOLATION. Uses `get_positions()`, `gemini_symbol_to_market` map, same hist_p/vol_p logic; SELL via `place_order_safe`. |
 
 ---
 

@@ -93,16 +93,17 @@ Same logic for Gemini events (BTC, ETH, SOL, XRP):
 
 ### Step 4: Evaluate Your Positions (Sell Logic)
 
-Look at what you already hold and decide whether to sell:
+Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | Step                     | What happens                                                              | Code pointer                                            |
 | ------------------------ | ------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Fetch positions          | Paginated `kalshi.get_positions()`                                        | `compare_historical.py:1453-1463`                       |
-| Parse position           | `position_fp` positive = YES, negative = NO                               | `compare_historical.py:1470-1476`                       |
-| Use cached or fresh data | Market data from earlier loop or fresh fetch                              | `compare_historical.py:1518`                            |
-| Compute P(lose)          | Probability we're wrong on this position                                  | `compare_historical.py:1537`                            |
-| SELL triggers            | LIKELY_LOSE (P≥55%), edge flip, RULE_VIOLATION (price above strike on NO) | `compare_historical.py:1539-1561`                       |
-| Add to pending_sells     | List of orders to place                                                   | `compare_historical.py:1540` → `pending_sells.append()` |
+| Fetch Kalshi positions   | Paginated `kalshi.get_positions()`                                        | `compare_historical.py:1654-1665`                       |
+| Fetch Gemini positions   | `gemini_trading.get_positions()`; map symbol→market via `gemini_symbol_to_market` | `compare_historical.py:1868-1888`                       |
+| Parse position           | Kalshi: `position_fp` positive = YES, negative = NO; Gemini: `outcome`, `totalQuantity` | `compare_historical.py:1668-1676`, `1878-1886`     |
+| Use cached or fresh data | Market data from earlier loop or fresh fetch (Kalshi); Gemini uses events  | `compare_historical.py:1672`, `1887`                    |
+| Compute P(lose)          | Probability we're wrong on this position (hist_p + vol_p blend)           | `compare_historical.py:1737`, `1947`                    |
+| SELL triggers            | LIKELY_LOSE (P≥55%), edge flip, RULE_VIOLATION (price above strike on NO), unsupported resolution | `compare_historical.py:1739-1775`, `1949-1992` |
+| Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `compare_historical.py:1740`, `1950` → `pending_sells.append()` |
 
 ---
 

@@ -1845,6 +1845,155 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if res_key and _yf:
                         key = (_yf, res_key, PLATFORM_KALSHI)
                         existing_by_underlying.setdefault(key, []).append((threshold, direction, side))
+
+            # Evaluate Gemini positions for sell when bet looks like a loser (like Kalshi)
+            gemini_symbol_to_market: dict[str, dict] = {}
+            for yf_ticker, evts in gemini_events_by_asset.items():
+                for mkt in expand_gemini_events_to_markets(evts):
+                    evt = mkt["event"]
+                    sym = mkt.get("instrument_symbol")
+                    if sym:
+                        gemini_symbol_to_market[str(sym)] = {**mkt, "yf_ticker": yf_ticker}
+                    else:
+                        for out in ("yes", "no"):
+                            s = get_instrument_symbol(evt, out)
+                            if s:
+                                gemini_symbol_to_market[str(s)] = {**mkt, "yf_ticker": yf_ticker}
+
+            gemini_trading_eval = None
+            try:
+                gemini_trading_eval = GeminiTradingClient()
+            except ValueError:
+                pass
+            if gemini_trading_eval and gemini_symbol_to_market:
+                try:
+                    pos_resp = gemini_trading_eval.get_positions()
+                    gemini_positions = pos_resp.get("positions") or []
+                    gemini_eval_count = len(gemini_positions)
+                    if gemini_eval_count:
+                        if eval_count:
+                            print(f"  (plus {gemini_eval_count} Gemini position(s))")
+                        else:
+                            print(f"\nEvaluating {gemini_eval_count} Gemini position(s) for keep vs sell...")
+                    for pos in gemini_positions:
+                        sym = pos.get("symbol") or pos.get("instrumentSymbol")
+                        outcome = (pos.get("outcome") or "").lower()
+                        qty_raw = pos.get("totalQuantity") or pos.get("quantity") or "0"
+                        try:
+                            position_count = int(float(qty_raw))
+                        except (ValueError, TypeError):
+                            position_count = 0
+                        if not sym or outcome not in ("yes", "no") or position_count <= 0:
+                            continue
+                        info = gemini_symbol_to_market.get(str(sym))
+                        if not info:
+                            if getattr(args, "verbose", False):
+                                print(f"    (skip Gemini {sym} — not in our market list)")
+                            continue
+                        evt = info["event"]
+                        threshold_g = info["threshold"]
+                        direction_g = info["direction"]
+                        pos_yf = info.get("yf_ticker")
+                        title = (info.get("title") or evt.get("title") or "")[:55]
+                        ticker_g = info.get("ticker") or evt.get("ticker", "?")
+                        side = outcome
+                        if _should_skip_by_resolution(evt, pos_yf or ""):
+                            impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
+                            no_price_g = 1.0 - impl if 0 < impl < 1 else impl
+                            sell_price = impl if side == "yes" else no_price_g
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": sell_price,
+                                "rec": "INTRADAY_MARKET",
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                            continue
+                        if not pos_yf or pos_yf not in GEMINI_CRYPTO_YF:
+                            continue
+                        closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
+                        if not closes:
+                            if getattr(args, "verbose", False):
+                                print(f"    (no hist data for Gemini {ticker_g}, skip sell eval)")
+                            continue
+                        impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
+                        no_price_g = 1.0 - impl if 0 < impl < 1 else impl
+                        emp_g = _empirical_probability(closes, threshold_g, direction_g)
+                        dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
+                        vol_p_g = (
+                            _volatility_probability(closes, threshold_g, direction_g, dte_g, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                            if use_vol else None
+                        )
+                        hist_p_g = emp_g
+                        if vol_p_g is not None and use_vol:
+                            hist_p_g = vol_p_g if _is_intraday_market(evt, pos_yf) else (
+                                (sp.vol_blend_weight * emp_g + (1 - sp.vol_blend_weight) * vol_p_g)
+                                if sp.vol_blend_weight is not None else max(emp_g, vol_p_g)
+                            )
+                        min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
+                        rec = (
+                            _recommend_strict(hist_p_g, impl, min_p_win_g, min_edge, sp.gemini_maker_fee_rate)
+                            if _is_other_intraday(evt, pos_yf)
+                            else _recommend(hist_p_g, impl, min_edge, sp.gemini_maker_fee_rate)
+                        )
+                        violates_g = _violates_no_above_rule(closes[-1], threshold_g, direction_g, sp.no_above_cushion)
+                        if rec == REC_BUY_NO and violates_g:
+                            rec = REC_SKIP
+                        current_price_g = closes[-1]
+                        sell_price = impl if side == "yes" else no_price_g
+                        p_lose = hist_p_g if side == "no" else (1.0 - hist_p_g)
+                        if p_lose >= sp.sell_losing_pct:
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": sell_price,
+                                "rec": REC_LIKELY_LOSE,
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                        elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": sell_price,
+                                "rec": rec,
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                        elif side == "no" and violates_g:
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": no_price_g,
+                                "rec": REC_RULE_VIOLATION,
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                        else:
+                            res_key_g = _extract_resolution_key_from_gemini_ticker(ticker_g)
+                            if res_key_g and pos_yf:
+                                key = (pos_yf, res_key_g, PLATFORM_GEMINI)
+                                existing_by_underlying.setdefault(key, []).append((threshold_g, direction_g, side))
+                except Exception as gex:
+                    if getattr(args, "verbose", False):
+                        print(f"    (Gemini position eval failed: {gex})")
         except Exception:
             pass
 
@@ -1927,8 +2076,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     gemini_pending_buys[(str(sym), o["side"])] = o
         for s in pending_sells:
             if s.get("platform") == PLATFORM_GEMINI:
-                evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
-                sym = get_instrument_symbol(evt, s["side"]) if evt else None
+                sym = s.get("instrument_symbol")
+                if not sym:
+                    evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
+                    sym = get_instrument_symbol(evt, s["side"]) if evt else None
                 if sym:
                     gemini_pending_sells[(str(sym), s["side"])] = s
 
