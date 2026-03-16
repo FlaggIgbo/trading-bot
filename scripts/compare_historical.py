@@ -16,8 +16,6 @@ Run: python3 scripts/compare_historical.py [--days 365] [--markets 0] [--edge 0.
 from __future__ import annotations
 
 # TODO: Add cron/scheduler integration for 15-min runs (e.g. APScheduler, or document crontab)
-# TODO: Support intraday data for "price today at 5pm" contracts (currently uses daily close)
-# TODO: Integrate with Kalshi/Gemini order APIs for auto-execution when edge > threshold
 # TODO: Add logging to file for historical run analysis
 # TODO: GARCH or EWMA for time-varying volatility
 # TODO: Implied volatility from options market (if available) for richer probability
@@ -42,6 +40,8 @@ load_dotenv(_ROOT / ".env")
 
 from config import get_config
 from constants import (
+    PLATFORM_GEMINI,
+    PLATFORM_KALSHI,
     REC_ARB_INTER,
     REC_ARB_INTRA,
     REC_BUY_NO,
@@ -55,6 +55,7 @@ from gemini_client import (
     GeminiTradingClient,
     _event_to_asset,
     _get_yes_contract,
+    expand_gemini_events_to_markets,
     extract_strike_from_event,
     get_instrument_symbol,
     get_no_price,
@@ -66,12 +67,15 @@ from ollama_analysis import analyze_single_trade, capture_and_analyze
 try:
     from storage import (
         get_calibration_stats,
+        get_last_snapshot_for_ticker,
         get_unresolved_predictions,
         record_prediction,
         record_prediction_outcome,
+        record_resolved,
     )
 except ImportError:
-    get_calibration_stats = get_unresolved_predictions = record_prediction = record_prediction_outcome = None
+    get_calibration_stats = get_last_snapshot_for_ticker = get_unresolved_predictions = None
+    record_prediction = record_prediction_outcome = record_resolved = None
 from yfinance_client import get_aggs as yf_get_aggs
 
 # ---------------------------------------------------------------------------
@@ -105,6 +109,10 @@ class _StrategyParams:
     enable_inter_arb: bool
     kalshi_maker_fee_rate: float
     gemini_maker_fee_rate: float
+    absolute_winner_min_p_win: float
+    absolute_winner_max_price: float
+    absolute_winner_max_pct_of_balance: float
+    absolute_winner_max_contracts: int
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -129,6 +137,10 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_inter_arb=bool(strategy.get("enable_inter_arb", True)),
         kalshi_maker_fee_rate=float(strategy.get("kalshi_maker_fee_rate", 0.0175)),
         gemini_maker_fee_rate=float(strategy.get("gemini_maker_fee_rate", 0.0175)),
+        absolute_winner_min_p_win=float(strategy.get("absolute_winner_min_p_win", 0.95)),
+        absolute_winner_max_price=float(strategy.get("absolute_winner_max_price", 0.05)),
+        absolute_winner_max_pct_of_balance=float(strategy.get("absolute_winner_max_pct_of_balance", 0.50)),
+        absolute_winner_max_contracts=int(strategy.get("absolute_winner_max_contracts", 500)),
     )
 
 
@@ -409,6 +421,13 @@ def _extract_strike(market: dict) -> tuple[float | None, str | None]:
                 threshold = float(match.group(1).replace(",", ""))
                 direction = dir_
                 break
+    # Fallback: parse strike from Kalshi ticker (e.g. KXXRPD-26MAR1600-T1.4199 -> 1.4199)
+    if threshold is None:
+        ticker = m.get("ticker") or ""
+        match = re.search(r"-T([\d.]+)$", ticker)
+        if match:
+            threshold = float(match.group(1))
+            direction = "above"  # Kalshi price tickers typically encode "above" strikes
     return threshold, direction
 
 
@@ -526,6 +545,7 @@ def _recommend(
     Recommend BUY YES / BUY NO / SKIP based on historical vs market.
     Buy YES when historical says P(YES) > market_price + edge (market underpriced).
     Buy NO when historical says P(NO) > (1 - market_yes_price) + edge.
+    When both have edge, prefer whichever yields the larger net return.
     min_edge is the minimum *net* edge after fees (e.g. 0.01 = 1¢ profit per $1 contract).
     """
     if market_yes_price <= 0:
@@ -535,10 +555,14 @@ def _recommend(
     fee_no = _fee_per_contract(no_price, maker_fee_rate)
     net_edge_yes = historical_p_yes - market_yes_price - fee_yes
     net_edge_no = (1.0 - historical_p_yes) - no_price - fee_no
-    if net_edge_yes >= min_edge:
-        return REC_BUY_YES  # Market underpricing YES (net of fees)
-    if net_edge_no >= min_edge:
-        return REC_BUY_NO  # Market underpricing NO (net of fees)
+    has_yes = net_edge_yes >= min_edge
+    has_no = net_edge_no >= min_edge
+    if has_yes and has_no:
+        return REC_BUY_YES if net_edge_yes >= net_edge_no else REC_BUY_NO
+    if has_yes:
+        return REC_BUY_YES
+    if has_no:
+        return REC_BUY_NO
     return REC_SKIP
 
 
@@ -552,6 +576,7 @@ def _recommend_strict(
     """
     For other intraday (e.g. 8pm ET): only BUY when ALMOST ABSOLUTELY CERTAIN we win.
     Requires P(win) >= min_p_win (e.g. 0.90) AND net edge after fees >= min_edge.
+    When both YES and NO qualify, prefer whichever yields the larger net return.
     """
     if market_yes_price <= 0:
         return REC_SKIP
@@ -560,12 +585,14 @@ def _recommend_strict(
     fee_no = _fee_per_contract(no_price, maker_fee_rate)
     net_edge_yes = historical_p_yes - market_yes_price - fee_yes
     net_edge_no = (1.0 - historical_p_yes) - no_price - fee_no
-    # BUY YES only when hist_p >= 90% AND market underpriced (net of fees)
-    if historical_p_yes >= min_p_win and net_edge_yes >= min_edge:
+    p_no = 1.0 - historical_p_yes
+    has_yes = historical_p_yes >= min_p_win and net_edge_yes >= min_edge
+    has_no = p_no >= min_p_win and net_edge_no >= min_edge
+    if has_yes and has_no:
+        return REC_BUY_YES if net_edge_yes >= net_edge_no else REC_BUY_NO
+    if has_yes:
         return REC_BUY_YES
-    # BUY NO only when P(NO) >= 90% AND market underpricing NO (net of fees)
-    p_no = 1 - historical_p_yes
-    if p_no >= min_p_win and net_edge_no >= min_edge:
+    if has_no:
         return REC_BUY_NO
     return REC_SKIP
 
@@ -731,6 +758,40 @@ def _kelly_count(
     return max(min_contracts, min(max_contracts, count))
 
 
+def _compute_buy_count(
+    p_win: float,
+    price: float,
+    balance_cents: float,
+    sp: _StrategyParams,
+    use_kelly: bool,
+    kelly_fraction: float,
+    min_contracts: int,
+) -> int:
+    """
+    Compute contract count for a buy. When it's an "absolute winner" (very high P(win), very low
+    price — e.g. 1¢ on a near-certainty), allow buying more contracts while respecting balance.
+    Otherwise use Kelly or default.
+    """
+    is_absolute_winner = (
+        price <= sp.absolute_winner_max_price
+        and p_win >= sp.absolute_winner_min_p_win
+        and sp.absolute_winner_max_pct_of_balance > 0
+    )
+    if is_absolute_winner:
+        cost_cents = max(1, int(price * 100))
+        available_cents = int(balance_cents * sp.absolute_winner_max_pct_of_balance)
+        count = min(
+            available_cents // cost_cents,
+            sp.absolute_winner_max_contracts,
+        )
+        return max(min_contracts, count)
+    if use_kelly:
+        return _kelly_count(
+            p_win, price, balance_cents, kelly_fraction, min_contracts
+        )
+    return 10
+
+
 def _find_gemini_event(gemini_events_by_asset: dict, ticker: str) -> dict:
     """Find Gemini event by ticker across all assets. Returns {} if not found."""
     for events in gemini_events_by_asset.values():
@@ -827,10 +888,122 @@ def _check_inter_arb(
     cost_k_yes_g_no = yes_k + no_g
     cost_g_yes_k_no = yes_g + no_k
     if cost_k_yes_g_no < (1.0 - min_arb_fee):
-        return ("kalshi", "gemini", yes_k, no_g, yes_g, no_k)
+        return (PLATFORM_KALSHI, PLATFORM_GEMINI, yes_k, no_g, yes_g, no_k)
     if cost_g_yes_k_no < (1.0 - min_arb_fee):
-        return ("gemini", "kalshi", yes_g, no_k, yes_k, no_g)
+        return (PLATFORM_GEMINI, PLATFORM_KALSHI, yes_g, no_k, yes_k, no_g)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Contradictory-position avoidance (same underlying + resolution, mutually exclusive outcomes)
+# ---------------------------------------------------------------------------
+_INF = 1e12
+
+
+def _extract_resolution_key_from_ticker(ticker: str) -> str | None:
+    """Extract resolution key from Kalshi ticker e.g. KXSOLD-26MAR1617-T82.9999 -> 26MAR1617."""
+    if not ticker:
+        return None
+    parts = ticker.split("-")
+    return parts[1] if len(parts) >= 2 else None
+
+
+def _extract_resolution_key_from_gemini_ticker(ticker: str) -> str | None:
+    """Extract resolution key from Gemini ticker e.g. SOL2603162100 -> 2603162100 (YYMMDDHHMM)."""
+    if not ticker or len(ticker) < 10:
+        return None
+    # Asset prefix is 3-4 chars (BTC, ETH, SOL, XRP); rest is date+time
+    for n in (4, 3):
+        if len(ticker) > n and ticker[n:].isdigit():
+            return ticker[n:]
+    return None
+
+
+def _get_resolution_key_for_order(o: dict) -> str | None:
+    """Get resolution key for any order (Kalshi or Gemini)."""
+    platform = o.get("platform", "")
+    ticker = o.get("ticker", "")
+    if platform == PLATFORM_KALSHI:
+        return _extract_resolution_key_from_ticker(ticker)
+    if platform == PLATFORM_GEMINI:
+        return _extract_resolution_key_from_gemini_ticker(ticker)
+    return None
+
+
+def _get_win_range(threshold: float, direction: str, side: str) -> tuple[float, float]:
+    """
+    Return (lo, hi) price range where this position wins. Uses -_INF/_INF for unbounded.
+    YES above X: [X, inf). NO above X: (-inf, X). YES below X: (-inf, X]. NO below X: (X, inf).
+    """
+    if direction == "above":
+        if side == "yes":
+            return (threshold, _INF)
+        return (-_INF, threshold)
+    # direction == "below"
+    if side == "yes":
+        return (-_INF, threshold)
+    return (threshold, _INF)
+
+
+def _ranges_overlap(lo1: float, hi1: float, lo2: float, hi2: float) -> bool:
+    """True if ranges [lo1,hi1) and [lo2,hi2) overlap. (Use open endpoint for strict < vs <=.)"""
+    # Ranges overlap iff lo1 < hi2 and lo2 < hi1
+    return lo1 < hi2 and lo2 < hi1
+
+
+def _filter_contradictory_buys(
+    pending_orders: list[dict],
+    existing_by_underlying: dict[tuple[str, str, str], list[tuple[float, str, str]]],
+) -> None:
+    """
+    Remove BUYs that contradict positions we're keeping OR other pending BUYs (same underlying + resolution + platform).
+    Contradiction check is per-platform only: NO on SOL>87 (Kalshi) + YES on SOL>93 (Gemini) is allowed.
+    existing_by_underlying: (yf_ticker, res_key, platform) -> [(threshold, direction, side), ...]
+    Process in descending edge order so we keep the best bet when there's a conflict.
+    """
+    # Deep-copy existing; we'll add accepted orders as we go
+    accepted: dict[tuple[str, str, str], list[tuple[float, str, str]]] = {
+        k: list(v) for k, v in existing_by_underlying.items()
+    }
+    # Indexed by original position; sort by edge desc so we keep higher-edge when conflicts exist
+    indexed = [(i, o) for i, o in enumerate(pending_orders)]
+    indexed.sort(key=lambda x: x[1].get("edge", 0.0), reverse=True)
+
+    to_remove: set[int] = set()
+    for i, o in indexed:
+        if i in to_remove:
+            continue
+        platform = o.get("platform", "")
+        yf = o.get("yf_ticker")
+        th = o.get("threshold")
+        direction = o.get("direction")
+        rec = o.get("rec", "")
+        side = o.get("side", "yes" if rec == REC_BUY_YES else "no")
+        if not yf or th is None or direction is None:
+            continue
+        res_key = _get_resolution_key_for_order(o)
+        if not res_key:
+            continue
+        key = (yf, res_key, platform)
+        our_lo, our_hi = _get_win_range(th, direction, side)
+        conflicts = False
+        for (ex_th, ex_dir, ex_side) in accepted.get(key, []):
+            # Arb: same threshold + direction, one YES one NO — intentional, allow both
+            if ex_th == th and ex_dir == direction and ex_side != side:
+                continue
+            ex_lo, ex_hi = _get_win_range(ex_th, ex_dir, ex_side)
+            if not _ranges_overlap(our_lo, our_hi, ex_lo, ex_hi):
+                conflicts = True
+                break
+        if conflicts:
+            to_remove.add(i)
+            ticker = o.get("ticker", "?")
+            print(f"  (skip BUY {ticker} — contradicts existing or other BUY on same underlying)")
+        else:
+            accepted.setdefault(key, []).append((th, direction, side))
+
+    for i in sorted(to_remove, reverse=True):
+        pending_orders.pop(i)
 
 
 def _resolve_series_for_position(m: dict, full: dict, ticker: str, yf_mapping: dict) -> str | None:
@@ -925,7 +1098,7 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
     if not get_unresolved_predictions or not record_prediction_outcome:
         return
     unresolved = get_unresolved_predictions(cfg)
-    kalshi_preds = [p for p in unresolved if p.get("platform") == "kalshi"]
+    kalshi_preds = [p for p in unresolved if p.get("platform") == PLATFORM_KALSHI]
     if not kalshi_preds:
         return
     tickers_needed = {p["ticker"] for p in kalshi_preds}
@@ -960,6 +1133,18 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
         pnl_cents = int((100 - entry * 100) * cnt) if won else int(-entry * 100 * cnt)
         record_prediction_outcome(p["id"], yes_settled, pnl_cents, cfg)
+        if record_resolved and get_last_snapshot_for_ticker:
+            snap = get_last_snapshot_for_ticker(t, platform=PLATFORM_KALSHI, config=cfg)
+            record_resolved(
+                ticker=t,
+                yes_settled=yes_settled,
+                platform=PLATFORM_KALSHI,
+                title=snap.get("title") if snap else None,
+                our_last_rec=snap.get("rec") if snap else None,
+                our_last_hist_p=snap.get("hist_p") if snap else None,
+                market_yes_at_last=snap.get("yes_bid") if snap else None,
+                config=cfg,
+            )
 
 
 def main():
@@ -1084,7 +1269,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     def _fetch_gemini_events() -> dict[str, list]:
         out: dict[str, list] = {}
         try:
-            events = gemini.get_crypto_events(limit=200)
+            events = gemini.get_crypto_events(limit=500)
             for evt in events:
                 asset = _event_to_asset(evt)
                 if asset:
@@ -1112,6 +1297,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         fut_kalshi = executor.submit(_fetch_kalshi_markets)
         gemini_events_by_asset = fut_gemini.result()
         kalshi_markets_by_series = fut_kalshi.result()
+
+    # Diagnostic: how many Gemini events per asset
+    total_gem = sum(len(v) for v in gemini_events_by_asset.values())
+    if total_gem > 0:
+        per_asset = ", ".join(f"{a}:{len(v)}" for a, v in sorted(gemini_events_by_asset.items()))
+        print(f"[Gemini] Fetched {total_gem} events ({per_asset})")
 
     pending_orders: list[dict] = []
     pending_sells: list[dict] = []
@@ -1158,7 +1349,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
             threshold, direction = _extract_strike(m)
             if threshold is None or direction is None:
-                # TODO: Handle "price at 5pm" contracts - use intraday data or volatility model
+                # Skip: empirical and vol models both require a threshold (from title, API, or ticker)
                 print(f"  {ticker}: YES {yes_bid:.2f} | (no threshold) {title}")
                 continue
 
@@ -1174,8 +1365,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  {ticker}")
                     print(f"    {title}")
                     print(f"    ARB_INTRA: yes_ask+no_ask={yes_ask+no_ask:.2f} < 1-{sp.min_arb_fee:.0%} → BUY BOTH (profit ~{profit_pct:.1f}%)")
-                    pending_orders.append({"platform": "kalshi", "ticker": ticker, "title": title, "rec": REC_ARB_INTRA, "side": "yes", "price": yes_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
-                    pending_orders.append({"platform": "kalshi", "ticker": ticker, "title": title, "rec": REC_ARB_INTRA, "side": "no", "price": no_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
+                    pending_orders.append({"platform": PLATFORM_KALSHI, "ticker": ticker, "title": title, "rec": REC_ARB_INTRA, "side": "yes", "price": yes_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
+                    pending_orders.append({"platform": PLATFORM_KALSHI, "ticker": ticker, "title": title, "rec": REC_ARB_INTRA, "side": "no", "price": no_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
                     arb_used = True
 
             # Inter-exchange arb (Kalshi + Gemini): buy YES on one, NO on other when sum < 1 - fee
@@ -1193,12 +1384,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"    ARB_INTER: {yes_plat} YES@{yes_p:.2f} + {no_plat} NO@{no_p:.2f} = {cost:.2f} < 1-{sp.min_arb_fee:.0%} → hedge (profit ~{profit_pct:.1f}%)")
                         k_ticker = ticker
                         g_ticker = gemini_match.get("ticker", "?")
-                        if yes_plat == "kalshi":
-                            pending_orders.append({"platform": "kalshi", "ticker": k_ticker, "title": title, "rec": REC_ARB_INTER, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
-                            pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": REC_ARB_INTER, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
+                        if yes_plat == PLATFORM_KALSHI:
+                            pending_orders.append({"platform": PLATFORM_KALSHI, "ticker": k_ticker, "title": title, "rec": REC_ARB_INTER, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
+                            pending_orders.append({"platform": PLATFORM_GEMINI, "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": REC_ARB_INTER, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
                         else:
-                            pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": REC_ARB_INTER, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
-                            pending_orders.append({"platform": "kalshi", "ticker": k_ticker, "title": title, "rec": REC_ARB_INTER, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
+                            pending_orders.append({"platform": PLATFORM_GEMINI, "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": REC_ARB_INTER, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
+                            pending_orders.append({"platform": PLATFORM_KALSHI, "ticker": k_ticker, "title": title, "rec": REC_ARB_INTER, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
                         gemini_used_in_arb.add(g_ticker)
                         arb_used = True
 
@@ -1279,7 +1470,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             try:
                 from storage import record_market_snapshot
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
-                record_market_snapshot("kalshi", ticker, yes_bid, no_bid, hist_p, rec, threshold, direction, vol_p, abs(diff), title, yf_ticker, cfg)
+                record_market_snapshot(PLATFORM_KALSHI, ticker, yes_bid, no_bid, hist_p, rec, threshold, direction, vol_p, abs(diff), title, yf_ticker, cfg)
             except ImportError:
                 pass
             if rec != REC_SKIP:
@@ -1296,9 +1487,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
                 # Limit price: bid or below (dip-catch). High confidence → larger dip (e.g. 15%) to catch bigger price drops
                 price = max(0.01, min(0.99, bid * (1 - dip))) if dip else bid
-                count = _kelly_count(p_win, price, balance_cents, kelly_fraction, min_contracts) if use_kelly else 10
+                count = _compute_buy_count(
+                    p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
+                )
                 pending_orders.append({
-                    "platform": "kalshi",
+                    "platform": PLATFORM_KALSHI,
                     "ticker": ticker,
                     "title": title,
                     "rec": rec,
@@ -1314,29 +1507,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 })
             print()
 
-        # Gemini crypto
+        # Gemini crypto — expand to individual markets (binary: 1 per event; categorical: 1 per strike contract)
         if yf_ticker in GEMINI_CRYPTO_YF:
             gemini_evts = gemini_events_by_asset.get(yf_ticker, [])
+            gemini_markets = expand_gemini_events_to_markets(gemini_evts)
             if args.markets > 0:
-                gemini_evts = gemini_evts[: args.markets]
+                gemini_markets = gemini_markets[: args.markets]
             use_vol = getattr(args, "use_volatility", False)
-            for evt in gemini_evts:
-                g_ticker = evt.get("ticker", "?")
+            for mkt in gemini_markets:
+                evt = mkt["event"]
+                contract = mkt.get("contract")
+                g_ticker = mkt["ticker"]
+                threshold_g = mkt["threshold"]
+                direction_g = mkt["direction"]
+                title = mkt["title"]
+                instrument_symbol = mkt.get("instrument_symbol")
                 if g_ticker in gemini_used_in_arb:
                     continue  # Already used in ARB_INTER with Kalshi
-                yes_c = _get_yes_contract(evt)
-                impl = get_yes_price(yes_c) if yes_c else 0.0
-                threshold_g, direction_g = extract_strike_from_event(evt)
-                title = (evt.get("title") or evt.get("ticker", ""))[:55]
+                impl = get_yes_price(contract) if contract else get_yes_price(_get_yes_contract(evt) or {})
                 if _should_skip_by_resolution(evt, yf_ticker):
-                    print(f"  [Gemini] {evt.get('ticker','?')}: SKIP (unsupported resolution — use 5pm ET) | {title}")
+                    print(f"  [Gemini] {g_ticker}: SKIP (unsupported resolution — use 5pm ET) | {title}")
                     continue
-                if threshold_g is None or direction_g is None:
-                    print(f"  [Gemini] {evt.get('ticker','?')}: YES {impl:.2f} | (no threshold) {title}")
-                    continue
-                # Gemini intra-exchange arb
+                # Intra-exchange arb: binary only (categorical contracts have per-strike yes/no)
                 arb_used_g = False
-                if sp.enable_intra_arb:
+                if sp.enable_intra_arb and contract is None:
                     intra_g = _check_intra_arb_gemini(evt, sp.min_arb_fee)
                     if intra_g:
                         yes_p, no_p, profit_pct = intra_g
@@ -1344,8 +1538,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  [Gemini] {g_ticker}")
                         print(f"    {title}")
                         print(f"    ARB_INTRA: yes+no={yes_p+no_p:.2f} < 1-{sp.min_arb_fee:.0%} → BUY BOTH (profit ~{profit_pct:.1f}%)")
-                        pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": title, "rec": REC_ARB_INTRA, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
-                        pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": title, "rec": REC_ARB_INTRA, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
+                        pending_orders.append({"platform": PLATFORM_GEMINI, "ticker": g_ticker, "title": title, "rec": REC_ARB_INTRA, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
+                        pending_orders.append({"platform": PLATFORM_GEMINI, "ticker": g_ticker, "title": title, "rec": REC_ARB_INTRA, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
                         arb_used_g = True
                 if arb_used_g:
                     print()
@@ -1407,7 +1601,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"    {p_label_gem}: {hist_p_gem:.1%}  Market YES: {impl:.1%}  →  {rec}")
                 try:
                     from storage import record_market_snapshot
-                    record_market_snapshot("gemini", evt.get("ticker", "?"), impl, 1.0 - impl, hist_p_gem, rec, threshold_g, direction_g, vol_p_gem, abs(diff_gem), title, yf_ticker, cfg)
+                    record_market_snapshot(PLATFORM_GEMINI, evt.get("ticker", "?"), impl, 1.0 - impl, hist_p_gem, rec, threshold_g, direction_g, vol_p_gem, abs(diff_gem), title, yf_ticker, cfg)
                 except ImportError:
                     pass
                 if rec != REC_SKIP:
@@ -1422,9 +1616,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                         dip = max(dip, sp.limit_dip_pct_high_confidence)
                     price = max(0.01, min(0.99, bid * (1 - dip))) if dip else bid
-                    count = _kelly_count(p_win, price, balance_cents, kelly_fraction, min_contracts) if use_kelly else 10
-                    pending_orders.append({
-                        "platform": "gemini",
+                    count = _compute_buy_count(
+                        p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
+                    )
+                    order_entry = {
+                        "platform": PLATFORM_GEMINI,
                         "ticker": evt.get("ticker", "?"),
                         "title": title,
                         "rec": rec,
@@ -1437,11 +1633,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "yf_ticker": yf_ticker,
                         "threshold": threshold_g,
                         "direction": direction_g,
-                    })
+                        "gemini_evt": evt,
+                    }
+                    if instrument_symbol:
+                        order_entry["instrument_symbol"] = instrument_symbol
+                    pending_orders.append(order_entry)
                 print()
 
     # Evaluate ALL positions (crypto / S&P 500) for sell when bet looks like a loser
     # Kalshi API: position_fp is signed (positive=YES, negative=NO); no "side"/"position" fields
+    existing_by_underlying: dict[tuple[str, str, str], list[tuple[float, str, str]]] = {}
     if True:  # Always evaluate positions; --preview/--execute control display and order placement
         try:
             kalshi_positions: list[dict] = []
@@ -1501,7 +1702,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                             sell_price = yes_bid if side == "yes" else no_bid
                             pending_sells.append({
-                                "platform": "kalshi",
+                                "platform": PLATFORM_KALSHI,
                                 "ticker": ticker,
                                 "title": (m.get("title") or "")[:55],
                                 "side": side,
@@ -1538,7 +1739,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     p_lose = hist_p if side == "no" else (1.0 - hist_p)
                                     if p_lose >= sp.sell_losing_pct:
                                         pending_sells.append({
-                                            "platform": "kalshi",
+                                            "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
                                             "title": (m.get("title") or "")[:55],
                                             "side": side,
@@ -1549,7 +1750,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         })
                                     elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                                         pending_sells.append({
-                                            "platform": "kalshi",
+                                            "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
                                             "title": (m.get("title") or "")[:55],
                                             "side": side,
@@ -1560,7 +1761,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         })
                                     elif side == "no" and _violates_no_above_rule(current_price_pos, threshold, direction, sp.no_above_cushion):
                                         pending_sells.append({
-                                            "platform": "kalshi",
+                                            "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
                                             "title": (m.get("title") or "")[:55],
                                             "side": side,
@@ -1569,6 +1770,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "price": no_bid,
                                             "rec": REC_RULE_VIOLATION,
                                         })
+                                    else:
+                                        res_key = _extract_resolution_key_from_ticker(ticker)
+                                        if res_key and pos_yf:
+                                            key = (pos_yf, res_key, PLATFORM_KALSHI)
+                                            existing_by_underlying.setdefault(key, []).append((threshold, direction, side))
                             elif getattr(args, "verbose", False):
                                 print(f"    (no hist data for {ticker}, skip sell eval)")
                     except Exception as ex:
@@ -1601,7 +1807,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 p_lose = hist_p if side == "no" else (1.0 - hist_p)
                 if p_lose >= sp.sell_losing_pct:
                     pending_sells.append({
-                        "platform": "kalshi",
+                        "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
                         "title": (m.get("title") or "")[:55],
                         "side": side,
@@ -1613,7 +1819,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # SELL YES when we'd now recommend BUY NO; SELL NO when we'd recommend BUY YES
                 elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                     pending_sells.append({
-                        "platform": "kalshi",
+                        "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
                         "title": (m.get("title") or "")[:55],
                         "side": side,
@@ -1625,7 +1831,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # SELL NO when holding NO on "above X" but price already > X * (1 + cushion)
                 elif side == "no" and _violates_no_above_rule(current_price_pos, threshold, direction, sp.no_above_cushion):
                     pending_sells.append({
-                        "platform": "kalshi",
+                        "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
                         "title": (m.get("title") or "")[:55],
                         "side": side,
@@ -1634,6 +1840,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "price": no_bid,
                         "rec": REC_RULE_VIOLATION,
                     })
+                else:
+                    res_key = _extract_resolution_key_from_ticker(ticker)
+                    if res_key and _yf:
+                        key = (_yf, res_key, PLATFORM_KALSHI)
+                        existing_by_underlying.setdefault(key, []).append((threshold, direction, side))
         except Exception:
             pass
 
@@ -1643,8 +1854,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     min_balance_fallback = int(trading.get("min_balance_for_limit_fallback_cents", 0))
     dry_run = trading.get("dry_run", True)
 
-    # Budget-aware allocation: adjust counts so we don't blow budget; prefer 1 of many over 10 of one
-    _allocate_budget_to_orders(pending_orders, balance_cents, max_total_buy_pct)
+    # Skip BUYs that contradict kept positions or other pending BUYs (e.g. NO on SOL>$87 + YES on SOL>$93).
+    # Per-platform only: cross-platform bets are allowed (e.g. NO Kalshi + YES Gemini on same underlying).
+    _filter_contradictory_buys(pending_orders, existing_by_underlying)
+
+    # Budget-aware allocation per platform (Kalshi and Gemini have separate balances)
+    kalshi_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI]
+    gemini_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_GEMINI]
+    _allocate_budget_to_orders(kalshi_orders, balance_cents, max_total_buy_pct)
+    gemini_balance_cents = 0
+    if gemini_orders:
+        try:
+            _gt = GeminiTradingClient()
+            gemini_balance_cents = int(_gt.get_balance().get("balance", 0) or 0)
+        except Exception:
+            pass
+    _allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct)
+    pending_orders[:] = [o for o in kalshi_orders + gemini_orders if o.get("count", 0) > 0]
 
     # Proposed trades + per-trade Ollama: print each trade and Ollama's interpretation
     if pending_orders or pending_sells:
@@ -1680,25 +1906,27 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print("=" * 75)
         buys_placed, sells_placed = 0, 0
         gemini_trading = None
-        if any(o["platform"] == "gemini" for o in pending_orders) or any(s["platform"] == "gemini" for s in pending_sells):
+        if any(o["platform"] == PLATFORM_GEMINI for o in pending_orders) or any(s["platform"] == PLATFORM_GEMINI for s in pending_sells):
             try:
                 gemini_trading = GeminiTradingClient()
             except ValueError:
                 print("  (Gemini: GEMINI_API_KEY/GEMINI_API_SECRET not set, skipping Gemini orders)")
 
         # Build pending lookups for order review: (ticker, side) or (symbol, outcome) → {price, count, ...}
-        kalshi_pending_buys = {(o["ticker"], o["side"]): o for o in pending_orders if o.get("platform") == "kalshi"}
-        kalshi_pending_sells = {(s["ticker"], s["side"]): s for s in pending_sells if s.get("platform") == "kalshi"}
+        kalshi_pending_buys = {(o["ticker"], o["side"]): o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI}
+        kalshi_pending_sells = {(s["ticker"], s["side"]): s for s in pending_sells if s.get("platform") == PLATFORM_KALSHI}
         gemini_pending_buys: dict[tuple[str, str], dict] = {}
         gemini_pending_sells: dict[tuple[str, str], dict] = {}
         for o in pending_orders:
-            if o.get("platform") == "gemini":
-                evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o.get("ticker", ""))
-                sym = get_instrument_symbol(evt, o["side"]) if evt else None
+            if o.get("platform") == PLATFORM_GEMINI:
+                sym = o.get("instrument_symbol")
+                if not sym:
+                    evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o.get("ticker", ""))
+                    sym = get_instrument_symbol(evt, o["side"]) if evt else None
                 if sym:
                     gemini_pending_buys[(str(sym), o["side"])] = o
         for s in pending_sells:
-            if s.get("platform") == "gemini":
+            if s.get("platform") == PLATFORM_GEMINI:
                 evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
                 sym = get_instrument_symbol(evt, s["side"]) if evt else None
                 if sym:
@@ -1729,17 +1957,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if action == "buy":
                         pend = kalshi_pending_buys.get((t, side))
                         if not pend:
-                            to_cancel.append(("kalshi", oid, label))
+                            to_cancel.append((PLATFORM_KALSHI, oid, label))
                         elif pend["price"] > old_price:
-                            to_cancel.append(("kalshi", oid, label))
+                            to_cancel.append((PLATFORM_KALSHI, oid, label))
                         else:
                             kalshi_keep_buys.add((t, side))
                     else:
                         pend = kalshi_pending_sells.get((t, side))
                         if not pend:
-                            to_cancel.append(("kalshi", oid, label))
+                            to_cancel.append((PLATFORM_KALSHI, oid, label))
                         elif pend["price"] > old_price:
-                            to_cancel.append(("kalshi", oid, label))
+                            to_cancel.append((PLATFORM_KALSHI, oid, label))
                         else:
                             kalshi_keep_sells.add((t, side))
                 cursor = r.get("cursor") or ""
@@ -1764,17 +1992,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if side == "buy":
                         pend = gemini_pending_buys.get(key)
                         if not pend:
-                            to_cancel.append(("gemini", str(oid), label))
+                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
                         elif pend["price"] > old_price:
-                            to_cancel.append(("gemini", str(oid), label))
+                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
                         else:
                             gemini_keep_buys.add(key)
                     else:
                         pend = gemini_pending_sells.get(key)
                         if not pend:
-                            to_cancel.append(("gemini", str(oid), label))
+                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
                         elif pend["price"] > old_price:
-                            to_cancel.append(("gemini", str(oid), label))
+                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
                         else:
                             gemini_keep_sells.add(key)
             except Exception:
@@ -1783,11 +2011,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         # Execute cancels
         cancels_done = 0
         for platform, order_id, label in to_cancel:
-            if platform == "kalshi":
+            if platform == PLATFORM_KALSHI:
                 if kalshi.cancel_order_safe(order_id, ticker=label):
                     print(f"  Cancelled (Kalshi) {label} — updating or no longer recommended")
                     cancels_done += 1
-            elif platform == "gemini" and gemini_trading:
+            elif platform == PLATFORM_GEMINI and gemini_trading:
                 if gemini_trading.cancel_order_safe(order_id, ticker_label=label):
                     print(f"  Cancelled (Gemini) {label} — updating or no longer recommended")
                     cancels_done += 1
@@ -1796,7 +2024,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
         # SELL first so balance reflects proceeds before we place buys
         for s in pending_sells:
-            if s["platform"] == "kalshi":
+            if s["platform"] == PLATFORM_KALSHI:
                 if (s["ticker"], s["side"]) in kalshi_keep_sells:
                     print(f"  (skip SELL {s['ticker']} — already have open limit order at same/better price)")
                     continue
@@ -1821,9 +2049,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  (skipped SELL {s['ticker']})")
                 except Exception as ex:
                     print(f"  SELL {s['ticker']} failed: {ex}")
-            elif s["platform"] == "gemini" and gemini_trading:
-                gemini_evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
-                sym = get_instrument_symbol(gemini_evt, s["side"]) if gemini_evt else None
+            elif s["platform"] == PLATFORM_GEMINI and gemini_trading:
+                sym = s.get("instrument_symbol")
+                if not sym:
+                    gemini_evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
+                    sym = get_instrument_symbol(gemini_evt, s["side"]) if gemini_evt else None
                 if sym and (sym, s["side"]) in gemini_keep_sells:
                     print(f"  (skip SELL (Gemini) {s['ticker']} — already have open limit order at same/better price)")
                 elif sym:
@@ -1839,7 +2069,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
         # Then BUY — balance now reflects sell proceeds
         for o in pending_orders:
-            if o["platform"] == "kalshi":
+            if o["platform"] == PLATFORM_KALSHI:
                 if (o["ticker"], o["side"]) in kalshi_keep_buys:
                     print(f"  (skip BUY {o['ticker']} — already have open limit order)")
                     continue
@@ -1866,7 +2096,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             ord_obj = result.get("order", result)
                             oid = ord_obj.get("order_id") if isinstance(ord_obj, dict) else None
                             record_prediction(
-                                platform="kalshi",
+                                platform=PLATFORM_KALSHI,
                                 ticker=o["ticker"],
                                 side=o["side"],
                                 hist_p=o["hist_p"],
@@ -1886,15 +2116,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  BUY {o['ticker']} failed: {ex}")
             else:
                 count = o.get("count", 10)
-                gemini_evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
-                sym = get_instrument_symbol(gemini_evt, o["side"]) if gemini_evt else None
-                if sym and (sym, o["side"]) in gemini_keep_buys:
+                sym = o.get("instrument_symbol")
+                if not sym:
+                    gemini_evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
+                    sym = get_instrument_symbol(gemini_evt, o["side"]) if gemini_evt else None
+                if not sym:
+                    print(f"  (skip BUY Gemini {o['ticker']} — no instrumentSymbol for {o['side']}; check contract structure)")
+                    continue
+                if (sym, o["side"]) in gemini_keep_buys:
                     print(f"  (skip BUY {o['ticker']} — already have open limit order)")
                     continue
-                if sym and gemini_trading:
+                if gemini_trading:
                     result = gemini_trading.place_order_safe(
                         symbol=sym, side="buy", outcome=o["side"], quantity=count, price=o["price"],
                         ticker_label=o["ticker"],
+                        max_pct_of_balance=max_pct,
                     )
                     if result:
                         print(f"  Placed BUY {o['side'].upper()} (Gemini) {o['ticker']} x {count}")
@@ -1902,7 +2138,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if record_prediction and o.get("rec") in (REC_BUY_YES, REC_BUY_NO) and o.get("hist_p") is not None:
                             oid = str(result.get("orderId") or result.get("order_id", "")) if isinstance(result, dict) else None
                             record_prediction(
-                                platform="gemini",
+                                platform=PLATFORM_GEMINI,
                                 ticker=o["ticker"],
                                 side=o["side"],
                                 hist_p=o["hist_p"],
@@ -1934,7 +2170,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  SELL {i}. [{s['platform'].upper()}] SELL {s['side'].upper()} {s['ticker']}")
             print(f"   {s['title']}")
             print(f"   Count: {s['count']} @ {s['price']:.2f} (edge flipped → now {s['rec']})")
-            if s["platform"] == "kalshi":
+            if s["platform"] == PLATFORM_KALSHI:
                 payload = {
                     "ticker": s["ticker"],
                     "side": s["side"],
@@ -1944,14 +2180,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 payload["yes_price_dollars" if s["side"] == "yes" else "no_price_dollars"] = f"{s['price']:.2f}"
                 print(f"   API: POST /portfolio/orders")
                 print(f"   Payload: {payload}")
-            elif s["platform"] == "gemini":
+            elif s["platform"] == PLATFORM_GEMINI:
                 print(f"   API: POST /v1/prediction-markets/order (place_order, side=sell)")
 
         for i, o in enumerate(pending_orders, 1):
             print(f"\n{i}. [{o['platform'].upper()}] {o['rec']} {o['ticker']}")
             print(f"   {o['title']}")
             print(f"   Edge: {o['edge']:.1%}")
-            if o["platform"] == "kalshi":
+            if o["platform"] == PLATFORM_KALSHI:
                 side, action = o["side"], "buy"
                 price_str = f"{o['price']:.2f}"
                 count = o.get("count", 10)
@@ -1965,8 +2201,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"   (count capped by balance * {max_pct:.0%} via create_order_safe)")
             else:
                 count = o.get("count", 10)
-                gemini_evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
-                sym = get_instrument_symbol(gemini_evt, o["side"]) if gemini_evt else None
+                sym = o.get("instrument_symbol") or (
+                    get_instrument_symbol(
+                        o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"]),
+                        o["side"],
+                    )
+                    if o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
+                    else None
+                )
                 if sym:
                     print(f"   API: POST /v1/prediction-markets/order (place_order)")
                     print(f"   Payload: symbol={sym}, side=buy, outcome={o['side']}, quantity={count}, price={o['price']:.2f}")

@@ -411,6 +411,180 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         conn.close()
 
 
+def get_market_snapshots_for_backtest(
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+    platform: str | None = None,
+    rec_filter: list[str] | None = None,
+    config: dict | None = None,
+) -> list[dict]:
+    """
+    Return market snapshots for backtesting. Optional filters by time range, platform, rec.
+    rec_filter: e.g. ["BUY YES", "BUY NO"] to include only actionable recommendations.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return []
+    try:
+        q = "SELECT * FROM market_snapshots WHERE 1=1"
+        params: list[Any] = []
+        if start_ts is not None:
+            q += " AND ts >= ?"
+            params.append(start_ts)
+        if end_ts is not None:
+            q += " AND ts <= ?"
+            params.append(end_ts)
+        if platform:
+            q += " AND platform = ?"
+            params.append(platform)
+        if rec_filter:
+            placeholders = ",".join("?" * len(rec_filter))
+            q += f" AND rec IN ({placeholders})"
+            params.extend(rec_filter)
+        q += " ORDER BY ticker, ts"
+        rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def get_last_snapshot_per_ticker(
+    rec_filter: list[str] | None = None,
+    platform: str | None = None,
+    config: dict | None = None,
+) -> dict[str, dict]:
+    """
+    Return the most recent snapshot per ticker. Used for synthetic backtest and
+    populating resolved_outcomes with our_last_rec/hist_p/market_yes.
+    Returns {ticker: snapshot_dict}.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {}
+    try:
+        q = """
+            SELECT * FROM market_snapshots m1
+            WHERE m1.id = (
+                SELECT id FROM market_snapshots m2
+                WHERE m2.ticker = m1.ticker
+                AND (1=1)
+                ORDER BY m2.ts DESC LIMIT 1
+            )
+        """
+        params: list[Any] = []
+        if platform:
+            q = q.replace("(1=1)", "m2.platform = ?")
+            params.append(platform)
+        if rec_filter:
+            ph = ",".join("?" * len(rec_filter))
+            q = q.replace("(1=1)", f"m2.rec IN ({ph})")
+            params.extend(rec_filter)
+        # Simplify: just get all, group by ticker and take max ts in Python
+        inner = "SELECT ticker, platform, title, yf_ticker, ts, yes_bid, no_bid, hist_p, vol_p, rec, threshold, direction, edge FROM market_snapshots WHERE 1=1"
+        if platform:
+            inner += " AND platform = ?"
+        if rec_filter:
+            inner += f" AND rec IN ({','.join('?' * len(rec_filter))})"
+        inner += " ORDER BY ticker, ts DESC"
+        params_inner = []
+        if platform:
+            params_inner.append(platform)
+        if rec_filter:
+            params_inner.extend(rec_filter)
+        rows = conn.execute(
+            f"SELECT * FROM ({inner})",
+            params_inner,
+        ).fetchall()
+        by_ticker: dict[str, dict] = {}
+        for r in rows:
+            t = r["ticker"]
+            if t not in by_ticker:
+                by_ticker[t] = dict(r)
+        return by_ticker
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def get_resolved_outcomes(
+    tickers: list[str] | None = None,
+    config: dict | None = None,
+) -> dict[str, dict]:
+    """Return resolved outcomes. If tickers given, filter to those. Returns {ticker: row_dict}."""
+    conn = _get_conn(config)
+    if not conn:
+        return {}
+    try:
+        if tickers:
+            placeholders = ",".join("?" * len(tickers))
+            rows = conn.execute(
+                f"SELECT * FROM resolved_outcomes WHERE ticker IN ({placeholders})",
+                tickers,
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM resolved_outcomes").fetchall()
+        return {r["ticker"]: dict(r) for r in rows}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def get_predictions_for_backtest(
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+    resolved_only: bool = True,
+    config: dict | None = None,
+) -> list[dict]:
+    """Return predictions for backtest. resolved_only: only rows with outcome."""
+    conn = _get_conn(config)
+    if not conn:
+        return []
+    try:
+        q = "SELECT * FROM predictions WHERE outcome IS NOT NULL" if resolved_only else "SELECT * FROM predictions"
+        params: list[Any] = []
+        if start_ts is not None:
+            ts_col = "resolved_ts" if resolved_only else "ts"
+            q += f" AND {ts_col} >= ?"
+            params.append(start_ts)
+        if end_ts is not None:
+            ts_col = "resolved_ts" if resolved_only else "ts"
+            q += f" AND {ts_col} <= ?"
+            params.append(end_ts)
+        q += " ORDER BY resolved_ts ASC, ts ASC"
+        rows = conn.execute(q, params).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def get_last_snapshot_for_ticker(
+    ticker: str, platform: str | None = None, config: dict | None = None
+) -> dict | None:
+    """Return the most recent market snapshot for a ticker. Optional platform filter. For settlement sync."""
+    conn = _get_conn(config)
+    if not conn:
+        return None
+    try:
+        q = "SELECT * FROM market_snapshots WHERE ticker = ?"
+        params: list = [ticker]
+        if platform:
+            q += " AND platform = ?"
+            params.append(platform)
+        q += " ORDER BY ts DESC LIMIT 1"
+        row = conn.execute(q, tuple(params)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def get_storage_stats(config: dict | None = None) -> dict[str, Any]:
     """Return counts of cached/snapshot data. Useful for diagnostics."""
     conn = _get_conn(config)

@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +32,10 @@ GEMINI_REASON_INVALID_PRICE = "InvalidPrice"
 GEMINI_REASON_INVALID_QUANTITY = "InvalidQuantity"
 GEMINI_REASON_INVALID_SYMBOL = "InvalidSymbol"
 GEMINI_REASON_MARKET_NOT_OPEN = "MarketNotOpen"
+# Master API keys require account in payload; see docs.gemini.com/authentication/api-key
+GEMINI_REASON_MISSING_ACCOUNTS = "MissingAccounts"
+# From Prediction Markets: accept terms at exchange.gemini.com
+GEMINI_REASON_TERMS_NOT_ACCEPTED = "TermsNotAccepted"
 
 PRODUCTION_BASE = "https://api.gemini.com"
 SANDBOX_BASE = "https://api.sandbox.gemini.com"
@@ -140,24 +145,30 @@ class GeminiPredictionClient:
         return resp.json() if resp.text else {"data": [], "pagination": {}}
 
     def get_crypto_events(self, limit: int = 100) -> list[dict]:
-        """Fetch active crypto prediction events. Returns list of events with contracts."""
-        out = []
-        offset = 0
-        while True:
-            r = self.get_events(
-                category="crypto",
-                status="active",
-                limit=limit,
-                offset=offset,
-            )
-            data = r.get("data") or []
-            out.extend(data)
-            pag = r.get("pagination") or {}
-            if len(data) < (r.get("limit") or limit):
-                break
-            offset = pag.get("offset", offset) + len(data)
-            if offset >= pag.get("total", offset + 1):
-                break
+        """Fetch active crypto prediction events (daily, weekly, hourly). Returns list of events with contracts."""
+        seen: set[str] = set()
+        out: list[dict] = []
+
+        def _fetch_category(cat: str) -> None:
+            nonlocal out
+            offset = 0
+            while True:
+                r = self.get_events(category=cat, status="active", limit=limit, offset=offset)
+                data = r.get("data") or []
+                for evt in data:
+                    eid = evt.get("id") or evt.get("ticker") or ""
+                    if eid and eid not in seen:
+                        seen.add(eid)
+                        out.append(evt)
+                pag = r.get("pagination") or {}
+                if len(data) < (r.get("limit") or limit):
+                    break
+                offset = pag.get("offset", offset) + len(data)
+                if offset >= pag.get("total", offset + 1):
+                    break
+
+        _fetch_category("crypto")  # daily, weekly
+        _fetch_category("hourly")  # hourly (BTC, ETH, SOL, XRP at 1am EDT etc.)
         return out
 
     def get_events_by_asset(
@@ -239,6 +250,64 @@ def extract_strike_from_event(event: dict) -> tuple[float | None, str | None]:
     return _extract_threshold_from_title(event.get("title") or "")
 
 
+def expand_gemini_events_to_markets(events: list[dict]) -> list[dict]:
+    """
+    Expand Gemini events into individual tradeable markets.
+
+    Binary events: one market per event (threshold from title).
+    Categorical events (e.g. "Bitcoin tomorrow at 12 AM" with strikes like BTC > $74,250):
+    one market per contract that has a parseable strike in its label/abbreviatedName.
+
+    Returns list of market dicts: {event, contract, threshold, direction, ticker, title, instrument_symbol}.
+    contract is None for binary; instrument_symbol is contract's instrumentSymbol for categorical.
+    """
+    markets = []
+    for evt in events:
+        evt_type = (evt.get("type") or "").lower()
+        title = (evt.get("title") or evt.get("ticker") or "")[:55]
+        evt_ticker = evt.get("ticker", "?")
+        # Treat as categorical if type says so, or if no Yes/No contract but contracts have strikes
+        has_binary_contracts = _get_yes_contract(evt) is not None
+        is_categorical = evt_type == "categorical" or (
+            not has_binary_contracts
+            and any(
+                _extract_threshold_from_title(c.get("label") or c.get("abbreviatedName") or "")[0] is not None
+                for c in evt.get("contracts") or []
+            )
+        )
+
+        if is_categorical:
+            for c in evt.get("contracts") or []:
+                label = c.get("label") or c.get("abbreviatedName") or ""
+                threshold, direction = _extract_threshold_from_title(label)
+                if threshold is not None and direction is not None:
+                    inst_sym = c.get("instrumentSymbol")
+                    if inst_sym:
+                        contract_label = (c.get("label") or c.get("abbreviatedName") or "")[:40]
+                        markets.append({
+                            "event": evt,
+                            "contract": c,
+                            "threshold": threshold,
+                            "direction": direction,
+                            "ticker": evt_ticker,
+                            "title": f"{title} ({contract_label})",
+                            "instrument_symbol": inst_sym,
+                        })
+        else:
+            threshold, direction = _extract_threshold_from_title(evt.get("title") or "")
+            if threshold is not None and direction is not None:
+                markets.append({
+                    "event": evt,
+                    "contract": None,
+                    "threshold": threshold,
+                    "direction": direction,
+                    "ticker": evt_ticker,
+                    "title": title,
+                    "instrument_symbol": None,
+                })
+    return markets
+
+
 def get_instrument_symbol(event: dict, outcome: str = "yes") -> str | None:
     """Get trading symbol from event for given outcome (yes/no). Contracts have instrumentSymbol."""
     outcome_lower = outcome.lower()
@@ -267,11 +336,25 @@ class GeminiTradingClient(GeminiPredictionClient):
         self.api_secret = os.getenv("GEMINI_API_SECRET")
         if not self.api_key or not self.api_secret:
             raise ValueError("GEMINI_API_KEY and GEMINI_API_SECRET must be set for authenticated API")
+        self._nonce_lock = threading.Lock()
+        self._last_nonce = 0
+
+    def _next_nonce(self) -> int:
+        """Return a nonce strictly greater than the last. Gemini requires monotonic increase per API key."""
+        with self._nonce_lock:
+            now_ms = int(time.time() * 1000)
+            self._last_nonce = max(self._last_nonce + 1, now_ms)
+            return self._last_nonce
 
     def _auth_headers(self, path: str, payload_obj: dict) -> dict:
         """Build X-GEMINI-* headers per Gemini REST auth."""
         payload_obj["request"] = path
-        payload_obj["nonce"] = int(time.time())
+        payload_obj["nonce"] = self._next_nonce()
+        # Master API keys (master-*) require accounts array; account-scoped keys (account-*) do not
+        account = os.getenv("GEMINI_ACCOUNT", "").strip()
+        if account:
+            # Prediction Markets API expects "accounts" as JSON array, not "account" as string
+            payload_obj["accounts"] = [account]
         encoded = json.dumps(payload_obj).encode("utf-8")
         b64 = base64.b64encode(encoded).decode("ascii")
         sig = hmac.new(
@@ -290,10 +373,39 @@ class GeminiTradingClient(GeminiPredictionClient):
     def _post_auth(self, path: str, body: dict) -> dict:
         """POST to authenticated endpoint with signed payload."""
         url = f"{self.base_url}{path}"
-        headers = self._auth_headers(path, body.copy())
-        resp = requests.post(url, headers=headers, data="", timeout=30)
+        payload = body.copy()
+        payload["request"] = path
+        # nonce set in _auth_headers (monotonically increasing per Gemini docs)
+        account = os.getenv("GEMINI_ACCOUNT", "").strip()
+        if account:
+            payload["accounts"] = [account]  # Must be JSON array for Master keys
+        headers = self._auth_headers(path, payload)
+        # Prediction Markets API expects JSON body with accounts array (not just header)
+        data = json.dumps(payload)
+        resp = requests.post(url, headers=headers, data=data, timeout=30)
         resp.raise_for_status()
         return resp.json() if resp.text else {}
+
+    def get_balance(self) -> dict:
+        """
+        Fetch USD balance in cents (matches Kalshi format for consistency).
+        Uses Gemini /v1/balances; finds USD entry and returns available for trading.
+        """
+        body: dict = {}
+        account = os.getenv("GEMINI_ACCOUNT", "").strip()
+        if account:
+            body["account"] = account  # /v1/balances uses "account" (singular) per Gemini docs
+        try:
+            resp = self._post_auth("/v1/balances", body)
+        except Exception as e:
+            log.warning("get_balance: could not fetch Gemini balance: %s", e)
+            return {"balance": 0}
+        balances = resp if isinstance(resp, list) else []
+        for b in balances:
+            if (b.get("currency") or "").upper() == "USD":
+                avail = float(b.get("available") or b.get("amount") or 0)
+                return {"balance": int(avail * 100)}
+        return {"balance": 0}
 
     def get_active_orders(
         self, symbol: str | None = None, limit: int = 50, offset: int = 0
@@ -346,21 +458,47 @@ class GeminiTradingClient(GeminiPredictionClient):
         ticker_label: str = "",
         order_type: str = "limit",
         time_in_force: str = "good-til-cancel",
+        max_pct_of_balance: float = 0.90,
     ) -> dict | None:
         """
         Place limit order; never raises on 4xx/406. Logs error and returns None on failure.
+        Caps quantity by Gemini balance (like Kalshi create_order_safe).
         ticker_label: optional label for log messages (e.g. Kalshi ticker).
         Rounds price to 0.01 to avoid InvalidPrice (Gemini uses 1¢ ticks).
         """
         p = float(price)
         if 0 < p < 1:
             price = round(p * 100) / 100
+        price_cents = int(p * 100)
+        qty = int(quantity) if quantity else 0
+        if qty < 1:
+            log.warning("place_order_safe: quantity must be >= 1")
+            return None
+        # Cap by balance (buy only; sell uses position)
+        if side.lower() == "buy" and outcome.lower() in ("yes", "no"):
+            try:
+                bal = self.get_balance()
+                balance_cents = int(bal.get("balance", 0) or 0)
+            except Exception as e:
+                log.warning("place_order_safe: could not fetch balance: %s", e)
+                return None
+            max_spend = int(balance_cents * max_pct_of_balance)
+            max_count = max_spend // price_cents if price_cents else 0
+            if max_count <= 0:
+                log.info(
+                    "place_order_safe: skip - Gemini balance $%.2f insufficient for %s @ %d¢",
+                    balance_cents / 100,
+                    ticker_label or symbol,
+                    price_cents,
+                )
+                return None
+            qty = min(qty, max_count)
         try:
             return self.place_order(
                 symbol=symbol,
                 side=side,
                 outcome=outcome,
-                quantity=quantity,
+                quantity=qty,
                 price=price,
                 order_type=order_type,
                 time_in_force=time_in_force,
@@ -379,6 +517,10 @@ class GeminiTradingClient(GeminiPredictionClient):
                     hint = " (market closed or paused)"
                 elif reason == GEMINI_REASON_INVALID_SYMBOL:
                     hint = " (invalid symbol)"
+                elif reason == GEMINI_REASON_TERMS_NOT_ACCEPTED:
+                    hint = " (accept Prediction Markets terms at exchange.gemini.com)"
+                elif reason == GEMINI_REASON_MISSING_ACCOUNTS:
+                    hint = " (Master API key: set GEMINI_ACCOUNT in .env, or use account-scoped key at exchange.gemini.com/settings/api)"
                 log.warning(
                     "place_order_safe: order rejected %s %s %s - %s%s",
                     symbol,

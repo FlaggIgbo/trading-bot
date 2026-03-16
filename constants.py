@@ -1,6 +1,10 @@
 """
 Shared constants for recommendation strings used across evaluation and execution.
 """
+# Platform identifiers (avoid hardcoded "kalshi"/"gemini" strings)
+PLATFORM_KALSHI = "kalshi"
+PLATFORM_GEMINI = "gemini"
+
 # Recommendation outcomes from _recommend / _recommend_strict
 REC_SKIP = "SKIP"
 REC_BUY_YES = "BUY YES"

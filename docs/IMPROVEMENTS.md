@@ -32,6 +32,9 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Limit dip when price might decrease** | —                                       | ✓ `strategy.limit_dip_pct_price_decline` (e.g. 10%); when vol model is on or 2+ days to expiry, use larger dip to prioritize limit orders—contract price may dip before settlement; stacks with high-confidence                                          |
 | **Local historical storage**            | Freqtrade, backtesting                  | ✓ SQLite under `~/.trading-bot-data/`; yfinance closes cache (1h TTL), market snapshots (yes/no bids, hist_p, vol_p, rec per eval), resolved_outcomes schema for calibration; enables backtesting & prediction calibration; not committed to git         |
 | **Kalshi & Gemini fee accounting**      | Kalshi/Gemini docs                      | ✓ Maker fee = rate × P × (1−P) per contract; `kalshi_maker_fee_rate`, `gemini_maker_fee_rate` (0.0175); min_edge is _net_ edge after fees (e.g. 0.01 = 1¢ profit per contract)                                                                           |
+| **BUY YES/NO preference**               | —                                       | ✓ When both YES and NO have edge, `_recommend()` prefers whichever yields the larger net return                                                                                                                                                        |
+| **Contradictory-position avoidance**    | —                                       | ✓ `_filter_contradictory_buys()` skips BUYs that would conflict with kept positions OR other pending BUYs on same underlying + resolution (Kalshi + Gemini). E.g. NO on SOL<$83 and YES on SOL≥$92 are mutually exclusive; keeps higher-edge when both sides compete. Arb (YES+NO same contract) allowed.                                                    |
+| **Gemini hourly events**               | —                                       | ✓ `get_crypto_events()` fetches both `crypto` (daily/weekly) and `hourly` categories; BTC, ETH, SOL, XRP at 1am EDT etc.                                                                                                                                   |
 
 ---
 
@@ -44,13 +47,14 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 
 ## High Priority (Feasible Now)
 
-### 1. Backtesting (Freqtrade, Gekko)
+### 1. ~~Backtesting (Freqtrade, Gekko)~~ ✓ Partially Done
 
 Run our evaluation logic on _historical_ market snapshots instead of live data. Simulate what recommendations we would have made in the past and measure PnL.
 
 - **Scope**: Use stored historical prices (yfinance) + historical Kalshi/Gemini snapshots (if available) or synthetic fills at mid
 - **Output**: Sharpe, win rate, max drawdown, edge decay over time
-- **TODO**: Fetch historical orderbook/market data; Kalshi may expose historical prices
+- **Implemented**: `scripts/backtest.py` — modes: `real` (resolved predictions from SQLite) and `synthetic` (market_snapshots + resolved_outcomes). Uses SQLite storage (~/.trading-bot-data/), yfinance `get_aggs_as_of()` for point-in-time historical closes. Settlement sync populates `resolved_outcomes` for synthetic backtest. Kalshi `get_historical_market()` added for future use.
+- **TODO**: Edge decay over time; Gemini historical; Kalshi historical orderbook (Dome API)
 
 ### 2. ~~Kelly Criterion Position Sizing~~ ✓ Done
 
@@ -332,3 +336,26 @@ Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/f
 | **hummingbot**              | Modular connectors (CEX/DEX), Gateway middleware                                      |
 | **gekko**                   | TA + backtesting; archived but concepts still valid                                   |
 | **Stock-Prediction-Models** | LSTM/GRU, RL agents, Monte Carlo, sentiment, portfolio optimization                   |
+| **polymarket-agent**        | Multi-model consensus, web dashboard, structured AI prompts, Kelly sizing; see below  |
+
+---
+## Polymarket-Agent Inspired ([manuelbarbas/polymarket-agent](https://github.com/manuelbarbas/polymarket-agent))
+
+From the [BlockRunAI polymarket-agent](https://github.com/manuelbarbas/polymarket-agent)—autonomous prediction-market trading with multi-model consensus and x402 micropayments. Ideas we can adapt for Kalshi/Gemini:
+
+| Improvement | Description | Effort | Notes |
+| ----------- | ----------- | ------ | ----- |
+| **Multi-model AI consensus** | Use 2–3 LLMs (GPT-4o, Claude, Gemini) to vote on each prediction; only trade when 2+ agree | Medium | Reduces single-model bias; we use Ollama only—could add optional API models |
+| **Structured AI output** | Prompts request `PROBABILITY:`, `CONFIDENCE:`, `REASONING:`; parse programmatically | Low | Our Ollama output is freeform; structured format improves reliability |
+| **Question sanitization** | Sanitize market titles before LLM calls (e.g. "invades" → "territorial change") | Low | Avoid content-filter rejections on sensitive markets |
+| **Min AI confidence threshold** | Require AI confidence ≥ 50% before trading; `MIN_CONFIDENCE=5` on 1–10 scale | Low | Add `strategy.min_ai_confidence`; skip low-confidence picks |
+| **Absolute max bet cap** | `MAX_BET_SIZE` per trade in addition to `max_pct_of_balance` | Low | Extra safety; add `trading.max_contracts_per_order` |
+| **Web dashboard** | Flask/Streamlit UI for portfolio, trades, run status | Medium | polymarket-agent has dark-themed dashboard; we have CLI only |
+| **Tiered model usage** | Fast model for screening, deeper model for high-edge candidates | Medium | gpt-4o-mini vs Claude Sonnet; we could use llama3.2:1b for screening |
+| **Whale / smart-money signals** | Expert forecaster or top-trader flow data if platform exposes it | Research | polymarket-agent has whale_data; Kalshi/Gemini may not—check APIs |
+| **Geographic deployment docs** | Document which regions allow trading (Polymarket blocks US/EU) | Low | Document Kalshi/Gemini restrictions in README |
+
+### Not directly applicable
+
+- **x402 / wallet-based AI payments**: polymarket-agent pays for AI via USDC micropayments (BlockRun). We use API keys; different architecture.
+- **Polymarket CLOB / proxy wallet**: Platform-specific; we use Kalshi and Gemini.

@@ -230,6 +230,10 @@ class KalshiClient:
     def get_market(self, ticker: str) -> dict:
         return self.get(f"/markets/{ticker}")
 
+    def get_historical_market(self, ticker: str) -> dict:
+        """Fetch settled market from historical API. Use for backtest outcome inference."""
+        return self.get(f"/historical/markets/{ticker}")
+
     def get_orderbook(self, ticker: str) -> dict:
         return self.get(f"/markets/{ticker}/orderbook")
 

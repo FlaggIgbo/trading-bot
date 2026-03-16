@@ -80,6 +80,7 @@ See [Kalshi API docs](https://docs.kalshi.com/welcome) and [Making your first re
 ```
 trading-bot/
 ├── scripts/                 # Runnable entry points (run from project root)
+│   ├── backtest.py          # Backtest: real (resolved preds) or synthetic (snapshots) mode
 │   ├── bot.py               # Main polling bot
 │   ├── compare_historical.py # Evaluate contracts → BUY YES / NO / SKIP
 │   ├── compare_prices.py    # Quick live price snapshot
@@ -115,7 +116,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration).
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini hourly events** (daily + hourly for BTC, ETH, SOL, XRP) (monotonically increasing per API key per Gemini docs), **Gemini hourly support** (trades on hourly crypto bets, e.g. BTC/ETH/SOL/XRP at 1am EDT).
 
 ## Contract evaluation workflow
 
@@ -325,11 +326,12 @@ If Ollama isn’t running or the model is missing, scripts still run and finish 
 
 ## Scripts
 
-| Script                                      | Purpose                                          |
-| ------------------------------------------- | ------------------------------------------------ |
-| `python3 scripts/test_connection.py`        | Test Kalshi & Gemini connections                 |
-| `python3 scripts/compare_prices.py`         | Quick live snapshot (prices only)                |
+| Script                                      | Purpose                                                |
+| ------------------------------------------- | ------------------------------------------------------ |
+| `python3 scripts/test_connection.py`        | Test Kalshi & Gemini connections                       |
+| `python3 scripts/compare_prices.py`        | Quick live snapshot (prices only)                       |
 | **`python3 scripts/compare_historical.py`** | **Evaluate contracts → BUY YES / BUY NO / SKIP** |
+| `python3 scripts/backtest.py`              | Backtest on historical data (`--mode real` or `synthetic`) |
 
 ### Ollama LLM analysis (local, free)
 
@@ -425,6 +427,19 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`limit_dip_pct_price_decline`** (e.g. `0.10`): When the model suggests the contract price might decrease—e.g. volatility model is active, or 2+ days to expiry—use this larger dip (10%) to prioritize limit orders and catch price dips. Stacks with high-confidence when both apply.
 - **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces. If the existing order is same or better, it keeps it and skips placing a duplicate.
 
+### Absolute winner (slam-dunk buys)
+
+**In plain English:** When we have a near-certainty—e.g. buying at 1¢ when our model says 95%+ chance of winning—the bot will buy more than one contract, up to a configurable cap. It respects your USD balance on both Kalshi and Gemini: each platform's balance is checked before allocation and at order placement; insufficient funds cause the order to be skipped (not placed) with a log message.
+
+**Config** (`config.yaml` → `strategy`):
+
+```yaml
+absolute_winner_min_p_win: 0.95 # P(win) must be ≥ 95% to treat as slam-dunk
+absolute_winner_max_price: 0.05 # Price must be ≤ 5¢ (e.g. 1¢ on a near-certainty)
+absolute_winner_max_pct_of_balance: 0.50 # Willing to spend up to 50% of balance on one absolute winner
+absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enforced at execution)
+```
+
 ### Local historical storage
 
 **In plain English:** The bot stores data locally to speed runs and to build history for future backtesting and calibration. All data stays on your machine and is **not committed to git**.
@@ -505,7 +520,7 @@ The script runs every 15 minutes. With `RunAtLoad: false` (default), the first r
 while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
 ```
 
-**Note:** `scripts/compare_prices` and `scripts/compare_historical` do not place orders—they only recommend. `scripts/bot.py` can place orders when `trading.dry_run` is `false` (see below).
+**Note:** `scripts/compare_prices` only shows prices. `scripts/compare_historical` with `--execute` places real orders on Kalshi and Gemini when `trading.dry_run` is `false`. `scripts/bot.py` can also place orders when configured (see below).
 
 ### Balance-aware order execution (Kalshi & Gemini)
 
@@ -513,8 +528,8 @@ while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
 
 Orders placed via `create_order_safe` are capped to your available balance and never cause the script to crash on 4xx (e.g. insufficient funds).
 
-- **Balance cap:** Each order uses at most `max_pct_of_balance` (configurable in `config.yaml`, e.g. 20%) of your Kalshi balance. Gemini orders similarly capped and use `place_order_safe`.
-- **Low-balance limit fallback:** When balance is below `min_balance_for_limit_fallback_cents` (e.g. 500 = $5) and you can't afford the target order, the bot places a 1-contract limit at a price you can afford (e.g. 60¢ if you have $3 and use 20% per order). Set to `0` to disable.
+- **Balance cap:** Each order uses at most `max_pct_of_balance` (configurable in `config.yaml`, e.g. 20%) of your balance. Kalshi and Gemini each have separate balances; the bot fetches both and allocates budget per platform. Gemini orders use `place_order_safe` (which fetches balance and caps quantity before placing).
+- **Low-balance limit fallback:** When balance is below `min_balance_for_limit_fallback_cents` (e.g. 100 = $1) and you can't afford the target order, the bot places a 1-contract limit at a price you can afford. Set to `0` to disable.
 - **4xx resilience:** If the API returns 4xx (insufficient funds, invalid market, etc.), the script logs a warning and continues.
 - **Config** (`config.yaml` → `trading`):
 
@@ -523,7 +538,7 @@ Orders placed via `create_order_safe` are capped to your available balance and n
     dry_run: true # false = place real orders (scripts/bot.py)
     max_pct_of_balance: 0.20 # use at most 20% of balance per order (configurable)
     min_contracts: 1 # skip if capped count < this
-    min_balance_for_limit_fallback_cents: 500 # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
+    min_balance_for_limit_fallback_cents: 100 # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
   ```
 
 Enable execution in `scripts/bot.py` by setting `buy_yes_below` / `buy_no_below` in `strategy` and `dry_run: false`. Add funds manually as needed.
@@ -546,6 +561,7 @@ If you see `HTTPError: 400 Client Error: Bad Request` when placing orders:
 - **`InvalidQuantity`**: Quantity must be a positive integer.
 - **`InvalidSymbol`**: Contract/symbol not found or no longer tradeable.
 - **`MarketNotOpen`**: Market closed or paused. See [Gemini error codes](https://docs.gemini.com/error-codes).
+- **`MissingAccounts`**: You're using a Master API key (`master-*`). Add `GEMINI_ACCOUNT=your_account_nickname` to `.env` (e.g. `Primary`), or create an account-scoped key at [Settings → API](https://exchange.gemini.com/settings/api).
 
 ### Configuring tickers
 
@@ -564,7 +580,7 @@ Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `SPY`, etc. See [yfinance](https://githu
 
 ### Gemini Prediction Markets (crypto only)
 
-The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemini.com/prediction-markets/markets) for **crypto only** (BTC, ETH, SOL, XRP). S&P 500 is not included. The events API is public; no API key required for listing. Optional env vars:
+The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemini.com/prediction-markets/markets) for **crypto only** (BTC, ETH, SOL, XRP)—both **daily/weekly** and **hourly** events. S&P 500 is not included. The events API is public; no API key required for listing. Optional env vars:
 
 - `GEMINI_USE_SANDBOX=true` - use sandbox API
 - `GEMINI_PREDICTION_BASE_URL` - override base URL
@@ -574,9 +590,13 @@ The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemin
 | Asset        | Type              | URL                                                                                                                                                    |
 | ------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Bitcoin      | Daily             | [BTC price on March 16](https://exchange.gemini.com/predictions/BTC2603162100/btc-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
+| Bitcoin      | Hourly            | [BTC price today at 1am EDT](https://exchange.gemini.com/predictions/BTC2603160500/btc-price-today-at-1am-edt?categoryPath=crypto%2Ccrypto_bitcoin%2Chourly&status=active) |
 | Ether        | Daily             | [ETH price on March 16](https://exchange.gemini.com/predictions/ETH2603162100/eth-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
+| Ether        | Hourly            | [ETH price today at 1am EDT](https://exchange.gemini.com/predictions/ETH2603160500/eth-price-today-at-1am-edt?categoryPath=crypto%2Chourly&status=active) |
 | Solana       | Weekly (no daily) | [SOL price on March 20](https://exchange.gemini.com/predictions/SOL2603202100/sol-price-on-march-20?categoryPath=crypto%2Ccrypto_solana&status=active) |
+| Solana       | Hourly            | [SOL price today at 1am EDT](https://exchange.gemini.com/predictions/SOL2603160500/sol-price-today-at-1am-edt?categoryPath=crypto%2Chourly&status=active) |
 | XRP (Ripple) | Daily             | [XRP price on March 16](https://exchange.gemini.com/predictions/XRP2603162100/xrp-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
+| XRP (Ripple) | Hourly            | [XRP price today at 1am EDT](https://exchange.gemini.com/predictions/XRP2603160500/xrp-price-today-at-1am-edt?categoryPath=crypto%2Chourly&status=active) |
 
 **Note:** With `GEMINI_API_KEY` and `GEMINI_API_SECRET` set, `scripts/compare_historical.py --execute` places limit orders on both Kalshi and Gemini. Use `--preview` to see planned orders without placing them.
 
