@@ -13,6 +13,7 @@
         <string>--use-volatility</string>
         <string>--execute</string>
         <string>--no-llm</string>
+        <string>--log</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/ogechukwuflagg-igbo/git/trading-bot</string>
