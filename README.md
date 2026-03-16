@@ -24,12 +24,12 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) to monitor sel
    cp .env.example .env
    ```
 
-   | Variable | Description | Where to get it |
-   |----------|-------------|-----------------|
-   | `KALSHI_API_KEY_ID` | Your API Key ID (UUID format) | [Account Settings → API Keys](https://kalshi.com/account/profile) |
-   | `KALSHI_PRIVATE_KEY_PATH` | Path to your `.key` file **or** | Download when you create an API key |
-   | `KALSHI_PRIVATE_KEY` | Raw PEM content (alternative to path) | Same key, as string with `\n` for newlines |
-   | `KALSHI_USE_DEMO` | `true` for demo, `false` for production | Demo: [demo.kalshi.com](https://demo.kalshi.com) |
+   | Variable                  | Description                             | Where to get it                                                   |
+   | ------------------------- | --------------------------------------- | ----------------------------------------------------------------- |
+   | `KALSHI_API_KEY_ID`       | Your API Key ID (UUID format)           | [Account Settings → API Keys](https://kalshi.com/account/profile) |
+   | `KALSHI_PRIVATE_KEY_PATH` | Path to your `.key` file **or**         | Download when you create an API key                               |
+   | `KALSHI_PRIVATE_KEY`      | Raw PEM content (alternative to path)   | Same key, as string with `\n` for newlines                        |
+   | `KALSHI_USE_DEMO`         | `true` for demo, `false` for production | Demo: [demo.kalshi.com](https://demo.kalshi.com)                  |
 
    For **demo**, use `https://demo-api.kalshi.co` and create keys at [demo.kalshi.com](https://demo.kalshi.com/account/profile).
 
@@ -39,11 +39,11 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) to monitor sel
 
    ```yaml
    markets:
-     - KXBTCD       # Bitcoin daily
-     - KXETHD       # Ethereum daily
-     - KXSOLD       # Solana
-     - KXINXU       # S&P 500
-     - KXXRPD       # XRP daily
+     - KXBTCD # Bitcoin daily
+     - KXETHD # Ethereum daily
+     - KXSOLD # Solana
+     - KXINXU # S&P 500
+     - KXXRPD # XRP daily
    ```
 
    Or: `MARKETS=KXBTCD,KXETHD,KXSOLD,KXINXU,KXXRPD`
@@ -57,6 +57,7 @@ python scripts/bot.py
 ```
 
 The bot will:
+
 - Connect using your API credentials
 - Fetch open markets for each series/ticker you configured
 - Log prices (YES/NO bids) and status
@@ -126,22 +127,22 @@ Run `scripts/compare_historical.py` every **15 minutes** locally for continuous 
 
 ### Key terms in plain English
 
-| Term | Plain-English meaning |
-|------|------------------------|
-| **BUY YES** | Bet that the event *will* happen (e.g. Bitcoin *will* be above $81,250). You profit if you're right. |
-| **BUY NO** | Bet that the event *won't* happen (e.g. Bitcoin *won't* be above $81,250). You profit if you're right. |
-| **Edge** | How much we think we're getting a bargain. If we think the real chance is 20% but the market prices it at 10¢ (10%), we have a 10% edge. |
-| **Bid** | The highest price someone is willing to *pay* to buy. |
-| **Ask** | The lowest price someone is willing to *accept* to sell. (Buying at the ask = paying the seller's price.) |
-| **Strike / threshold** | The number the bet is about. E.g. "$81,250" in "Bitcoin above $81,250". |
-| **Resolution** | When the bet settles—e.g. "5pm ET" means we use the price at 5pm Eastern that day to determine who wins. |
-| **Limit order** | "Buy only if the price is X or better." Your order waits in the book until someone matches it. Safer than "buy at whatever price is available now." |
-| **Volatility** | How much prices swing. High volatility = bigger moves up and down; low = calmer. Affects how likely the price is to reach a target. |
-| **Arbitrage** | Risk-free profit from a pricing mistake. E.g. if YES costs 40¢ and NO costs 50¢ on the same bet, buying both costs 90¢ but one must win (payout $1), so you lock in 10¢ profit. |
-| **Dry run** | Practice mode: the bot figures out what it *would* do but doesn't place any real orders. |
-| **Contract** | One market/bet—e.g. "Bitcoin above $81,250 on March 16." Each contract has YES and NO sides. |
-| **Position** | A bet you already hold. If you bought 10 YES contracts, you have a "position" of 10 YES. |
-| **Payout** | What you get if you win. Usually $1 per contract—so if you paid 30¢ and win, you profit 70¢. |
+| Term                   | Plain-English meaning                                                                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **BUY YES**            | Bet that the event _will_ happen (e.g. Bitcoin _will_ be above $81,250). You profit if you're right.                                                                            |
+| **BUY NO**             | Bet that the event _won't_ happen (e.g. Bitcoin _won't_ be above $81,250). You profit if you're right.                                                                          |
+| **Edge**               | How much we think we're getting a bargain. If we think the real chance is 20% but the market prices it at 10¢ (10%), we have a 10% edge.                                        |
+| **Bid**                | The highest price someone is willing to _pay_ to buy.                                                                                                                           |
+| **Ask**                | The lowest price someone is willing to _accept_ to sell. (Buying at the ask = paying the seller's price.)                                                                       |
+| **Strike / threshold** | The number the bet is about. E.g. "$81,250" in "Bitcoin above $81,250".                                                                                                         |
+| **Resolution**         | When the bet settles—e.g. "5pm ET" means we use the price at 5pm Eastern that day to determine who wins.                                                                        |
+| **Limit order**        | "Buy only if the price is X or better." Your order waits in the book until someone matches it. Safer than "buy at whatever price is available now."                             |
+| **Volatility**         | How much prices swing. High volatility = bigger moves up and down; low = calmer. Affects how likely the price is to reach a target.                                             |
+| **Arbitrage**          | Risk-free profit from a pricing mistake. E.g. if YES costs 40¢ and NO costs 50¢ on the same bet, buying both costs 90¢ but one must win (payout $1), so you lock in 10¢ profit. |
+| **Dry run**            | Practice mode: the bot figures out what it _would_ do but doesn't place any real orders.                                                                                        |
+| **Contract**           | One market/bet—e.g. "Bitcoin above $81,250 on March 16." Each contract has YES and NO sides.                                                                                    |
+| **Position**           | A bet you already hold. If you bought 10 YES contracts, you have a "position" of 10 YES.                                                                                        |
+| **Payout**             | What you get if you win. Usually $1 per contract—so if you paid 30¢ and win, you profit 70¢.                                                                                    |
 
 ### Flow diagram: `scripts/compare_historical.py`
 
@@ -280,6 +281,7 @@ When [Ollama](https://ollama.com) is running locally, scripts send their output 
    ```
 
 To skip LLM analysis (e.g. for cron or automation):
+
 ```bash
 python3 scripts/compare_historical.py --no-llm
 python3 scripts/compare_prices.py --no-llm
@@ -287,6 +289,7 @@ python3 scripts/test_connection.py --no-llm
 ```
 
 Override model via `OLLAMA_MODEL`:
+
 ```bash
 OLLAMA_MODEL=mistral python3 scripts/compare_historical.py
 ```
@@ -322,10 +325,10 @@ If Ollama isn’t running or the model is missing, scripts still run and finish 
 
 ## Scripts
 
-| Script | Purpose |
-|--------|---------|
-| `python3 scripts/test_connection.py` | Test Kalshi & Gemini connections |
-| `python3 scripts/compare_prices.py` | Quick live snapshot (prices only) |
+| Script                                      | Purpose                                          |
+| ------------------------------------------- | ------------------------------------------------ |
+| `python3 scripts/test_connection.py`        | Test Kalshi & Gemini connections                 |
+| `python3 scripts/compare_prices.py`         | Quick live snapshot (prices only)                |
 | **`python3 scripts/compare_historical.py`** | **Evaluate contracts → BUY YES / BUY NO / SKIP** |
 
 ### Ollama LLM analysis (local, free)
@@ -360,17 +363,17 @@ Requires `trading.dry_run: false` in config.yaml.
 
 **Flags**
 
-| Flag | Description |
-|------|-------------|
-| `--days` | Historical lookback (default: 365, or config `strategy.days_back`) |
-| `--markets` | Max markets per series (0 = all, default) |
-| `--edge` | Min "bargain size" to recommend buy—how much cheaper than fair we need (default: 15%) |
-| `--execute` | Place real Kalshi orders for buys and sells (requires dry_run: false) |
-| `--preview` | **Preview mode**: print Kalshi/Gemini API calls we would make, without placing any orders |
-| `--use-volatility` | Add volatility-based probability (option-style log-normal model) alongside empirical P |
-| `--verbose`, `-v` | Show closes range vs threshold (explains historical P) |
-| `--no-llm` | Skip Ollama analysis |
-| `--log` | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDD.log` (or `--log DIR` for custom dir) |
+| Flag               | Description                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------- |
+| `--days`           | Historical lookback (default: 365, or config `strategy.days_back`)                        |
+| `--markets`        | Max markets per series (0 = all, default)                                                 |
+| `--edge`           | Min "bargain size" to recommend buy—how much cheaper than fair we need (default: 15%)     |
+| `--execute`        | Place real Kalshi orders for buys and sells (requires dry_run: false)                     |
+| `--preview`        | **Preview mode**: print Kalshi/Gemini API calls we would make, without placing any orders |
+| `--use-volatility` | Add volatility-based probability (option-style log-normal model) alongside empirical P    |
+| `--verbose`, `-v`  | Show closes range vs threshold (explains historical P)                                    |
+| `--no-llm`         | Skip Ollama analysis                                                                      |
+| `--log`            | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDD.log` (or `--log DIR` for custom dir) |
 
 Config: `strategy.min_edge`, `strategy.min_yes_price` (skip BUY YES when market YES &lt; 5¢), `strategy.min_no_price` (skip BUY NO when market NO &lt; 5¢), `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.limit_dip_pct_high_confidence` (15% when P(win) ≥ 90%), `strategy.vol_blend_weight` (blend empirical + vol; 0.5 = equal), `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, etc. in `config.yaml`.
 
@@ -380,11 +383,11 @@ Config: `strategy.min_edge`, `strategy.min_yes_price` (skip BUY YES when market 
 
 The bot evaluates **all** crypto and S&P 500 intraday markets (e.g. "Bitcoin today at 8pm ET"), not only 5pm crypto / 4pm S&P:
 
-| Resolution | Logic |
-|------------|-------|
-| **5pm ET crypto** / **4pm ET S&P 500** | Standard `min_edge` (e.g. 10%) — same as before |
-| **Other intraday** (e.g. 8pm ET) | Strict threshold: only BUY when P(win) ≥ 90% (or 80% with `--use-volatility` — vol model accounts for time & uncertainty) |
-| **Non–crypto / non–S&P** with intraday | Skipped (no supported time) |
+| Resolution                             | Logic                                                                                                                     |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **5pm ET crypto** / **4pm ET S&P 500** | Standard `min_edge` (e.g. 10%) — same as before                                                                           |
+| **Other intraday** (e.g. 8pm ET)       | Strict threshold: only BUY when P(win) ≥ 90% (or 80% with `--use-volatility` — vol model accounts for time & uncertainty) |
+| **Non–crypto / non–S&P** with intraday | Skipped (no supported time)                                                                                               |
 
 For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empirical only) or ≥ 80% with `--use-volatility` (vol model accounts for time-to-expiry and uncertainty). Uses daily closes as a proxy (no intraday data yet).
 
@@ -394,30 +397,30 @@ For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empiri
 
 **In plain English:** Sometimes the market prices YES and NO in a way that guarantees profit if you buy both. For example, if YES costs 40¢ and NO costs 50¢ on the same bet, buying both costs 90¢—but one side always wins (payout $1), so you lock in 10¢. The bot looks for these "free money" situations before making regular bets.
 
-| Edge | Description | When |
-|------|-------------|------|
-| **Intra-exchange arb** | Buy YES and NO on the same market when `yes_ask + no_ask < 1 - fee` | Same outcome, one platform (Kalshi or Gemini) |
+| Edge                   | Description                                                                | When                                                        |
+| ---------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **Intra-exchange arb** | Buy YES and NO on the same market when `yes_ask + no_ask < 1 - fee`        | Same outcome, one platform (Kalshi or Gemini)               |
 | **Inter-exchange arb** | Buy YES on one platform and NO on the other when total cost &lt; `1 - fee` | Matching Kalshi + Gemini crypto events (same threshold ±1%) |
 
 **Config** (`config.yaml` → `strategy`):
 
 ```yaml
-min_arb_fee: 0.02      # Min edge for arb (2%): only act when profit >= 2%
-enable_intra_arb: true   # Intra-exchange: buy YES+NO when sum < 1
-enable_inter_arb: true   # Inter-exchange: Kalshi↔Gemini cross-hedge
+min_arb_fee: 0.02 # Min edge for arb (2%): only act when profit >= 2%
+enable_intra_arb: true # Intra-exchange: buy YES+NO when sum < 1
+enable_inter_arb: true # Inter-exchange: Kalshi↔Gemini cross-hedge
 ```
 
-*In plain English:* `min_arb_fee` is the smallest profit we demand before acting. 0.02 = 2%: we only buy both sides when the guaranteed profit is at least 2¢ per $1 bet (after fees).
+_In plain English:_ `min_arb_fee` is the smallest profit we demand before acting. 0.02 = 2%: we only buy both sides when the guaranteed profit is at least 2¢ per $1 bet (after fees).
 
-The bot checks for arb *before* making normal BUY YES/NO suggestions. If it finds one, it places both sides of the bet and skips the directional recommendation.
+The bot checks for arb _before_ making normal BUY YES/NO suggestions. If it finds one, it places both sides of the bet and skips the directional recommendation.
 
 ### Limit orders & dip catching (Kalshi + Gemini)
 
-**In plain English:** Instead of "buy at whatever price is available now," we say "buy only if the price hits X or better." Your order waits until someone matches it. We also place slightly *below* the current price so that if the market dips briefly, we might get a better deal.
+**In plain English:** Instead of "buy at whatever price is available now," we say "buy only if the price hits X or better." Your order waits until someone matches it. We also place slightly _below_ the current price so that if the market dips briefly, we might get a better deal.
 
 Both platforms place **limit orders** (good-til-cancel) so orders rest on the book until filled. To catch dips when the market temporarily drops:
 
-- **`limit_dip_pct`** (default `0.05`): Place buy limits this much *below* the current bid. E.g. `0.05` = 5% below bid — if bid is 40¢, we place at 38¢. Set to `0` to use the bid directly.
+- **`limit_dip_pct`** (default `0.05`): Place buy limits this much _below_ the current bid. E.g. `0.05` = 5% below bid — if bid is 40¢, we place at 38¢. Set to `0` to use the bid directly.
 - **`limit_dip_pct_high_confidence`** (e.g. `0.15`): When P(win) ≥ 90%, use this larger dip instead—e.g. 15% below bid. Prioritizes catching bigger dips on high-certainty contracts (perfect for 10¢ limit on YES/NO we're confident will hit). Set to `0` to use `limit_dip_pct` for all.
 - **`limit_dip_pct_price_decline`** (e.g. `0.10`): When the model suggests the contract price might decrease—e.g. volatility model is active, or 2+ days to expiry—use this larger dip (10%) to prioritize limit orders and catch price dips. Stacks with high-confidence when both apply.
 - **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces. If the existing order is same or better, it keeps it and skips placing a duplicate.
@@ -426,18 +429,18 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 
 **In plain English:** The bot stores data locally to speed runs and to build history for future backtesting and calibration. All data stays on your machine and is **not committed to git**.
 
-| What we store | Purpose |
-|---------------|---------|
-| **yfinance closes cache** | Daily closes cached for 1 hour → fewer API calls, faster runs |
-| **Market snapshots** | For each evaluation: yes/no bids, our hist_p, vol_p, recommendation, threshold, direction. Builds time series for backtesting. |
-| **Resolved outcomes schema** | Ready for when we record contract settlements → calibrate our predictions (e.g. "when we said 70% YES, did we win?") |
+| What we store                | Purpose                                                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **yfinance closes cache**    | Daily closes cached for 1 hour → fewer API calls, faster runs                                                                  |
+| **Market snapshots**         | For each evaluation: yes/no bids, our hist_p, vol_p, recommendation, threshold, direction. Builds time series for backtesting. |
+| **Resolved outcomes schema** | Ready for when we record contract settlements → calibrate our predictions (e.g. "when we said 70% YES, did we win?")           |
 
 **Config** (`config.yaml` → `storage`):
 
 ```yaml
 storage:
   enabled: true
-  data_dir: ~/.trading-bot-data   # Override with TRADING_BOT_DATA_DIR env
+  data_dir: ~/.trading-bot-data # Override with TRADING_BOT_DATA_DIR env
 ```
 
 Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
@@ -501,10 +504,10 @@ Orders placed via `create_order_safe` are capped to your available balance and n
 
   ```yaml
   trading:
-    dry_run: true              # false = place real orders (scripts/bot.py)
-    max_pct_of_balance: 0.20   # use at most 20% of balance per order (configurable)
-    min_contracts: 1           # skip if capped count < this
-    min_balance_for_limit_fallback_cents: 500  # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
+    dry_run: true # false = place real orders (scripts/bot.py)
+    max_pct_of_balance: 0.20 # use at most 20% of balance per order (configurable)
+    min_contracts: 1 # skip if capped count < this
+    min_balance_for_limit_fallback_cents: 500 # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
   ```
 
 Enable execution in `scripts/bot.py` by setting `buy_yes_below` / `buy_no_below` in `strategy` and `dry_run: false`. Add funds manually as needed.
@@ -534,11 +537,11 @@ Add `yfinance_tickers` in `config.yaml` to map Kalshi series to Yahoo Finance ti
 
 ```yaml
 yfinance_tickers:
-  KXBTCD: "BTC-USD"   # Bitcoin
-  KXETHD: "ETH-USD"   # Ethereum
-  KXSOLD: "SOL-USD"   # Solana
-  KXINXU: "^GSPC"     # S&P 500
-  KXXRPD: "XRP-USD"   # XRP (Ripple)
+  KXBTCD: "BTC-USD" # Bitcoin
+  KXETHD: "ETH-USD" # Ethereum
+  KXSOLD: "SOL-USD" # Solana
+  KXINXU: "^GSPC" # S&P 500
+  KXXRPD: "XRP-USD" # XRP (Ripple)
 ```
 
 Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `SPY`, etc. See [yfinance](https://github.com/ranaroussi/yfinance).
@@ -552,12 +555,12 @@ The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemin
 
 **Relevant markets (Gemini Exchange UI):**
 
-| Asset | Type | URL |
-|-------|------|-----|
-| Bitcoin | Daily | [BTC price on March 16](https://exchange.gemini.com/predictions/BTC2603162100/btc-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
-| Ether | Daily | [ETH price on March 16](https://exchange.gemini.com/predictions/ETH2603162100/eth-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
-| Solana | Weekly (no daily) | [SOL price on March 20](https://exchange.gemini.com/predictions/SOL2603202100/sol-price-on-march-20?categoryPath=crypto%2Ccrypto_solana&status=active) |
-| XRP (Ripple) | Daily | [XRP price on March 16](https://exchange.gemini.com/predictions/XRP2603162100/xrp-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
+| Asset        | Type              | URL                                                                                                                                                    |
+| ------------ | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Bitcoin      | Daily             | [BTC price on March 16](https://exchange.gemini.com/predictions/BTC2603162100/btc-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
+| Ether        | Daily             | [ETH price on March 16](https://exchange.gemini.com/predictions/ETH2603162100/eth-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
+| Solana       | Weekly (no daily) | [SOL price on March 20](https://exchange.gemini.com/predictions/SOL2603202100/sol-price-on-march-20?categoryPath=crypto%2Ccrypto_solana&status=active) |
+| XRP (Ripple) | Daily             | [XRP price on March 16](https://exchange.gemini.com/predictions/XRP2603162100/xrp-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
 
 **Note:** With `GEMINI_API_KEY` and `GEMINI_API_SECRET` set, `scripts/compare_historical.py --execute` places limit orders on both Kalshi and Gemini. Use `--preview` to see planned orders without placing them.
 
@@ -565,10 +568,10 @@ The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemin
 
 The evaluation logic draws on econometric and financial time-series literature:
 
-| Source | Relevance |
-|--------|-----------|
-| [Taylor (2005)](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents.pdf) *Asset Price Dynamics, Volatility, and Prediction* | Volatility forecasting works better than directional; GARCH/implied vol improve P(above/below) |
-| [Campbell, Lo, MacKinlay (1997)](https://www.nrc.gov/docs/ml1208/ML12088A329.pdf) *The Econometrics of Financial Markets* | Event-study methodology; market model reduces variance of abnormal returns |
-| [Tsay](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) *Analysis of Financial Time Series* | GARCH, ARIMA, structural breaks for volatility and regime modeling |
+| Source                                                                                                                                                                 | Relevance                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [Taylor (2005)](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents.pdf) _Asset Price Dynamics, Volatility, and Prediction_                                        | Volatility forecasting works better than directional; GARCH/implied vol improve P(above/below) |
+| [Campbell, Lo, MacKinlay (1997)](https://www.nrc.gov/docs/ml1208/ML12088A329.pdf) _The Econometrics of Financial Markets_                                              | Event-study methodology; market model reduces variance of abnormal returns                     |
+| [Tsay](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) _Analysis of Financial Time Series_ | GARCH, ARIMA, structural breaks for volatility and regime modeling                             |
 
 See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for prioritized enhancements (GARCH, implied vol, market-model adjustment, etc.).

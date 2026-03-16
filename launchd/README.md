@@ -24,12 +24,12 @@ This LaunchAgent runs `scripts/compare_historical.py` every 15 minutes with `--u
 
 ## Commands
 
-| Action | Command |
-|--------|---------|
-| Start (load) | `launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist` |
+| Action        | Command                                                                     |
+| ------------- | --------------------------------------------------------------------------- |
+| Start (load)  | `launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist`   |
 | Stop (unload) | `launchctl unload ~/Library/LaunchAgents/com.user.compare_historical.plist` |
-| View stdout | `tail -f /tmp/compare_historical.out.log` |
-| View stderr | `tail -f /tmp/compare_historical.err.log` |
+| View stdout   | `tail -f /tmp/compare_historical.out.log`                                   |
+| View stderr   | `tail -f /tmp/compare_historical.err.log`                                   |
 
 ## Configuration
 

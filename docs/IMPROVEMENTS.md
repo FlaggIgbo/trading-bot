@@ -6,32 +6,32 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 
 ## Implemented ✓
 
-| Feature | From | Status |
-|---------|------|--------|
-| Dry-run / preview mode | Freqtrade | ✓ `--preview` in compare_historical.py |
-| Volatility-based probability | Stock-Prediction-Models, options theory | ✓ `--use-volatility` log-normal model; per-contract time-to-expiry parsed from title (e.g. "tomorrow at 5pm ET"); `intraday_other_min_p_win_with_vol: 0.80` eases strict threshold (90%→80%) when vol model is used |
-| Balance-aware order execution | Freqtrade | ✓ `create_order_safe`, `max_pct_of_balance` |
-| Low-balance limit fallback | Freqtrade | ✓ `min_balance_for_limit_fallback_cents` — place 1-contract limit instead of skipping when balance is low |
-| Config-driven strategy | Freqtrade, Gekko | ✓ `config.yaml` strategy, min_edge |
-| Kelly criterion position sizing | Freqtrade, Stock-Prediction-Models | ✓ `strategy.use_kelly`, `kelly_fraction` |
-| Whitelist / blacklist | Freqtrade | ✓ `strategy.whitelist`, `strategy.blacklist` |
-| File logging for run history | Freqtrade | ✓ `--log` or `--log DIR` |
-| Systematic edges (arbitrage) | QuantPedia | ✓ Intra-exchange + inter-exchange (Kalshi↔Gemini) arb; `min_arb_fee`, `enable_intra_arb`, `enable_inter_arb` |
-| XRP (Ripple) market support | — | ✓ KXXRPD, XRP-USD; crypto treatment, arbitrage, intraday |
-| Ollama LLM analysis | — | ✓ Local free analysis; `scripts/debug_ollama.py`; llama3.2:1b fallback |
-| **Budget-aware order allocation** | — | ✓ `_allocate_budget_to_orders`; when total cost exceeds budget, prefers 1 contract each (diversification) over 10 of one; `trading.max_total_buy_pct` (default 50%) |
-| **Ollama per-trade analysis** | — | ✓ Each proposed buy/sell is interpreted by Ollama as it's displayed (not batch at end); `analyze_single_trade()` in ollama_analysis.py |
-| **Flexible margin config** | — | ✓ `trading.max_pct_of_balance` (per order), `trading.max_total_buy_pct` (all buys combined) |
-| Recommendation constants | — | ✓ `constants.py`: REC_SKIP, REC_BUY_YES, REC_BUY_NO, REC_ARB_*, REC_LIKELY_LOSE, REC_RULE_VIOLATION |
-| **Order review (cancel/update/keep)** | — | ✓ Before placing, review resting orders on Kalshi + Gemini; cancel if no longer recommended or if we want a higher limit; keep if existing order is same or better; `cancel_order_safe`, `create_order_safe`, `place_order_safe` |
-| **Kalshi 4xx error handling** | Kalshi docs | ✓ `parse_kalshi_error()`, `round_price_to_tick()` using `price_ranges`; `create_order_safe` catches 4xx, logs `invalid_price`/`insufficient_balance` hints; never crashes on order rejection |
-| **Gemini 4xx/406 error handling** | Gemini docs | ✓ `parse_gemini_error()`, `place_order_safe`, `cancel_order_safe`; price rounded to 0.01; catches InvalidPrice, InsufficientFunds, InvalidQuantity, MarketNotOpen, InvalidSymbol; see [docs.gemini.com/error-codes](https://docs.gemini.com/error-codes) |
-| **Vol blend (empirical + volatility)** | Taylor, IMPROVEMENTS §6 | ✓ `strategy.vol_blend_weight` (0.5 = equal); `w*emp + (1-w)*vol` when both available; replaces `max(emp, vol)` for non-intraday |
-| **EWMA volatility** | Taylor Ch 9 | ✓ `strategy.use_ewma_vol`, `ewma_lambda` (0.94); σ²_t = λ·σ²_{t-1} + (1−λ)·r²_t; time-varying vol in `_volatility_probability` |
-| **High-confidence limit orders** | — | ✓ `strategy.limit_dip_pct_high_confidence` (e.g. 15%); when P(win) ≥ 90%, place limit 15% below bid to prioritize catching bigger dips on high-certainty contracts |
-| **Limit dip when price might decrease** | — | ✓ `strategy.limit_dip_pct_price_decline` (e.g. 10%); when vol model is on or 2+ days to expiry, use larger dip to prioritize limit orders—contract price may dip before settlement; stacks with high-confidence |
-| **Local historical storage** | Freqtrade, backtesting | ✓ SQLite under `~/.trading-bot-data/`; yfinance closes cache (1h TTL), market snapshots (yes/no bids, hist_p, vol_p, rec per eval), resolved_outcomes schema for calibration; enables backtesting & prediction calibration; not committed to git |
-| **Kalshi & Gemini fee accounting** | Kalshi/Gemini docs | ✓ Maker fee = rate × P × (1−P) per contract; `kalshi_maker_fee_rate`, `gemini_maker_fee_rate` (0.0175); min_edge is *net* edge after fees (e.g. 0.01 = 1¢ profit per contract) |
+| Feature                                 | From                                    | Status                                                                                                                                                                                                                                                   |
+| --------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dry-run / preview mode                  | Freqtrade                               | ✓ `--preview` in compare_historical.py                                                                                                                                                                                                                   |
+| Volatility-based probability            | Stock-Prediction-Models, options theory | ✓ `--use-volatility` log-normal model; per-contract time-to-expiry parsed from title (e.g. "tomorrow at 5pm ET"); `intraday_other_min_p_win_with_vol: 0.80` eases strict threshold (90%→80%) when vol model is used                                      |
+| Balance-aware order execution           | Freqtrade                               | ✓ `create_order_safe`, `max_pct_of_balance`                                                                                                                                                                                                              |
+| Low-balance limit fallback              | Freqtrade                               | ✓ `min_balance_for_limit_fallback_cents` — place 1-contract limit instead of skipping when balance is low                                                                                                                                                |
+| Config-driven strategy                  | Freqtrade, Gekko                        | ✓ `config.yaml` strategy, min_edge                                                                                                                                                                                                                       |
+| Kelly criterion position sizing         | Freqtrade, Stock-Prediction-Models      | ✓ `strategy.use_kelly`, `kelly_fraction`                                                                                                                                                                                                                 |
+| Whitelist / blacklist                   | Freqtrade                               | ✓ `strategy.whitelist`, `strategy.blacklist`                                                                                                                                                                                                             |
+| File logging for run history            | Freqtrade                               | ✓ `--log` or `--log DIR`                                                                                                                                                                                                                                 |
+| Systematic edges (arbitrage)            | QuantPedia                              | ✓ Intra-exchange + inter-exchange (Kalshi↔Gemini) arb; `min_arb_fee`, `enable_intra_arb`, `enable_inter_arb`                                                                                                                                             |
+| XRP (Ripple) market support             | —                                       | ✓ KXXRPD, XRP-USD; crypto treatment, arbitrage, intraday                                                                                                                                                                                                 |
+| Ollama LLM analysis                     | —                                       | ✓ Local free analysis; `scripts/debug_ollama.py`; llama3.2:1b fallback                                                                                                                                                                                   |
+| **Budget-aware order allocation**       | —                                       | ✓ `_allocate_budget_to_orders`; when total cost exceeds budget, prefers 1 contract each (diversification) over 10 of one; `trading.max_total_buy_pct` (default 50%)                                                                                      |
+| **Ollama per-trade analysis**           | —                                       | ✓ Each proposed buy/sell is interpreted by Ollama as it's displayed (not batch at end); `analyze_single_trade()` in ollama_analysis.py                                                                                                                   |
+| **Flexible margin config**              | —                                       | ✓ `trading.max_pct_of_balance` (per order), `trading.max_total_buy_pct` (all buys combined)                                                                                                                                                              |
+| Recommendation constants                | —                                       | ✓ `constants.py`: REC*SKIP, REC_BUY_YES, REC_BUY_NO, REC_ARB*\*, REC_LIKELY_LOSE, REC_RULE_VIOLATION                                                                                                                                                     |
+| **Order review (cancel/update/keep)**   | —                                       | ✓ Before placing, review resting orders on Kalshi + Gemini; cancel if no longer recommended or if we want a higher limit; keep if existing order is same or better; `cancel_order_safe`, `create_order_safe`, `place_order_safe`                         |
+| **Kalshi 4xx error handling**           | Kalshi docs                             | ✓ `parse_kalshi_error()`, `round_price_to_tick()` using `price_ranges`; `create_order_safe` catches 4xx, logs `invalid_price`/`insufficient_balance` hints; never crashes on order rejection                                                             |
+| **Gemini 4xx/406 error handling**       | Gemini docs                             | ✓ `parse_gemini_error()`, `place_order_safe`, `cancel_order_safe`; price rounded to 0.01; catches InvalidPrice, InsufficientFunds, InvalidQuantity, MarketNotOpen, InvalidSymbol; see [docs.gemini.com/error-codes](https://docs.gemini.com/error-codes) |
+| **Vol blend (empirical + volatility)**  | Taylor, IMPROVEMENTS §6                 | ✓ `strategy.vol_blend_weight` (0.5 = equal); `w*emp + (1-w)*vol` when both available; replaces `max(emp, vol)` for non-intraday                                                                                                                          |
+| **EWMA volatility**                     | Taylor Ch 9                             | ✓ `strategy.use_ewma_vol`, `ewma_lambda` (0.94); σ²*t = λ·σ²*{t-1} + (1−λ)·r²_t; time-varying vol in `_volatility_probability`                                                                                                                           |
+| **High-confidence limit orders**        | —                                       | ✓ `strategy.limit_dip_pct_high_confidence` (e.g. 15%); when P(win) ≥ 90%, place limit 15% below bid to prioritize catching bigger dips on high-certainty contracts                                                                                       |
+| **Limit dip when price might decrease** | —                                       | ✓ `strategy.limit_dip_pct_price_decline` (e.g. 10%); when vol model is on or 2+ days to expiry, use larger dip to prioritize limit orders—contract price may dip before settlement; stacks with high-confidence                                          |
+| **Local historical storage**            | Freqtrade, backtesting                  | ✓ SQLite under `~/.trading-bot-data/`; yfinance closes cache (1h TTL), market snapshots (yes/no bids, hist_p, vol_p, rec per eval), resolved_outcomes schema for calibration; enables backtesting & prediction calibration; not committed to git         |
+| **Kalshi & Gemini fee accounting**      | Kalshi/Gemini docs                      | ✓ Maker fee = rate × P × (1−P) per contract; `kalshi_maker_fee_rate`, `gemini_maker_fee_rate` (0.0175); min_edge is _net_ edge after fees (e.g. 0.01 = 1¢ profit per contract)                                                                           |
 
 ---
 
@@ -46,7 +46,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 
 ### 1. Backtesting (Freqtrade, Gekko)
 
-Run our evaluation logic on *historical* market snapshots instead of live data. Simulate what recommendations we would have made in the past and measure PnL.
+Run our evaluation logic on _historical_ market snapshots instead of live data. Simulate what recommendations we would have made in the past and measure PnL.
 
 - **Scope**: Use stored historical prices (yfinance) + historical Kalshi/Gemini snapshots (if available) or synthetic fills at mid
 - **Output**: Sharpe, win rate, max drawdown, edge decay over time
@@ -77,7 +77,7 @@ Extract strategy logic into pluggable classes so we can swap empirical vs volati
 
 ### 6. ~~GARCH / EWMA for Time-Varying Volatility~~ ✓ EWMA Done (Stock-Prediction-Models)
 
-~~Current volatility model uses a fixed historical vol.~~ **EWMA implemented**: `strategy.use_ewma_vol: true`, `ewma_lambda: 0.94`; σ²_t = λ·σ²_{t-1} + (1−λ)·r²_t. GARCH(1,1) remains a future upgrade for full regime adaptation.
+~~Current volatility model uses a fixed historical vol.~~ **EWMA implemented**: `strategy.use_ewma_vol: true`, `ewma_lambda: 0.94`; σ²*t = λ·σ²*{t-1} + (1−λ)·r²_t. GARCH(1,1) remains a future upgrade for full regime adaptation.
 
 ### 7. Monte Carlo Paths (Stock-Prediction-Models)
 
@@ -116,28 +116,28 @@ Reference: [Lancaster University PDF](https://www.lancaster.ac.uk/staff/afasjt/a
 
 ### Concrete improvements (prioritized)
 
-| Improvement | Taylor ref | Effort | Impact |
-|-------------|------------|--------|--------|
-| GARCH(1,1) for time-varying vol | Ch 9–10 | Medium | High – better P estimates in volatile regimes |
-| EWMA as lightweight GARCH alternative | Ch 9 | Low | Medium |
-| Implied vol from options (VIX, Deribit) | Ch 14–15 | Medium | High – market’s forward-looking vol |
-| Monte Carlo paths for non–log-normal tails | Ch 16 | Medium | Medium – better tail probabilities |
-| Intraday / realized vol (if data available) | Ch 12 | High | High |
+| Improvement                                 | Taylor ref | Effort | Impact                                        |
+| ------------------------------------------- | ---------- | ------ | --------------------------------------------- |
+| GARCH(1,1) for time-varying vol             | Ch 9–10    | Medium | High – better P estimates in volatile regimes |
+| EWMA as lightweight GARCH alternative       | Ch 9       | Low    | Medium                                        |
+| Implied vol from options (VIX, Deribit)     | Ch 14–15   | Medium | High – market’s forward-looking vol           |
+| Monte Carlo paths for non–log-normal tails  | Ch 16      | Medium | Medium – better tail probabilities            |
+| Intraday / realized vol (if data available) | Ch 12      | High   | High                                          |
 
 ---
 
-## Strategy insights from Taylor (2005): *Asset Price Dynamics, Volatility, and Prediction*
+## Strategy insights from Taylor (2005): _Asset Price Dynamics, Volatility, and Prediction_
 
 Based on [Taylor (2005)](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents.pdf) (Princeton University Press):
 
-| Insight | Implication for our bot |
-|---------|-------------------------|
-| **Direction prediction is hard** | "Very difficult to obtain an interesting and satisfactory answer by considering historical prices." Our empirical P and log-normal P are directional—use with caution; favor high-confidence cases (intraday_other_min_p_win; intraday_other_min_p_win_with_vol when volatility model is used). |
-| **Volatility prediction works better** | Volatility can be "measured and predicted, with some success" using historical prices or option prices. Our `_volatility_probability` is a start; GARCH/implied vol would improve it. |
-| **Implied vol often beats historical** | Ch 15: "Forecasts derived from option-implied volatilities and intraday asset prices... often provide superior predictions." VIX (S&P), Deribit (crypto) are candidates. |
-| **Full density, not just mean** | Ch 16: Option prices encode risk-neutral densities; transform to real-world with risk aversion. For binary contracts, P(YES) = integral above strike—richer than single log-normal P. |
-| **Stylized facts** | Returns: not normal, ~zero autocorr, but |returns| autocorrelated. Our log-normal assumes normal returns; consider fat tails (e.g. Student-t) for extreme strikes. |
-| **High-frequency data** | Ch 12: Intraday returns improve volatility estimates. If we get 5-min crypto/S&P data, use realized vol. |
+| Insight                                | Implication for our bot                                                                                                                                                                                                                                                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| **Direction prediction is hard**       | "Very difficult to obtain an interesting and satisfactory answer by considering historical prices." Our empirical P and log-normal P are directional—use with caution; favor high-confidence cases (intraday_other_min_p_win; intraday_other_min_p_win_with_vol when volatility model is used). |
+| **Volatility prediction works better** | Volatility can be "measured and predicted, with some success" using historical prices or option prices. Our `_volatility_probability` is a start; GARCH/implied vol would improve it.                                                                                                           |
+| **Implied vol often beats historical** | Ch 15: "Forecasts derived from option-implied volatilities and intraday asset prices... often provide superior predictions." VIX (S&P), Deribit (crypto) are candidates.                                                                                                                        |
+| **Full density, not just mean**        | Ch 16: Option prices encode risk-neutral densities; transform to real-world with risk aversion. For binary contracts, P(YES) = integral above strike—richer than single log-normal P.                                                                                                           |
+| **Stylized facts**                     | Returns: not normal, ~zero autocorr, but                                                                                                                                                                                                                                                        | returns | autocorrelated. Our log-normal assumes normal returns; consider fat tails (e.g. Student-t) for extreme strikes. |
+| **High-frequency data**                | Ch 12: Intraday returns improve volatility estimates. If we get 5-min crypto/S&P data, use realized vol.                                                                                                                                                                                        |
 
 **Concrete next steps** (in priority order):
 
@@ -159,7 +159,7 @@ Based on [Taylor (2005)](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents
 
 ## Strategy Improvements from Taylor (2005): Asset Price Dynamics, Volatility, and Prediction
 
-Reference: [Lancaster University PDF](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents.pdf) — Stephen J. Taylor, *Asset Price Dynamics, Volatility, and Prediction*, Princeton University Press (2005).
+Reference: [Lancaster University PDF](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents.pdf) — Stephen J. Taylor, _Asset Price Dynamics, Volatility, and Prediction_, Princeton University Press (2005).
 
 ### Key insights
 
@@ -171,15 +171,15 @@ Reference: [Lancaster University PDF](https://www.lancaster.ac.uk/staff/afasjt/a
 
 ### Concrete improvements (prioritized)
 
-| Improvement | Taylor reference | Effort | Notes |
-|-------------|------------------|--------|-------|
-| **GARCH(1,1) / EWMA volatility** | Ch 9–10 | Medium | Replace static historical σ with time-varying vol; better regime awareness |
-| **Implied volatility (options)** | Ch 14–15 | High | VIX for S&P; Deribit/others for crypto; "often provide superior predictions" |
-| **Intraday / realized volatility** | Ch 12, 15 | Medium | High-frequency data improves vol forecasts; yfinance has intraday |
-| **ARCH forecasts + implied vol** | Ch 15.6 | Medium | Blend historical GARCH with option-implied vol for hybrid forecast |
-| **Monte Carlo paths** | Ch 16 | Medium | Simulate N paths for non–log-normal tail behavior |
-| **Heavy tails / non-normal** | Ch 4, 9.6 | Medium | Returns are not normal; consider Student-t or skewed distributions |
-| **Density prediction** | Ch 16 | Research | Risk-neutral from options → real-world via risk aversion |
+| Improvement                        | Taylor reference | Effort   | Notes                                                                        |
+| ---------------------------------- | ---------------- | -------- | ---------------------------------------------------------------------------- |
+| **GARCH(1,1) / EWMA volatility**   | Ch 9–10          | Medium   | Replace static historical σ with time-varying vol; better regime awareness   |
+| **Implied volatility (options)**   | Ch 14–15         | High     | VIX for S&P; Deribit/others for crypto; "often provide superior predictions" |
+| **Intraday / realized volatility** | Ch 12, 15        | Medium   | High-frequency data improves vol forecasts; yfinance has intraday            |
+| **ARCH forecasts + implied vol**   | Ch 15.6          | Medium   | Blend historical GARCH with option-implied vol for hybrid forecast           |
+| **Monte Carlo paths**              | Ch 16            | Medium   | Simulate N paths for non–log-normal tail behavior                            |
+| **Heavy tails / non-normal**       | Ch 4, 9.6        | Medium   | Returns are not normal; consider Student-t or skewed distributions           |
+| **Density prediction**             | Ch 16            | Research | Risk-neutral from options → real-world via risk aversion                     |
 
 ### Stylized facts we should respect (Ch 4)
 
@@ -194,7 +194,7 @@ Implement **GARCH(1,1)** or **EWMA** for time-varying volatility in `_volatility
 
 ---
 
-## Insights from Taylor, *Asset Price Dynamics, Volatility, and Prediction* (2005)
+## Insights from Taylor, _Asset Price Dynamics, Volatility, and Prediction_ (2005)
 
 Reference: [Lancaster PDF](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents.pdf) · Taylor, S. (2005). Princeton University Press.
 
@@ -202,15 +202,15 @@ Reference: [Lancaster PDF](https://www.lancaster.ac.uk/staff/afasjt/apdvp_conten
 
 > "Which way will the price go, up or down? However hard we try... it is very difficult to obtain an interesting and satisfactory answer by considering historical prices." (Ch 1)
 
-Our empirical P (above/below threshold) is a directional guess. Taylor says volatility *forecasting* works better than directional forecasting. Recommended upgrades:
+Our empirical P (above/below threshold) is a directional guess. Taylor says volatility _forecasting_ works better than directional forecasting. Recommended upgrades:
 
-| Taylor insight | Our current state | Action |
-|----------------|-------------------|--------|
-| **Volatility is time-varying** | Fixed historical σ in log-normal model | Add GARCH(1,1) or EWMA (Ch 9) so vol adapts to recent regime |
-| **Implied vol often beats historical** | Historical only | Use VIX (S&P), Deribit/CBOE (crypto) implied vol when available (Ch 15) |
-| **High-frequency data improves vol forecasts** | Daily closes only | Use intraday / realized vol if yfinance supports it (Ch 12) |
-| **Risk-neutral densities from options** | N/A | If we had option chain data, infer P(price>K) directly (Ch 16) |
-| **Stylized facts** (returns not normal, autocorr ~0, absolute returns autocorrelated) | Log-normal assumes normality | Consider fat tails, Monte Carlo paths for non-log-normal (Ch 4, 7.12) |
+| Taylor insight                                                                        | Our current state                      | Action                                                                  |
+| ------------------------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------- |
+| **Volatility is time-varying**                                                        | Fixed historical σ in log-normal model | Add GARCH(1,1) or EWMA (Ch 9) so vol adapts to recent regime            |
+| **Implied vol often beats historical**                                                | Historical only                        | Use VIX (S&P), Deribit/CBOE (crypto) implied vol when available (Ch 15) |
+| **High-frequency data improves vol forecasts**                                        | Daily closes only                      | Use intraday / realized vol if yfinance supports it (Ch 12)             |
+| **Risk-neutral densities from options**                                               | N/A                                    | If we had option chain data, infer P(price>K) directly (Ch 16)          |
+| **Stylized facts** (returns not normal, autocorr ~0, absolute returns autocorrelated) | Log-normal assumes normality           | Consider fat tails, Monte Carlo paths for non-log-normal (Ch 4, 7.12)   |
 
 ### Suggested implementation order
 
@@ -235,14 +235,14 @@ Based on [Stephen Taylor's book](https://www.lancaster.ac.uk/staff/afasjt/apdvp_
 
 ### Actionable improvements (prioritized)
 
-| Improvement | Source | Effort | Impact |
-|-------------|--------|--------|--------|
-| **GARCH(1,1) / EWMA** for time-varying vol | Ch 9 | Medium | High — adapts to recent regime (e.g. post-news) |
-| **Implied volatility** (VIX for S&P, Deribit/options for crypto) | Ch 15 | Medium | High — market’s forward-looking vol |
-| **Intraday / realized vol** (if data available) | Ch 12, 15 | High | Medium — better vol estimates |
-| **Blend empirical + vol** (don’t over-weight empirical) | Ch 1, 7 | Low | Medium — already doing `max(emp, vol)`; consider weighted blend |
-| **Monte Carlo** for fat tails, non-normality | Ch 16 | Medium | Medium — better tail probabilities |
-| **Risk-neutral → real-world** transformation if using options | Ch 16 | High | Research |
+| Improvement                                                      | Source    | Effort | Impact                                                          |
+| ---------------------------------------------------------------- | --------- | ------ | --------------------------------------------------------------- |
+| **GARCH(1,1) / EWMA** for time-varying vol                       | Ch 9      | Medium | High — adapts to recent regime (e.g. post-news)                 |
+| **Implied volatility** (VIX for S&P, Deribit/options for crypto) | Ch 15     | Medium | High — market’s forward-looking vol                             |
+| **Intraday / realized vol** (if data available)                  | Ch 12, 15 | High   | Medium — better vol estimates                                   |
+| **Blend empirical + vol** (don’t over-weight empirical)          | Ch 1, 7   | Low    | Medium — already doing `max(emp, vol)`; consider weighted blend |
+| **Monte Carlo** for fat tails, non-normality                     | Ch 16     | Medium | Medium — better tail probabilities                              |
+| **Risk-neutral → real-world** transformation if using options    | Ch 16     | High   | Research                                                        |
 
 See items 6, 7, 8 in Medium Priority above for existing roadmap entries; this section aligns them with Taylor’s framework.
 
@@ -254,7 +254,7 @@ Reference: [NRC PDF](https://www.nrc.gov/docs/ml1208/ML12088A329.pdf) / Campbell
 
 ### Event-study methodology (Ch 4)
 
-Our evaluation is analogous to an event study: the "event" is *price closes above/below threshold on resolution date*. Key insights:
+Our evaluation is analogous to an event study: the "event" is _price closes above/below threshold on resolution date_. Key insights:
 
 1. **Normal vs abnormal returns**: Abnormal return = actual return − normal (expected) return. We use empirical P (fraction of days above/below) as a simple normal-performance measure.
 
@@ -266,15 +266,15 @@ Our evaluation is analogous to an event study: the "event" is *price closes abov
 
 ### Actionable improvement
 
-| Improvement | Source | Effort | Impact |
-|-------------|--------|--------|--------|
-| **Market model for S&P 500** | Ch 4.3.2 | Low | Medium – regress ^GSPC return on market factor; use residual for "abnormal" move |
+| Improvement                  | Source   | Effort | Impact                                                                           |
+| ---------------------------- | -------- | ------ | -------------------------------------------------------------------------------- |
+| **Market model for S&P 500** | Ch 4.3.2 | Low    | Medium – regress ^GSPC return on market factor; use residual for "abnormal" move |
 
 ---
 
 ## Insights from Tsay: Analysis of Financial Time Series
 
-Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) / Tsay, R.S. (3rd ed., Wiley). *Note: PDF parsing failed; referencing standard Tsay coverage.*
+Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) / Tsay, R.S. (3rd ed., Wiley). _Note: PDF parsing failed; referencing standard Tsay coverage._
 
 Typical coverage: ARIMA, ARCH/GARCH, structural breaks, cointegration. Overlaps with Taylor (2005) and our roadmap:
 
@@ -292,7 +292,7 @@ Reference: [NRC PDF](https://www.nrc.gov/docs/ml1208/ML12088A329.pdf) — Campbe
 
 ### Key takeaways (Event-Study Analysis, Ch 4)
 
-1. **Market model vs constant-mean-return**: The market model \(R_{it} = \alpha_i + \beta_i R_{mt} + \epsilon_{it}\) reduces the variance of abnormal returns vs a constant-mean model. Higher \(R^2\) = greater variance reduction = more precise inferences. Our empirical P is analogous to a constant-mean approach; incorporating a market factor (e.g. S&P 500 for crypto/equities) could improve precision.
+1. **Market model vs constant-mean-return**: The market model \(R*{it} = \alpha_i + \beta_i R*{mt} + \epsilon\_{it}\) reduces the variance of abnormal returns vs a constant-mean model. Higher \(R^2\) = greater variance reduction = more precise inferences. Our empirical P is analogous to a constant-mean approach; incorporating a market factor (e.g. S&P 500 for crypto/equities) could improve precision.
 
 2. **Estimation window vs event window**: Keep them separate. Use pre-event data (e.g. 250 days) for estimating normal performance; the event window is the resolution date. We already do this with `days_back` (estimation) and per-contract expiry (event).
 
@@ -302,17 +302,17 @@ Reference: [NRC PDF](https://www.nrc.gov/docs/ml1208/ML12088A329.pdf) — Campbe
 
 ### Actionable improvements
 
-| Improvement | Source | Effort | Impact |
-|-------------|--------|--------|--------|
-| **Market model** for "normal" return | Ch 4.3.2 | Medium | Medium — regress asset return on S&P/benchmark; use residual for abnormal component |
-| **Cross-sectional regression** (CAR vs firm characteristics) | Ch 4.8 | Research | Low — relate edge to market cap, volatility regime, etc. |
-| **Nonparametric tests** (sign, rank) for robustness | Ch 4.7 | Low | Low — validate that our recommendations aren't driven by outliers |
+| Improvement                                                  | Source   | Effort   | Impact                                                                              |
+| ------------------------------------------------------------ | -------- | -------- | ----------------------------------------------------------------------------------- |
+| **Market model** for "normal" return                         | Ch 4.3.2 | Medium   | Medium — regress asset return on S&P/benchmark; use residual for abnormal component |
+| **Cross-sectional regression** (CAR vs firm characteristics) | Ch 4.8   | Research | Low — relate edge to market cap, volatility regime, etc.                            |
+| **Nonparametric tests** (sign, rank) for robustness          | Ch 4.7   | Low      | Low — validate that our recommendations aren't driven by outliers                   |
 
 ---
 
 ## Insights from Tsay: Analysis of Financial Time Series
 
-Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) — Tsay, R.S. *Analysis of Financial Time Series* (Wiley). *Note: PDF parsing failed; referencing standard Tsay coverage.*
+Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) — Tsay, R.S. _Analysis of Financial Time Series_ (Wiley). _Note: PDF parsing failed; referencing standard Tsay coverage._
 
 ### Standard coverage relevant to our bot
 
@@ -325,10 +325,10 @@ Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/f
 
 ## Reference Repos Summary
 
-| Repo | Key Takeaways |
-|------|----------------|
-| **freqtrade** | Dry-run, backtest, hyperopt, SQLite, WebUI, Telegram, strategy interface |
-| **ccxt** | Unified API, normalized data; we use custom Kalshi/Gemini clients (different product) |
-| **hummingbot** | Modular connectors (CEX/DEX), Gateway middleware |
-| **gekko** | TA + backtesting; archived but concepts still valid |
-| **Stock-Prediction-Models** | LSTM/GRU, RL agents, Monte Carlo, sentiment, portfolio optimization |
+| Repo                        | Key Takeaways                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------------- |
+| **freqtrade**               | Dry-run, backtest, hyperopt, SQLite, WebUI, Telegram, strategy interface              |
+| **ccxt**                    | Unified API, normalized data; we use custom Kalshi/Gemini clients (different product) |
+| **hummingbot**              | Modular connectors (CEX/DEX), Gateway middleware                                      |
+| **gekko**                   | TA + backtesting; archived but concepts still valid                                   |
+| **Stock-Prediction-Models** | LSTM/GRU, RL agents, Monte Carlo, sentiment, portfolio optimization                   |
