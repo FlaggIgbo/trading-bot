@@ -79,7 +79,7 @@ try:
 except ImportError:
     get_calibration_stats = get_last_snapshot_for_ticker = get_unresolved_predictions = None
     get_price_after_buy_from_snapshots = record_market_snapshot = record_prediction = record_prediction_outcome = record_resolved = None
-from yfinance_client import get_aggs as yf_get_aggs
+from yfinance_client import get_aggs as yf_get_aggs, get_intraday_aggs_at_hour as yf_get_intraday_aggs
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -129,6 +129,7 @@ class _StrategyParams:
     enable_sell_and_rebuy: bool
     p_lose_blend_market_max_weight: float
     p_lose_blend_market_half_life_days: float
+    use_intraday_empirical: bool
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -170,6 +171,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_sell_and_rebuy=bool(strategy.get("enable_sell_and_rebuy", False)),
         p_lose_blend_market_max_weight=float(strategy.get("p_lose_blend_market_max_weight", 0.5)),
         p_lose_blend_market_half_life_days=float(strategy.get("p_lose_blend_market_half_life_days", 0.5)),
+        use_intraday_empirical=bool(strategy.get("use_intraday_empirical", True)),
     )
 
 
@@ -481,6 +483,24 @@ def _empirical_probability(closes: list[float], threshold: float, direction: str
     if direction == "above":
         return sum(1 for c in closes if c > threshold) / len(closes)
     return sum(1 for c in closes if c < threshold) / len(closes)
+
+
+def _get_closes_for_empirical(
+    yf_ticker: str,
+    days_back: int,
+    closes_daily: list[float],
+    market_or_title: dict | str,
+    sp: "_StrategyParams",
+    cfg: dict,
+) -> list[float]:
+    """For intraday + use_intraday_empirical: return prices at resolution hour; else daily closes."""
+    if _is_intraday_market(market_or_title, yf_ticker) and sp.use_intraday_empirical:
+        hour = _get_resolution_hour_from_title(_get_title(market_or_title))
+        if hour is not None:
+            intraday = yf_get_intraday_aggs(yf_ticker, days_back, hour, cfg)
+            if intraday:
+                return intraday
+    return closes_daily
 
 
 def _ewma_variance(returns: list[float], lam: float = 0.94) -> float:
@@ -1628,7 +1648,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
                 continue
 
-            emp = _empirical_probability(closes, threshold, direction)
+            closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg)
+            emp = _empirical_probability(closes_for_emp, threshold, direction)
             hist_p = emp
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             vol_p = (
@@ -1636,9 +1657,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if use_vol else None
             )
             if vol_p is not None and use_vol:
-                # Intraday: empirical is wrong for short-horizon; use vol model.
-                if _is_intraday_market(m, yf_ticker):
+                # Intraday: use vol only when use_intraday_empirical is False; else blend emp (from intraday prices) + vol
+                if _is_intraday_market(m, yf_ticker) and not sp.use_intraday_empirical:
                     hist_p = vol_p
+                elif _is_intraday_market(m, yf_ticker) and sp.use_intraday_empirical:
+                    hist_p = (sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None else max(emp, vol_p)
                 elif sp.vol_blend_weight is not None:
                     hist_p = sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p
                 else:
@@ -1790,14 +1813,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if arb_used_g:
                     print()
                     continue
-                emp = _empirical_probability(closes, threshold_g, direction_g)
+                closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
+                emp = _empirical_probability(closes_for_emp_g, threshold_g, direction_g)
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
                 vol_p_gem = (
                     _volatility_probability(closes, threshold_g, direction_g, dte_g, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
                     if use_vol else None
                 )
                 if vol_p_gem is not None and use_vol:
-                    hist_p_gem = vol_p_gem if _is_intraday_market(evt, yf_ticker) else (
+                    hist_p_gem = vol_p_gem if (_is_intraday_market(evt, yf_ticker) and not sp.use_intraday_empirical) else (
                         (sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p_gem) if sp.vol_blend_weight is not None
                         else max(emp, vol_p_gem)
                     )
@@ -1976,22 +2000,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if pos_yf:
                             closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
                             if closes:
-                                threshold, direction = _extract_strike(m)
-                                if threshold is not None and direction is not None:
-                                    yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
-                                    no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
-                                    emp_pos = _empirical_probability(closes, threshold, direction)
-                                    hist_p = emp_pos
-                                    dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
-                                    vol_p = (
-                                        _volatility_probability(closes, threshold, direction, dte_pos, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
-                                        if use_vol else None
-                                    )
-                                    if vol_p is not None and use_vol:
-                                        hist_p = vol_p if _is_intraday_market(m, pos_yf) else (
-                                            (sp.vol_blend_weight * emp_pos + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
-                                            else max(emp_pos, vol_p)
+                                    threshold, direction = _extract_strike(m)
+                                    if threshold is not None and direction is not None:
+                                        yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
+                                        no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
+                                        closes_for_emp_pos = _get_closes_for_empirical(pos_yf, args.days, closes, m, sp, cfg)
+                                        emp_pos = _empirical_probability(closes_for_emp_pos, threshold, direction)
+                                        hist_p = emp_pos
+                                        dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
+                                        vol_p = (
+                                            _volatility_probability(closes, threshold, direction, dte_pos, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                                            if use_vol else None
                                         )
+                                        if vol_p is not None and use_vol:
+                                            hist_p = vol_p if (_is_intraday_market(m, pos_yf) and not sp.use_intraday_empirical) else (
+                                                (sp.vol_blend_weight * emp_pos + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
+                                                else max(emp_pos, vol_p)
+                                            )
                                     rec = _recommend(hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate)
                                     current_price_pos = closes[-1]
                                     sell_price = yes_bid if side == "yes" else no_bid
@@ -2063,7 +2088,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if threshold is None or direction is None:
                     continue
                 yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
-                emp_cached = _empirical_probability(closes, threshold, direction)
+                closes_for_emp_cached = _get_closes_for_empirical(_yf, args.days, closes, m, sp, cfg)
+                emp_cached = _empirical_probability(closes_for_emp_cached, threshold, direction)
                 hist_p = emp_cached
                 dte_cached = _get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
                 vol_p = (
@@ -2071,7 +2097,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if use_vol else None
                 )
                 if vol_p is not None and use_vol:
-                    hist_p = vol_p if _is_intraday_market(m, _yf) else (
+                    hist_p = vol_p if (_is_intraday_market(m, _yf) and not sp.use_intraday_empirical) else (
                         (sp.vol_blend_weight * emp_cached + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
                         else max(emp_cached, vol_p)
                     )
@@ -2210,7 +2236,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             continue
                         impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
                         no_price_g = 1.0 - impl if 0 < impl < 1 else impl
-                        emp_g = _empirical_probability(closes, threshold_g, direction_g)
+                        closes_for_emp_g = _get_closes_for_empirical(pos_yf, args.days, closes, evt, sp, cfg)
+                        emp_g = _empirical_probability(closes_for_emp_g, threshold_g, direction_g)
                         dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
                         vol_p_g = (
                             _volatility_probability(closes, threshold_g, direction_g, dte_g, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
@@ -2218,7 +2245,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         )
                         hist_p_g = emp_g
                         if vol_p_g is not None and use_vol:
-                            hist_p_g = vol_p_g if _is_intraday_market(evt, pos_yf) else (
+                            hist_p_g = vol_p_g if (_is_intraday_market(evt, pos_yf) and not sp.use_intraday_empirical) else (
                                 (sp.vol_blend_weight * emp_g + (1 - sp.vol_blend_weight) * vol_p_g)
                                 if sp.vol_blend_weight is not None else max(emp_g, vol_p_g)
                             )

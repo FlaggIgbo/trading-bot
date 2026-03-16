@@ -39,6 +39,7 @@ strategy:
   limit_dip_pct_high_confidence: 0.15 # When P(win) >= 90%, use larger dip (15%) — prioritize aggressive limits on high-certainty contracts
   limit_dip_pct_price_decline: 0.10 # When model suggests contract price might decrease (vol model on, or dte >= 2), use this dip (10%) to prioritize limit orders
   vol_blend_weight: 0.5 # Blend empirical + vol: w*emp + (1-w)*vol when both available. 0.5 = equal; 0 = pure emp; 1 = pure vol. (with --use-volatility)
+  use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
   ewma_lambda: 0.94 # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
   intraday_other_min_p_win: 0.90 # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)

@@ -64,6 +64,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             updated_at REAL NOT NULL,
             PRIMARY KEY (ticker, days_back)
         );
+        CREATE TABLE IF NOT EXISTS yf_intraday_cache (
+            ticker TEXT NOT NULL,
+            days_back INTEGER NOT NULL,
+            resolution_hour_et INTEGER NOT NULL,
+            closes_json TEXT NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (ticker, days_back, resolution_hour_et)
+        );
         CREATE TABLE IF NOT EXISTS market_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             platform TEXT NOT NULL,
@@ -199,6 +207,63 @@ def set_yf_closes(ticker: str, days_back: int, closes: list[float], config: dict
         conn.execute(
             "INSERT OR REPLACE INTO yf_cache (ticker, days_back, closes_json, updated_at) VALUES (?,?,?,?)",
             (ticker, days_back, json.dumps([round(c, 4) for c in closes]), time.time()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def get_yf_intraday_at_hour(
+    ticker: str,
+    days_back: int,
+    resolution_hour_et: int,
+    config: dict | None = None,
+) -> list[float] | None:
+    """
+    Return cached yfinance intraday closes at resolution_hour_et if fresh, else None.
+    TTL: 1 hour. Caller should fetch via get_intraday_aggs_at_hour and call set_yf_intraday_at_hour on miss.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return None
+    try:
+        row = conn.execute(
+            """SELECT closes_json, updated_at FROM yf_intraday_cache
+               WHERE ticker=? AND days_back=? AND resolution_hour_et=?""",
+            (ticker, days_back, resolution_hour_et),
+        ).fetchone()
+        if not row:
+            return None
+        updated = row["updated_at"]
+        if time.time() - updated > _CACHE_TTL_SECONDS:
+            return None
+        data = json.loads(row["closes_json"])
+        return [float(x) for x in data]
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def set_yf_intraday_at_hour(
+    ticker: str,
+    days_back: int,
+    resolution_hour_et: int,
+    closes: list[float],
+    config: dict | None = None,
+) -> None:
+    """Store yfinance intraday closes at resolution_hour_et in cache."""
+    conn = _get_conn(config)
+    if not conn:
+        return
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO yf_intraday_cache
+               (ticker, days_back, resolution_hour_et, closes_json, updated_at)
+               VALUES (?,?,?,?,?)""",
+            (ticker, days_back, resolution_hour_et, json.dumps([round(c, 4) for c in closes]), time.time()),
         )
         conn.commit()
     except Exception:

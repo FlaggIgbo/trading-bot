@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import yfinance as yf
+
+ET = ZoneInfo("America/New_York")
 
 _DEBUG = os.getenv("YFINANCE_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -193,6 +196,100 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
             set_yf_closes(ticker, days_back, result, cfg)
         except ImportError:
             pass
+    return result
+
+
+UTC = ZoneInfo("UTC")
+
+
+def get_intraday_aggs_at_hour(
+    ticker: str,
+    days_back: int,
+    resolution_hour_et: int,
+    config: dict | None = None,
+) -> list[float]:
+    """
+    Get historical prices at a specific hour (ET) for each day. For intraday empirical P.
+    Uses yfinance 1h data. Falls back to daily closes if intraday fails.
+    resolution_hour_et: 0-23 (e.g. 17 = 5pm ET).
+    Returns list of prices (oldest first), one per day. Fewer days than days_back if 1h data limited.
+    """
+    cfg = config
+    if cfg is None:
+        try:
+            from config import get_config
+            cfg = get_config()
+        except Exception:
+            cfg = {}
+
+    # Check storage cache (keyed by ticker, days_back, resolution_hour)
+    try:
+        from storage import get_yf_intraday_at_hour
+        cached = get_yf_intraday_at_hour(ticker, days_back, resolution_hour_et, cfg)
+        if cached:
+            return cached
+    except ImportError:
+        pass
+
+    # yfinance 1h: period up to ~60d for most tickers (Yahoo limits intraday range)
+    period_days = min(60, max(7, days_back))
+    result: list[float] = []
+    tickers_to_try = [ticker] + _TICKER_FALLBACKS.get(ticker, [])
+
+    for t in tickers_to_try:
+        try:
+            end = datetime.now(UTC)
+            start = end - timedelta(days=period_days)
+            hist = yf.download(t, start=start, end=end, interval="1h", progress=False, auto_adjust=True)
+            if hist is None or hist.empty or "Close" not in hist.columns:
+                continue
+            closes_col = hist["Close"]
+            if hasattr(closes_col, "ndim") and closes_col.ndim > 1:
+                closes_col = closes_col.iloc[:, 0]
+            closes_col = closes_col.dropna()
+            if len(closes_col) < 24:
+                continue
+
+            # For each calendar day, find bar at resolution_hour_et (ET)
+            by_date: dict[str, float] = {}
+            for ts, row in hist.iterrows():
+                if "Close" not in row.index:
+                    continue
+                try:
+                    if hasattr(ts, "tz_localize") and ts.tzinfo is None:
+                        ts_utc = ts.tz_localize(UTC)
+                    elif hasattr(ts, "tz_convert"):
+                        ts_utc = ts.tz_convert(UTC) if ts.tzinfo else ts.tz_localize(UTC)
+                    else:
+                        ts_utc = ts
+                    ts_et = ts_utc.astimezone(ET)
+                    if ts_et.hour == resolution_hour_et:
+                        date_key = ts_et.strftime("%Y-%m-%d")
+                        price = float(row["Close"])
+                        if t == "SPY" and ticker in ("^GSPC", "GSPC"):
+                            price *= 10.0
+                        by_date[date_key] = price
+                except Exception:
+                    continue
+
+            if by_date:
+                dates_sorted = sorted(by_date.keys())
+                result = [by_date[d] for d in dates_sorted]
+                break
+        except Exception as e:
+            if _DEBUG:
+                print(f"  [yfinance_client] intraday failed for {t}: {e}")
+            continue
+
+    if not result:
+        # Fallback to daily closes (CoinGecko doesn't have intraday)
+        return get_aggs(ticker, days_back, cfg)
+
+    try:
+        from storage import set_yf_intraday_at_hour
+        set_yf_intraday_at_hour(ticker, days_back, resolution_hour_et, result, cfg)
+    except ImportError:
+        pass
     return result
 
 

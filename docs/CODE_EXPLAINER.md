@@ -10,8 +10,9 @@
 2. [Step-by-Step Flow (Main Script)](#step-by-step-flow-main-script)
 3. [Every File in the Repository](#every-file-in-the-repository)
 4. [Data Flow Diagram](#data-flow-diagram)
-5. [Key Concepts (Layman's Terms)](#key-concepts-laymans-terms)
-6. [Quick Reference](#quick-reference)
+5. [Local Storage Schema](#local-storage-schema)
+6. [Key Concepts (Layman's Terms)](#key-concepts-laymans-terms)
+7. [Quick Reference](#quick-reference)
 
 ---
 
@@ -156,14 +157,14 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | ------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`kalshi_client.py`**   | Kalshi API with RSA-PSS auth       | `KalshiClient`: `get_balance()`, `get_markets()`, `get_positions()`, `get_market()`, `get_historical_market()`, `get_orderbook()`, `create_order_safe()`, `cancel_order_safe()`                                                                        |
 | **`gemini_client.py`**   | Gemini Prediction Markets (crypto) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`; `hourly` category skipped if API returns 400); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. |
-| **`yfinance_client.py`** | Historical prices (no API key)     | `get_aggs()` L137 (daily closes), `get_aggs_as_of()` (point-in-time for backtest), `get_snapshot()` L52 (current price); CoinGecko fallback for crypto                                                                                                                                   |
+| **`yfinance_client.py`** | Historical prices (no API key)     | `get_aggs()` L137 (daily closes), `get_intraday_aggs_at_hour()` (1h prices at 5pm/4pm ET for intraday empirical P), `get_aggs_as_of()` (point-in-time for backtest), `get_snapshot()` L52 (current price); CoinGecko fallback for crypto |
 
 ### Support Modules
 
 | File                     | Purpose                | Key functions                                                                                                                                |
 | ------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`constants.py`**       | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`                           |
-| **`storage.py`**         | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `get_last_snapshot_for_ticker()` (platform filter), `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58 |
+| **`storage.py`**         | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58 |
 | **`ollama_analysis.py`** | Local LLM analysis     | `capture_and_analyze()`, `run_analysis()`, `analyze_single_trade()` L117, `_get_analysis()` L78                                              |
 
 ### Scheduling & Dev Tools
@@ -204,6 +205,103 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
                           └─────────────────────▶ predictions     │
                                                  └─────────────────┘
 ```
+
+---
+
+## Local Storage Schema
+
+All data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable via `storage.data_dir` or `TRADING_BOT_DATA_DIR`). Not committed to git.
+
+### Schema Overview
+
+| Table                | Purpose                                           | TTL      | Primary Key                                   |
+| -------------------- | ------------------------------------------------- | -------- | --------------------------------------------- |
+| **yf_cache**         | Daily closes from yfinance (fewer API calls)      | 1 hour   | `(ticker, days_back)`                          |
+| **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
+| **market_snapshots**  | Per-evaluation snapshot (yes/no bids, hist_p, rec)| None     | `id` (auto-increment)                          |
+| **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
+| **predictions**       | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
+
+### Table Structures
+
+```
+yf_cache
+├── ticker           TEXT      (e.g. BTC-USD, ^GSPC)
+├── days_back        INTEGER   (e.g. 365)
+├── closes_json      TEXT      (JSON array of close prices)
+├── updated_at       REAL      (Unix timestamp)
+└── PRIMARY KEY (ticker, days_back)
+
+yf_intraday_cache
+├── ticker           TEXT
+├── days_back        INTEGER
+├── resolution_hour_et INTEGER (0–23, e.g. 17 = 5pm ET)
+├── closes_json      TEXT      (JSON array, one price per day at that hour)
+├── updated_at       REAL
+└── PRIMARY KEY (ticker, days_back, resolution_hour_et)
+
+market_snapshots
+├── id               INTEGER   (auto-increment)
+├── platform         TEXT      (kalshi | gemini)
+├── ticker           TEXT
+├── title            TEXT
+├── yf_ticker        TEXT
+├── ts               REAL      (Unix timestamp)
+├── yes_bid          REAL
+├── no_bid           REAL
+├── hist_p           REAL
+├── vol_p            REAL
+├── rec              TEXT      (BUY YES | BUY NO | SKIP)
+├── threshold        REAL
+├── direction        TEXT      (above | below)
+└── edge             REAL
+
+resolved_outcomes
+├── ticker           TEXT      (PRIMARY KEY)
+├── platform         TEXT
+├── title            TEXT
+├── resolution_ts    REAL
+├── yes_settled      INTEGER   (1=YES won, 0=NO won)
+├── our_last_rec     TEXT
+├── our_last_hist_p  REAL
+└── market_yes_at_last REAL
+
+predictions
+├── id               INTEGER   (auto-increment)
+├── platform         TEXT
+├── ticker           TEXT
+├── order_id         TEXT
+├── side             TEXT      (yes | no)
+├── hist_p           REAL
+├── vol_p            REAL
+├── entry_price      REAL
+├── count            INTEGER
+├── ts               REAL
+├── yf_ticker        TEXT
+├── threshold        REAL
+├── direction        TEXT
+├── rec              TEXT
+├── outcome          TEXT      (win | lose, NULL until resolved)
+├── pnl_cents        INTEGER
+├── resolved_ts      REAL
+├── min_price_after_buy REAL
+└── max_price_after_buy REAL
+```
+
+### How Data Flows
+
+| Data                    | Written by                              | Read by                                        |
+| ----------------------- | --------------------------------------- | ---------------------------------------------- |
+| **yf_cache**            | `yfinance_client.get_aggs()` via `storage.set_yf_closes()` | `yfinance_client.get_aggs()` via `storage.get_yf_closes()` |
+| **yf_intraday_cache**   | `yfinance_client.get_intraday_aggs_at_hour()` via `storage.set_yf_intraday_at_hour()` | `yfinance_client.get_intraday_aggs_at_hour()` via `storage.get_yf_intraday_at_hour()` |
+| **market_snapshots**    | `compare_historical.py` → `record_market_snapshot()` | `backtest.py`, `get_last_snapshot_for_ticker()`, calibration |
+| **resolved_outcomes**   | `_sync_kalshi_settlements()` → `record_resolved()` | Calibration, backtest                           |
+| **predictions**         | `record_prediction()` on order fill; `record_prediction_outcome()` on settlement | `get_unresolved_predictions()`, `get_calibration_stats()`, `backtest.py` |
+
+### TTL Behavior
+
+- **yf_cache** and **yf_intraday_cache**: Entries older than 1 hour (`_CACHE_TTL_SECONDS = 3600`) are treated as stale. Callers receive `None` and re-fetch from yfinance.
+- **market_snapshots**, **resolved_outcomes**, **predictions**: Append-only; no TTL. Old data retained for backtesting and calibration.
 
 ---
 

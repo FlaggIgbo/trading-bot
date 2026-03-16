@@ -116,7 +116,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini crypto events** (daily/weekly for BTC, ETH, SOL, XRP; hourly category may return 400—we gracefully skip and use crypto only), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation), **calibration loss weighting** (`calibration_loss_weight`: losers count 1.5× in calibration; learn more from mistakes), **sell and re-buy** (`enable_sell_and_rebuy`: re-buy same contract at lower price when selling a loser if model still sees edge; bypasses min 5¢), **P(lose) with market odds blend** (blend model with Kalshi/Gemini odds; market weight increases near resolution).
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, intraday cache, market snapshots, resolved-outcomes schema for backtesting and calibration; see [Local historical storage](#local-historical-storage) for schema + TTL), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini crypto events** (daily/weekly for BTC, ETH, SOL, XRP; hourly category may return 400—we gracefully skip and use crypto only), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation), **calibration loss weighting** (`calibration_loss_weight`: losers count 1.5× in calibration; learn more from mistakes), **sell and re-buy** (`enable_sell_and_rebuy`: re-buy same contract at lower price when selling a loser if model still sees edge; bypasses min 5¢), **P(lose) with market odds blend** (blend model with Kalshi/Gemini odds; market weight increases near resolution), **intraday empirical P** (`use_intraday_empirical`: use yfinance 1h data at 5pm/4pm ET for empirical P on intraday markets; falls back to daily closes if intraday fails).
 
 ## Contract evaluation workflow
 
@@ -394,9 +394,11 @@ The bot evaluates **all** crypto and S&P 500 intraday markets (e.g. "Bitcoin tod
 | **Other intraday** (e.g. 8pm ET)       | Strict threshold: only BUY when P(win) ≥ 90% (or 80% with `--use-volatility` — vol model accounts for time & uncertainty) |
 | **Non–crypto / non–S&P** with intraday | Skipped (no supported time)                                                                                               |
 
-For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empirical only) or ≥ 80% with `--use-volatility` (vol model accounts for time-to-expiry and uncertainty). Uses daily closes as a proxy (no intraday data yet).
+For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empirical only) or ≥ 80% with `--use-volatility` (vol model accounts for time-to-expiry and uncertainty).
 
-**Config:** `strategy.intraday_other_min_p_win: 0.90` (empirical only); `strategy.intraday_other_min_p_win_with_vol: 0.80` when `--use-volatility` (vol model accounts for uncertainty).
+**Intraday empirical:** For 5pm crypto and 4pm S&P 500, when `strategy.use_intraday_empirical: true` (default), the bot uses yfinance 1h data to compute empirical P from prices at the exact resolution hour—not daily closes. Falls back to daily closes if intraday fails (e.g. CoinGecko). Set `use_intraday_empirical: false` to use only the volatility model for intraday.
+
+**Config:** `strategy.intraday_other_min_p_win: 0.90` (empirical only); `strategy.intraday_other_min_p_win_with_vol: 0.80` when `--use-volatility` (vol model accounts for uncertainty); `strategy.use_intraday_empirical: true` (use yfinance 1h for 5pm/4pm empirical P).
 
 ### Systematic edges (arbitrage, cross-platform hedging)
 
@@ -454,11 +456,29 @@ absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enfo
 
 **In plain English:** The bot stores data locally to speed runs and to build history for future backtesting and calibration. All data stays on your machine and is **not committed to git**.
 
-| What we store                | Purpose                                                                                                                        |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **yfinance closes cache**    | Daily closes cached for 1 hour → fewer API calls, faster runs                                                                  |
-| **Market snapshots**         | For each evaluation: yes/no bids, our hist_p, vol_p, recommendation, threshold, direction. Builds time series for backtesting. |
-| **Resolved outcomes schema** | Ready for when we record contract settlements → calibrate our predictions (e.g. "when we said 70% YES, did we win?")           |
+Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable via `storage.data_dir` or `TRADING_BOT_DATA_DIR`).
+
+#### Storage schema overview
+
+| Table                | Purpose                                           | TTL      | Primary Key                                   |
+| -------------------- | ------------------------------------------------- | -------- | --------------------------------------------- |
+| **yf_cache**         | Daily closes from yfinance (fewer API calls)      | 1 hour   | `(ticker, days_back)`                          |
+| **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
+| **market_snapshots** | Per-evaluation snapshot (yes/no bids, hist_p, rec)| None     | `id` (auto-increment)                          |
+| **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
+| **predictions**      | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
+
+#### Table structures (columns)
+
+```
+yf_cache:           ticker, days_back, closes_json, updated_at
+yf_intraday_cache:  ticker, days_back, resolution_hour_et, closes_json, updated_at
+market_snapshots:   id, platform, ticker, title, yf_ticker, ts, yes_bid, no_bid, hist_p, vol_p, rec, threshold, direction, edge
+resolved_outcomes:  ticker, platform, title, resolution_ts, yes_settled, our_last_rec, our_last_hist_p, market_yes_at_last
+predictions:        id, platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, outcome, pnl_cents, resolved_ts, ...
+```
+
+**TTL behavior:** `yf_cache` and `yf_intraday_cache` entries older than 1 hour are treated as stale; callers re-fetch from yfinance. Other tables are append-only. Full schema details: [docs/CODE_EXPLAINER.md](docs/CODE_EXPLAINER.md#local-storage-schema).
 
 **Config** (`config.yaml` → `storage`):
 
