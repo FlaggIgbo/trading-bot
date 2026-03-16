@@ -729,6 +729,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     sell_losing_pct = float(strategy.get("sell_losing_pct", 0.55))
     limit_dip_pct = float(strategy.get("limit_dip_pct", 0))
     intraday_other_min_p_win = float(strategy.get("intraday_other_min_p_win", 0.90))
+    intraday_other_min_p_win_with_vol = float(strategy.get("intraday_other_min_p_win_with_vol", 0.80))
     min_arb_fee = float(strategy.get("min_arb_fee", 0.02))
     enable_intra_arb = strategy.get("enable_intra_arb", True)
     enable_inter_arb = strategy.get("enable_inter_arb", True)
@@ -834,8 +835,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             vol_p = _volatility_probability(closes, threshold, direction, dte) if getattr(args, "use_volatility", False) else None
             if vol_p is not None and getattr(args, "use_volatility", False):
                 hist_p = max(hist_p, vol_p)
+            # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
+            min_p_win = intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else intraday_other_min_p_win
             rec = (
-                _recommend_strict(hist_p, yes_bid, intraday_other_min_p_win)
+                _recommend_strict(hist_p, yes_bid, min_p_win)
                 if _is_other_intraday(m, yf_ticker)
                 else _recommend(hist_p, yes_bid, min_edge)
             )
@@ -922,8 +925,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, days_to_expiry)
                 vol_p_gem = _volatility_probability(closes, threshold_g, direction_g, dte_g) if use_vol else None
                 hist_p_gem = max(emp, vol_p_gem) if vol_p_gem is not None and use_vol else emp
+                # For non-standard intraday: use relaxed threshold when volatility model available
+                min_p_win_gem = intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else intraday_other_min_p_win
                 rec = (
-                    _recommend_strict(hist_p_gem, impl, intraday_other_min_p_win)
+                    _recommend_strict(hist_p_gem, impl, min_p_win_gem)
                     if _is_other_intraday(evt, yf_ticker)
                     else _recommend(hist_p_gem, impl, min_edge)
                 )

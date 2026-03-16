@@ -97,7 +97,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (with per-contract resolution time), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (with llama3.2:1b fallback).
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants.
 
 ## Contract evaluation workflow
 
@@ -348,7 +348,7 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--no-llm` | Skip Ollama analysis |
 | `--log` | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDD.log` (or `--log DIR` for custom dir) |
 
-Config: `strategy.min_edge`, `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.intraday_other_min_p_win`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, etc. in `config.yaml`.
+Config: `strategy.min_edge`, `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, etc. in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 
@@ -359,12 +359,12 @@ The bot evaluates **all** crypto and S&P 500 intraday markets (e.g. "Bitcoin tod
 | Resolution | Logic |
 |------------|-------|
 | **5pm ET crypto** / **4pm ET S&P 500** | Standard `min_edge` (e.g. 10%) — same as before |
-| **Other intraday** (e.g. 8pm ET) | Strict threshold: only BUY when P(win) ≥ `intraday_other_min_p_win` (default 90%) — "almost certain" |
+| **Other intraday** (e.g. 8pm ET) | Strict threshold: only BUY when P(win) ≥ 90% (or 80% with `--use-volatility` — vol model accounts for time & uncertainty) |
 | **Non–crypto / non–S&P** with intraday | Skipped (no supported time) |
 
-For "Bitcoin today at 8pm ET", we only recommend BUY YES when historical says ≥90% chance price ends above the strike, and BUY NO when ≥90% chance it ends below. Uses daily closes as a proxy (no intraday data yet).
+For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empirical only) or ≥ 80% with `--use-volatility` (vol model accounts for time-to-expiry and uncertainty). Uses daily closes as a proxy (no intraday data yet).
 
-**Config:** `strategy.intraday_other_min_p_win: 0.90` in `config.yaml`.
+**Config:** `strategy.intraday_other_min_p_win: 0.90` (empirical only); `strategy.intraday_other_min_p_win_with_vol: 0.80` when `--use-volatility` (vol model accounts for uncertainty).
 
 ### Systematic edges (arbitrage, cross-platform hedging)
 

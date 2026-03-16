@@ -33,6 +33,7 @@ strategy:
   sell_losing_pct: 0.55   # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
   limit_dip_pct: 0.05     # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
   intraday_other_min_p_win: 0.90   # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)
+  intraday_other_min_p_win_with_vol: 0.80   # When --use-volatility: use 80% instead (vol model already accounts for time & vol)
   # Systematic edges (QuantPedia: arbitrage, cross-platform hedging)
   min_arb_fee: 0.02   # Min edge for arb (2%): buy-all when yes_ask+no_ask < 1 - fee
   enable_intra_arb: true   # Intra-exchange: buy YES+NO when sum < 1 (same market)

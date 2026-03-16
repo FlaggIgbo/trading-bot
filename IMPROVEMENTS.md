@@ -9,7 +9,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | Feature | From | Status |
 |---------|------|--------|
 | Dry-run / preview mode | Freqtrade | ✓ `--preview` in compare_historical.py |
-| Volatility-based probability | Stock-Prediction-Models, options theory | ✓ `--use-volatility` log-normal model; per-contract time-to-expiry parsed from title (e.g. "tomorrow at 5pm ET") |
+| Volatility-based probability | Stock-Prediction-Models, options theory | ✓ `--use-volatility` log-normal model; per-contract time-to-expiry parsed from title (e.g. "tomorrow at 5pm ET"); `intraday_other_min_p_win_with_vol: 0.80` eases strict threshold (90%→80%) when vol model is used |
 | Balance-aware order execution | Freqtrade | ✓ `create_order_safe`, `max_pct_of_balance` |
 | Low-balance limit fallback | Freqtrade | ✓ `min_balance_for_limit_fallback_cents` — place 1-contract limit instead of skipping when balance is low |
 | Config-driven strategy | Freqtrade, Gekko | ✓ `config.yaml` strategy, min_edge |
@@ -19,6 +19,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | Systematic edges (arbitrage) | QuantPedia | ✓ Intra-exchange + inter-exchange (Kalshi↔Gemini) arb; `min_arb_fee`, `enable_intra_arb`, `enable_inter_arb` |
 | XRP (Ripple) market support | — | ✓ KXXRPD, XRP-USD; crypto treatment, arbitrage, intraday |
 | Ollama LLM analysis | — | ✓ Local free analysis; `scripts/debug_ollama.py`; llama3.2:1b fallback |
+| Recommendation constants | — | ✓ `constants.py`: REC_SKIP, REC_BUY_YES, REC_BUY_NO, REC_ARB_*, REC_LIKELY_LOSE, REC_RULE_VIOLATION |
 
 ---
 
@@ -118,7 +119,7 @@ Based on [Taylor (2005)](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents
 
 | Insight | Implication for our bot |
 |---------|-------------------------|
-| **Direction prediction is hard** | "Very difficult to obtain an interesting and satisfactory answer by considering historical prices." Our empirical P and log-normal P are directional—use with caution; favor high-confidence cases (intraday_other_min_p_win). |
+| **Direction prediction is hard** | "Very difficult to obtain an interesting and satisfactory answer by considering historical prices." Our empirical P and log-normal P are directional—use with caution; favor high-confidence cases (intraday_other_min_p_win; intraday_other_min_p_win_with_vol when volatility model is used). |
 | **Volatility prediction works better** | Volatility can be "measured and predicted, with some success" using historical prices or option prices. Our `_volatility_probability` is a start; GARCH/implied vol would improve it. |
 | **Implied vol often beats historical** | Ch 15: "Forecasts derived from option-implied volatilities and intraday asset prices... often provide superior predictions." VIX (S&P), Deribit (crypto) are candidates. |
 | **Full density, not just mean** | Ch 16: Option prices encode risk-neutral densities; transform to real-world with risk aversion. For binary contracts, P(YES) = integral above strike—richer than single log-normal P. |
@@ -139,7 +140,7 @@ Based on [Taylor (2005)](https://www.lancaster.ac.uk/staff/afasjt/apdvp_contents
 - **FreqAI-style ML**: Train a model on historical recommendations + outcomes to tune min_edge or blend probabilities
 - **Sentiment consensus** (Stock-Prediction-Models): Incorporate news/social sentiment if we add a data source
 - **~~Cross-platform arbitrage~~** ✓ Done: Inter-exchange arb (Kalshi↔Gemini) via `enable_inter_arb`
-- **Parse exact resolution datetime**: Use per-contract expiry for precise time-to-expiry in volatility model
+- **~~Parse exact resolution datetime~~** ✓ Done: Per-contract time-to-expiry parsed from title (e.g. "tomorrow at 5pm ET") and passed to volatility model
 
 ---
 
