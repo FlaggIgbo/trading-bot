@@ -15,7 +15,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | Config-driven strategy                  | Freqtrade, Gekko                        | ✓ `config.yaml` strategy, min_edge                                                                                                                                                                                                                       |
 | Kelly criterion position sizing         | Freqtrade, Stock-Prediction-Models      | ✓ `strategy.use_kelly`, `kelly_fraction`                                                                                                                                                                                                                 |
 | Whitelist / blacklist                   | Freqtrade                               | ✓ `strategy.whitelist`, `strategy.blacklist`                                                                                                                                                                                                             |
-| File logging for run history            | Freqtrade                               | ✓ `--log` or `--log DIR`                                                                                                                                                                                                                                 |
+| File logging for run history            | Freqtrade                               | ✓ `--log` or `--log DIR`; eval_YYYYMMDDHH.log per hour, append within hour                                                                                                                                                                                |
 | Systematic edges (arbitrage)            | QuantPedia                              | ✓ Intra-exchange + inter-exchange (Kalshi↔Gemini) arb; `min_arb_fee`, `enable_intra_arb`, `enable_inter_arb`                                                                                                                                             |
 | XRP (Ripple) market support             | —                                       | ✓ KXXRPD, XRP-USD; crypto treatment, arbitrage, intraday                                                                                                                                                                                                 |
 | Ollama LLM analysis                     | —                                       | ✓ Local free analysis; `scripts/debug_ollama.py`; llama3.2:1b fallback                                                                                                                                                                                   |
@@ -36,6 +36,10 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Contradictory-position avoidance**    | —                                       | ✓ `_filter_contradictory_buys()` skips BUYs that would conflict with kept positions OR other pending BUYs on same underlying + resolution (Kalshi + Gemini). E.g. NO on SOL<$83 and YES on SOL≥$92 are mutually exclusive; keeps higher-edge when both sides compete. Arb (YES+NO same contract) allowed.                                                    |
 | **Gemini crypto events**               | —                                       | ✓ `get_crypto_events()` fetches `crypto` category (daily/weekly); `hourly` category may return 400—we catch and skip, still get daily markets (e.g. BTC2603162100).                                                                                                                                   |
 | **Gemini position sell (losers)**      | Kalshi sell logic                       | ✓ Evaluates Gemini positions (like Kalshi) and sells contracts we judge as losers: REC_LIKELY_LOSE, rec flip (BUY YES→now BUY NO), or REC_RULE_VIOLATION. Uses `get_positions()`, `gemini_symbol_to_market` map, same hist_p/vol_p logic; SELL via `place_order_safe`. |
+| **Calibration-based prediction tuning** | FreqAI-style ML                         | ✓ `_apply_bucket_penalty()` dampens hist_p when hist_p bucket underperforms (overconfidence correction); `_get_effective_min_edge()` raises min_edge when overall win rate < 50%; `_should_downgrade_buy_yes_above()` requires extra edge for BUY YES on "above X" when above+YES underperforms. Config: `use_bucket_penalty`, `min_bucket_samples`, `calibration_extra_edge_above_yes`, `calibration_extra_edge_overall`, `min_calibration_samples_overall`. |
+| **Stricter far OTM threshold**         | —                                       | ✓ `min_vol_confidence_far_otm` (default 0.97) — when strike far above current, require vol model ≥97% (not 95%) before BUY YES; targets losing "above X" YES trades. |
+| **Price-after-buy calibration**       | —                                       | ✓ `min_price_after_buy`, `max_price_after_buy` stored from market_snapshots after purchase; calibration stats show % dipped/rose after buy (improve limit_dip_pct). |
+| **Hours until resolution in output** | —                                       | ✓ Contract title shows "(in X.X hours)" until resolution; decimal for sub-hour (e.g. 0.3 hours). |
 
 ---
 
@@ -70,9 +74,18 @@ Config: `strategy.whitelist`, `strategy.blacklist` in `config.yaml`.
 ### 4. ~~File Logging for Run History~~ ✓ Done
 
 ~~Log each run (timestamp, recommendations, edge, market ticks) to `logs/eval_YYYYMMDD.log`~~
-Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDD.log`, or `--log /path/to/dir` for a custom directory.
+Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket; runs within same hour append), or `--log /path/to/dir` for a custom directory.
 
-### 5. Modular Strategy Interface (Freqtrade)
+### 5. Learn from position & limit order evaluations (FreqAI-style)
+
+**Implemented (simple)**: Orphan Kalshi positions (tickers not in main market loop) and all Gemini position evals now persist via `record_market_snapshot`. Calibration can use these snapshots once resolved.
+
+**TODO (later)**:
+- **Limit order evaluations**: Persist when we cancel/keep resting limit orders—e.g. `order_reviews` table with (ticker, order_id, action: cancel|keep, reason: no_longer_rec|want_better_price|same_better, hist_p, entry_price, ts). Enables learning: "we cancelled at 50¢, market dipped to 45¢ → we could have filled lower."
+- **Kept position outcomes**: When we decide KEEP (don't sell), track that position and when it eventually resolves (win/lose). Currently we only record outcomes for placed buys (`record_prediction` → `record_prediction_outcome`). Add `position_evaluations` or link kept positions to predictions so we can measure: "we kept YES at hist_p=0.75, it won."
+- **Cancel reason classification**: Distinguish "no longer recommended" (rec=SKIP) vs "want better limit" (rec still BUY) for finer calibration.
+
+### 6. Modular Strategy Interface (Freqtrade)
 
 Extract strategy logic into pluggable classes so we can swap empirical vs volatility vs custom logic without editing `compare_historical.py`.
 
@@ -80,23 +93,23 @@ Extract strategy logic into pluggable classes so we can swap empirical vs volati
 
 ## Medium Priority (More Effort)
 
-### 6. ~~GARCH / EWMA for Time-Varying Volatility~~ ✓ EWMA Done (Stock-Prediction-Models)
+### 7. ~~GARCH / EWMA for Time-Varying Volatility~~ ✓ EWMA Done (Stock-Prediction-Models)
 
 ~~Current volatility model uses a fixed historical vol.~~ **EWMA implemented**: `strategy.use_ewma_vol: true`, `ewma_lambda: 0.94`; σ²*t = λ·σ²*{t-1} + (1−λ)·r²_t. GARCH(1,1) remains a future upgrade for full regime adaptation.
 
-### 7. Monte Carlo Paths (Stock-Prediction-Models)
+### 8. Monte Carlo Paths (Stock-Prediction-Models)
 
 Instead of single log-normal P(S>K), run N simulated price paths and compute empirical P. Useful for non-log-normal behavior.
 
-### 8. Implied Volatility from Options (if available)
+### 9. Implied Volatility from Options (if available)
 
 If we can get options data (e.g. Deribit for BTC), use implied vol instead of historical for richer probability estimates.
 
-### 9. Telegram / WebUI Control (Freqtrade, Hummingbot)
+### 10. Telegram / WebUI Control (Freqtrade, Hummingbot)
 
 Remote control: start/stop, status, force-exit. Hummingbot’s Condor shows a working pattern.
 
-### 10. Persistence (SQLite) (Freqtrade)
+### 11. Persistence (SQLite) (Freqtrade)
 
 Store recommendations, fills, PnL in a local DB for performance reports and backtest comparison.
 

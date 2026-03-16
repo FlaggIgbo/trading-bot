@@ -13,12 +13,20 @@
         <string>--use-volatility</string>
         <string>--execute</string>
         <string>--no-llm</string>
+        <string>--verbose</string>
         <string>--log</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/ogechukwuflagg-igbo</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
     <key>WorkingDirectory</key>
     <string>/Users/ogechukwuflagg-igbo/git/trading-bot</string>
     <key>StartInterval</key>
-    <integer>900</integer>
+    <integer>600</integer>
     <key>StandardOutPath</key>
     <string>/tmp/compare_historical.out.log</string>
     <key>StandardErrorPath</key>

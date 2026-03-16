@@ -115,6 +115,53 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
         CREATE INDEX IF NOT EXISTS idx_predictions_platform ON predictions(platform);
     """)
+    _migrate_predictions_price_after_buy(conn)
+
+
+def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
+    """Add min_price_after_buy, max_price_after_buy to predictions (price movement after we bought)."""
+    for col in ["min_price_after_buy", "max_price_after_buy"]:
+        try:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+
+def get_price_after_buy_from_snapshots(
+    ticker: str,
+    buy_ts: float,
+    side: str,
+    platform: str,
+    config: dict | None = None,
+) -> tuple[float | None, float | None]:
+    """
+    From market_snapshots, get min/max contract price after we bought.
+    For YES: use yes_bid. For NO: use no_bid. Returns (min_p, max_p) or (None, None) if no snapshots.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return (None, None)
+    try:
+        rows = conn.execute(
+            """SELECT yes_bid, no_bid FROM market_snapshots
+               WHERE ticker=? AND platform=? AND ts>? ORDER BY ts""",
+            (ticker, platform, buy_ts),
+        ).fetchall()
+        if not rows:
+            return (None, None)
+        prices = [
+            (r["yes_bid"] or 0) if (side or "").lower() == "yes" else (r["no_bid"] or (1.0 - (r["yes_bid"] or 0)))
+            for r in rows
+        ]
+        prices = [p for p in prices if p > 0]
+        if not prices:
+            return (None, None)
+        return (min(prices), max(prices))
+    except Exception:
+        return (None, None)
+    finally:
+        conn.close()
 
 
 def get_yf_closes(ticker: str, days_back: int, config: dict | None = None) -> list[float] | None:
@@ -311,7 +358,7 @@ def get_unresolved_predictions(config: dict | None = None) -> list[dict]:
         return []
     try:
         rows = conn.execute(
-            "SELECT id, platform, ticker, side, hist_p, entry_price, count FROM predictions WHERE outcome IS NULL"
+            "SELECT id, platform, ticker, side, hist_p, entry_price, count, ts FROM predictions WHERE outcome IS NULL"
         ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
@@ -325,8 +372,12 @@ def record_prediction_outcome(
     yes_settled: bool,
     pnl_cents: int,
     config: dict | None = None,
+    *,
+    min_price_after_buy: float | None = None,
+    max_price_after_buy: float | None = None,
 ) -> bool:
-    """Mark a prediction as resolved. outcome: win if (side==yes and yes_settled) or (side==no and not yes_settled)."""
+    """Mark a prediction as resolved. outcome: win if (side==yes and yes_settled) or (side==no and not yes_settled).
+    Optionally store min/max contract price after we bought (from market_snapshots) for calibration."""
     conn = _get_conn(config)
     if not conn:
         return False
@@ -341,10 +392,16 @@ def record_prediction_outcome(
         side = row["side"]
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
         outcome = "win" if won else "lose"
-        conn.execute(
-            "UPDATE predictions SET outcome=?, pnl_cents=?, resolved_ts=? WHERE id=?",
-            (outcome, pnl_cents, time.time(), prediction_id),
-        )
+        if min_price_after_buy is not None and max_price_after_buy is not None:
+            conn.execute(
+                "UPDATE predictions SET outcome=?, pnl_cents=?, resolved_ts=?, min_price_after_buy=?, max_price_after_buy=? WHERE id=?",
+                (outcome, pnl_cents, time.time(), min_price_after_buy, max_price_after_buy, prediction_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE predictions SET outcome=?, pnl_cents=?, resolved_ts=? WHERE id=?",
+                (outcome, pnl_cents, time.time(), prediction_id),
+            )
         conn.commit()
         return True
     except Exception:
@@ -354,17 +411,29 @@ def record_prediction_outcome(
         conn.close()
 
 
+def _predictions_has_price_after_buy_columns(conn: sqlite3.Connection) -> bool:
+    """Check if predictions table has min/max_price_after_buy columns (migration may have failed)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()]
+    return "min_price_after_buy" in cols and "max_price_after_buy" in cols
+
+
 def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
     """
-    Return calibration stats from resolved predictions: win rate, total PnL, win rate by hist_p bucket.
-    Used to detect overconfidence (said 70%, won 50%) or losing streaks.
+    Return calibration stats from resolved predictions: win rate, total PnL, win rate by hist_p bucket,
+    and win rate by (direction, side) for BUY YES on "above X" vs BUY NO on "below X" etc.
+    Used to detect overconfidence and YES/NO bias (e.g. BUY YES on "above X" underperforming).
+    Includes price_after_buy stats when columns exist (min/max contract price after we bought).
     """
     conn = _get_conn(config)
     if not conn:
         return {"enabled": False, "resolved_count": 0}
     try:
+        has_pab_cols = _predictions_has_price_after_buy_columns(conn)
+        select_cols = "outcome, pnl_cents, hist_p, direction, side, entry_price"
+        if has_pab_cols:
+            select_cols += ", min_price_after_buy, max_price_after_buy"
         rows = conn.execute(
-            """SELECT outcome, pnl_cents, hist_p FROM predictions WHERE outcome IS NOT NULL"""
+            f"""SELECT {select_cols} FROM predictions WHERE outcome IS NOT NULL"""
         ).fetchall()
         if not rows:
             return {
@@ -375,6 +444,8 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
                 "total_pnl_cents": 0,
                 "win_rate": None,
                 "buckets": [],
+                "by_direction_side": {},
+                "price_after_buy": None,
             }
         wins = sum(1 for r in rows if r["outcome"] == "win")
         loses = sum(1 for r in rows if r["outcome"] == "lose")
@@ -383,7 +454,6 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         buckets: dict[tuple[float, float], list[str]] = {}
         for r in rows:
             h = r["hist_p"] or 0.5
-            # For NO: P(win)=1-hist_p
             bucket = (round(h * 10) / 10, round(h * 10) / 10 + 0.1)
             if bucket not in buckets:
                 buckets[bucket] = []
@@ -391,11 +461,48 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         bucket_stats = [
             {
                 "hist_p_range": f"{lo:.1f}-{hi:.1f}",
+                "lo": lo,
+                "hi": hi,
                 "count": len(outcomes),
                 "win_rate": sum(1 for o in outcomes if o == "win") / len(outcomes) if outcomes else 0,
             }
             for (lo, hi), outcomes in sorted(buckets.items())
         ]
+        # Win rate by (direction, side): above+yes, above+no, below+yes, below+no
+        by_ds: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            d = (r["direction"] or "").strip().lower() or "unknown"
+            s = (r["side"] or "").strip().lower() or "unknown"
+            key = f"{d}+{s}"
+            if key not in by_ds:
+                by_ds[key] = {"wins": 0, "loses": 0}
+            if r["outcome"] == "win":
+                by_ds[key]["wins"] += 1
+            else:
+                by_ds[key]["loses"] += 1
+        by_direction_side = {
+            k: {"count": v["wins"] + v["loses"], "win_rate": v["wins"] / (v["wins"] + v["loses"])}
+            for k, v in by_ds.items()
+        }
+        # Price-after-buy: how much lower/higher did contract go after we bought "low"
+        rows_with_price = [
+            r for r in rows
+            if r.get("entry_price") and r.get("min_price_after_buy") is not None and r.get("max_price_after_buy") is not None
+        ]
+        price_after_buy = None
+        if rows_with_price:
+            entry_prices = [r["entry_price"] for r in rows_with_price]
+            min_after = [r["min_price_after_buy"] for r in rows_with_price]
+            max_after = [r["max_price_after_buy"] for r in rows_with_price]
+            dips = [(e - m) / e for e, m in zip(entry_prices, min_after) if e > 0 and m < e]
+            rises = [(m - e) / e for e, m in zip(entry_prices, max_after) if e > 0 and m > e]
+            price_after_buy = {
+                "count": len(rows_with_price),
+                "avg_dip_pct": sum(dips) / len(dips) * 100 if dips else 0,
+                "avg_rise_pct": sum(rises) / len(rises) * 100 if rises else 0,
+                "pct_dipped": len(dips) / len(rows_with_price) * 100 if rows_with_price else 0,
+                "pct_rose": len(rises) / len(rows_with_price) * 100 if rows_with_price else 0,
+            }
         return {
             "enabled": True,
             "resolved_count": len(rows),
@@ -404,6 +511,8 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
             "total_pnl_cents": total_pnl,
             "win_rate": wins / (wins + loses) if (wins + loses) > 0 else None,
             "buckets": bucket_stats,
+            "by_direction_side": by_direction_side,
+            "price_after_buy": price_after_buy,
         }
     except Exception:
         return {"enabled": False, "resolved_count": 0}

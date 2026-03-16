@@ -1,6 +1,6 @@
-# LaunchAgent: Run compare_historical every 15 minutes
+# LaunchAgent: Run compare_historical every 10 minutes
 
-This LaunchAgent runs `scripts/compare_historical.py` every 15 minutes with `--use-volatility`, `--execute`, and `--no-llm`. It uses your `.venv` Python so all dependencies are available.
+This LaunchAgent runs `scripts/compare_historical.py` every 10 minutes with `--use-volatility`, `--execute`, `--no-llm`, and `--verbose`. It uses your `.venv` Python so all dependencies are available.
 
 ## One-time setup
 
@@ -33,6 +33,6 @@ This LaunchAgent runs `scripts/compare_historical.py` every 15 minutes with `--u
 
 ## Configuration
 
-- **Interval:** 900 seconds (15 minutes). Change `<integer>900</integer>` in the plist to adjust.
+- **Interval:** 600 seconds (10 minutes). Change `<integer>600</integer>` in the plist to adjust.
 - **Run on login:** Set `<key>RunAtLoad</key><true/>` if you want it to run once immediately when loaded.
 - **Paths:** `ProgramArguments[0]` = Python in your venv; `ProgramArguments[1]` = script path; `WorkingDirectory` = project root (for `config.yaml`).

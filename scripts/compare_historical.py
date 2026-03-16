@@ -23,6 +23,7 @@ import argparse
 import math
 import re
 import sys
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -68,14 +69,16 @@ try:
     from storage import (
         get_calibration_stats,
         get_last_snapshot_for_ticker,
+        get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
+        record_market_snapshot,
         record_prediction,
         record_prediction_outcome,
         record_resolved,
     )
 except ImportError:
     get_calibration_stats = get_last_snapshot_for_ticker = get_unresolved_predictions = None
-    record_prediction = record_prediction_outcome = record_resolved = None
+    get_price_after_buy_from_snapshots = record_market_snapshot = record_prediction = record_prediction_outcome = record_resolved = None
 from yfinance_client import get_aggs as yf_get_aggs
 
 # ---------------------------------------------------------------------------
@@ -113,6 +116,16 @@ class _StrategyParams:
     absolute_winner_max_price: float
     absolute_winner_max_pct_of_balance: float
     absolute_winner_max_contracts: int
+    use_calibration: bool
+    favor_yes_when_above_strike: bool
+    min_calibration_samples: int
+    calibration_min_win_rate_above_yes: float
+    calibration_extra_edge_above_yes: float
+    calibration_extra_edge_overall: float
+    min_calibration_samples_overall: int
+    use_bucket_penalty: bool
+    min_bucket_samples: int
+    min_vol_confidence_far_otm: float
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -141,6 +154,16 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         absolute_winner_max_price=float(strategy.get("absolute_winner_max_price", 0.05)),
         absolute_winner_max_pct_of_balance=float(strategy.get("absolute_winner_max_pct_of_balance", 0.50)),
         absolute_winner_max_contracts=int(strategy.get("absolute_winner_max_contracts", 500)),
+        use_calibration=bool(strategy.get("use_calibration", True)),
+        favor_yes_when_above_strike=bool(strategy.get("favor_yes_when_above_strike", True)),
+        min_calibration_samples=int(strategy.get("min_calibration_samples", 5)),
+        calibration_min_win_rate_above_yes=float(strategy.get("calibration_min_win_rate_above_yes", 0.45)),
+        calibration_extra_edge_above_yes=float(strategy.get("calibration_extra_edge_above_yes", 0.05)),
+        calibration_extra_edge_overall=float(strategy.get("calibration_extra_edge_overall", 0.02)),
+        min_calibration_samples_overall=int(strategy.get("min_calibration_samples_overall", 20)),
+        use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
+        min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
+        min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),
     )
 
 
@@ -383,6 +406,16 @@ def _get_days_to_expiry_from_market(
     return max(0.01, days)  # Minimum 0.01 days (~15 min) for numerical stability
 
 
+def _hours_until_resolution(title: str, yf_ticker: str) -> float | None:
+    """Hours until resolution (positive = future, negative = past). None if unparseable."""
+    res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
+    if res_dt is None:
+        return None
+    now_utc = datetime.now(UTC)
+    res_utc = res_dt.astimezone(UTC)
+    return (res_utc - now_utc).total_seconds() / 3600.0
+
+
 # ---------------------------------------------------------------------------
 # Strike/threshold extraction (Kalshi vs Gemini)
 # ---------------------------------------------------------------------------
@@ -520,6 +553,81 @@ def _violates_no_above_rule(
     if direction != "above" or threshold <= 0:
         return False
     return current_price > threshold * (1 + cushion)
+
+
+def _apply_bucket_penalty(
+    hist_p: float,
+    calibration: dict[str, Any],
+    sp: _StrategyParams,
+) -> float:
+    """
+    Dampen hist_p when its bucket has lower win rate than expected (overconfidence).
+    effective_hist_p = hist_p * (bucket_win_rate / bucket_midpoint) when bucket underperforms.
+    """
+    if not sp.use_bucket_penalty or not sp.use_calibration or not calibration:
+        return hist_p
+    buckets = calibration.get("buckets", [])
+    if not buckets:
+        return hist_p
+    lo = round(hist_p * 10) / 10
+    hi = lo + 0.1
+    midpoint = (lo + hi) / 2
+    for b in buckets:
+        if b.get("lo") == lo and b.get("hi") == hi:
+            cnt = b.get("count", 0)
+            wr = b.get("win_rate", midpoint)
+            if cnt >= sp.min_bucket_samples and wr < midpoint:
+                scale = wr / midpoint if midpoint > 0 else 1.0
+                return max(0.01, min(0.99, hist_p * scale))
+            break
+    return hist_p
+
+
+def _get_effective_min_edge(
+    min_edge: float,
+    direction: str,
+    calibration: dict[str, Any],
+    sp: _StrategyParams,
+) -> float:
+    """Apply calibration-based min_edge adjustments (overall + above+yes)."""
+    if not sp.use_calibration or not calibration:
+        return min_edge
+    effective = min_edge
+    resolved = calibration.get("resolved_count", 0)
+    overall_wr = calibration.get("win_rate")
+    if (
+        resolved >= sp.min_calibration_samples_overall
+        and overall_wr is not None
+        and overall_wr < 0.5
+    ):
+        effective += sp.calibration_extra_edge_overall
+    return effective
+
+
+def _should_downgrade_buy_yes_above(
+    rec: str,
+    direction: str,
+    hist_p: float,
+    yes_bid: float,
+    min_edge: float,
+    calibration: dict[str, Any],
+    sp: _StrategyParams,
+    maker_fee_rate: float,
+) -> bool:
+    """If BUY YES on 'above' and above+yes underperforms, require extra edge or downgrade to SKIP."""
+    if rec != REC_BUY_YES or direction != "above":
+        return False
+    if not sp.use_calibration or not calibration:
+        return False
+    above_yes = calibration.get("by_direction_side", {}).get("above+yes", {})
+    if above_yes.get("count", 0) < sp.min_calibration_samples:
+        return False
+    if above_yes.get("win_rate", 1.0) >= 0.5:
+        return False
+    fee = _fee_per_contract(yes_bid, maker_fee_rate)
+    required = min_edge + sp.calibration_extra_edge_above_yes
+    net_edge = hist_p - yes_bid - fee
+    return net_edge < required
 
 
 def _fee_per_contract(price: float, maker_rate: float) -> float:
@@ -1133,7 +1241,17 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
         side = (p.get("side") or "").lower()
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
         pnl_cents = int((100 - entry * 100) * cnt) if won else int(-entry * 100 * cnt)
-        record_prediction_outcome(p["id"], yes_settled, pnl_cents, cfg)
+        buy_ts = p.get("ts")
+        min_after = max_after = None
+        if buy_ts is not None and get_price_after_buy_from_snapshots:
+            min_after, max_after = get_price_after_buy_from_snapshots(
+                t, float(buy_ts), side, PLATFORM_KALSHI, cfg
+            )
+        record_prediction_outcome(
+            p["id"], yes_settled, pnl_cents, cfg,
+            min_price_after_buy=min_after,
+            max_price_after_buy=max_after,
+        )
         if record_resolved and get_last_snapshot_for_ticker:
             snap = get_last_snapshot_for_ticker(t, platform=PLATFORM_KALSHI, config=cfg)
             record_resolved(
@@ -1164,7 +1282,7 @@ def main():
     parser.add_argument("--preview", action="store_true", help="Show API calls we would make (no orders placed)")
     parser.add_argument("--execute", action="store_true", help="Place real buy/sell orders (requires dry_run: false in config)")
     parser.add_argument("--use-volatility", action="store_true", help="Use volatility-based probability (option-style) in addition to empirical")
-    parser.add_argument("--log", metavar="DIR", nargs="?", const="~/Desktop/trading-bot-logs", default=None, help="Log run output to ~/Desktop/trading-bot-logs/ or specified dir (creates eval_YYYYMMDD.log)")
+    parser.add_argument("--log", metavar="DIR", nargs="?", const="~/Desktop/trading-bot-logs", default=None, help="Log run output to ~/Desktop/trading-bot-logs/ or specified dir (eval_YYYYMMDDHH.log per hour, append within hour)")
     args = parser.parse_args()
     args.use_llm = not args.no_llm
 
@@ -1206,7 +1324,7 @@ def _run(args) -> int:
     if log_dir:
         log_dir_resolved = Path(log_dir).expanduser().resolve()
         log_dir_resolved.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir_resolved / f"eval_{datetime.utcnow().strftime('%Y%m%d')}.log"
+        log_path = log_dir_resolved / f"eval_{datetime.utcnow().strftime('%Y%m%d%H')}.log"
         log_file = open(log_path, "a", encoding="utf-8")
         orig_stdout = sys.stdout
         print(f"Logging to {log_path}", flush=True)
@@ -1316,6 +1434,29 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     pending_sells: list[dict] = []
     sp = _load_strategy_params(strategy)
 
+    # Calibration: learn from resolved predictions (e.g. "above+YES" underperforming)
+    calibration: dict[str, Any] = {}
+    if get_calibration_stats:
+        try:
+            calibration = get_calibration_stats(cfg) or {}
+            if calibration.get("enabled") and calibration.get("resolved_count", 0) > 0:
+                wr = calibration.get("win_rate")
+                wr_str = f"{wr:.1%}" if wr is not None else "N/A"
+                by_ds = calibration.get("by_direction_side", {})
+                above_yes = by_ds.get("above+yes", {})
+                above_yes_str = ""
+                if above_yes:
+                    above_yes_str = f" | above+YES: {above_yes.get('count',0)} trades, {above_yes.get('win_rate',0):.1%} win rate"
+                print(f"[Calibration] {calibration.get('resolved_count')} resolved | overall win rate {wr_str}{above_yes_str}")
+                pab = calibration.get("price_after_buy")
+                if pab and pab.get("count", 0) > 0:
+                    print(f"[Calibration] Price-after-buy: {pab['count']} w/ data | "
+                          f"{pab['pct_dipped']:.0f}% dipped lower after buy (avg {pab['avg_dip_pct']:.1f}%) | "
+                          f"{pab['pct_rose']:.0f}% rose after buy (avg {pab['avg_rise_pct']:.1f}%)")
+                print()
+        except Exception:
+            pass
+
     # Build ticker -> (series, yf_ticker, closes, market_data) for sell evaluation
     market_data_cache: dict[str, tuple[str, str, list[float], dict]] = {}
 
@@ -1420,29 +1561,40 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hist_p = sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p
                 else:
                     hist_p = max(emp, vol_p)
+            # Bucket penalty: dampen hist_p when bucket underperforms (overconfidence correction)
+            hist_p = _apply_bucket_penalty(hist_p, calibration, sp)
+            effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
             rec = (
-                _recommend_strict(hist_p, yes_bid, min_p_win, min_edge, sp.kalshi_maker_fee_rate)
+                _recommend_strict(hist_p, yes_bid, min_p_win, effective_min, sp.kalshi_maker_fee_rate)
                 if _is_other_intraday(m, yf_ticker)
-                else _recommend(hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate)
+                else _recommend(hist_p, yes_bid, effective_min, sp.kalshi_maker_fee_rate)
             )
             # Skip BUY NO when price already above strike (risky to bet NO)
             violates_rule = _violates_no_above_rule(current_price, threshold, direction, sp.no_above_cushion)
             if rec == REC_BUY_NO and violates_rule:
                 rec = REC_SKIP
-            # Favor BUY YES when price is well above strike — but only if we have edge (hist_p >= market)
+            # Favor BUY YES when price is well above strike — but only if we have edge and calibration allows it
             if rec == REC_SKIP and violates_rule:
                 if 0 < yes_bid < (1 - min_edge) and hist_p >= yes_bid + min_edge:
-                    rec = REC_BUY_YES
+                    should_favor = sp.favor_yes_when_above_strike
+                    if should_favor and sp.use_calibration and calibration:
+                        above_yes = calibration.get("by_direction_side", {}).get("above+yes", {})
+                        cnt = above_yes.get("count", 0)
+                        wr = above_yes.get("win_rate", 1.0)
+                        if cnt >= sp.min_calibration_samples and wr < sp.calibration_min_win_rate_above_yes:
+                            should_favor = False  # Historical "above+YES" underperforming
+                    if should_favor:
+                        rec = REC_BUY_YES
             # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance; often illiquid or model overconfidence for far OTM
             if rec == REC_BUY_YES and yes_bid < sp.min_yes_price:
                 if not (use_vol and vol_p is not None and hist_p >= 0.95):  # Override when vol model shows high confidence
                     rec = REC_SKIP
-            # Skip BUY YES when strike is far above current (far OTM) unless vol model shows ≥95% confidence
+            # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
             if rec == REC_BUY_YES and direction == "above" and sp.max_buy_yes_strike_above_pct > 0:
                 if threshold > current_price * (1 + sp.max_buy_yes_strike_above_pct):
-                    if not (use_vol and vol_p is not None and vol_p >= 0.95):
+                    if not (use_vol and vol_p is not None and vol_p >= sp.min_vol_confidence_far_otm):
                         rec = REC_SKIP
             # Skip BUY NO when market prices NO very low (market thinks our side unlikely); same override when vol shows high P(NO)
             no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -1454,10 +1606,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if threshold > current_price * (1 + sp.max_buy_no_strike_above_pct):
                     if not (use_vol and vol_p is not None and (1 - hist_p) >= 0.95):
                         rec = REC_SKIP
+            if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(rec, direction, hist_p, yes_bid, min_edge, calibration, sp, sp.kalshi_maker_fee_rate):
+                rec = REC_SKIP
             diff = _compute_edge_diff(yes_bid, hist_p, rec, violates_rule, sp.kalshi_maker_fee_rate)
 
             print(f"  {ticker}")
-            print(f"    {title}")
+            h = _hours_until_resolution(title, yf_ticker)
+            hours_str = f" (in {h:.1f} hours)" if h is not None else ""
+            print(f"    {title}{hours_str}")
             print(f"    Threshold: ${threshold:,.0f} ({direction})")
             if vol_p is None:
                 p_label = "P(YES)"
@@ -1565,28 +1721,38 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 else:
                     hist_p_gem = emp
+                hist_p_gem = _apply_bucket_penalty(hist_p_gem, calibration, sp)
+                effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
                 rec = (
-                    _recommend_strict(hist_p_gem, impl, min_p_win_gem, min_edge, sp.gemini_maker_fee_rate)
+                    _recommend_strict(hist_p_gem, impl, min_p_win_gem, effective_min_gem, sp.gemini_maker_fee_rate)
                     if _is_other_intraday(evt, yf_ticker)
-                    else _recommend(hist_p_gem, impl, min_edge, sp.gemini_maker_fee_rate)
+                    else _recommend(hist_p_gem, impl, effective_min_gem, sp.gemini_maker_fee_rate)
                 )
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, sp.no_above_cushion)
                 if rec == REC_BUY_NO and violates_rule_g:
                     rec = REC_SKIP
-                # Favor BUY YES when price is well above strike — only if we have edge (hist_p >= market)
+                # Favor BUY YES when price is well above strike — only if we have edge and calibration allows it
                 if rec == REC_SKIP and violates_rule_g:
                     if 0 < impl < (1 - min_edge) and hist_p_gem >= impl + min_edge:
-                        rec = REC_BUY_YES
+                        should_favor = sp.favor_yes_when_above_strike
+                        if should_favor and sp.use_calibration and calibration:
+                            above_yes = calibration.get("by_direction_side", {}).get("above+yes", {})
+                            cnt = above_yes.get("count", 0)
+                            wr = above_yes.get("win_rate", 1.0)
+                            if cnt >= sp.min_calibration_samples and wr < sp.calibration_min_win_rate_above_yes:
+                                should_favor = False  # Historical "above+YES" underperforming
+                        if should_favor:
+                            rec = REC_BUY_YES
                 # Skip BUY YES when market prices it very low (e.g. 1¢); override when vol model shows ≥95% confidence
                 if rec == REC_BUY_YES and impl < sp.min_yes_price:
                     if not (use_vol and vol_p_gem is not None and hist_p_gem >= 0.95):
                         rec = REC_SKIP
-                # Skip BUY YES when strike is far above current (far OTM) unless vol model shows ≥95% confidence
+                # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
                 if rec == REC_BUY_YES and direction_g == "above" and sp.max_buy_yes_strike_above_pct > 0:
                     if threshold_g > current_price * (1 + sp.max_buy_yes_strike_above_pct):
-                        if not (use_vol and vol_p_gem is not None and vol_p_gem >= 0.95):
+                        if not (use_vol and vol_p_gem is not None and vol_p_gem >= sp.min_vol_confidence_far_otm):
                             rec = REC_SKIP
                 # Skip BUY NO when market prices NO very low; override when vol model shows P(NO) ≥ 95%
                 no_price_gem = 1.0 - impl
@@ -1598,9 +1764,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if threshold_g > current_price * (1 + sp.max_buy_no_strike_above_pct):
                         if not (use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95):
                             rec = REC_SKIP
+                if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(rec, direction_g, hist_p_gem, impl, min_edge, calibration, sp, sp.gemini_maker_fee_rate):
+                    rec = REC_SKIP
                 diff_gem = _compute_edge_diff(impl, hist_p_gem, rec, violates_rule_g, sp.gemini_maker_fee_rate)
                 print(f"  [Gemini] {evt.get('ticker','?')}")
-                print(f"    {title}")
+                h = _hours_until_resolution(title, yf_ticker)
+                hours_str = f" (in {h:.1f} hours)" if h is not None else ""
+                print(f"    {title}{hours_str}")
                 print(f"    Threshold: ${threshold_g:,.0f} ({direction_g})")
                 if vol_p_gem is None:
                     p_label_gem = "P(YES)"
@@ -1743,6 +1913,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     rec = _recommend(hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate)
                                     current_price_pos = closes[-1]
                                     sell_price = yes_bid if side == "yes" else no_bid
+                                    # Persist orphan position eval for calibration (positions not in main market loop)
+                                    if record_market_snapshot:
+                                        diff = (hist_p - yes_bid) if rec == REC_BUY_YES else ((1 - hist_p) - no_bid) if rec == REC_BUY_NO else 0
+                                        record_market_snapshot(
+                                            PLATFORM_KALSHI, ticker, yes_bid, no_bid, hist_p, rec,
+                                            threshold, direction, vol_p, abs(diff), m.get("title"), pos_yf, cfg,
+                                        )
                                     # SELL when definitely a loser
                                     p_lose = hist_p if side == "no" else (1.0 - hist_p)
                                     if p_lose >= sp.sell_losing_pct:
@@ -1954,6 +2131,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             rec = REC_SKIP
                         current_price_g = closes[-1]
                         sell_price = impl if side == "yes" else no_price_g
+                        # Persist position eval for calibration (same as Kalshi orphan positions)
+                        if record_market_snapshot:
+                            diff_g = (hist_p_g - impl) if rec == REC_BUY_YES else ((1 - hist_p_g) - no_price_g) if rec == REC_BUY_NO else 0
+                            record_market_snapshot(
+                                PLATFORM_GEMINI, ticker_g, impl, no_price_g, hist_p_g, rec,
+                                threshold_g, direction_g, vol_p_g, abs(diff_g), title, pos_yf, cfg,
+                            )
                         p_lose = hist_p_g if side == "no" else (1.0 - hist_p_g)
                         if p_lose >= sp.sell_losing_pct:
                             pending_sells.append({

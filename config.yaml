@@ -55,6 +55,17 @@ strategy:
   absolute_winner_max_price: 0.05 # Price must be at or below this (e.g. 5¢)
   absolute_winner_max_pct_of_balance: 0.50 # Willing to spend up to this fraction of balance on one slam-dunk
   absolute_winner_max_contracts: 500 # Cap contracts per absolute-winner order (still respects balance)
+  # Calibration: use historical prediction outcomes to improve recommendations (FreqAI-style)
+  use_calibration: true # Consult resolved predictions; disable favor-YES when "above+YES" underperforms
+  favor_yes_when_above_strike: true # When price above strike, upgrade SKIP→BUY YES if we have edge. Set false to avoid YES bias.
+  min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
+  calibration_min_win_rate_above_yes: 0.45 # If "above+YES" win rate < this (and samples met), don't favor YES when above strike
+  calibration_extra_edge_above_yes: 0.05 # When "above+YES" underperforms, require this extra edge before BUY YES
+  calibration_extra_edge_overall: 0.02 # When overall win rate < 50%, add this to min_edge globally
+  min_calibration_samples_overall: 20 # Min resolved trades before applying overall min_edge bump
+  use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
+  min_bucket_samples: 5 # Min trades in bucket before applying bucket penalty
+  min_vol_confidence_far_otm: 0.97 # Require vol model ≥97% (not 95%) for BUY YES when strike far above current; targets losing "above X"
   # use_kelly: true   # Use Kelly criterion for position sizing (when true)
   # kelly_fraction: 0.25   # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer)
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
