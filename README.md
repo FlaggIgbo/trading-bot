@@ -97,7 +97,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability, systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (with llama3.2:1b fallback).
+See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (with per-contract resolution time), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (with llama3.2:1b fallback).
 
 ## Contract evaluation workflow
 
@@ -401,7 +401,7 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 **In plain English:** We estimate the chance of YES two ways: (1) **Empirical** = "In the last year, how often did the price end above (or below) the target?" and (2) **Volatility** = Using how much the price typically swings, we calculate the odds. We use the higher of the two when both are available.
 
 - **Empirical**: fraction of past days the close was above/below the threshold.
-- **Volatility** (with `--use-volatility`): log-normal model using historical annualized vol and time-to-expiry (see `strategy.days_to_expiry`). Used as `max(empirical, volatility_probability)` for more robust recommendations.
+- **Volatility** (with `--use-volatility`): log-normal model using historical annualized vol and time-to-expiry. Time-to-expiry is parsed per contract from the title (e.g. "tomorrow at 5pm ET", "March 16 at 5pm") and converted to UTC; falls back to `strategy.days_to_expiry` when parsing fails. Used as `max(empirical, volatility_probability)` for more robust recommendations.
 
 ### Quick snapshot: `compare_prices.py`
 

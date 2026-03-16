@@ -16,20 +16,19 @@ Run: python3 scripts/compare_historical.py [--days 365] [--markets 0] [--edge 0.
 from __future__ import annotations
 
 # TODO: Add cron/scheduler integration for 15-min runs (e.g. APScheduler, or document crontab)
-# TODO: Parse resolution timestamp (e.g. "5pm EDT") for time-of-day–aware probability
 # TODO: Support intraday data for "price today at 5pm" contracts (currently uses daily close)
 # TODO: Integrate with Kalshi/Gemini order APIs for auto-execution when edge > threshold
 # TODO: Add logging to file for historical run analysis
 # TODO: GARCH or EWMA for time-varying volatility
 # TODO: Implied volatility from options market (if available) for richer probability
-# TODO: Parse exact resolution date per contract for accurate time-to-expiry
-
 import argparse
 import math
 import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from zoneinfo import ZoneInfo
 
 # Add project root to path so imports work when run from scripts/
 _ROOT = Path(__file__).resolve().parent.parent
@@ -148,6 +147,144 @@ def _is_other_intraday(market_or_title: dict | str, yf_ticker: str) -> bool:
         return False  # Standard 5pm crypto
     # Has intraday time but not standard → other intraday
     return is_sp500 or is_crypto
+
+
+# ---------------------------------------------------------------------------
+# Resolution datetime parsing (for per-contract time-to-expiry)
+# ---------------------------------------------------------------------------
+# Parse titles like "Bitcoin above $81,250 tomorrow at 5pm ET" or "on March 16 at 5pm"
+# into UTC datetime for accurate volatility model T (time to expiry).
+
+ET = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+# today/tomorrow at 5pm / 5:00pm (optional ET/EDT/EST)
+_RELATIVE_TIME = re.compile(
+    r"(today|tomorrow)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?",
+    re.I,
+)
+# at 5pm (assume today)
+_AT_TIME_ONLY = re.compile(
+    r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?",
+    re.I,
+)
+# on March 16 / on Mar 16 / March 16 at 5pm
+_DATE_PATTERN = re.compile(
+    r"(?:on\s+)?"
+    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+"
+    r"(\d{1,2})"
+    r"(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?)?",
+    re.I,
+)
+
+
+def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetime | None:
+    """
+    Parse resolution datetime from title (e.g. "tomorrow at 5pm ET", "on March 16 at 5pm").
+    Returns timezone-aware datetime in UTC, or None if unparseable.
+    Uses ET (America/New_York) for all times; crypto defaults to 5pm, S&P to 4pm for date-only.
+    """
+    if not title:
+        return None
+    title_lower = title.lower()
+    now_et = datetime.now(ET).date()
+
+    # 1. "today at 5pm" / "tomorrow at 5pm"
+    m = _RELATIVE_TIME.search(title)
+    if m:
+        rel, h_str, min_str, am_pm = m.group(1), m.group(2), m.group(3), m.group(4)
+        hour = int(h_str)
+        minute = int(min_str) if min_str else 0
+        if "pm" in am_pm.lower() and hour < 12:
+            hour += 12
+        elif "am" in am_pm.lower() and hour == 12:
+            hour = 0
+        base_date = now_et
+        if "tomorrow" in rel.lower():
+            base_date = base_date + timedelta(days=1)
+        try:
+            dt_et = datetime(base_date.year, base_date.month, base_date.day, hour, minute, 0, tzinfo=ET)
+            return dt_et.astimezone(UTC)
+        except (ValueError, TypeError):
+            return None
+
+    # 2. "at 5pm" (no today/tomorrow) - assume today
+    m2 = _AT_TIME_ONLY.search(title)
+    if m2:
+        h_str, min_str, am_pm = m2.group(1), m2.group(2), m2.group(3)
+        hour = int(h_str)
+        minute = int(min_str) if min_str else 0
+        if "pm" in am_pm.lower() and hour < 12:
+            hour += 12
+        elif "am" in am_pm.lower() and hour == 12:
+            hour = 0
+        try:
+            dt_et = datetime(now_et.year, now_et.month, now_et.day, hour, minute, 0, tzinfo=ET)
+            return dt_et.astimezone(UTC)
+        except (ValueError, TypeError):
+            return None
+
+    # 3. "on March 16" / "March 16 at 5pm" - explicit date
+    m3 = _DATE_PATTERN.search(title)
+    if m3:
+        mon_str, day_str = m3.group(1), m3.group(2)
+        month = _MONTHS.get(mon_str[:3].lower())
+        if not month:
+            return None
+        day = int(day_str)
+        year = now_et.year
+        # If date has passed this year, assume next year
+        try:
+            cand = datetime(year, month, day, tzinfo=ET)
+        except ValueError:
+            return None
+        if cand.date() < now_et:
+            year += 1
+        # Hour: from "at 5pm" in match, or default 17 (5pm) for crypto, 16 (4pm) for S&P
+        is_sp = yf_ticker.upper() in ("^GSPC", "GSPC")
+        default_hour = 16 if is_sp else 17
+        if m3.group(3) is not None:
+            h_str, min_str, am_pm = m3.group(3), m3.group(4), m3.group(5)
+            hour = int(h_str)
+            minute = int(min_str) if min_str else 0
+            if "pm" in (am_pm or "").lower() and hour < 12:
+                hour += 12
+            elif "am" in (am_pm or "").lower() and hour == 12:
+                hour = 0
+        else:
+            hour, minute = default_hour, 0
+        try:
+            dt_et = datetime(year, month, day, hour, minute, 0, tzinfo=ET)
+            return dt_et.astimezone(UTC)
+        except (ValueError, TypeError):
+            return None
+
+    return None
+
+
+def _get_days_to_expiry_from_market(
+    market_or_title: dict | str, yf_ticker: str, default_days: float = 30.0
+) -> float:
+    """
+    Compute days (or fraction) until resolution. Uses _parse_resolution_datetime_from_title.
+    Falls back to default_days if title cannot be parsed (e.g. daily-close "on March 16" without time).
+    """
+    title = _get_title(market_or_title)
+    res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
+    if res_dt is None:
+        return default_days
+    # Ensure we use aware datetimes and compare in UTC
+    if res_dt.tzinfo is None:
+        res_dt = res_dt.replace(tzinfo=ET)
+    now_utc = datetime.now(UTC)
+    res_utc = res_dt.astimezone(UTC)
+    delta = res_utc - now_utc
+    days = delta.total_seconds() / 86400.0
+    return max(0.01, days)  # Minimum 0.01 days (~15 min) for numerical stability
 
 
 # ---------------------------------------------------------------------------
@@ -684,7 +821,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 continue
 
             hist_p = _empirical_probability(closes, threshold, direction)
-            vol_p = _volatility_probability(closes, threshold, direction, days_to_expiry) if getattr(args, "use_volatility", False) else None
+            dte = _get_days_to_expiry_from_market(m, yf_ticker, days_to_expiry)
+            vol_p = _volatility_probability(closes, threshold, direction, dte) if getattr(args, "use_volatility", False) else None
             if vol_p is not None and getattr(args, "use_volatility", False):
                 hist_p = max(hist_p, vol_p)
             rec = (
@@ -772,7 +910,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print()
                     continue
                 emp = _empirical_probability(closes, threshold_g, direction_g)
-                vol_p_gem = _volatility_probability(closes, threshold_g, direction_g, days_to_expiry) if use_vol else None
+                dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, days_to_expiry)
+                vol_p_gem = _volatility_probability(closes, threshold_g, direction_g, dte_g) if use_vol else None
                 hist_p_gem = max(emp, vol_p_gem) if vol_p_gem is not None and use_vol else emp
                 rec = (
                     _recommend_strict(hist_p_gem, impl, intraday_other_min_p_win)
@@ -894,7 +1033,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                                     no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                                     hist_p = _empirical_probability(closes, threshold, direction)
-                                    vol_p = _volatility_probability(closes, threshold, direction, days_to_expiry) if use_vol else None
+                                    dte_pos = _get_days_to_expiry_from_market(m, pos_yf, days_to_expiry)
+                                    vol_p = _volatility_probability(closes, threshold, direction, dte_pos) if use_vol else None
                                     if vol_p is not None and use_vol:
                                         hist_p = max(hist_p, vol_p)
                                     rec = _recommend(hist_p, yes_bid, min_edge)
@@ -947,7 +1087,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                 hist_p = _empirical_probability(closes, threshold, direction)
-                vol_p = _volatility_probability(closes, threshold, direction, days_to_expiry) if use_vol else None
+                dte_cached = _get_days_to_expiry_from_market(m, _yf, days_to_expiry)
+                vol_p = _volatility_probability(closes, threshold, direction, dte_cached) if use_vol else None
                 if vol_p is not None and use_vol:
                     hist_p = max(hist_p, vol_p)
                 rec = _recommend(hist_p, yes_bid, min_edge)

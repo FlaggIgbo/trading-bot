@@ -9,7 +9,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | Feature | From | Status |
 |---------|------|--------|
 | Dry-run / preview mode | Freqtrade | ✓ `--preview` in compare_historical.py |
-| Volatility-based probability | Stock-Prediction-Models, options theory | ✓ `--use-volatility` log-normal model |
+| Volatility-based probability | Stock-Prediction-Models, options theory | ✓ `--use-volatility` log-normal model; per-contract time-to-expiry parsed from title (e.g. "tomorrow at 5pm ET") |
 | Balance-aware order execution | Freqtrade | ✓ `create_order_safe`, `max_pct_of_balance` |
 | Low-balance limit fallback | Freqtrade | ✓ `min_balance_for_limit_fallback_cents` — place 1-contract limit instead of skipping when balance is low |
 | Config-driven strategy | Freqtrade, Gekko | ✓ `config.yaml` strategy, min_edge |
