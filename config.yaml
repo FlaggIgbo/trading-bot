@@ -26,7 +26,7 @@ yfinance_tickers:
 strategy:
   min_edge: 0.10   # Min edge (10%) to recommend buy. historical_p - market_price >= edge
   days_to_expiry: 30   # For volatility model (log-normal)
-  skip_buy_no_above_cushion: 0.1   # Skip BUY NO on "above X" when current_price > X * (1+cushion). Sells existing NO positions that violate.
+  skip_buy_no_above_cushion: 0.01   # Skip BUY NO on "above X" when current_price > X * (1+cushion). 1% cushion avoids noise; 10% was too permissive (held NO at $72.5k vs $71.5k strike).
   sell_losing_pct: 0.55   # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
   limit_dip_pct: 0.05     # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
   intraday_other_min_p_win: 0.90   # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)

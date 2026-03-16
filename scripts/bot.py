@@ -1,18 +1,24 @@
 """
 Trading bot for Kalshi prediction markets.
 Watches selected markets and decides when to trade based on configurable strategies.
+
+Run: python scripts/bot.py   (from project root)
 """
 import logging
+import sys
 import time
 from pathlib import Path
 
+# Add project root to path so imports work when run from scripts/
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+
 from dotenv import load_dotenv
+
+load_dotenv(_ROOT / ".env")
 
 from config import get_config
 from kalshi_client import KalshiClient
-
-# Load .env from project root so it's used regardless of cwd
-load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logging.basicConfig(
     level=logging.INFO,

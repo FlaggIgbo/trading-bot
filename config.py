@@ -27,6 +27,7 @@ def get_config() -> dict:
             cfg = yaml.safe_load(f) or {}
 
     # Env overrides (useful for cron, CI, or per-run overrides)
+    # Example: MARKETS=KXBTCD,KXETHD  POLL_INTERVAL_SECONDS=120
     if markets_str := os.getenv("MARKETS"):
         cfg["markets"] = [m.strip() for m in markets_str.split(",") if m.strip()]
     if pi := os.getenv("POLL_INTERVAL_SECONDS"):

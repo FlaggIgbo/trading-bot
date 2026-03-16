@@ -44,17 +44,38 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) to monitor sel
 
    Or: `MARKETS=KXHIGHNY,KXBTC,KALSHI_YES`
 
+## Project structure
+
+```
+trading-bot/
+├── config.py           # Config loader (config.yaml + env overrides)
+├── config.yaml         # Markets, strategy, trading settings
+├── kalshi_client.py    # Kalshi API client
+├── gemini_client.py   # Gemini Prediction Markets API client
+├── yfinance_client.py # Price data (yfinance + CoinGecko fallback)
+├── ollama_analysis.py  # Ollama LLM analysis integration
+├── scripts/            # Runnable entry points
+│   ├── bot.py          # Main bot loop (watches markets, applies strategy)
+│   ├── compare_historical.py  # Evaluate contracts → BUY YES / BUY NO / SKIP
+│   ├── compare_prices.py      # Quick live price snapshot
+│   └── test_connection.py     # Test API connections
+├── .env                # Credentials (not in git)
+└── requirements.txt
+```
+
+Run scripts from the project root (e.g. `python scripts/bot.py`). Scripts add the project root to `sys.path` so imports work correctly.
+
 ## Running
 
 ```bash
-python bot.py
+python scripts/bot.py
 ```
 
 The bot will:
 - Connect using your API credentials
 - Fetch open markets for each series/ticker you configured
 - Log prices (YES/NO bids) and status
-- Apply strategy rules when you add them in `config.yaml` / `bot.py`
+- Apply strategy rules when you add them in `config.yaml` / `scripts/bot.py`
 
 ## Kalshi API Overview
 
@@ -68,6 +89,26 @@ The bot will:
 
 See [Kalshi API docs](https://docs.kalshi.com/welcome) and [Making your first request](https://docs.kalshi.com/getting_started/making_your_first_request).
 
+## Project structure
+
+```
+trading-bot/
+├── scripts/                 # Runnable entry points (run from project root)
+│   ├── bot.py               # Main polling bot
+│   ├── compare_historical.py # Evaluate contracts → BUY YES / NO / SKIP
+│   ├── compare_prices.py    # Quick live price snapshot
+│   └── test_connection.py   # Test API connections
+├── config.py                # Config loader (yaml + env overrides)
+├── config.yaml              # Markets, strategy, trading settings
+├── kalshi_client.py         # Kalshi API client
+├── gemini_client.py         # Gemini Prediction Markets client
+├── yfinance_client.py       # Price data (yfinance + CoinGecko fallback)
+├── ollama_analysis.py       # Ollama LLM analysis integration
+└── .env                     # Credentials (from .env.example)
+```
+
+All scripts in `scripts/` add the project root to the Python path and load `.env` from the project root, so run them from the project directory: `python scripts/compare_historical.py`.
+
 ## Improvement roadmap
 
 See [IMPROVEMENTS.md](IMPROVEMENTS.md) for a roadmap of features inspired by top open-source trading bots (freqtrade, ccxt, hummingbot, Stock-Prediction-Models). Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability.
@@ -78,9 +119,9 @@ See [IMPROVEMENTS.md](IMPROVEMENTS.md) for a roadmap of features inspired by top
 
 Example: "Bitcoin above $81,250 on Mar 16?" → Historical data says 5% of past days closed above that level → If market YES = 40¢, the market is overpricing YES → **BUY NO** or **SKIP**.
 
-Run `compare_historical.py` every **15 minutes** locally for continuous evaluation. See [Cron setup](#run-every-15-minutes) below.
+Run `scripts/compare_historical.py` every **15 minutes** locally for continuous evaluation. See [Cron setup](#run-every-15-minutes) below.
 
-### Flow diagram: `compare_historical.py`
+### Flow diagram: `scripts/compare_historical.py`
 
 ```mermaid
 flowchart TB
@@ -204,21 +245,21 @@ When [Ollama](https://ollama.com) is running locally, scripts send their output 
 2. Ensure Ollama is running (often auto-starts in the background).
 3. Run any script — the last output will be the LLM’s analysis:
    ```bash
-   python3 compare_prices.py
-   python3 compare_historical.py
-   python3 test_connection.py
+   python3 scripts/compare_prices.py
+   python3 scripts/compare_historical.py
+   python3 scripts/test_connection.py
    ```
 
 To skip LLM analysis (e.g. for cron or automation):
 ```bash
-python3 compare_historical.py --no-llm
-python3 compare_prices.py --no-llm
-python3 test_connection.py --no-llm
+python3 scripts/compare_historical.py --no-llm
+python3 scripts/compare_prices.py --no-llm
+python3 scripts/test_connection.py --no-llm
 ```
 
 Override model via `OLLAMA_MODEL`:
 ```bash
-OLLAMA_MODEL=mistral python3 compare_historical.py
+OLLAMA_MODEL=mistral python3 scripts/compare_historical.py
 ```
 
 **Troubleshooting: "Ollama skipped: not running or model missing"**
@@ -228,9 +269,9 @@ If you see this message at the end of a run, either Ollama isn't running or the 
 1. **Start Ollama** — Open the Ollama app (Applications or Spotlight). It must be running before you run the script.
 2. **Pull the model** — Run `ollama pull llama3.2`, or a smaller/faster option: `ollama pull llama3.2:1b`.
 3. **Verify** — Run `ollama list` to confirm models are installed and the Ollama server is reachable.
-4. **Re-run** — `python3 compare_historical.py --preview --log` (or any script).
+4. **Re-run** — `python3 scripts/compare_historical.py --preview --log` (or any script)
 
-To use a different model (e.g. if llama3.2 fails): `OLLAMA_MODEL=mistral python3 compare_historical.py`
+To use a different model (e.g. if llama3.2 fails): `OLLAMA_MODEL=mistral python3 scripts/compare_historical.py`
 
 If Ollama isn't running or the model is missing, scripts still run and finish without the LLM analysis.
 
@@ -243,10 +284,10 @@ Scripts send their output to a local [Ollama](https://ollama.com) model for trad
 ollama pull llama3.2
 ```
 
-When you run `compare_prices.py`, `compare_historical.py`, or `test_connection.py`, the script prints verbose data as usual, then adds an **OLLAMA ANALYSIS** section with the model’s take (e.g. mispriced contracts, risks, suggestions). Uses free local models (`llama3.2`, `mistral`, `phi3`, etc.).
+When you run `scripts/compare_prices.py`, `scripts/compare_historical.py`, or `scripts/test_connection.py`, the script prints verbose data as usual, then adds an **OLLAMA ANALYSIS** section with the model’s take (e.g. mispriced contracts, risks, suggestions). Uses free local models (`llama3.2`, `mistral`, `phi3`, etc.).
 
 - **Skip LLM** for cron or non-interactive runs: add `--no-llm`
-- **Override model**: `OLLAMA_MODEL=qwen2.5:3b python3 compare_prices.py`
+- **Override model**: `OLLAMA_MODEL=qwen2.5:3b python3 scripts/compare_prices.py`
 
 If Ollama isn’t running or the model is missing, scripts still run and finish without analysis.
 
@@ -254,9 +295,9 @@ If Ollama isn’t running or the model is missing, scripts still run and finish 
 
 | Script | Purpose |
 |--------|---------|
-| `python3 test_connection.py` | Test Kalshi & Gemini connections |
-| `python3 compare_prices.py` | Quick live snapshot (prices only) |
-| **`python3 compare_historical.py`** | **Evaluate contracts → BUY YES / BUY NO / SKIP** |
+| `python3 scripts/test_connection.py` | Test Kalshi & Gemini connections |
+| `python3 scripts/compare_prices.py` | Quick live snapshot (prices only) |
+| **`python3 scripts/compare_historical.py`** | **Evaluate contracts → BUY YES / BUY NO / SKIP** |
 
 ### Ollama LLM analysis (local, free)
 
@@ -266,24 +307,24 @@ All three scripts send their raw output to a local [Ollama](https://ollama.com) 
 2. Pull a model: `ollama pull llama3.2` (or `mistral`, `phi3`, `qwen2.5:3b`)
 3. Run any script; the last output is Ollama's opinion
 
-To skip LLM analysis (e.g. for cron): `python3 compare_historical.py --no-llm`
+To skip LLM analysis (e.g. for cron): `python3 scripts/compare_historical.py --no-llm`
 
-### Main evaluation: `compare_historical.py`
+### Main evaluation: `scripts/compare_historical.py`
 
 Uses historical daily closes (yfinance) to compute P(price above/below threshold). Compares to market YES price → recommends BUY YES / BUY NO / SKIP when edge exceeds `min_edge` (config or `--edge`).
 
 ```bash
-python3 compare_historical.py --days 30 --markets 0 --edge 0.15   # 0 = all markets
-python3 compare_historical.py --preview              # Show planned orders without placing them
-python3 compare_historical.py --execute              # Place real buy/sell orders (one-shot live run)
-python3 compare_historical.py --execute --no-llm    # Live run, skip LLM analysis
-python3 compare_historical.py --use-volatility      # Add option-style probability (log-normal model)
+python3 scripts/compare_historical.py --days 30 --markets 0 --edge 0.15   # 0 = all markets
+python3 scripts/compare_historical.py --preview              # Show planned orders without placing them
+python3 scripts/compare_historical.py --execute              # Place real buy/sell orders (one-shot live run)
+python3 scripts/compare_historical.py --execute --no-llm    # Live run, skip LLM analysis
+python3 scripts/compare_historical.py --use-volatility      # Add option-style probability (log-normal model)
 ```
 
 **Single production live run** — Evaluate markets and place real orders if the bot finds opportunities:
 
 ```bash
-python3 compare_historical.py --execute --no-llm
+python3 scripts/compare_historical.py --execute --no-llm
 ```
 
 Requires `trading.dry_run: false` in config.yaml.
@@ -332,10 +373,10 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 
 ### Quick snapshot: `compare_prices.py`
 
-Live prices only. For BUY/NO/SKIP recommendations, run `compare_historical.py`:
+Live prices only. For BUY/NO/SKIP recommendations, run `scripts/compare_historical.py`:
 
 ```bash
-python3 compare_prices.py
+python3 scripts/compare_prices.py
 ```
 
 ### Run every 15 minutes
@@ -345,16 +386,16 @@ Run the evaluation locally every 15 minutes for continuous monitoring:
 ```bash
 # crontab -e
 # Add this line (adjust path to your project and venv):
-*/15 * * * * cd /path/to/trading-bot && .venv/bin/python compare_historical.py --days 30 --no-llm >> eval.log 2>&1
+*/15 * * * * cd /path/to/trading-bot && .venv/bin/python scripts/compare_historical.py --days 30 --no-llm >> eval.log 2>&1
 ```
 
 Or use a simple loop (for testing):
 
 ```bash
-while true; do .venv/bin/python compare_historical.py; sleep 900; done
+while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
 ```
 
-**Note:** `compare_prices` and `compare_historical` do not place orders—they only recommend. `bot.py` can place orders when `trading.dry_run` is `false` (see below).
+**Note:** `scripts/compare_prices` and `scripts/compare_historical` do not place orders—they only recommend. `scripts/bot.py` can place orders when `trading.dry_run` is `false` (see below).
 
 ### Balance-aware order execution (Kalshi)
 
@@ -366,12 +407,12 @@ Orders placed via `create_order_safe` are capped to your available balance and n
 
   ```yaml
   trading:
-    dry_run: true              # false = place real orders (bot.py)
+    dry_run: true              # false = place real orders (scripts/bot.py)
     max_pct_of_balance: 0.90   # use at most 90% per order
     min_contracts: 1            # skip if capped count < this
   ```
 
-Enable execution in `bot.py` by setting `buy_yes_below` / `buy_no_below` in `strategy` and `dry_run: false`. Add funds manually as needed.
+Enable execution in `scripts/bot.py` by setting `buy_yes_below` / `buy_no_below` in `strategy` and `dry_run: false`. Add funds manually as needed.
 
 ### Troubleshooting: 400 Bad Request on orders
 
@@ -413,4 +454,4 @@ The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemin
 | Ether | Daily | [ETH price on March 16](https://exchange.gemini.com/predictions/ETH2603162100/eth-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
 | Solana | Weekly (no daily) | [SOL price on March 20](https://exchange.gemini.com/predictions/SOL2603202100/sol-price-on-march-20?categoryPath=crypto%2Ccrypto_solana&status=active) |
 
-**Note:** With `GEMINI_API_KEY` and `GEMINI_API_SECRET` set, `compare_historical.py --execute` places limit orders on both Kalshi and Gemini. Use `--preview` to see planned orders without placing them.
+**Note:** With `GEMINI_API_KEY` and `GEMINI_API_SECRET` set, `scripts/compare_historical.py --execute` places limit orders on both Kalshi and Gemini. Use `--preview` to see planned orders without placing them.

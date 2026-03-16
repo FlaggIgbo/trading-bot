@@ -6,11 +6,16 @@ Ends with Ollama LLM analysis (local, free) when available.
 # TODO: Add --cron mode: minimal output for 15-min runs, log to file
 """
 import argparse
+import sys
 from pathlib import Path
+
+# Add project root to path so imports work when run from scripts/
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(_ROOT / ".env")
 
 from config import get_config
 from gemini_client import (
@@ -56,7 +61,7 @@ def _run() -> int:
         print(f"Gemini: could not fetch events ({e}) - skipping Gemini checks\n")
 
     print("Kalshi & Gemini vs yfinance (live snapshot)\n" + "=" * 70)
-    print("For BUY/NO/SKIP recommendations, run: python3 compare_historical.py\n")
+    print("For BUY/NO/SKIP recommendations, run: python3 scripts/compare_historical.py\n")
 
     for series in markets:
         series = series.strip()
@@ -114,7 +119,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-llm", action="store_true", help="Skip Ollama analysis")
     args = parser.parse_args()
-    return capture_and_analyze(_run, "compare_prices.py", use_llm=not args.no_llm)
+    return capture_and_analyze(_run, "scripts/compare_prices.py", use_llm=not args.no_llm)
 
 
 if __name__ == "__main__":

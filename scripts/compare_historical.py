@@ -11,7 +11,7 @@ Example: "Bitcoin above $81,250 on Mar 16?" → historical says 5% of days close
 Designed to run every 15 minutes locally for continuous evaluation.
 See README for cron setup.
 
-Run: python3 compare_historical.py [--days 30] [--markets 0] [--edge 0.15]
+Run: python3 scripts/compare_historical.py [--days 30] [--markets 0] [--edge 0.15]
 """
 from __future__ import annotations
 
@@ -31,9 +31,13 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Add project root to path so imports work when run from scripts/
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(_ROOT / ".env")
 
 from config import get_config
 from gemini_client import (
@@ -91,6 +95,18 @@ def _get_resolution_hour_from_title(title: str) -> int | None:
     return hour
 
 
+def _get_title(market_or_title: dict | str) -> str:
+    """Extract full title string from market dict or raw string."""
+    if isinstance(market_or_title, dict):
+        title = (
+            (market_or_title.get("title") or market_or_title.get("yes_sub_title") or "")
+            + (market_or_title.get("no_sub_title") or "")
+        )
+    else:
+        title = str(market_or_title)
+    return title
+
+
 def _should_skip_by_resolution(market_or_title: dict | str, yf_ticker: str) -> bool:
     """
     True if we should SKIP this market (never evaluate). We evaluate:
@@ -100,13 +116,7 @@ def _should_skip_by_resolution(market_or_title: dict | str, yf_ticker: str) -> b
       - Other times (e.g. 8pm ET): use strict intraday_other_min_p_win (only buy when almost certain)
     - Non–crypto/non–S&P with intraday → skip (no supported time)
     """
-    if isinstance(market_or_title, dict):
-        title = (market_or_title.get("title") or market_or_title.get("yes_sub_title") or "") + (
-            market_or_title.get("no_sub_title") or ""
-        )
-    else:
-        title = str(market_or_title)
-
+    title = _get_title(market_or_title)
     hour = _get_resolution_hour_from_title(title)
     if hour is None:
         return False  # No intraday time → treat as daily close, don't skip
@@ -124,13 +134,7 @@ def _is_other_intraday(market_or_title: dict | str, yf_ticker: str) -> bool:
     True if this is an intraday market at a time OTHER than our standard 5pm crypto / 4pm S&P.
     E.g. "Bitcoin today at 8pm ET" → use strict "almost certain" threshold (intraday_other_min_p_win).
     """
-    if isinstance(market_or_title, dict):
-        title = (market_or_title.get("title") or market_or_title.get("yes_sub_title") or "") + (
-            market_or_title.get("no_sub_title") or ""
-        )
-    else:
-        title = str(market_or_title)
-
+    title = _get_title(market_or_title)
     hour = _get_resolution_hour_from_title(title)
     if hour is None:
         return False
@@ -222,7 +226,9 @@ def _volatility_probability(
             returns.append(r)
     if len(returns) < 3:
         return None
-    sigma_daily = (sum((r - sum(returns) / len(returns)) ** 2 for r in returns) / len(returns)) ** 0.5
+    mean_return = sum(returns) / len(returns)
+    variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+    sigma_daily = variance ** 0.5
     sigma_annual = sigma_daily * (252 ** 0.5)
     T = max(0.01, days_to_expiry / 365.0)
     if sigma_annual < 1e-8:
@@ -377,7 +383,7 @@ def main():
     parser.add_argument("--log", metavar="DIR", nargs="?", const="~/Desktop/trading-bot-logs", default=None, help="Log run output to ~/Desktop/trading-bot-logs/ or specified dir (creates eval_YYYYMMDD.log)")
     args = parser.parse_args()
 
-    return capture_and_analyze(lambda: _run(args), "compare_historical.py", use_llm=not args.no_llm)
+    return capture_and_analyze(lambda: _run(args), "scripts/compare_historical.py", use_llm=not args.no_llm)
 
 
 def _run(args) -> int:
@@ -416,6 +422,8 @@ def _run(args) -> int:
         print(f"Logging to {log_path}", flush=True)
 
         class Tee:
+            """Writes to multiple file handles (stdout and log file)."""
+
             def __init__(self, *files):
                 self.files = files
 
@@ -473,7 +481,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     pending_orders: list[dict] = []
     pending_sells: list[dict] = []
     days_to_expiry = float(strategy.get("days_to_expiry", 30))
-    no_above_cushion = float(strategy.get("skip_buy_no_above_cushion", 0.1))
+    no_above_cushion = float(strategy.get("skip_buy_no_above_cushion", 0.01))
     sell_losing_pct = float(strategy.get("sell_losing_pct", 0.55))
     limit_dip_pct = float(strategy.get("limit_dip_pct", 0))
     intraday_other_min_p_win = float(strategy.get("intraday_other_min_p_win", 0.90))
@@ -553,7 +561,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"  {ticker}")
             print(f"    {title}")
             print(f"    Threshold: ${threshold:,.0f} ({direction})")
-            p_label = "P(YES)" if vol_p is None else f"P(YES) [emp={_empirical_probability(closes, threshold, direction):.1%} vol={vol_p:.1%}]"
+            if vol_p is None:
+                p_label = "P(YES)"
+            else:
+                emp_kalshi = _empirical_probability(closes, threshold, direction)
+                p_label = f"P(YES) [emp={emp_kalshi:.1%} vol={vol_p:.1%}]"
             print(f"    {p_label}: {hist_p:.1%}  Market YES: {yes_bid:.1%}  →  {rec}")
             if getattr(args, "verbose", False):
                 mn, mx = min(closes), max(closes)
@@ -615,7 +627,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"  [Gemini] {evt.get('ticker','?')}")
                 print(f"    {title}")
                 print(f"    Threshold: ${threshold_g:,.0f} ({direction_g})")
-                p_label_gem = "P(YES)" if vol_p_gem is None else f"P(YES) [emp={emp:.1%} vol={vol_p_gem:.1%}]"
+                if vol_p_gem is None:
+                    p_label_gem = "P(YES)"
+                else:
+                    p_label_gem = f"P(YES) [emp={emp:.1%} vol={vol_p_gem:.1%}]"
                 print(f"    {p_label_gem}: {hist_p_gem:.1%}  Market YES: {impl:.1%}  →  {rec}")
                 if rec != "SKIP":
                     print(f"    Edge: {abs(diff_gem):.1%}")
@@ -876,13 +891,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 price_str = f"{s['price']:.4f}"  # Kalshi requires 4 decimal places
                 try:
                     result = kalshi.create_order_safe(
-                    ticker=s["ticker"],
-                    side=s["side"],
-                    action="sell",
-                    count=s["count"],
-                    yes_price_dollars=price_str if s["side"] == "yes" else None,
-                    no_price_dollars=price_str if s["side"] == "no" else None,
-                    max_pct_of_balance=max_pct,
+                        ticker=s["ticker"],
+                        side=s["side"],
+                        action="sell",
+                        count=s["count"],
+                        yes_price_dollars=price_str if s["side"] == "yes" else None,
+                        no_price_dollars=price_str if s["side"] == "no" else None,
+                        max_pct_of_balance=max_pct,
                     )
                     if result:
                         print(f"  Placed SELL {s['side'].upper()} {s['ticker']} x {s['count']}")
@@ -912,13 +927,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 count = o.get("count", 10)
                 try:
                     result = kalshi.create_order_safe(
-                    ticker=o["ticker"],
-                    side=o["side"],
-                    action="buy",
-                    count=count,
-                    yes_price_dollars=price_str if o["side"] == "yes" else None,
-                    no_price_dollars=price_str if o["side"] == "no" else None,
-                    max_pct_of_balance=max_pct,
+                        ticker=o["ticker"],
+                        side=o["side"],
+                        action="buy",
+                        count=count,
+                        yes_price_dollars=price_str if o["side"] == "yes" else None,
+                        no_price_dollars=price_str if o["side"] == "no" else None,
+                        max_pct_of_balance=max_pct,
                     )
                     if result:
                         print(f"  Placed BUY {o['side'].upper()} {o['ticker']} x {count}")

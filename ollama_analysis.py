@@ -93,8 +93,11 @@ def capture_and_analyze(
     real_stdout = sys.stdout
 
     class Tee:
+        """Forwards writes to both real stdout and a capture buffer."""
+
         def __init__(self, primary, secondary):
-            self.primary, self.secondary = primary, secondary
+            self.primary = primary
+            self.secondary = secondary
 
         def write(self, data):
             self.primary.write(data)

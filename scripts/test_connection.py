@@ -3,19 +3,23 @@
 Quick script to test Kalshi and Gemini API connections and fetch data for configured markets.
 Ends with Ollama LLM analysis (local, free) when available.
 
-Run: python test_connection.py
-      python test_connection.py --debug    # diagnose auth issues
-      python test_connection.py --inspect  # show API response types/schema
-      python test_connection.py --no-llm   # skip Ollama analysis (e.g. for cron)
+Run: python scripts/test_connection.py
+      python scripts/test_connection.py --debug    # diagnose auth issues
+      python scripts/test_connection.py --inspect  # show API response types/schema
+      python scripts/test_connection.py --no-llm   # skip Ollama analysis (e.g. for cron)
 """
 import argparse
 import os
+import sys
 from pathlib import Path
+
+# Add project root to path so imports work when run from scripts/
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
 
 from dotenv import load_dotenv
 
-# Load .env from project root so it's used regardless of cwd
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(_ROOT / ".env")
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +242,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from ollama_analysis import capture_and_analyze
-    return capture_and_analyze(lambda: _run(args), "test_connection.py", use_llm=not args.no_llm)
+    return capture_and_analyze(lambda: _run(args), "scripts/test_connection.py", use_llm=not args.no_llm)
 
 
 if __name__ == "__main__":

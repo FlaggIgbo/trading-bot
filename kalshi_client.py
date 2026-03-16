@@ -83,10 +83,10 @@ class KalshiClient:
     ):
         self.api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID")
         self.private_key = private_key or _load_private_key()
+        use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
+        default_base = DEMO_BASE if use_demo else PRODUCTION_BASE
         self.base_url = (
-            base_url
-            or os.getenv("KALSHI_BASE_URL")
-            or (DEMO_BASE if os.getenv("KALSHI_USE_DEMO", "true").lower() == "true" else PRODUCTION_BASE)
+            base_url or os.getenv("KALSHI_BASE_URL") or default_base
         ).rstrip("/")
 
         if not self.api_key_id:
@@ -267,18 +267,17 @@ class KalshiClient:
                 r = self.get_positions(ticker=ticker)
                 positions = r.get("market_positions") or []
                 side_lower = side.lower()
-                pos = next(
-                    (
-                        p
-                        for p in positions
-                        if p.get("ticker") == ticker
-                        and (
-                            (side_lower == "yes" and float(p.get("position_fp") or p.get("position") or 0) > 0)
-                            or (side_lower == "no" and float(p.get("position_fp") or p.get("position") or 0) < 0)
-                        )
-                    ),
-                    None,
-                )
+                pos = None
+                for p in positions:
+                    if p.get("ticker") != ticker:
+                        continue
+                    fp_val = float(p.get("position_fp") or p.get("position") or 0)
+                    if side_lower == "yes" and fp_val > 0:
+                        pos = p
+                        break
+                    if side_lower == "no" and fp_val < 0:
+                        pos = p
+                        break
                 fp_raw = pos.get("position_fp") or pos.get("position") or "0" if pos else "0"
                 position_count = int(abs(float(fp_raw))) if pos else 0
                 max_count = position_count
@@ -331,12 +330,10 @@ class KalshiClient:
             )
         except requests.exceptions.HTTPError as e:
             if e.response is not None and 400 <= e.response.status_code < 500:
-                err_text = ""
-                if e.response is not None:
-                    try:
-                        err_text = (e.response.text or "")[:200]
-                    except Exception:
-                        err_text = str(e)
+                try:
+                    err_text = (e.response.text or "")[:200]
+                except Exception:
+                    err_text = str(e)
                 log.warning(
                     "create_order_safe: order rejected (4xx) %s %s - %s",
                     getattr(e.response, "status_code", "?"),
