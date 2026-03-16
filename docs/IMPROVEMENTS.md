@@ -42,6 +42,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Hours until resolution in output** | —                                       | ✓ Contract title shows "(in X.X hours)" until resolution; decimal for sub-hour (e.g. 0.3 hours). |
 | **Calibration loss weighting**       | —                                       | ✓ `strategy.calibration_loss_weight` (default 1.5); losers weighted higher in calibration; `get_calibration_stats()` uses weighted wins/loses for bucket and by_direction_side win rates. Learn more from mistakes. |
 | **Sell and re-buy losers**            | —                                       | ✓ `strategy.enable_sell_and_rebuy`; when selling a losing position (LIKELY_LOSE or rec flip), optionally re-buy same contract at current price if model still sees edge; bypasses min 5¢ rule for re-entry. Kalshi + Gemini. |
+| **P(lose) with market odds blend**    | —                                       | ✓ `_compute_p_lose()` blends model (hist_p) with Kalshi/Gemini market odds; market weight increases as we approach resolution (more accurate near expiry). Config: `p_lose_blend_market_max_weight` (0.5), `p_lose_blend_market_half_life_days` (0.5). |
 
 ---
 
@@ -54,7 +55,8 @@ Refactoring, architecture, and code quality changes.
 | Improvement                         | Description |
 | ----------------------------------- | ----------- |
 | **_StrategyParams consolidation**   | Strategy config loaded once into `_StrategyParams` dataclass; avoids repeated dict lookups; single source of truth for min_edge, fees, thresholds. |
-| **_maybe_add_reentry_order helper**| Shared helper for sell-and-rebuy logic; used by Kalshi (cached + orphan) and Gemini position eval; DRY, consistent edge check. |
+| **_maybe_add_reentry_order helper** | Shared helper for sell-and-rebuy logic; used by Kalshi (cached + orphan) and Gemini position eval; DRY, consistent edge check. |
+| **_compute_p_lose helper**         | Blends model P(lose) with market odds; time-weighted (half-life decay) so market gets more weight near resolution. |
 | **Calibration loss weighting in storage** | `get_calibration_stats()` accepts `config`; reads `calibration_loss_weight`; applies to bucket and by_direction_side win rates. |
 | **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
 | **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |

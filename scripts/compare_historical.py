@@ -127,6 +127,8 @@ class _StrategyParams:
     min_bucket_samples: int
     min_vol_confidence_far_otm: float
     enable_sell_and_rebuy: bool
+    p_lose_blend_market_max_weight: float
+    p_lose_blend_market_half_life_days: float
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -166,6 +168,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
         min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),
         enable_sell_and_rebuy=bool(strategy.get("enable_sell_and_rebuy", False)),
+        p_lose_blend_market_max_weight=float(strategy.get("p_lose_blend_market_max_weight", 0.5)),
+        p_lose_blend_market_half_life_days=float(strategy.get("p_lose_blend_market_half_life_days", 0.5)),
     )
 
 
@@ -643,6 +647,28 @@ def _fee_per_contract(price: float, maker_rate: float) -> float:
     if fee <= 0:
         return 0.0
     return math.ceil(fee * 100) / 100
+
+
+def _compute_p_lose(
+    hist_p: float,
+    yes_bid: float,
+    no_bid: float,
+    side: str,
+    days_to_expiry: float | None,
+    sp: _StrategyParams,
+) -> float:
+    """
+    P(our position loses). Blends model (hist_p) with market odds; market gets more
+    weight as we approach resolution (closer = more accurate). Half-life decay.
+    """
+    p_model = hist_p if side == "no" else (1.0 - hist_p)
+    p_market = yes_bid if side == "no" else no_bid
+    if sp.p_lose_blend_market_max_weight <= 0 or not (0 < yes_bid < 1):
+        return p_model
+    dte = max(0.01, days_to_expiry) if days_to_expiry is not None else 1.0
+    half = max(0.01, sp.p_lose_blend_market_half_life_days)
+    weight_market = sp.p_lose_blend_market_max_weight * (1.0 / (1.0 + dte / half))
+    return (1.0 - weight_market) * p_model + weight_market * p_market
 
 
 def _maybe_add_reentry_order(
@@ -1977,7 +2003,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             threshold, direction, vol_p, abs(diff), m.get("title"), pos_yf, cfg,
                                         )
                                     # SELL when definitely a loser
-                                    p_lose = hist_p if side == "no" else (1.0 - hist_p)
+                                    p_lose = _compute_p_lose(hist_p, yes_bid, no_bid, side, dte_pos, sp)
                                     if p_lose >= sp.sell_losing_pct:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -2055,7 +2081,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 sell_price = yes_bid if side == "yes" else no_bid
 
                 # SELL when we think position will lose: P(lose) > sell_losing_pct
-                p_lose = hist_p if side == "no" else (1.0 - hist_p)
+                p_lose = _compute_p_lose(hist_p, yes_bid, no_bid, side, dte_cached, sp)
                 if p_lose >= sp.sell_losing_pct:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
@@ -2214,7 +2240,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 PLATFORM_GEMINI, ticker_g, impl, no_price_g, hist_p_g, rec,
                                 threshold_g, direction_g, vol_p_g, abs(diff_g), title, pos_yf, cfg,
                             )
-                        p_lose = hist_p_g if side == "no" else (1.0 - hist_p_g)
+                        p_lose = _compute_p_lose(hist_p_g, impl, no_price_g, side, dte_g, sp)
                         if p_lose >= sp.sell_losing_pct:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,

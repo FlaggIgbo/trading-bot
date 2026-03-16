@@ -101,7 +101,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Fetch Gemini positions   | `gemini_trading.get_positions()`; map symbol→market via `gemini_symbol_to_market` | `compare_historical.py:1868-1888`                       |
 | Parse position           | Kalshi: `position_fp` positive = YES, negative = NO; Gemini: `outcome`, `totalQuantity` | `compare_historical.py:1668-1676`, `1878-1886`     |
 | Use cached or fresh data | Market data from earlier loop or fresh fetch (Kalshi); Gemini uses events  | `compare_historical.py:1672`, `1887`                    |
-| Compute P(lose)          | Probability we're wrong on this position (hist_p + vol_p blend)           | `compare_historical.py`                                 |
+| Compute P(lose)          | Blends model (hist_p) with market odds (yes_bid/no_bid); market weight increases near resolution via `_compute_p_lose()` | `compare_historical.py` → `_compute_p_lose()`           |
 | SELL triggers            | LIKELY_LOSE (P≥55%), rec flip, RULE_VIOLATION (price above strike on NO), unsupported resolution | `compare_historical.py` → `pending_sells.append()` |
 | Re-entry (optional)      | If `enable_sell_and_rebuy`: when selling loser, add BUY at current price if edge ≥ min_edge; bypasses min 5¢ | `_maybe_add_reentry_order()`                      |
 | Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `pending_sells.append()`                               |
@@ -136,7 +136,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | File                                | Purpose                                             | Key code pointers                                                                                                                                                                    |
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_filter_contradictory_buys()` L951 |
+| **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
 | **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); Sharpe, win rate, max drawdown                                                                                                 |
 | **`scripts/bot.py`**                | Simple polling bot (buy when price below threshold) | `main()` L34, `_check_market()` L101, `_resolve_markets()` L84                                                                                                                       |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
@@ -170,7 +170,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | File                                            | Purpose                                                   |
 | ----------------------------------------------- | --------------------------------------------------------- |
-| **`launchd/com.user.compare_historical.plist`** | Run `compare_historical` every 15 min on macOS            |
+| **`launchd/com.user.compare_historical.plist`** | Run `compare_historical` every 10 min on macOS (configurable) |
 | **`launchd/README.md`**                         | Setup: copy plist, `launchctl load`, caffeinate           |
 | **`package.json`**                              | Prettier dev dependency for YAML/JSON/MD formatting       |
 | **`.pre-commit-config.yaml`**                   | Ruff (Python linter/formatter) + Prettier on git push     |
@@ -229,6 +229,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Where is the backtest?               | `scripts/backtest.py` — `--mode real` or `synthetic`                 |
 | Where are strategy params defined?   | `config.yaml` → `strategy:`; loaded in `_load_strategy_params()` L115 |
 | Where is P(YES) computed?            | `_empirical_probability()` L434 + `_volatility_probability()` L463    |
+| Where is P(lose) computed?           | `_compute_p_lose()` L652 — blends model with market odds; more weight near expiry |
 | Where are Kalshi orders placed?      | `kalshi_client.py` → `create_order_safe()`                            |
 | Where are Gemini orders placed?      | `gemini_client.py` → `place_order_safe()`                             |
 | Where is historical price data from? | `yfinance_client.py` → `get_aggs()` (Yahoo Finance / CoinGecko)       |

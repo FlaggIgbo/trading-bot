@@ -68,6 +68,9 @@ strategy:
   min_vol_confidence_far_otm: 0.97 # Require vol model ≥97% (not 95%) for BUY YES when strike far above current; targets losing "above X"
   calibration_loss_weight: 1.5 # Weight losers 1.5x in calibration (learn more from mistakes; 1.0 = equal weight)
   enable_sell_and_rebuy: true # When selling a loser, re-buy same contract at lower price if model sees edge (bypasses min 5¢)
+  # P(lose) blend: incorporate market odds; weight increases as we approach resolution (markets more accurate near expiry)
+  p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
+  p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   # use_kelly: true   # Use Kelly criterion for position sizing (when true)
   # kelly_fraction: 0.25   # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer)
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
