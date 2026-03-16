@@ -224,11 +224,14 @@ class KalshiClient:
         no_price_dollars: str | None = None,
         time_in_force: str = "good_till_canceled",
         max_pct_of_balance: float = 0.90,
+        min_balance_for_limit_fallback_cents: int = 0,
         **kwargs,
     ) -> dict | None:
         """
         Create order, capping size by balance (buy) or position (sell).
         Never raises on 4xx (e.g. insufficient funds); logs and returns None so scripts continue.
+        When balance is below min_balance_for_limit_fallback_cents and we'd skip a buy,
+        place a 1-contract limit order at a price we can afford instead.
         """
         # Resolve price in cents (Kalshi: 1-99 cents per contract)
         price_cents: int | None = None
@@ -261,6 +264,7 @@ class KalshiClient:
             return None
 
         max_count: int
+        balance_cents = 0
         if action == "sell":
             # Cap by position size. Kalshi API: position_fp is signed (positive=YES, negative=NO)
             try:
@@ -297,6 +301,45 @@ class KalshiClient:
 
         count = min(count, max_count) if max_count else 0
 
+        # Low-balance limit-order fallback: when we'd skip a buy due to insufficient balance,
+        # place a 1-contract limit at a price we can afford instead of skipping
+        if (
+            count <= 0
+            and action == "buy"
+            and balance_cents > 0
+            and min_balance_for_limit_fallback_cents > 0
+            and balance_cents < min_balance_for_limit_fallback_cents
+        ):
+            max_spend = int(balance_cents * max_pct_of_balance)
+            if max_spend >= 1:  # Can afford at least 1¢ (Kalshi min)
+                fallback_price_cents = min(99, max(1, max_spend))
+                fallback_price_str = f"{fallback_price_cents / 100:.4f}"
+                try:
+                    result = self.create_order(
+                        ticker=ticker,
+                        side=side,
+                        action=action,
+                        count=1,
+                        yes_price_dollars=fallback_price_str if side.lower() == "yes" else None,
+                        no_price_dollars=fallback_price_str if side.lower() == "no" else None,
+                        time_in_force=time_in_force,
+                    )
+                    log.info(
+                        "create_order_safe: low-balance limit fallback - placed 1 @ %d¢ (balance $%.2f)",
+                        fallback_price_cents,
+                        balance_cents / 100,
+                    )
+                    return result
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and 400 <= e.response.status_code < 500:
+                        log.warning(
+                            "create_order_safe: low-balance limit fallback rejected %s - %s",
+                            ticker,
+                            (e.response.text or "")[:200],
+                        )
+                        return None
+                    raise
+
         if count <= 0:
             if action == "sell":
                 log.info(
@@ -308,7 +351,7 @@ class KalshiClient:
             else:
                 log.info(
                     "create_order_safe: skip - balance $%.2f insufficient for %s @ %d¢ (max %d contracts)",
-                    (self.get_balance().get("balance", 0) or 0) / 100,
+                    balance_cents / 100,
                     ticker,
                     price_cents,
                     max_count,

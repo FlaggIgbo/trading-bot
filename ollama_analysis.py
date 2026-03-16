@@ -16,7 +16,8 @@ from typing import Callable
 
 # Default: small fast free model. Override via OLLAMA_MODEL env.
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
-FALLBACK_MODELS = ["mistral", "phi3", "qwen2.5:3b"]  # Tried in order if default model unavailable
+# llama3.2:1b is a common variant when full llama3.2 isn't pulled
+FALLBACK_MODELS = ["llama3.2:1b", "mistral", "phi3", "qwen2.5:3b"]  # Tried in order if default unavailable
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ def run_analysis(data_text: str, script_name: str, model: str | None = None) -> 
             print("=" * 70)
             return True
 
-    print("\n(Ollama skipped: not running or model missing. Run: ollama pull llama3.2)")
+    print("\n(Ollama skipped: not running or model missing. Run: ollama pull llama3.2 or ollama pull llama3.2:1b)")
     return False
 
 

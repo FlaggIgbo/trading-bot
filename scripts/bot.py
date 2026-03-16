@@ -127,6 +127,7 @@ def _check_market(client: KalshiClient, ticker: str, cfg: dict) -> None:
     dry_run = trading.get("dry_run", True)
     max_pct = float(trading.get("max_pct_of_balance", 0.90))
     min_contracts = int(trading.get("min_contracts", 1))
+    min_balance_fallback = int(trading.get("min_balance_for_limit_fallback_cents", 0))
 
     if buy_yes_threshold is not None and yes_bid < buy_yes_threshold:
         log.info("  -> Strategy: buy YES below %.2f (current %.2f)", buy_yes_threshold, yes_bid)
@@ -136,6 +137,7 @@ def _check_market(client: KalshiClient, ticker: str, cfg: dict) -> None:
                 count=10,  # strategy can add max_contracts
                 yes_price_dollars=f"{yes_bid:.4f}",  # Kalshi requires 4 decimal places
                 max_pct_of_balance=max_pct,
+                min_balance_for_limit_fallback_cents=min_balance_fallback,
             )
             if result:
                 log.info("  -> Placed BUY YES order")
@@ -147,6 +149,7 @@ def _check_market(client: KalshiClient, ticker: str, cfg: dict) -> None:
                 count=10,
                 no_price_dollars=f"{no_bid:.4f}",  # Kalshi requires 4 decimal places
                 max_pct_of_balance=max_pct,
+                min_balance_for_limit_fallback_cents=min_balance_fallback,
             )
             if result:
                 log.info("  -> Placed BUY NO order")

@@ -36,6 +36,8 @@ _CRYPTO_ASSET_KEYS = {
     "ethereum": "ETH-USD",
     "sol": "SOL-USD",
     "solana": "SOL-USD",
+    "xrp": "XRP-USD",
+    "ripple": "XRP-USD",
 }
 
 
@@ -160,6 +162,14 @@ def _get_yes_contract(event: dict) -> dict | None:
     return None
 
 
+def _get_no_contract(event: dict) -> dict | None:
+    """Return the No contract from event.contracts, or None."""
+    for c in event.get("contracts") or []:
+        if (c.get("label") or "").lower() == "no":
+            return c
+    return None
+
+
 def get_yes_price(contract: dict) -> float:
     """Extract implied P(YES) from Gemini contract. Prefer bestBid, else lastTradePrice, else buy.yes."""
     prices = contract.get("prices") or {}
@@ -182,6 +192,16 @@ def get_yes_price(contract: dict) -> float:
             return float(yes)
         except (ValueError, TypeError):
             pass
+    return 0.0
+
+
+def get_no_price(event: dict) -> float:
+    """Extract implied P(NO) from Gemini event. For binary markets, P(NO) = 1 - P(YES)."""
+    yes_c = _get_yes_contract(event)
+    if yes_c:
+        yes_p = get_yes_price(yes_c)
+        if 0 < yes_p < 1:
+            return 1.0 - yes_p
     return 0.0
 
 
