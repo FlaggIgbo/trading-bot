@@ -168,7 +168,10 @@ class GeminiPredictionClient:
                     break
 
         _fetch_category("crypto")  # daily, weekly
-        _fetch_category("hourly")  # hourly (BTC, ETH, SOL, XRP at 1am EDT etc.)
+        try:
+            _fetch_category("hourly")  # hourly (BTC, ETH, SOL, XRP at 1am EDT etc.)
+        except Exception as e:
+            log.debug("Gemini hourly category fetch failed (API may have deprecated it): %s", e)
         return out
 
     def get_events_by_asset(

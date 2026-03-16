@@ -84,7 +84,7 @@ Same logic for Gemini events (BTC, ETH, SOL, XRP):
 
 | Step              | What happens                               | Code pointer                                       |
 | ----------------- | ------------------------------------------ | -------------------------------------------------- |
-| Get Gemini events | `gemini.get_crypto_events()` (daily, weekly, hourly) | `gemini_client.py:144` → `get_crypto_events()`     |
+| Get Gemini events | `gemini.get_crypto_events()` (crypto category; hourly skipped if API returns 400) | `gemini_client.py:147` → `get_crypto_events()`     |
 | Map asset         | Title/ticker → BTC-USD, ETH-USD, etc.      | `gemini_client.py:74` → `_event_to_asset()`        |
 | Extract strike    | Parse from event title                     | `gemini_client.py` → `extract_strike_from_event()` |
 | Same flow         | Arb, P(YES), recommend, rules, limit order | `compare_historical.py:1324-1435`                  |
@@ -154,7 +154,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | File                     | Purpose                            | Key functions                                                                                                                                                                                                                                            |
 | ------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`kalshi_client.py`**   | Kalshi API with RSA-PSS auth       | `KalshiClient`: `get_balance()`, `get_markets()`, `get_positions()`, `get_market()`, `get_historical_market()`, `get_orderbook()`, `create_order_safe()`, `cancel_order_safe()`                                                                        |
-| **`gemini_client.py`**   | Gemini Prediction Markets (crypto, incl. hourly) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto` + `hourly`); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. |
+| **`gemini_client.py`**   | Gemini Prediction Markets (crypto) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`; `hourly` category skipped if API returns 400); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. |
 | **`yfinance_client.py`** | Historical prices (no API key)     | `get_aggs()` L137 (daily closes), `get_aggs_as_of()` (point-in-time for backtest), `get_snapshot()` L52 (current price); CoinGecko fallback for crypto                                                                                                                                   |
 
 ### Support Modules

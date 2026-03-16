@@ -116,7 +116,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini hourly events** (daily + hourly for BTC, ETH, SOL, XRP) (monotonically increasing per API key per Gemini docs), **Gemini hourly support** (trades on hourly crypto bets, e.g. BTC/ETH/SOL/XRP at 1am EDT), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation).
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini crypto events** (daily/weekly for BTC, ETH, SOL, XRP; hourly category may return 400—we gracefully skip and use crypto only), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation).
 
 ## Contract evaluation workflow
 
@@ -583,10 +583,12 @@ Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `SPY`, etc. See [yfinance](https://githu
 
 ### Gemini Prediction Markets (crypto only)
 
-The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemini.com/prediction-markets/markets) for **crypto only** (BTC, ETH, SOL, XRP)—both **daily/weekly** and **hourly** events. S&P 500 is not included. The events API is public; no API key required for listing. Optional env vars:
+The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemini.com/prediction-markets/markets) for **crypto only** (BTC, ETH, SOL, XRP)—**daily/weekly** events via `category=crypto`. S&P 500 is not included. The events API is public; no API key required for listing. Optional env vars:
 
 - `GEMINI_USE_SANDBOX=true` - use sandbox API
 - `GEMINI_PREDICTION_BASE_URL` - override base URL
+
+**Troubleshooting:** If you see `[Gemini] No events fetched` with a proxy or 403 error, try `NO_PROXY=api.gemini.com,*.gemini.com` or run without proxy (e.g. `env -u HTTP_PROXY -u HTTPS_PROXY`).
 
 **Relevant markets (Gemini Exchange UI):**
 

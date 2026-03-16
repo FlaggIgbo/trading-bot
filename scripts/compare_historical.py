@@ -1058,10 +1058,12 @@ def _allocate_budget_to_orders(
     pending_orders: list[dict],
     balance_cents: int,
     max_pct: float,
+    filter_zero: bool = True,
 ) -> None:
     """
     Adjust order counts so total cost fits budget. Prefer buying 1 of many
     contracts over blowing the budget on a few. Modifies pending_orders in place.
+    filter_zero: if True, remove orders with count 0 from the list; if False, keep them.
     """
     if not pending_orders:
         return
@@ -1080,17 +1082,16 @@ def _allocate_budget_to_orders(
         return
     # Can't afford 1 of each: keep highest-edge trades first
     by_edge = sorted(pending_orders, key=lambda x: -float(x.get("edge", 0)))
-    kept: list[dict] = []
     running_cents = 0
     for o in by_edge:
         cost_1 = int(float(o.get("price", 0)) * 100)
         if running_cents + cost_1 <= available_cents:
             o["count"] = 1
-            kept.append(o)
             running_cents += cost_1
         else:
-            o["count"] = 0  # Will be filtered
-    pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
+            o["count"] = 0
+    if filter_zero:
+        pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
 
 
 def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
@@ -1266,6 +1267,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     gemini_events_by_asset: dict[str, list] = {}
     kalshi_markets_by_series: dict[str, list] = {}
 
+    _gemini_fetch_error: list[BaseException | None] = [None]
+
     def _fetch_gemini_events() -> dict[str, list]:
         out: dict[str, list] = {}
         try:
@@ -1274,8 +1277,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 asset = _event_to_asset(evt)
                 if asset:
                     out.setdefault(asset, []).append(evt)
-        except Exception:
-            pass
+        except Exception as e:
+            _gemini_fetch_error[0] = e
         return out
 
     def _fetch_kalshi_markets() -> dict[str, list]:
@@ -1303,6 +1306,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     if total_gem > 0:
         per_asset = ", ".join(f"{a}:{len(v)}" for a, v in sorted(gemini_events_by_asset.items()))
         print(f"[Gemini] Fetched {total_gem} events ({per_asset})")
+    elif _gemini_fetch_error[0]:
+        err = _gemini_fetch_error[0]
+        print(f"[Gemini] No events fetched: {err}")
+        if "proxy" in str(err).lower() or "403" in str(err):
+            print("[Gemini] Tip: If using a proxy (HTTP_PROXY/HTTPS_PROXY), api.gemini.com may be blocked. Try: NO_PROXY=api.gemini.com,*.gemini.com")
 
     pending_orders: list[dict] = []
     pending_sells: list[dict] = []
@@ -2018,8 +2026,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             gemini_balance_cents = int(_gt.get_balance().get("balance", 0) or 0)
         except Exception:
             pass
-    _allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct)
-    pending_orders[:] = [o for o in kalshi_orders + gemini_orders if o.get("count", 0) > 0]
+    _allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct, filter_zero=False)
+    # Keep Gemini orders with count=0 so we can re-allocate after cancels free up balance
+    pending_orders[:] = [o for o in kalshi_orders if o.get("count", 0) > 0] + gemini_orders
 
     # Proposed trades + per-trade Ollama: print each trade and Ollama's interpretation
     if pending_orders or pending_sells:
@@ -2055,11 +2064,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print("=" * 75)
         buys_placed, sells_placed = 0, 0
         gemini_trading = None
-        if any(o["platform"] == PLATFORM_GEMINI for o in pending_orders) or any(s["platform"] == PLATFORM_GEMINI for s in pending_sells):
-            try:
-                gemini_trading = GeminiTradingClient()
-            except ValueError:
-                print("  (Gemini: GEMINI_API_KEY/GEMINI_API_SECRET not set, skipping Gemini orders)")
+        # Always try to create Gemini client when executing — review/cancel stale orders even if no new Gemini orders
+        try:
+            gemini_trading = GeminiTradingClient()
+        except ValueError:
+            pass  # No API keys; skip Gemini (no message unless we had pending Gemini items)
+        if gemini_trading is None and (any(o["platform"] == PLATFORM_GEMINI for o in pending_orders) or any(s["platform"] == PLATFORM_GEMINI for s in pending_sells)):
+            print("  (Gemini: GEMINI_API_KEY/GEMINI_API_SECRET not set, skipping Gemini orders)")
 
         # Build pending lookups for order review: (ticker, side) or (symbol, outcome) → {price, count, ...}
         kalshi_pending_buys = {(o["ticker"], o["side"]): o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI}
@@ -2218,6 +2229,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     else:
                         print(f"  (skipped SELL (Gemini) {s['ticker']} - balance/API constraint)")
 
+        # Re-allocate Gemini budget after cancels+sells — freed balance may now allow buys
+        gemini_orders_in_pending = [o for o in pending_orders if o.get("platform") == PLATFORM_GEMINI]
+        if gemini_trading and gemini_orders_in_pending:
+            try:
+                gemini_balance_after = int(gemini_trading.get_balance().get("balance", 0) or 0)
+                _allocate_budget_to_orders(
+                    gemini_orders_in_pending, gemini_balance_after, max_total_buy_pct, filter_zero=False
+                )
+            except Exception:
+                pass
+
         # Then BUY — balance now reflects sell proceeds
         for o in pending_orders:
             if o["platform"] == PLATFORM_KALSHI:
@@ -2267,6 +2289,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  BUY {o['ticker']} failed: {ex}")
             else:
                 count = o.get("count", 10)
+                if count <= 0:
+                    continue
                 sym = o.get("instrument_symbol")
                 if not sym:
                     gemini_evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
@@ -2352,6 +2376,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"   (count capped by balance * {max_pct:.0%} via create_order_safe)")
             else:
                 count = o.get("count", 10)
+                if count <= 0:
+                    continue
                 sym = o.get("instrument_symbol") or (
                     get_instrument_symbol(
                         o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"]),
