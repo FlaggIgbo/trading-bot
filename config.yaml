@@ -66,6 +66,8 @@ strategy:
   use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
   min_bucket_samples: 5 # Min trades in bucket before applying bucket penalty
   min_vol_confidence_far_otm: 0.97 # Require vol model ≥97% (not 95%) for BUY YES when strike far above current; targets losing "above X"
+  calibration_loss_weight: 1.5 # Weight losers 1.5x in calibration (learn more from mistakes; 1.0 = equal weight)
+  enable_sell_and_rebuy: true # When selling a loser, re-buy same contract at lower price if model sees edge (bypasses min 5¢)
   # use_kelly: true   # Use Kelly criterion for position sizing (when true)
   # kelly_fraction: 0.25   # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer)
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)

@@ -40,6 +40,35 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Stricter far OTM threshold**         | —                                       | ✓ `min_vol_confidence_far_otm` (default 0.97) — when strike far above current, require vol model ≥97% (not 95%) before BUY YES; targets losing "above X" YES trades. |
 | **Price-after-buy calibration**       | —                                       | ✓ `min_price_after_buy`, `max_price_after_buy` stored from market_snapshots after purchase; calibration stats show % dipped/rose after buy (improve limit_dip_pct). |
 | **Hours until resolution in output** | —                                       | ✓ Contract title shows "(in X.X hours)" until resolution; decimal for sub-hour (e.g. 0.3 hours). |
+| **Calibration loss weighting**       | —                                       | ✓ `strategy.calibration_loss_weight` (default 1.5); losers weighted higher in calibration; `get_calibration_stats()` uses weighted wins/loses for bucket and by_direction_side win rates. Learn more from mistakes. |
+| **Sell and re-buy losers**            | —                                       | ✓ `strategy.enable_sell_and_rebuy`; when selling a losing position (LIKELY_LOSE or rec flip), optionally re-buy same contract at current price if model still sees edge; bypasses min 5¢ rule for re-entry. Kalshi + Gemini. |
+
+---
+
+## Repo & Code Improvements
+
+Refactoring, architecture, and code quality changes.
+
+### Implemented ✓
+
+| Improvement                         | Description |
+| ----------------------------------- | ----------- |
+| **_StrategyParams consolidation**   | Strategy config loaded once into `_StrategyParams` dataclass; avoids repeated dict lookups; single source of truth for min_edge, fees, thresholds. |
+| **_maybe_add_reentry_order helper**| Shared helper for sell-and-rebuy logic; used by Kalshi (cached + orphan) and Gemini position eval; DRY, consistent edge check. |
+| **Calibration loss weighting in storage** | `get_calibration_stats()` accepts `config`; reads `calibration_loss_weight`; applies to bucket and by_direction_side win rates. |
+| **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
+| **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |
+
+### Future / TODO
+
+| Improvement                         | Effort | Notes |
+| ----------------------------------- | ------ | ----- |
+| **Modular strategy interface**     | Medium | Extract strategy into pluggable classes (Freqtrade-style); swap empirical vs volatility without editing compare_historical.py. |
+| **Position eval extraction**       | Low    | Extract Kalshi/Gemini position eval into `_evaluate_position()` with platform-agnostic core. |
+| **Type hints consistency**          | Low    | Add return types and ParamSpec where missing; improve IDE support. |
+| **Config schema validation**       | Low    | Validate strategy/trading keys at load; fail fast on typos. |
+| **Unit tests for edge cases**      | Medium | Test `_recommend()`, `_fee_per_contract()`, `_apply_bucket_penalty()` with fixture data. |
+| **Docstrings for public APIs**     | Low    | Ensure storage, kalshi_client, gemini_client have clear module docstrings. |
 
 ---
 

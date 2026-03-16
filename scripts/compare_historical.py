@@ -126,6 +126,7 @@ class _StrategyParams:
     use_bucket_penalty: bool
     min_bucket_samples: int
     min_vol_confidence_far_otm: float
+    enable_sell_and_rebuy: bool
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -164,6 +165,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
         min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),
+        enable_sell_and_rebuy=bool(strategy.get("enable_sell_and_rebuy", False)),
     )
 
 
@@ -641,6 +643,60 @@ def _fee_per_contract(price: float, maker_rate: float) -> float:
     if fee <= 0:
         return 0.0
     return math.ceil(fee * 100) / 100
+
+
+def _maybe_add_reentry_order(
+    sp: _StrategyParams,
+    min_edge: float,
+    pending_orders: list[dict],
+    platform: str,
+    ticker: str,
+    title: str,
+    side: str,
+    hist_p: float,
+    yes_bid: float,
+    no_bid: float,
+    threshold: float | None,
+    direction: str | None,
+    yf_ticker: str | None,
+    vol_p: float | None,
+    maker_rate: float,
+    position_count: int,
+    extra: dict | None = None,
+) -> None:
+    """
+    When selling a losing position, optionally add a re-entry BUY at current price
+    if the model still sees edge (p_win - price - fee >= min_edge).
+    Re-entry bypasses min_yes_price/min_no_price (can buy below 5¢) when profitable.
+    """
+    if not sp.enable_sell_and_rebuy or position_count <= 0:
+        return
+    re_entry_price = yes_bid if side == "yes" else no_bid
+    p_win = hist_p if side == "yes" else (1.0 - hist_p)
+    fee = _fee_per_contract(re_entry_price, maker_rate)
+    edge = p_win - re_entry_price - fee
+    if edge < min_edge:
+        return
+    rec = REC_BUY_YES if side == "yes" else REC_BUY_NO
+    order: dict[str, Any] = {
+        "platform": platform,
+        "ticker": ticker,
+        "title": title,
+        "rec": rec,
+        "side": side,
+        "price": re_entry_price,
+        "edge": edge,
+        "count": position_count,
+        "hist_p": hist_p,
+        "vol_p": vol_p,
+        "yf_ticker": yf_ticker,
+        "threshold": threshold,
+        "direction": direction,
+        "re_entry": True,
+    }
+    if extra:
+        order.update(extra)
+    pending_orders.append(order)
 
 
 def _recommend(
@@ -1933,6 +1989,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "price": sell_price,
                                             "rec": REC_LIKELY_LOSE,
                                         })
+                                        _maybe_add_reentry_order(
+                                            sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
+                                            side, hist_p, yes_bid, no_bid, threshold, direction, pos_yf, vol_p,
+                                            sp.kalshi_maker_fee_rate, position_count,
+                                        )
                                     elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -1944,6 +2005,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "price": sell_price,
                                             "rec": rec,
                                         })
+                                        _maybe_add_reentry_order(
+                                            sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
+                                            side, hist_p, yes_bid, no_bid, threshold, direction, pos_yf, vol_p,
+                                            sp.kalshi_maker_fee_rate, position_count,
+                                        )
                                     elif side == "no" and _violates_no_above_rule(current_price_pos, threshold, direction, sp.no_above_cushion):
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -2001,6 +2067,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "price": sell_price,
                         "rec": REC_LIKELY_LOSE,
                     })
+                    _maybe_add_reentry_order(
+                        sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
+                        side, hist_p, yes_bid, no_bid, threshold, direction, _yf, vol_p,
+                        sp.kalshi_maker_fee_rate, position_count,
+                    )
                 # SELL YES when we'd now recommend BUY NO; SELL NO when we'd recommend BUY YES
                 elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                     pending_sells.append({
@@ -2013,6 +2084,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "price": sell_price,
                         "rec": rec,
                     })
+                    _maybe_add_reentry_order(
+                        sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
+                        side, hist_p, yes_bid, no_bid, threshold, direction, _yf, vol_p,
+                        sp.kalshi_maker_fee_rate, position_count,
+                    )
                 # SELL NO when holding NO on "above X" but price already > X * (1 + cushion)
                 elif side == "no" and _violates_no_above_rule(current_price_pos, threshold, direction, sp.no_above_cushion):
                     pending_sells.append({
@@ -2152,6 +2228,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 "instrument_symbol": sym,
                                 "gemini_evt": evt,
                             })
+                            _maybe_add_reentry_order(
+                                sp, min_edge, pending_orders, PLATFORM_GEMINI, ticker_g, title,
+                                side, hist_p_g, impl, no_price_g, threshold_g, direction_g, pos_yf, vol_p_g,
+                                sp.gemini_maker_fee_rate, position_count,
+                                extra={"instrument_symbol": sym, "gemini_evt": evt},
+                            )
                         elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
@@ -2165,6 +2247,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 "instrument_symbol": sym,
                                 "gemini_evt": evt,
                             })
+                            _maybe_add_reentry_order(
+                                sp, min_edge, pending_orders, PLATFORM_GEMINI, ticker_g, title,
+                                side, hist_p_g, impl, no_price_g, threshold_g, direction_g, pos_yf, vol_p_g,
+                                sp.gemini_maker_fee_rate, position_count,
+                                extra={"instrument_symbol": sym, "gemini_evt": evt},
+                            )
                         elif side == "no" and violates_g:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,

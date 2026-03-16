@@ -101,9 +101,10 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Fetch Gemini positions   | `gemini_trading.get_positions()`; map symbol→market via `gemini_symbol_to_market` | `compare_historical.py:1868-1888`                       |
 | Parse position           | Kalshi: `position_fp` positive = YES, negative = NO; Gemini: `outcome`, `totalQuantity` | `compare_historical.py:1668-1676`, `1878-1886`     |
 | Use cached or fresh data | Market data from earlier loop or fresh fetch (Kalshi); Gemini uses events  | `compare_historical.py:1672`, `1887`                    |
-| Compute P(lose)          | Probability we're wrong on this position (hist_p + vol_p blend)           | `compare_historical.py:1737`, `1947`                    |
-| SELL triggers            | LIKELY_LOSE (P≥55%), edge flip, RULE_VIOLATION (price above strike on NO), unsupported resolution | `compare_historical.py:1739-1775`, `1949-1992` |
-| Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `compare_historical.py:1740`, `1950` → `pending_sells.append()` |
+| Compute P(lose)          | Probability we're wrong on this position (hist_p + vol_p blend)           | `compare_historical.py`                                 |
+| SELL triggers            | LIKELY_LOSE (P≥55%), rec flip, RULE_VIOLATION (price above strike on NO), unsupported resolution | `compare_historical.py` → `pending_sells.append()` |
+| Re-entry (optional)      | If `enable_sell_and_rebuy`: when selling loser, add BUY at current price if edge ≥ min_edge; bypasses min 5¢ | `_maybe_add_reentry_order()`                      |
+| Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `pending_sells.append()`                               |
 
 ---
 

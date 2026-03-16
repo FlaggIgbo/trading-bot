@@ -116,7 +116,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini crypto events** (daily/weekly for BTC, ETH, SOL, XRP; hourly category may return 400—we gracefully skip and use crypto only), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation).
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini crypto events** (daily/weekly for BTC, ETH, SOL, XRP; hourly category may return 400—we gracefully skip and use crypto only), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation), **calibration loss weighting** (`calibration_loss_weight`: losers count 1.5× in calibration; learn more from mistakes), **sell and re-buy** (`enable_sell_and_rebuy`: re-buy same contract at lower price when selling a loser if model still sees edge; bypasses min 5¢).
 
 ## Contract evaluation workflow
 
@@ -380,7 +380,7 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--no-llm`         | Skip Ollama analysis                                                                      |
 | `--log`            | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket, append within hour; or `--log DIR` for custom dir) |
 
-Config: `strategy.min_edge`, `strategy.min_yes_price` (skip BUY YES when market YES &lt; 5¢), `strategy.min_no_price` (skip BUY NO when market NO &lt; 5¢), `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.limit_dip_pct_high_confidence` (15% when P(win) ≥ 90%), `strategy.vol_blend_weight` (blend empirical + vol; 0.5 = equal), `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, etc. in `config.yaml`.
+Config: `strategy.min_edge`, `strategy.min_yes_price` (skip BUY YES when market YES &lt; 5¢), `strategy.min_no_price` (skip BUY NO when market NO &lt; 5¢), `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.limit_dip_pct_high_confidence` (15% when P(win) ≥ 90%), `strategy.vol_blend_weight` (blend empirical + vol; 0.5 = equal), `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, `strategy.calibration_loss_weight` (1.5 = weight losers higher), `strategy.enable_sell_and_rebuy` (re-buy after selling loser if edge), etc. in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 
@@ -442,6 +442,11 @@ absolute_winner_max_price: 0.05 # Price must be ≤ 5¢ (e.g. 1¢ on a near-cert
 absolute_winner_max_pct_of_balance: 0.50 # Willing to spend up to 50% of balance on one absolute winner
 absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enforced at execution)
 ```
+
+### Calibration and sell-and-rebuy
+
+- **`calibration_loss_weight`** (default 1.5): Weight losers higher in calibration so the bot learns more from mistakes. Bucket and direction-side win rates use weighted loses; higher values make the system more conservative.
+- **`enable_sell_and_rebuy`** (default true): When selling a losing position (P(lose) ≥ 55% or rec flip), optionally re-buy the same contract at the current price if the model still sees edge. Bypasses min 5¢ rule for re-entry when profitable.
 
 ### Local historical storage
 

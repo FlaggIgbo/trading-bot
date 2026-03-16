@@ -450,7 +450,8 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         wins = sum(1 for r in rows if r["outcome"] == "win")
         loses = sum(1 for r in rows if r["outcome"] == "lose")
         total_pnl = sum(r["pnl_cents"] or 0 for r in rows)
-        # Bucket by hist_p (0.5-0.6, 0.6-0.7, ...)
+        loss_weight = float((config or {}).get("strategy", {}).get("calibration_loss_weight", 1.0))
+        # Bucket by hist_p (0.5-0.6, 0.6-0.7, ...); weight losers higher for win_rate
         buckets: dict[tuple[float, float], list[str]] = {}
         for r in rows:
             h = r["hist_p"] or 0.5
@@ -458,17 +459,13 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
             if bucket not in buckets:
                 buckets[bucket] = []
             buckets[bucket].append(r["outcome"])
-        bucket_stats = [
-            {
-                "hist_p_range": f"{lo:.1f}-{hi:.1f}",
-                "lo": lo,
-                "hi": hi,
-                "count": len(outcomes),
-                "win_rate": sum(1 for o in outcomes if o == "win") / len(outcomes) if outcomes else 0,
-            }
-            for (lo, hi), outcomes in sorted(buckets.items())
-        ]
-        # Win rate by (direction, side): above+yes, above+no, below+yes, below+no
+        bucket_stats = []
+        for (lo, hi), outcomes in sorted(buckets.items()):
+            ww = sum(1 for o in outcomes if o == "win")
+            wl = sum(loss_weight for o in outcomes if o == "lose")
+            wr = ww / (ww + wl) if (ww + wl) > 0 else 0
+            bucket_stats.append({"hist_p_range": f"{lo:.1f}-{hi:.1f}", "lo": lo, "hi": hi, "count": len(outcomes), "win_rate": wr})
+        # Win rate by (direction, side); weight losers higher
         by_ds: dict[str, dict[str, Any]] = {}
         for r in rows:
             d = (r["direction"] or "").strip().lower() or "unknown"
@@ -480,10 +477,11 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
                 by_ds[key]["wins"] += 1
             else:
                 by_ds[key]["loses"] += 1
-        by_direction_side = {
-            k: {"count": v["wins"] + v["loses"], "win_rate": v["wins"] / (v["wins"] + v["loses"])}
-            for k, v in by_ds.items()
-        }
+        by_direction_side = {}
+        for k, v in by_ds.items():
+            ww, wl = v["wins"], v["loses"] * loss_weight
+            wr = ww / (ww + wl) if (ww + wl) > 0 else 0
+            by_direction_side[k] = {"count": v["wins"] + v["loses"], "win_rate": wr}
         # Price-after-buy: how much lower/higher did contract go after we bought "low"
         rows_with_price = [
             r for r in rows
