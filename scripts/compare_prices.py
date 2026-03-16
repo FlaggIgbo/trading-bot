@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv(_ROOT / ".env")
 
 from config import get_config
+from constants import REC_BUY_NO, REC_BUY_YES, REC_SKIP
 from gemini_client import (
     GeminiPredictionClient,
     _event_to_asset,
@@ -61,7 +62,7 @@ def _run() -> int:
         print(f"Gemini: could not fetch events ({e}) - skipping Gemini checks\n")
 
     print("Kalshi & Gemini vs yfinance (live snapshot)\n" + "=" * 70)
-    print("For BUY/NO/SKIP recommendations, run: python3 scripts/compare_historical.py\n")
+    print(f"For {REC_BUY_YES}/{REC_BUY_NO}/{REC_SKIP} recommendations, run: python3 scripts/compare_historical.py\n")
 
     for series in markets:
         series = series.strip()

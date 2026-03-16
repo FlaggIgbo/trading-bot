@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv(_ROOT / ".env")
 
 from config import get_config
+from constants import REC_BUY_NO, REC_BUY_YES
 from kalshi_client import KalshiClient
 
 logging.basicConfig(
@@ -140,7 +141,7 @@ def _check_market(client: KalshiClient, ticker: str, cfg: dict) -> None:
                 min_balance_for_limit_fallback_cents=min_balance_fallback,
             )
             if result:
-                log.info("  -> Placed BUY YES order")
+                log.info("  -> Placed %s order", REC_BUY_YES)
     if buy_no_threshold is not None and no_bid < buy_no_threshold:
         log.info("  -> Strategy: buy NO below %.2f (current %.2f)", buy_no_threshold, no_bid)
         if not dry_run:
@@ -152,7 +153,7 @@ def _check_market(client: KalshiClient, ticker: str, cfg: dict) -> None:
                 min_balance_for_limit_fallback_cents=min_balance_fallback,
             )
             if result:
-                log.info("  -> Placed BUY NO order")
+                log.info("  -> Placed %s order", REC_BUY_NO)
 
 
 if __name__ == "__main__":

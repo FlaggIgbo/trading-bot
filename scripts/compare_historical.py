@@ -39,6 +39,15 @@ from dotenv import load_dotenv
 load_dotenv(_ROOT / ".env")
 
 from config import get_config
+from constants import (
+    REC_ARB_INTER,
+    REC_ARB_INTRA,
+    REC_BUY_NO,
+    REC_BUY_YES,
+    REC_LIKELY_LOSE,
+    REC_RULE_VIOLATION,
+    REC_SKIP,
+)
 from gemini_client import (
     GeminiPredictionClient,
     GeminiTradingClient,
@@ -401,12 +410,12 @@ def _recommend(historical_p_yes: float, market_yes_price: float, min_edge: float
     Buy NO when historical says P(NO) > (1 - market_yes_price) + edge.
     """
     if market_yes_price <= 0:
-        return "SKIP"  # No liquidity
+        return REC_SKIP  # No liquidity
     if historical_p_yes >= market_yes_price + min_edge:
-        return "BUY YES"  # Market underpricing YES
+        return REC_BUY_YES  # Market underpricing YES
     if (1 - historical_p_yes) >= (1 - market_yes_price) + min_edge:
-        return "BUY NO"  # Market underpricing NO
-    return "SKIP"
+        return REC_BUY_NO  # Market underpricing NO
+    return REC_SKIP
 
 
 def _recommend_strict(
@@ -417,15 +426,15 @@ def _recommend_strict(
     Requires P(win) >= min_p_win (e.g. 0.90) AND small edge.
     """
     if market_yes_price <= 0:
-        return "SKIP"
+        return REC_SKIP
     # BUY YES only when hist_p >= 90% AND market underpriced
     if historical_p_yes >= min_p_win and historical_p_yes >= market_yes_price + min_edge:
-        return "BUY YES"
+        return REC_BUY_YES
     # BUY NO only when P(NO) >= 90% AND market underpricing NO
     p_no = 1 - historical_p_yes
     if p_no >= min_p_win and p_no >= (1 - market_yes_price) + min_edge:
-        return "BUY NO"
-    return "SKIP"
+        return REC_BUY_NO
+    return REC_SKIP
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +450,7 @@ def _compute_edge_diff(
     Edge = market_yes - fair_price. When we favor BUY YES (price >> strike),
     fair price is ~1.0. Otherwise use historical P(YES).
     """
-    if rec == "BUY YES" and violates_no_above:
+    if rec == REC_BUY_YES and violates_no_above:
         fair_price = 1.0
     else:
         fair_price = hist_p_yes
@@ -788,8 +797,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  {ticker}")
                     print(f"    {title}")
                     print(f"    ARB_INTRA: yes_ask+no_ask={yes_ask+no_ask:.2f} < 1-{min_arb_fee:.0%} → BUY BOTH (profit ~{profit_pct:.1f}%)")
-                    pending_orders.append({"platform": "kalshi", "ticker": ticker, "title": title, "rec": "ARB_INTRA", "side": "yes", "price": yes_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
-                    pending_orders.append({"platform": "kalshi", "ticker": ticker, "title": title, "rec": "ARB_INTRA", "side": "no", "price": no_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
+                    pending_orders.append({"platform": "kalshi", "ticker": ticker, "title": title, "rec": REC_ARB_INTRA, "side": "yes", "price": yes_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
+                    pending_orders.append({"platform": "kalshi", "ticker": ticker, "title": title, "rec": REC_ARB_INTRA, "side": "no", "price": no_ask, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{ticker}-intra"})
                     arb_used = True
 
             # Inter-exchange arb (Kalshi + Gemini): buy YES on one, NO on other when sum < 1 - fee
@@ -808,11 +817,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         k_ticker = ticker
                         g_ticker = gemini_match.get("ticker", "?")
                         if yes_plat == "kalshi":
-                            pending_orders.append({"platform": "kalshi", "ticker": k_ticker, "title": title, "rec": "ARB_INTER", "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
-                            pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": "ARB_INTER", "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
+                            pending_orders.append({"platform": "kalshi", "ticker": k_ticker, "title": title, "rec": REC_ARB_INTER, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
+                            pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": REC_ARB_INTER, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
                         else:
-                            pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": "ARB_INTER", "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
-                            pending_orders.append({"platform": "kalshi", "ticker": k_ticker, "title": title, "rec": "ARB_INTER", "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
+                            pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": (gemini_match.get("title") or "")[:55], "rec": REC_ARB_INTER, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}", "gemini_evt": gemini_match})
+                            pending_orders.append({"platform": "kalshi", "ticker": k_ticker, "title": title, "rec": REC_ARB_INTER, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{k_ticker}-{g_ticker}"})
                         gemini_used_in_arb.add(g_ticker)
                         arb_used = True
 
@@ -832,12 +841,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
             # Skip BUY NO when price already above strike (risky to bet NO)
             violates_rule = _violates_no_above_rule(current_price, threshold, direction, no_above_cushion)
-            if rec == "BUY NO" and violates_rule:
-                rec = "SKIP"
+            if rec == REC_BUY_NO and violates_rule:
+                rec = REC_SKIP
             # Favor BUY YES when price is well above strike (e.g. ETH $2500, strike $1900 = safe YES)
-            if rec == "SKIP" and violates_rule:
+            if rec == REC_SKIP and violates_rule:
                 if 0 < yes_bid < (1 - min_edge):  # Market hasn't priced it at 99%; room for edge
-                    rec = "BUY YES"
+                    rec = REC_BUY_YES
             diff = _compute_edge_diff(yes_bid, hist_p, rec, violates_rule)
 
             print(f"  {ticker}")
@@ -853,20 +862,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 mn, mx = min(closes), max(closes)
                 n = sum(1 for c in closes if (c > threshold if direction == "above" else c < threshold))
                 print(f"    (closes ${mn:,.0f}-${mx:,.0f}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
-            if rec != "SKIP":
+            if rec != REC_SKIP:
                 print(f"    Edge: {abs(diff):.1%}")
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
-                bid = yes_bid if rec == "BUY YES" else no_bid
+                bid = yes_bid if rec == REC_BUY_YES else no_bid
                 # Limit price: bid or below (dip-catch). limit_dip_pct=0.05 → place 5% below bid
                 price = max(0.01, min(0.99, bid * (1 - limit_dip_pct))) if limit_dip_pct else bid
-                p_win = hist_p if rec == "BUY YES" else (1 - hist_p)
+                p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
                 count = _kelly_count(p_win, price, balance_cents, kelly_fraction, min_contracts) if use_kelly else 10
                 pending_orders.append({
                     "platform": "kalshi",
                     "ticker": ticker,
                     "title": title,
                     "rec": rec,
-                    "side": "yes" if rec == "BUY YES" else "no",
+                    "side": "yes" if rec == REC_BUY_YES else "no",
                     "price": price,
                     "edge": abs(diff),
                     "count": count,
@@ -903,8 +912,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  [Gemini] {g_ticker}")
                         print(f"    {title}")
                         print(f"    ARB_INTRA: yes+no={yes_p+no_p:.2f} < 1-{min_arb_fee:.0%} → BUY BOTH (profit ~{profit_pct:.1f}%)")
-                        pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": title, "rec": "ARB_INTRA", "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
-                        pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": title, "rec": "ARB_INTRA", "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
+                        pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": title, "rec": REC_ARB_INTRA, "side": "yes", "price": yes_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
+                        pending_orders.append({"platform": "gemini", "ticker": g_ticker, "title": title, "rec": REC_ARB_INTRA, "side": "no", "price": no_p, "edge": profit_pct/100, "count": count_arb, "arb_group": f"{g_ticker}-intra", "gemini_evt": evt})
                         arb_used_g = True
                 if arb_used_g:
                     print()
@@ -919,12 +928,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     else _recommend(hist_p_gem, impl, min_edge)
                 )
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, no_above_cushion)
-                if rec == "BUY NO" and violates_rule_g:
-                    rec = "SKIP"
+                if rec == REC_BUY_NO and violates_rule_g:
+                    rec = REC_SKIP
                 # Favor BUY YES when price is well above strike
-                if rec == "SKIP" and violates_rule_g:
+                if rec == REC_SKIP and violates_rule_g:
                     if 0 < impl < (1 - min_edge):
-                        rec = "BUY YES"
+                        rec = REC_BUY_YES
                 diff_gem = _compute_edge_diff(impl, hist_p_gem, rec, violates_rule_g)
                 print(f"  [Gemini] {evt.get('ticker','?')}")
                 print(f"    {title}")
@@ -934,19 +943,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 else:
                     p_label_gem = f"P(YES) [emp={emp:.1%} vol={vol_p_gem:.1%}]"
                 print(f"    {p_label_gem}: {hist_p_gem:.1%}  Market YES: {impl:.1%}  →  {rec}")
-                if rec != "SKIP":
+                if rec != REC_SKIP:
                     print(f"    Edge: {abs(diff_gem):.1%}")
                     no_price = 1.0 - impl
-                    bid = impl if rec == "BUY YES" else no_price
+                    bid = impl if rec == REC_BUY_YES else no_price
                     price = max(0.01, min(0.99, bid * (1 - limit_dip_pct))) if limit_dip_pct else bid
-                    p_win = hist_p_gem if rec == "BUY YES" else (1 - hist_p_gem)
+                    p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
                     count = _kelly_count(p_win, price, balance_cents, kelly_fraction, min_contracts) if use_kelly else 10
                     pending_orders.append({
                         "platform": "gemini",
                         "ticker": evt.get("ticker", "?"),
                         "title": title,
                         "rec": rec,
-                        "side": "yes" if rec == "BUY YES" else "no",
+                        "side": "yes" if rec == REC_BUY_YES else "no",
                         "price": price,
                         "edge": abs(diff_gem),
                         "count": count,
@@ -1051,9 +1060,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "action": "sell",
                                             "count": position_count,
                                             "price": sell_price,
-                                            "rec": "LIKELY_LOSE",
+                                            "rec": REC_LIKELY_LOSE,
                                         })
-                                    elif (side == "yes" and rec == "BUY NO") or (side == "no" and rec == "BUY YES"):
+                                    elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                                         pending_sells.append({
                                             "platform": "kalshi",
                                             "ticker": ticker,
@@ -1073,7 +1082,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "action": "sell",
                                             "count": position_count,
                                             "price": no_bid,
-                                            "rec": "RULE_VIOLATION",
+                                            "rec": REC_RULE_VIOLATION,
                                         })
                             elif getattr(args, "verbose", False):
                                 print(f"    (no hist data for {ticker}, skip sell eval)")
@@ -1107,10 +1116,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "action": "sell",
                         "count": position_count,
                         "price": sell_price,
-                        "rec": "LIKELY_LOSE",
+                        "rec": REC_LIKELY_LOSE,
                     })
                 # SELL YES when we'd now recommend BUY NO; SELL NO when we'd recommend BUY YES
-                elif (side == "yes" and rec == "BUY NO") or (side == "no" and rec == "BUY YES"):
+                elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                     pending_sells.append({
                         "platform": "kalshi",
                         "ticker": ticker,
@@ -1131,7 +1140,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "action": "sell",
                         "count": position_count,
                         "price": no_bid,
-                        "rec": "RULE_VIOLATION",
+                        "rec": REC_RULE_VIOLATION,
                     })
         except Exception:
             pass

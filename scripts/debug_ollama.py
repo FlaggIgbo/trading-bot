@@ -10,6 +10,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+from constants import REC_BUY_NO
+
 
 def main() -> None:
     print("=== Ollama Debug ===\n")
@@ -54,7 +56,7 @@ def main() -> None:
     # 4. Try a minimal chat (use first available model)
     model = models[0] if models else "llama3.2"
     print(f"\n4. Testing chat with model '{model}'...")
-    test_data = "KXBTCD: Bitcoin above $81,250 | hist_p=0.05 | market YES=0.40 | rec=BUY NO"
+    test_data = f"KXBTCD: Bitcoin above $81,250 | hist_p=0.05 | market YES=0.40 | rec={REC_BUY_NO}"
     prompt = f"One sentence: what would you do with this? DATA: {test_data}"
 
     try:
