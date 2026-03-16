@@ -467,13 +467,29 @@ python3 scripts/compare_prices.py
 
 Run the evaluation locally every 15 minutes for continuous monitoring.
 
-**launchd (recommended on macOS):** Uses Apple's native scheduler. See [`launchd/README.md`](launchd/README.md) for setup. Quick steps:
+**launchd (recommended on macOS):** Uses Apple's native scheduler. See [`launchd/README.md`](launchd/README.md) for full setup.
+
+**Setup commands:**
 
 ```bash
 cp launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
 # Edit plist if paths differ (Python, script, WorkingDirectory)
 launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist
 ```
+
+**Keep Mac awake** (otherwise macOS may sleep and pause the timer): run `caffeinate -di` in a separate terminal, or use [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704).
+
+**launchctl reference:**
+
+| Purpose                            | Command                                                                     |
+| ---------------------------------- | --------------------------------------------------------------------------- |
+| View stdout (script output)        | `tail -f /tmp/compare_historical.out.log`                                   |
+| View stderr (errors)               | `tail -f /tmp/compare_historical.err.log`                                   |
+| Check if agent is loaded & running | `launchctl list \| grep compare_historical`                                 |
+| Stop (unload)                      | `launchctl unload ~/Library/LaunchAgents/com.user.compare_historical.plist` |
+
+The script runs every 15 minutes. With `RunAtLoad: false` (default), the first run happens ~15 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
+`cd /path/to/trading-bot && .venv/bin/python3 scripts/compare_historical.py --days 365 --use-volatility --execute --no-llm`
 
 **crontab (alternative):**
 
