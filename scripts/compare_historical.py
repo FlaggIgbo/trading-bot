@@ -69,16 +69,19 @@ try:
     from storage import (
         get_calibration_stats,
         get_last_snapshot_for_ticker,
+        get_limit_order_analysis,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
+        record_limit_order,
         record_market_snapshot,
+        record_order_cancel,
         record_prediction,
         record_prediction_outcome,
         record_resolved,
     )
 except ImportError:
-    get_calibration_stats = get_last_snapshot_for_ticker = get_unresolved_predictions = None
-    get_price_after_buy_from_snapshots = record_market_snapshot = record_prediction = record_prediction_outcome = record_resolved = None
+    get_calibration_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_unresolved_predictions = None
+    get_price_after_buy_from_snapshots = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction = record_prediction_outcome = record_resolved = None
 from yfinance_client import get_aggs as yf_get_aggs, get_intraday_aggs_at_hour as yf_get_intraday_aggs
 
 # ---------------------------------------------------------------------------
@@ -130,6 +133,10 @@ class _StrategyParams:
     p_lose_blend_market_max_weight: float
     p_lose_blend_market_half_life_days: float
     use_intraday_empirical: bool
+    enable_easy_win: bool
+    min_edge_easy_win: float
+    easy_win_min_p_win: float
+    easy_win_min_market_p: float
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -172,6 +179,10 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         p_lose_blend_market_max_weight=float(strategy.get("p_lose_blend_market_max_weight", 0.5)),
         p_lose_blend_market_half_life_days=float(strategy.get("p_lose_blend_market_half_life_days", 0.5)),
         use_intraday_empirical=bool(strategy.get("use_intraday_empirical", True)),
+        enable_easy_win=bool(strategy.get("enable_easy_win", True)),
+        min_edge_easy_win=float(strategy.get("min_edge_easy_win", 0.01)),
+        easy_win_min_p_win=float(strategy.get("easy_win_min_p_win", 0.90)),
+        easy_win_min_market_p=float(strategy.get("easy_win_min_market_p", 0.85)),
     )
 
 
@@ -750,6 +761,10 @@ def _recommend(
     market_yes_price: float,
     min_edge: float,
     maker_fee_rate: float = 0.0,
+    *,
+    min_edge_easy_win: float | None = None,
+    easy_win_min_p_win: float = 0.90,
+    easy_win_min_market_p: float = 0.85,
 ) -> str:
     """
     Recommend BUY YES / BUY NO / SKIP based on historical vs market.
@@ -757,6 +772,10 @@ def _recommend(
     Buy NO when historical says P(NO) > (1 - market_yes_price) + edge.
     When both have edge, prefer whichever yields the larger net return.
     min_edge is the minimum *net* edge after fees (e.g. 0.01 = 1¢ profit per $1 contract).
+
+    Easy win: when model and market both say ~90%+ (aligned high confidence), use
+    min_edge_easy_win instead — allows buying profitable contracts even with small edge
+    (e.g. 1¢ profit after fees) when both agree the outcome is likely.
     """
     if market_yes_price <= 0:
         return REC_SKIP  # No liquidity
@@ -765,8 +784,16 @@ def _recommend(
     fee_no = _fee_per_contract(no_price, maker_fee_rate)
     net_edge_yes = historical_p_yes - market_yes_price - fee_yes
     net_edge_no = (1.0 - historical_p_yes) - no_price - fee_no
-    has_yes = net_edge_yes >= min_edge
-    has_no = net_edge_no >= min_edge
+
+    req_yes, req_no = min_edge, min_edge
+    if min_edge_easy_win is not None:
+        if historical_p_yes >= easy_win_min_p_win and market_yes_price >= easy_win_min_market_p:
+            req_yes = min_edge_easy_win
+        if (1.0 - historical_p_yes) >= easy_win_min_p_win and no_price >= easy_win_min_market_p:
+            req_no = min_edge_easy_win
+
+    has_yes = net_edge_yes >= req_yes
+    has_no = net_edge_no >= req_no
     if has_yes and has_no:
         return REC_BUY_YES if net_edge_yes >= net_edge_no else REC_BUY_NO
     if has_yes:
@@ -1385,6 +1412,7 @@ def main():
     parser.add_argument("--execute", action="store_true", help="Place real buy/sell orders (requires dry_run: false in config)")
     parser.add_argument("--use-volatility", action="store_true", help="Use volatility-based probability (option-style) in addition to empirical")
     parser.add_argument("--log", metavar="DIR", nargs="?", const="~/Desktop/trading-bot-logs", default=None, help="Log run output to ~/Desktop/trading-bot-logs/ or specified dir (eval_YYYYMMDDHH.log per hour, append within hour)")
+    parser.add_argument("--limit-analysis", action="store_true", help="Print analysis of unfilled limit orders (why they didn't hit; inform limit_dip_pct tuning)")
     args = parser.parse_args()
     args.use_llm = not args.no_llm
 
@@ -1559,6 +1587,29 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
 
+    # Limit order analysis: learn from unfilled limit orders (why they didn't hit)
+    if getattr(args, "limit_analysis", False) and get_limit_order_analysis:
+        try:
+            analysis = get_limit_order_analysis(cfg, days=90)
+            orders = analysis.get("orders", [])
+            summary = analysis.get("summary", {})
+            if orders:
+                print("[Limit Order Analysis] Unfilled limit orders (last 90 days):")
+                for o in orders[:15]:  # Show up to 15
+                    status = o.get("status", "?")
+                    cancel_reason = o.get("cancel_reason") or ""
+                    would = "would have filled" if o.get("would_have_filled") else "never touched"
+                    print(f"  {o.get('ticker','?')} {o.get('side','?')} @ {o.get('limit_price',0):.2f} ({status}) — {would}"
+                          f"{' — cancelled: ' + cancel_reason if cancel_reason else ''}")
+                total = summary.get("total", 0)
+                would_fill = summary.get("would_have_filled", 0)
+                if total > 0:
+                    print(f"  Summary: {total} unfilled | {would_fill} would have filled if we'd kept/waiting — "
+                          f"inform limit_dip_pct tuning")
+                print()
+        except Exception:
+            pass
+
     # Build ticker -> (series, yf_ticker, closes, market_data) for sell evaluation
     market_data_cache: dict[str, tuple[str, str, list[float], dict]] = {}
 
@@ -1674,7 +1725,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             rec = (
                 _recommend_strict(hist_p, yes_bid, min_p_win, effective_min, sp.kalshi_maker_fee_rate)
                 if _is_other_intraday(m, yf_ticker)
-                else _recommend(hist_p, yes_bid, effective_min, sp.kalshi_maker_fee_rate)
+                else _recommend(
+                    hist_p, yes_bid, effective_min, sp.kalshi_maker_fee_rate,
+                    min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                    easy_win_min_p_win=sp.easy_win_min_p_win,
+                    easy_win_min_market_p=sp.easy_win_min_market_p,
+                )
             )
             # Skip BUY NO when price already above strike (risky to bet NO)
             violates_rule = _violates_no_above_rule(current_price, threshold, direction, sp.no_above_cushion)
@@ -1766,6 +1822,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "rec": rec,
                     "side": "yes" if rec == REC_BUY_YES else "no",
                     "price": price,
+                    "bid_at_place": bid,
+                    "dip_pct_used": dip,
                     "edge": abs(diff),
                     "count": count,
                     "hist_p": hist_p,
@@ -1834,7 +1892,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 rec = (
                     _recommend_strict(hist_p_gem, impl, min_p_win_gem, effective_min_gem, sp.gemini_maker_fee_rate)
                     if _is_other_intraday(evt, yf_ticker)
-                    else _recommend(hist_p_gem, impl, effective_min_gem, sp.gemini_maker_fee_rate)
+                    else _recommend(
+                        hist_p_gem, impl, effective_min_gem, sp.gemini_maker_fee_rate,
+                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                        easy_win_min_p_win=sp.easy_win_min_p_win,
+                        easy_win_min_market_p=sp.easy_win_min_market_p,
+                    )
                 )
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, sp.no_above_cushion)
                 if rec == REC_BUY_NO and violates_rule_g:
@@ -1910,6 +1973,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "rec": rec,
                         "side": "yes" if rec == REC_BUY_YES else "no",
                         "price": price,
+                        "bid_at_place": bid,
+                        "dip_pct_used": dip,
                         "edge": abs(diff_gem),
                         "count": count,
                         "hist_p": hist_p_gem,
@@ -2017,7 +2082,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 (sp.vol_blend_weight * emp_pos + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
                                                 else max(emp_pos, vol_p)
                                             )
-                                    rec = _recommend(hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate)
+                                    rec = _recommend(
+                                        hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate,
+                                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                                        easy_win_min_p_win=sp.easy_win_min_p_win,
+                                        easy_win_min_market_p=sp.easy_win_min_market_p,
+                                    )
                                     current_price_pos = closes[-1]
                                     sell_price = yes_bid if side == "yes" else no_bid
                                     # Persist orphan position eval for calibration (positions not in main market loop)
@@ -2101,7 +2171,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         (sp.vol_blend_weight * emp_cached + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
                         else max(emp_cached, vol_p)
                     )
-                rec = _recommend(hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate)
+                rec = _recommend(
+                    hist_p, yes_bid, min_edge, sp.kalshi_maker_fee_rate,
+                    min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                    easy_win_min_p_win=sp.easy_win_min_p_win,
+                    easy_win_min_market_p=sp.easy_win_min_market_p,
+                )
                 current_price_pos = closes[-1]
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 sell_price = yes_bid if side == "yes" else no_bid
@@ -2253,7 +2328,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         rec = (
                             _recommend_strict(hist_p_g, impl, min_p_win_g, min_edge, sp.gemini_maker_fee_rate)
                             if _is_other_intraday(evt, pos_yf)
-                            else _recommend(hist_p_g, impl, min_edge, sp.gemini_maker_fee_rate)
+                            else _recommend(
+                                hist_p_g, impl, min_edge, sp.gemini_maker_fee_rate,
+                                min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                                easy_win_min_p_win=sp.easy_win_min_p_win,
+                                easy_win_min_market_p=sp.easy_win_min_market_p,
+                            )
                         )
                         violates_g = _violates_no_above_rule(closes[-1], threshold_g, direction_g, sp.no_above_cushion)
                         if rec == REC_BUY_NO and violates_g:
@@ -2424,7 +2504,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         kalshi_keep_sells: set[tuple[str, str]] = set()
         gemini_keep_buys: set[tuple[str, str]] = set()
         gemini_keep_sells: set[tuple[str, str]] = set()
-        to_cancel: list[tuple[str, str, str]] = []  # (platform, order_id, label)
+        to_cancel: list[dict] = []  # {platform, order_id, label, reason, ticker, side, old_price}
 
         try:
             cursor = ""
@@ -2444,17 +2524,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if action == "buy":
                         pend = kalshi_pending_buys.get((t, side))
                         if not pend:
-                            to_cancel.append((PLATFORM_KALSHI, oid, label))
+                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "no_longer_rec", "ticker": t, "side": side, "old_price": old_price})
                         elif pend["price"] > old_price:
-                            to_cancel.append((PLATFORM_KALSHI, oid, label))
+                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "want_better_price", "ticker": t, "side": side, "old_price": old_price})
                         else:
                             kalshi_keep_buys.add((t, side))
                     else:
                         pend = kalshi_pending_sells.get((t, side))
                         if not pend:
-                            to_cancel.append((PLATFORM_KALSHI, oid, label))
+                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "no_longer_rec", "ticker": t, "side": side, "old_price": old_price})
                         elif pend["price"] > old_price:
-                            to_cancel.append((PLATFORM_KALSHI, oid, label))
+                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "want_better_price", "ticker": t, "side": side, "old_price": old_price})
                         else:
                             kalshi_keep_sells.add((t, side))
                 cursor = r.get("cursor") or ""
@@ -2479,32 +2559,40 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if side == "buy":
                         pend = gemini_pending_buys.get(key)
                         if not pend:
-                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
+                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "no_longer_rec", "ticker": str(sym), "side": out, "old_price": old_price})
                         elif pend["price"] > old_price:
-                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
+                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "want_better_price", "ticker": str(sym), "side": out, "old_price": old_price})
                         else:
                             gemini_keep_buys.add(key)
                     else:
                         pend = gemini_pending_sells.get(key)
                         if not pend:
-                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
+                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "no_longer_rec", "ticker": str(sym), "side": out, "old_price": old_price})
                         elif pend["price"] > old_price:
-                            to_cancel.append((PLATFORM_GEMINI, str(oid), label))
+                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "want_better_price", "ticker": str(sym), "side": out, "old_price": old_price})
                         else:
                             gemini_keep_sells.add(key)
             except Exception:
                 pass
 
-        # Execute cancels
+        # Execute cancels (record why for limit-order learning)
         cancels_done = 0
-        for platform, order_id, label in to_cancel:
+        for item in to_cancel:
+            platform = item["platform"]
+            order_id = item["order_id"]
+            label = item["label"]
+            reason = item.get("reason", "no_longer_rec")
             if platform == PLATFORM_KALSHI:
                 if kalshi.cancel_order_safe(order_id, ticker=label):
-                    print(f"  Cancelled (Kalshi) {label} — updating or no longer recommended")
+                    if record_order_cancel:
+                        record_order_cancel(platform, order_id, reason, cfg, ticker=item.get("ticker"), side=item.get("side"), limit_price=item.get("old_price"))
+                    print(f"  Cancelled (Kalshi) {label} — {reason}")
                     cancels_done += 1
             elif platform == PLATFORM_GEMINI and gemini_trading:
                 if gemini_trading.cancel_order_safe(order_id, ticker_label=label):
-                    print(f"  Cancelled (Gemini) {label} — updating or no longer recommended")
+                    if record_order_cancel:
+                        record_order_cancel(platform, order_id, reason, cfg, ticker=item.get("ticker"), side=item.get("side"), limit_price=item.get("old_price"))
+                    print(f"  Cancelled (Gemini) {label} — {reason}")
                     cancels_done += 1
         if cancels_done:
             print()
@@ -2608,6 +2696,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 rec=o.get("rec"),
                                 config=cfg,
                             )
+                            if record_limit_order and oid:
+                                record_limit_order(
+                                    platform=PLATFORM_KALSHI,
+                                    ticker=o["ticker"],
+                                    order_id=oid,
+                                    side=o["side"],
+                                    action="buy",
+                                    limit_price=o["price"],
+                                    bid_at_place=o.get("bid_at_place"),
+                                    dip_pct_used=o.get("dip_pct_used"),
+                                    hist_p=o.get("hist_p"),
+                                    vol_p=o.get("vol_p"),
+                                    edge=o.get("edge"),
+                                    rec=o.get("rec"),
+                                    count=count,
+                                    yf_ticker=o.get("yf_ticker"),
+                                    threshold=o.get("threshold"),
+                                    direction=o.get("direction"),
+                                    config=cfg,
+                                )
                     else:
                         print(f"  (skipped BUY {o['ticker']} - balance/API constraint)")
                 except Exception as ex:
@@ -2652,6 +2760,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 rec=o.get("rec"),
                                 config=cfg,
                             )
+                            if record_limit_order and oid:
+                                record_limit_order(
+                                    platform=PLATFORM_GEMINI,
+                                    ticker=o["ticker"],
+                                    order_id=oid,
+                                    side=o["side"],
+                                    action="buy",
+                                    limit_price=o["price"],
+                                    bid_at_place=o.get("bid_at_place"),
+                                    dip_pct_used=o.get("dip_pct_used"),
+                                    hist_p=o.get("hist_p"),
+                                    vol_p=o.get("vol_p"),
+                                    edge=o.get("edge"),
+                                    rec=o.get("rec"),
+                                    count=count,
+                                    yf_ticker=o.get("yf_ticker"),
+                                    threshold=o.get("threshold"),
+                                    direction=o.get("direction"),
+                                    config=cfg,
+                                )
                     else:
                         print(f"  (skipped BUY (Gemini) {o['ticker']} - balance/API constraint)")
                 elif sym and not gemini_trading:

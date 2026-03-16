@@ -174,7 +174,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | File                     | Purpose                | Key functions                                                                                                                                |
 | ------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`constants.py`**       | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`                           |
-| **`storage.py`**         | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58 |
+| **`storage.py`**         | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `record_limit_order()`, `record_order_cancel()`, `get_limit_order_analysis()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58 |
 | **`ollama_analysis.py`** | Local LLM analysis     | `capture_and_analyze()`, `run_analysis()`, `analyze_single_trade()` L117, `_get_analysis()` L78                                              |
 
 ### Scheduling & Dev Tools
@@ -386,6 +386,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `--preview` | flag | — | Show planned orders, no API calls |
 | `--execute` | flag | — | Place real buy/sell orders (requires `dry_run: false` in config) |
 | `--use-volatility` | flag | — | Enable volatility model; blend with empirical |
+| `--limit-analysis` | flag | — | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
 | `--log` [DIR] | optional | — | Log output to `~/Desktop/trading-bot-logs/` or specified dir (eval_YYYYMMDDHH.log per hour) |
 
 **Example:** `python scripts/compare_historical.py --days 365 --preview` → evaluate all markets, no orders, 365 days of history.
@@ -489,6 +490,9 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 | `record_prediction(...)` | When order fills (Kalshi/Gemini) | Inserts `predictions` with order_id, side, entry_price, hist_p |
 | `record_prediction_outcome(...)` | `_sync_kalshi_settlements()` on resolve | Updates predictions with outcome, pnl_cents, resolved_ts |
 | `record_resolved(...)` | `_sync_kalshi_settlements()` | Upserts `resolved_outcomes` (yes_settled, our_last_rec, etc.) |
+| `record_limit_order(...)` | When placing BUY limit order | Inserts `limit_orders` (limit_price, bid_at_place, dip_pct_used, hist_p, etc.) |
+| `record_order_cancel(...)` | When cancelling resting order | Updates `limit_orders` with status=cancelled, cancel_reason (no_longer_rec|want_better_price) |
+| `get_limit_order_analysis(config, days)` | `--limit-analysis` | Returns unfilled orders + would_have_filled from market_snapshots (inform limit_dip_pct) |
 | `get_last_snapshot_for_ticker(ticker)` | Position eval, orphan positions | Last snapshot for a ticker |
 | `get_market_snapshots_for_backtest(...)` | backtest.py synthetic | Snapshots in time range with rec filter |
 | `get_resolved_outcomes(config)` | Calibration, backtest synthetic | Dict ticker → {yes_settled, ...} |
@@ -613,6 +617,7 @@ All data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurab
 | **market_snapshots**  | Per-evaluation snapshot (yes/no bids, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**       | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
+| **limit_orders**      | Limit orders placed + cancel reasons (learn from unfilled) | None     | `id` (auto-increment)                          |
 
 ### Table Structures
 
@@ -678,6 +683,21 @@ predictions
 ├── resolved_ts      REAL
 ├── min_price_after_buy REAL
 └── max_price_after_buy REAL
+
+limit_orders
+├── id               INTEGER   (auto-increment)
+├── platform         TEXT      (kalshi | gemini)
+├── ticker           TEXT
+├── order_id         TEXT
+├── side             TEXT      (yes | no)
+├── limit_price      REAL
+├── bid_at_place     REAL      (market bid when order placed)
+├── dip_pct_used     REAL      (e.g. 0.05)
+├── hist_p           REAL
+├── vol_p            REAL
+├── ts               REAL
+├── status           TEXT      (placed | filled | cancelled)
+└── cancel_reason    TEXT      (no_longer_rec | want_better_price, NULL if not cancelled)
 ```
 
 ### How Data Flows
@@ -689,11 +709,12 @@ predictions
 | **market_snapshots**    | `compare_historical.py` → `record_market_snapshot()` | `backtest.py`, `get_last_snapshot_for_ticker()`, calibration |
 | **resolved_outcomes**   | `_sync_kalshi_settlements()` → `record_resolved()` | Calibration, backtest                           |
 | **predictions**         | `record_prediction()` on order fill; `record_prediction_outcome()` on settlement | `get_unresolved_predictions()`, `get_calibration_stats()`, `backtest.py` |
+| **limit_orders**       | `record_limit_order()` on place; `record_order_cancel()` on cancel | `get_limit_order_analysis()` for `--limit-analysis` |
 
 ### TTL Behavior
 
 - **yf_cache** and **yf_intraday_cache**: Entries older than 1 hour (`_CACHE_TTL_SECONDS = 3600`) are treated as stale. Callers receive `None` and re-fetch from yfinance.
-- **market_snapshots**, **resolved_outcomes**, **predictions**: Append-only; no TTL. Old data retained for backtesting and calibration.
+- **market_snapshots**, **resolved_outcomes**, **predictions**, **limit_orders**: Append-only; no TTL. Old data retained for backtesting, calibration, and limit-order analysis.
 
 ---
 

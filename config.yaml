@@ -27,6 +27,11 @@ yfinance_tickers:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   min_edge: 0.10 # Min edge (10%) to recommend buy. historical_p - market_price >= edge
+  # Easy win: when model and market both say ~90%+ (aligned), use relaxed edge — buy if profitable after fees
+  enable_easy_win: true # Buy when both agree on high probability and we profit after fees
+  min_edge_easy_win: 0.01 # Min 1¢ profit per contract when aligned (covers fees; 0 = any positive)
+  easy_win_min_p_win: 0.90 # Model must say P(win) >= this for easy-win
+  easy_win_min_market_p: 0.85 # Market must be in ballpark (yes_bid or no_bid >= this)
   min_yes_price: 0.05 # Skip BUY YES when market YES < 5¢ (market thinks <5% chance; often illiquid or model overconfidence). Override: allow when vol model shows ≥95%
   max_buy_yes_strike_above_pct: 0.05 # Skip BUY YES on "above X" when strike > current*(1+this). E.g. 5%: ETH $2179, strike $2300 (5.6% above) → skip unless vol ≥95%. Avoids far OTM intraday.
   max_buy_no_strike_above_pct: 0.05 # Skip BUY NO on "below X" when strike > current*(1+this). E.g. 5%: ETH $2179, strike $2300 → BUY NO = "price >$2300" needs 5.6% rally; skip unless vol shows P(NO) ≥95%.

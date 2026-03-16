@@ -75,6 +75,29 @@ Refactoring, architecture, and code quality changes.
 
 ---
 
+## Python AI/ML Ecosystem (NumPy, SciPy, scikit-learn, etc.)
+
+Leveraging NumPy and common Python AI/ML libraries could improve performance, calibration, and strategy tuning:
+
+| Tool / Library   | Potential use                                                                 | Effort | Impact |
+| ----------------- | ------------------------------------------------------------------------------ | ------ | ------ |
+| **NumPy**         | Vectorized `closes` arrays for empirical P, EWMA vol, backtest; faster than Python loops | Low    | Medium — speed, cleaner numerical code |
+| **SciPy**         | `scipy.stats.norm.cdf` for log-normal P(S&gt;K); `scipy.optimize.minimize` for Kelly/calibration tuning | Low    | Medium — robust probability and optimization |
+| **pandas**        | Time series for closes, `.rolling()` for vol, `.resample()` for intraday; merges for backtest | Medium | High — cleaner data pipelines, resampling |
+| **scikit-learn**  | **Calibration**: Platt scaling / isotonic regression on (hist_p → outcome); ML to tune min_edge from resolved predictions | Medium | High — better probability calibration, data-driven thresholds |
+| **statsmodels**   | GARCH(1,1), ARIMA for time-varying vol; structural break detection | Medium | High — Taylor Ch 9–10 improvements |
+| **PyTorch / JAX** | Gradient-based calibration, custom loss for P(YES); research-grade ML models | Research | Research — if we move to learned probability models |
+| **optuna / hyperopt** | Hyperparameter tuning for `min_edge`, `limit_dip_pct`, `vol_blend_weight` on backtest data | Medium | High — data-driven strategy param optimization |
+
+**Concrete next steps:**
+
+1. **NumPy for closes**: Replace list-based empirical P with `np.mean(closes > threshold)`; vectorize EWMA and volatility in `_volatility_probability`.
+2. **SciPy for norm.cdf**: Use `scipy.stats.norm.cdf(d)` in the log-normal model instead of manual integration.
+3. **scikit-learn calibration**: Fit `CalibratedClassifierCV` or isotonic regression on `(hist_p, outcome)` from resolved predictions; replace raw hist_p with calibrated P for recommendations.
+4. **pandas for backtest**: Load closes into `pd.Series`; use `.rolling()`, `.shift()` for point-in-time backtest and rolling vol.
+
+---
+
 ## Future: External APIs & UI (Ollama suggestions)
 
 - **CoinGecko / Binance API**: Integrate real-time prices as alternative to yfinance. Requires API keys, rate limits.
@@ -110,10 +133,7 @@ Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log`
 
 ### 5. Learn from position & limit order evaluations (FreqAI-style)
 
-**Implemented (simple)**: Orphan Kalshi positions (tickers not in main market loop) and all Gemini position evals now persist via `record_market_snapshot`. Calibration can use these snapshots once resolved.
-
-**TODO (later)**:
-- **Limit order evaluations**: Persist when we cancel/keep resting limit orders—e.g. `order_reviews` table with (ticker, order_id, action: cancel|keep, reason: no_longer_rec|want_better_price|same_better, hist_p, entry_price, ts). Enables learning: "we cancelled at 50¢, market dipped to 45¢ → we could have filled lower."
+**Implemented**: Orphan Kalshi positions and all Gemini position evals persist via `record_market_snapshot`. **Limit order tracking** (`limit_orders` table): we record every limit order placed (platform, ticker, order_id, limit_price, bid_at_place, dip_pct_used, hist_p, etc.) and record cancel reasons (`no_longer_rec`, `want_better_price`). Use `--limit-analysis` to see unfilled orders, min/max price during order lifetime, and "would have filled" stats — informs `limit_dip_pct` tuning.
 - **Kept position outcomes**: When we decide KEEP (don't sell), track that position and when it eventually resolves (win/lose). Currently we only record outcomes for placed buys (`record_prediction` → `record_prediction_outcome`). Add `position_evaluations` or link kept positions to predictions so we can measure: "we kept YES at hist_p=0.75, it won."
 - **Cancel reason classification**: Distinguish "no longer recommended" (rec=SKIP) vs "want better limit" (rec still BUY) for finer calibration.
 
