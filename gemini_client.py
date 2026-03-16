@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -21,8 +22,36 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+log = logging.getLogger(__name__)
+
+# Gemini 4xx error reasons (from API: {"reason":"...","message":"...","result":"error"})
+# See: https://docs.gemini.com/error-codes
+GEMINI_REASON_INSUFFICIENT_FUNDS = "InsufficientFunds"
+GEMINI_REASON_INVALID_PRICE = "InvalidPrice"
+GEMINI_REASON_INVALID_QUANTITY = "InvalidQuantity"
+GEMINI_REASON_INVALID_SYMBOL = "InvalidSymbol"
+GEMINI_REASON_MARKET_NOT_OPEN = "MarketNotOpen"
+
 PRODUCTION_BASE = "https://api.gemini.com"
 SANDBOX_BASE = "https://api.sandbox.gemini.com"
+
+
+def parse_gemini_error(response) -> tuple[str | None, str]:
+    """
+    Parse Gemini 4xx/406 error response. Returns (reason, message).
+    Response has: {"reason":"...","message":"...","result":"error"}
+    See: https://docs.gemini.com/error-codes
+    """
+    text = ""
+    if hasattr(response, "text") and response.text:
+        text = response.text
+    try:
+        data = json.loads(text) if text else {}
+    except Exception:
+        return None, (text or "")[:200]
+    reason = data.get("reason")
+    msg = data.get("message", "")
+    return reason, msg
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +336,83 @@ class GeminiTradingClient(GeminiPredictionClient):
         }
         return self._post_auth("/v1/prediction-markets/order", body)
 
+    def place_order_safe(
+        self,
+        symbol: str,
+        side: str,
+        outcome: str,
+        quantity: int | str,
+        price: float | str,
+        ticker_label: str = "",
+        order_type: str = "limit",
+        time_in_force: str = "good-til-cancel",
+    ) -> dict | None:
+        """
+        Place limit order; never raises on 4xx/406. Logs error and returns None on failure.
+        ticker_label: optional label for log messages (e.g. Kalshi ticker).
+        Rounds price to 0.01 to avoid InvalidPrice (Gemini uses 1¢ ticks).
+        """
+        p = float(price)
+        if 0 < p < 1:
+            price = round(p * 100) / 100
+        try:
+            return self.place_order(
+                symbol=symbol,
+                side=side,
+                outcome=outcome,
+                quantity=quantity,
+                price=price,
+                order_type=order_type,
+                time_in_force=time_in_force,
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and 400 <= e.response.status_code < 500:
+                reason, msg = parse_gemini_error(e.response)
+                hint = ""
+                if reason == GEMINI_REASON_INSUFFICIENT_FUNDS:
+                    hint = " (check balance)"
+                elif reason == GEMINI_REASON_INVALID_PRICE:
+                    hint = " (round price to valid tick, e.g. 0.01 steps)"
+                elif reason == GEMINI_REASON_INVALID_QUANTITY:
+                    hint = " (quantity must be positive integer)"
+                elif reason == GEMINI_REASON_MARKET_NOT_OPEN:
+                    hint = " (market closed or paused)"
+                elif reason == GEMINI_REASON_INVALID_SYMBOL:
+                    hint = " (invalid symbol)"
+                log.warning(
+                    "place_order_safe: order rejected %s %s %s - %s%s",
+                    symbol,
+                    side,
+                    outcome,
+                    reason or str(e.response.status_code),
+                    hint,
+                )
+                if msg and msg != (reason or ""):
+                    log.warning("place_order_safe: %s", msg[:200])
+            else:
+                raise
+            return None
+
     def cancel_order(self, order_id: int | str) -> dict:
         """Cancel order by orderId."""
         return self._post_auth("/v1/prediction-markets/order/cancel", {"orderId": int(order_id)})
+
+    def cancel_order_safe(self, order_id: int | str, ticker_label: str = "") -> bool:
+        """
+        Cancel order; never raises on 4xx/406 (e.g. order already filled/canceled).
+        Returns True if canceled, False on failure.
+        """
+        try:
+            self.cancel_order(order_id)
+            return True
+        except requests.HTTPError as e:
+            if e.response is not None and 400 <= e.response.status_code < 500:
+                reason, msg = parse_gemini_error(e.response)
+                log.warning(
+                    "cancel_order_safe: order %s not canceled - %s: %s",
+                    order_id,
+                    reason or e.response.status_code,
+                    (msg[:100] if msg else ""),
+                )
+                return False
+            raise

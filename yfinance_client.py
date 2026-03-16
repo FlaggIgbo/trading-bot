@@ -133,43 +133,64 @@ def _coingecko_aggs(ticker: str, days_back: int) -> list[float]:
         return []
 
 
-def get_aggs(ticker: str, days_back: int = 30) -> list[float]:
+def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> list[float]:
     """
     Get historical daily closes. Returns list of close prices (oldest first).
     Tries fallback tickers if primary fails (e.g. ^GSPC -> SPY for S&P 500).
     For crypto, tries CoinGecko when Yahoo fails.
+    Uses local storage cache when enabled (faster runs, fewer API calls).
     """
+    cfg = config
+    if cfg is None:
+        try:
+            from config import get_config
+            cfg = get_config()
+        except Exception:
+            cfg = {}
+
+    # Check cache first (storage.storage_enabled and cache TTL)
+    try:
+        from storage import get_yf_closes
+        cached = get_yf_closes(ticker, days_back, cfg)
+        if cached:
+            return cached
+    except ImportError:
+        pass
+
+    result: list[float] = []
     # For crypto: try CoinGecko first (Yahoo often blocked)
     if ticker in _COINGECKO_IDS.values():
-        cg_result = _coingecko_aggs(ticker, days_back)
-        if cg_result:
-            return cg_result
-
-    tickers_to_try: list[str] = [ticker]
-    tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
-
-    for t in tickers_to_try:
-        try:
-            end = datetime.utcnow()
-            start = end - timedelta(days=days_back)
-            hist = yf.download(t, start=start, end=end, interval="1d", progress=False)
-            if hist is None or hist.empty:
+        result = _coingecko_aggs(ticker, days_back)
+    if not result:
+        tickers_to_try: list[str] = [ticker]
+        tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
+        for t in tickers_to_try:
+            try:
+                end = datetime.utcnow()
+                start = end - timedelta(days=days_back)
+                hist = yf.download(t, start=start, end=end, interval="1d", progress=False)
+                if hist is None or hist.empty:
+                    continue
+                closes_raw = None
+                if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
+                    closes = hist["Close"]
+                    if hasattr(closes, "ndim") and closes.ndim > 1:
+                        closes = closes.iloc[:, 0]
+                    closes_raw = closes.dropna()
+                elif "Close" in hist.columns:
+                    closes_raw = hist["Close"].dropna()
+                if closes_raw is not None and len(closes_raw) > 0:
+                    result = [float(x) for x in closes_raw.tolist()]
+                    if t == "SPY" and ticker in ("^GSPC", "GSPC"):
+                        result = [x * 10.0 for x in result]
+                    break
+            except Exception:
                 continue
-            closes_raw = None
-            # yf.download returns MultiIndex columns for single ticker: [('Close','^GSPC'),...]
-            if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
-                closes = hist["Close"]
-                if hasattr(closes, "ndim") and closes.ndim > 1:
-                    closes = closes.iloc[:, 0]
-                closes_raw = closes.dropna()
-            elif "Close" in hist.columns:
-                closes_raw = hist["Close"].dropna()
-            if closes_raw is not None and len(closes_raw) > 0:
-                result = [float(x) for x in closes_raw.tolist()]
-                # SPY ~1/10 of ^GSPC; if we used SPY for S&P, scale to match GSPC for consistency
-                if t == "SPY" and ticker in ("^GSPC", "GSPC"):
-                    result = [x * 10.0 for x in result]  # approx SPX level
-                return result
-        except Exception:
-            continue
-    return []
+
+    if result:
+        try:
+            from storage import set_yf_closes
+            set_yf_closes(ticker, days_back, result, cfg)
+        except ImportError:
+            pass
+    return result

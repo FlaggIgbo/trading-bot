@@ -19,7 +19,26 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | Systematic edges (arbitrage) | QuantPedia | ✓ Intra-exchange + inter-exchange (Kalshi↔Gemini) arb; `min_arb_fee`, `enable_intra_arb`, `enable_inter_arb` |
 | XRP (Ripple) market support | — | ✓ KXXRPD, XRP-USD; crypto treatment, arbitrage, intraday |
 | Ollama LLM analysis | — | ✓ Local free analysis; `scripts/debug_ollama.py`; llama3.2:1b fallback |
+| **Budget-aware order allocation** | — | ✓ `_allocate_budget_to_orders`; when total cost exceeds budget, prefers 1 contract each (diversification) over 10 of one; `trading.max_total_buy_pct` (default 50%) |
+| **Ollama per-trade analysis** | — | ✓ Each proposed buy/sell is interpreted by Ollama as it's displayed (not batch at end); `analyze_single_trade()` in ollama_analysis.py |
+| **Flexible margin config** | — | ✓ `trading.max_pct_of_balance` (per order), `trading.max_total_buy_pct` (all buys combined) |
 | Recommendation constants | — | ✓ `constants.py`: REC_SKIP, REC_BUY_YES, REC_BUY_NO, REC_ARB_*, REC_LIKELY_LOSE, REC_RULE_VIOLATION |
+| **Order review (cancel/update/keep)** | — | ✓ Before placing, review resting orders on Kalshi + Gemini; cancel if no longer recommended or if we want a higher limit; keep if existing order is same or better; `cancel_order_safe`, `create_order_safe`, `place_order_safe` |
+| **Kalshi 4xx error handling** | Kalshi docs | ✓ `parse_kalshi_error()`, `round_price_to_tick()` using `price_ranges`; `create_order_safe` catches 4xx, logs `invalid_price`/`insufficient_balance` hints; never crashes on order rejection |
+| **Gemini 4xx/406 error handling** | Gemini docs | ✓ `parse_gemini_error()`, `place_order_safe`, `cancel_order_safe`; price rounded to 0.01; catches InvalidPrice, InsufficientFunds, InvalidQuantity, MarketNotOpen, InvalidSymbol; see [docs.gemini.com/error-codes](https://docs.gemini.com/error-codes) |
+| **Vol blend (empirical + volatility)** | Taylor, IMPROVEMENTS §6 | ✓ `strategy.vol_blend_weight` (0.5 = equal); `w*emp + (1-w)*vol` when both available; replaces `max(emp, vol)` for non-intraday |
+| **EWMA volatility** | Taylor Ch 9 | ✓ `strategy.use_ewma_vol`, `ewma_lambda` (0.94); σ²_t = λ·σ²_{t-1} + (1−λ)·r²_t; time-varying vol in `_volatility_probability` |
+| **High-confidence limit orders** | — | ✓ `strategy.limit_dip_pct_high_confidence` (e.g. 15%); when P(win) ≥ 90%, place limit 15% below bid to prioritize catching bigger dips on high-certainty contracts |
+| **Limit dip when price might decrease** | — | ✓ `strategy.limit_dip_pct_price_decline` (e.g. 10%); when vol model is on or 2+ days to expiry, use larger dip to prioritize limit orders—contract price may dip before settlement; stacks with high-confidence |
+| **Local historical storage** | Freqtrade, backtesting | ✓ SQLite under `~/.trading-bot-data/`; yfinance closes cache (1h TTL), market snapshots (yes/no bids, hist_p, vol_p, rec per eval), resolved_outcomes schema for calibration; enables backtesting & prediction calibration; not committed to git |
+| **Kalshi & Gemini fee accounting** | Kalshi/Gemini docs | ✓ Maker fee = rate × P × (1−P) per contract; `kalshi_maker_fee_rate`, `gemini_maker_fee_rate` (0.0175); min_edge is *net* edge after fees (e.g. 0.01 = 1¢ profit per contract) |
+
+---
+
+## Future: External APIs & UI (Ollama suggestions)
+
+- **CoinGecko / Binance API**: Integrate real-time prices as alternative to yfinance. Requires API keys, rate limits.
+- **User-friendly UI**: Web dashboard for portfolio, trades, custom notifications. (Streamlit, Flask, or TUI.)
 
 ---
 
@@ -33,16 +52,10 @@ Run our evaluation logic on *historical* market snapshots instead of live data. 
 - **Output**: Sharpe, win rate, max drawdown, edge decay over time
 - **TODO**: Fetch historical orderbook/market data; Kalshi may expose historical prices
 
-### 2. Kelly Criterion Position Sizing (Freqtrade, Stock-Prediction-Models)
+### 2. ~~Kelly Criterion Position Sizing~~ ✓ Done
 
-Instead of fixed `count=10`, size positions by edge and bankroll:
-
-```
-f* = (p*b - q) / b   # p=win prob, q=1-p, b=odds
-```
-
-- **Scope**: `strategy.use_kelly: true`, `kelly_fraction: 0.25` (quarter-Kelly) in config
-- **Output**: Recommended contract count in preview and live execution
+~~Instead of fixed `count=10`, size positions by edge and bankroll.~~
+Config: `strategy.use_kelly`, `kelly_fraction` (quarter-Kelly). `_kelly_count()` in compare_historical.py.
 
 ### 3. ~~Whitelist / Blacklist~~ ✓ Done
 
@@ -62,9 +75,9 @@ Extract strategy logic into pluggable classes so we can swap empirical vs volati
 
 ## Medium Priority (More Effort)
 
-### 6. GARCH / EWMA for Time-Varying Volatility (Stock-Prediction-Models)
+### 6. ~~GARCH / EWMA for Time-Varying Volatility~~ ✓ EWMA Done (Stock-Prediction-Models)
 
-Current volatility model uses a fixed historical vol. GARCH or EWMA adapts vol to recent regime (e.g. post-news spike).
+~~Current volatility model uses a fixed historical vol.~~ **EWMA implemented**: `strategy.use_ewma_vol: true`, `ewma_lambda: 0.94`; σ²_t = λ·σ²_{t-1} + (1−λ)·r²_t. GARCH(1,1) remains a future upgrade for full regime adaptation.
 
 ### 7. Monte Carlo Paths (Stock-Prediction-Models)
 

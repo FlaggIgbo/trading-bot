@@ -27,13 +27,25 @@ yfinance_tickers:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   min_edge: 0.10   # Min edge (10%) to recommend buy. historical_p - market_price >= edge
+  min_yes_price: 0.05   # Skip BUY YES when market YES < 5¢ (market thinks <5% chance; often illiquid or model overconfidence). Override: allow when vol model shows ≥95%
+  max_buy_yes_strike_above_pct: 0.05   # Skip BUY YES on "above X" when strike > current*(1+this). E.g. 5%: ETH $2179, strike $2300 (5.6% above) → skip unless vol ≥95%. Avoids far OTM intraday.
+  max_buy_no_strike_above_pct: 0.05    # Skip BUY NO on "below X" when strike > current*(1+this). E.g. 5%: ETH $2179, strike $2300 → BUY NO = "price >$2300" needs 5.6% rally; skip unless vol shows P(NO) ≥95%.
+  min_no_price: 0.05    # Skip BUY NO when market NO < 5¢ (market thinks our side unlikely). Override: allow when vol model shows P(NO) ≥95%
   days_back: 365   # Days of historical data for P(above/below). Longer = more stable empirical P
   days_to_expiry: 30   # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01   # Skip BUY NO on "above X" when current_price > X * (1+cushion). 1% cushion avoids noise; 10% was too permissive (held NO at $72.5k vs $71.5k strike).
   sell_losing_pct: 0.55   # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
   limit_dip_pct: 0.05     # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
+  limit_dip_pct_high_confidence: 0.15   # When P(win) >= 90%, use larger dip (15%) — prioritize aggressive limits on high-certainty contracts
+  limit_dip_pct_price_decline: 0.10   # When model suggests contract price might decrease (vol model on, or dte >= 2), use this dip (10%) to prioritize limit orders
+  vol_blend_weight: 0.5   # Blend empirical + vol: w*emp + (1-w)*vol when both available. 0.5 = equal; 0 = pure emp; 1 = pure vol. (with --use-volatility)
+  use_ewma_vol: true      # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
+  ewma_lambda: 0.94       # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
   intraday_other_min_p_win: 0.90   # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)
   intraday_other_min_p_win_with_vol: 0.80   # When --use-volatility: use 80% instead (vol model already accounts for time & vol)
+  # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
+  kalshi_maker_fee_rate: 0.0175   # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
+  gemini_maker_fee_rate: 0.0175   # 1.75% maker; same formula as Kalshi
   # Systematic edges (QuantPedia: arbitrage, cross-platform hedging)
   min_arb_fee: 0.02   # Min edge for arb (2%): buy-all when yes_ask+no_ask < 1 - fee
   enable_intra_arb: true   # Intra-exchange: buy YES+NO when sum < 1 (same market)
@@ -45,10 +57,17 @@ strategy:
   # buy_yes_below: 0.30   # bot.py: buy YES when price < 30 cents
   # buy_no_below: 0.30    # bot.py: buy NO when price < 30 cents
 
+# Local historical storage (SQLite). Data in ~/.trading-bot-data/ — not committed to git.
+# Speeds runs (yf cache), builds history for backtesting and calibration.
+storage:
+  enabled: true
+  data_dir: ~/.trading-bot-data   # Or TRADING_BOT_DATA_DIR env var
+
 # Order execution (Kalshi & Gemini) - balance-aware, 4xx-resilient
 trading:
   dry_run: false   # false = place real orders when strategy triggers
   max_pct_of_balance: 0.20    # use at most 20% of balance per order
+  max_total_buy_pct: 0.50     # max % of balance for ALL buys combined (budget-aware diversification)
   min_contracts: 1   # skip if capped count < this
   # When balance is below this (cents), place a limit order instead of skipping
   # E.g. 500 = $5: with $3 balance, place 1-contract limit at price we can afford (e.g. 60¢)

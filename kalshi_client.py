@@ -5,6 +5,7 @@ Based on: https://docs.kalshi.com/getting_started/quick_start_authenticated_requ
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 from pathlib import Path
@@ -24,6 +25,65 @@ log = logging.getLogger(__name__)
 # API endpoints per Kalshi docs (https://docs.kalshi.com)
 DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 PRODUCTION_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+
+# Kalshi 400 error codes (from API error response: {"error":{"code":"...","message":"..."}})
+# See: https://docs.kalshi.com/fix/error-handling
+KALSHI_ERROR_INSUFFICIENT_BALANCE = "insufficient_balance"
+KALSHI_ERROR_INVALID_PRICE = "invalid_price"
+KALSHI_ERROR_UNKNOWN_SYMBOL = "unknown_symbol"
+KALSHI_ERROR_MARKET_CLOSED = "market_closed"
+KALSHI_ERROR_DUPLICATE_ORDER = "duplicate_order"
+
+
+def parse_kalshi_error(response) -> tuple[str | None, str]:
+    """
+    Parse Kalshi 400 error response. Returns (error_code, message).
+    Response can be requests.Response or dict with 'error' key.
+    """
+    err_obj = None
+    if hasattr(response, "text") and response.text:
+        try:
+            data = json.loads(response.text)
+            err_obj = data.get("error") or data
+        except Exception:
+            return None, (response.text or "")[:200]
+    elif isinstance(response, dict):
+        err_obj = response.get("error") or response
+    if not err_obj:
+        return None, ""
+    code = err_obj.get("code") if isinstance(err_obj, dict) else None
+    msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
+    return code, msg
+
+
+def round_price_to_tick(
+    price_dollars: float | str,
+    price_ranges: list[dict] | None = None,
+) -> str:
+    """
+    Round price to valid Kalshi tick. Kalshi uses price_level_structure:
+    - linear_cent: step $0.01 (most markets)
+    - tapered_deci_cent: $0.001 at tails, $0.01 in middle
+    - deci_cent: step $0.001
+    Without price_ranges, default to 0.01 (safe for linear_cent).
+    """
+    p = float(price_dollars)
+    if p <= 0 or p >= 1:
+        return f"{max(0.01, min(0.99, p)):.2f}"
+
+    if price_ranges:
+        for r in price_ranges:
+            start = float(r.get("start", 0))
+            end = float(r.get("end", 1))
+            step = float(r.get("step", 0.01))
+            if start <= p <= end and step > 0:
+                n = round((p - start) / step)
+                rounded = start + n * step
+                rounded = max(start, min(end, rounded))
+                decimals = len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 2
+                return f"{rounded:.{decimals}f}"
+    # Default: linear_cent (1¢ ticks)
+    return f"{round(p * 100) / 100:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +215,14 @@ class KalshiClient:
     def get_orders(self, **params) -> dict:
         return self.get("/portfolio/orders", params)
 
+    def get_settlements(self, **params) -> dict:
+        """Fetch settlement records. Supports ticker, event_ticker, limit, cursor."""
+        return self.get("/portfolio/settlements", params)
+
+    def get_fills(self, **params) -> dict:
+        """Fetch recent order fills. Supports ticker, min_ts, max_ts, limit, cursor."""
+        return self.get("/portfolio/fills", params)
+
     # --- Markets (public data also available unauthenticated) ---
     def get_markets(self, **params) -> dict:
         return self.get("/markets", params)
@@ -212,6 +280,21 @@ class KalshiClient:
     def cancel_order(self, order_id: str) -> dict:
         return self.delete(f"/portfolio/orders/{order_id}")
 
+    def cancel_order_safe(self, order_id: str, ticker: str = "") -> bool:
+        """
+        Cancel order; never raises on 4xx (e.g. order already filled). Returns True on success.
+        """
+        try:
+            self.cancel_order(order_id)
+            return True
+        except requests.HTTPError as e:
+            if e.response is not None and 400 <= e.response.status_code < 500:
+                code, msg = parse_kalshi_error(e.response)
+                log.warning("cancel_order_safe: failed %s %s - %s", order_id, ticker or "", code or msg)
+            else:
+                raise
+            return False
+
     def create_order_safe(
         self,
         ticker: str,
@@ -225,6 +308,7 @@ class KalshiClient:
         time_in_force: str = "good_till_canceled",
         max_pct_of_balance: float = 0.90,
         min_balance_for_limit_fallback_cents: int = 0,
+        price_ranges: list[dict] | None = None,
         **kwargs,
     ) -> dict | None:
         """
@@ -233,6 +317,16 @@ class KalshiClient:
         When balance is below min_balance_for_limit_fallback_cents and we'd skip a buy,
         place a 1-contract limit order at a price we can afford instead.
         """
+        # Validate ticker (Ollama-suggested: ensure we have a valid market identifier)
+        if not ticker or not str(ticker).strip():
+            log.warning("create_order_safe: empty ticker")
+            return None
+        if count < 1:
+            log.warning("create_order_safe: count must be >= 1")
+            return None
+        if side.lower() not in ("yes", "no"):
+            log.warning("create_order_safe: side must be yes or no")
+            return None
         # Resolve price in cents (Kalshi: 1-99 cents per contract)
         price_cents: int | None = None
         if action == "buy":
@@ -259,8 +353,8 @@ class KalshiClient:
                 elif no_price_dollars:
                     price_cents = int(float(no_price_dollars) * 100)
 
-        if not price_cents or price_cents < 1:
-            log.warning("create_order_safe: invalid price (need yes_price/no_price in cents or dollars)")
+        if not price_cents or price_cents < 1 or price_cents > 99:
+            log.warning("create_order_safe: invalid price (Kalshi: 1-99 cents; need yes_price/no_price)")
             return None
 
         max_count: int
@@ -313,7 +407,7 @@ class KalshiClient:
             max_spend = int(balance_cents * max_pct_of_balance)
             if max_spend >= 1:  # Can afford at least 1¢ (Kalshi min)
                 fallback_price_cents = min(99, max(1, max_spend))
-                fallback_price_str = f"{fallback_price_cents / 100:.4f}"
+                fallback_price_str = round_price_to_tick(fallback_price_cents / 100, price_ranges)
                 try:
                     result = self.create_order(
                         ticker=ticker,
@@ -358,6 +452,14 @@ class KalshiClient:
                 )
             return None
 
+        # Round prices to valid Kalshi tick (avoids invalid_price for linear_cent markets)
+        yes_rounded = None
+        no_rounded = None
+        if yes_price_dollars:
+            yes_rounded = round_price_to_tick(yes_price_dollars, price_ranges)
+        if no_price_dollars:
+            no_rounded = round_price_to_tick(no_price_dollars, price_ranges)
+
         try:
             return self.create_order(
                 ticker=ticker,
@@ -365,23 +467,26 @@ class KalshiClient:
                 action=action,
                 count=count,
                 yes_price=yes_price,
-                yes_price_dollars=yes_price_dollars,
+                yes_price_dollars=yes_rounded or yes_price_dollars,
                 no_price=no_price,
-                no_price_dollars=no_price_dollars,
+                no_price_dollars=no_rounded or no_price_dollars,
                 time_in_force=time_in_force,
                 **kwargs,
             )
         except requests.exceptions.HTTPError as e:
             if e.response is not None and 400 <= e.response.status_code < 500:
-                try:
-                    err_text = (e.response.text or "")[:200]
-                except Exception:
-                    err_text = str(e)
+                code, msg = parse_kalshi_error(e.response)
+                hint = ""
+                if code == KALSHI_ERROR_INVALID_PRICE:
+                    hint = " (round price to market tick; see round_price_to_tick)"
+                elif code == KALSHI_ERROR_INSUFFICIENT_BALANCE:
+                    hint = " (check balance/position; may have been filled or closed)"
                 log.warning(
-                    "create_order_safe: order rejected (4xx) %s %s - %s",
-                    getattr(e.response, "status_code", "?"),
+                    "create_order_safe: order rejected %s %s - %s%s",
                     ticker,
-                    err_text,
+                    code or "4xx",
+                    msg or (e.response.text or "")[:150],
+                    hint,
                 )
                 return None
             raise

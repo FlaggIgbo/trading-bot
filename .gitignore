@@ -12,3 +12,8 @@ venv/
 .eggs/
 dist/
 build/
+
+# Local historical storage (never commit)
+data/
+*.db
+.trading-bot-data/

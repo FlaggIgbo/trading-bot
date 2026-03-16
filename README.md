@@ -84,20 +84,37 @@ trading-bot/
 │   ├── compare_prices.py    # Quick live price snapshot
 │   ├── debug_ollama.py      # Debug Ollama LLM integration (run when analysis fails)
 │   └── test_connection.py   # Test API connections
+├── docs/                    # Documentation
+│   ├── CODE_EXPLAINER.md    # Step-by-step flow, file-by-file reference, code pointers
+│   └── IMPROVEMENTS.md      # Roadmap and backlog
+├── launchd/                 # macOS scheduling (run every 15 min)
+│   ├── README.md            # Setup instructions
+│   └── com.user.compare_historical.plist
 ├── config.py                # Config loader (yaml + env overrides)
 ├── config.yaml              # Markets, strategy, trading settings
 ├── kalshi_client.py         # Kalshi API client
 ├── gemini_client.py         # Gemini Prediction Markets client
 ├── yfinance_client.py       # Price data (yfinance + CoinGecko fallback)
+├── storage.py               # Local SQLite storage (yf cache, market snapshots, resolved outcomes)
 ├── ollama_analysis.py       # Ollama LLM analysis integration
+├── pyproject.toml           # Ruff (linter/formatter) config
+├── .pre-commit-config.yaml  # Ruff + Prettier on git push
 └── .env                     # Credentials (from .env.example)
 ```
 
 All scripts in `scripts/` add the project root to the Python path and load `.env` from the project root, so run them from the project directory: `python scripts/compare_historical.py`.
 
+**Code walkthrough:** For a step-by-step flow and file-by-file reference with code pointers, see [docs/CODE_EXPLAINER.md](docs/CODE_EXPLAINER.md).
+
+### Development (linting, formatting)
+
+- **Ruff** (Python): `pip install ruff` then `ruff check . --fix && ruff format .`
+- **Pre-commit** (runs on `git push`): `pip install pre-commit && pre-commit install --hook-type pre-push`
+- **Prettier** (YAML/JSON/MD): `npm install` then `npx prettier --write "*.yaml" "*.json" "*.md"` (or use pre-commit)
+
 ## Improvement roadmap
 
-See [IMPROVEMENTS.md](IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, market snapshots, resolved-outcomes schema for backtesting and calibration).
 
 ## Contract evaluation workflow
 
@@ -132,7 +149,7 @@ Run `scripts/compare_historical.py` every **15 minutes** locally for continuous 
 flowchart TB
     subgraph init["1. Initialize"]
         A[Load config] --> B[Fetch Gemini events]
-        B --> C[Fetch yfinance closes per series]
+        B --> C[Fetch yfinance closes — cache when storage on]
     end
 
     subgraph eval["2. Evaluate Markets"]
@@ -141,16 +158,20 @@ flowchart TB
         D --> F[Gemini: get crypto events]
         E --> G{Skip? Non-crypto/non-S&P intraday}
         F --> G
-        G -->|No| H[Extract strike, hist_p, vol_p]
+        G -->|No| G2{Arb? intra or inter}
+        G2 -->|Yes| J
+        G2 -->|No| H[Extract strike, emp+vol blend, hist_p]
         H --> I{Recommendation}
         I -->|BUY YES/NO| J[pending_orders]
         I -->|SKIP| K[Skip]
+        I --> J2[Record snapshot]
+        J --> J2
     end
 
     subgraph positions["3. Evaluate Positions"]
         L[Paginate Kalshi get_positions] --> M[Parse position_fp: positive=YES, negative=NO]
         M --> N{Cached or fetch market}
-        N --> O[Compute P lose, rec]
+        N --> O[Compute P lose, rec with vol blend]
         O --> P{Sell trigger?}
         P -->|LIKELY_LOSE ≥55%| Q[pending_sells]
         P -->|Edge flip| Q
@@ -165,8 +186,9 @@ flowchart TB
     subgraph execute["4. Execute or Preview"]
         Q --> R{Flags?}
         J --> R
-        R -->|--execute| S[SELL first: Kalshi + Gemini]
-        S --> T[BUY then: limit orders, skip duplicates]
+        R -->|--execute| S[Review orders: cancel/update/keep]
+        S --> T[SELL first: Kalshi + Gemini]
+        T --> U[BUY then: limit orders - dip based on P-win, skip kept]
         R -->|--preview| U[Show planned orders]
         R -->|none| V[Note: N losers, run --preview]
     end
@@ -186,11 +208,11 @@ flowchart TB
 │                         compare_historical.py                                │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-  ┌──────────────┐     ┌──────────────┐     ┌──────────────────────────────────┐
-  │ Load config  │────▶│ Fetch        │────▶│ For each series (KXBTCD, KXETHD,  │
-  │ markets,     │     │ yfinance     │     │ KXSOLD, KXINXU, KXXRPD):         │
-  │ yf_tickers   │     │ closes       │     │   • Get Kalshi open markets       │
-  └──────────────┘     └──────────────┘     │   • Get Gemini events (crypto)    │
+  ┌──────────────┐     ┌─────────────────────┐     ┌──────────────────────────────────┐
+  │ Load config  │────▶│ Fetch yfinance       │────▶│ For each series (KXBTCD, KXETHD,  │
+  │ markets,     │     │ closes (cache 1h     │     │ KXSOLD, KXINXU, KXXRPD):         │
+  │ yf_tickers   │     │ when storage on)     │     │   • Get Kalshi open markets       │
+  └──────────────┘     └─────────────────────┘     │   • Get Gemini events (crypto)    │
                                             └────────────────┬─────────────────┘
                                                              │
                          ┌───────────────────────────────────┘
@@ -200,10 +222,10 @@ flowchart TB
   │   1. Skip? → Non–crypto/non–S&P intraday only. Crypto/S&P: all intraday OK   │
   │   2. Arb first: intra (yes+no<1) or inter (Kalshi↔Gemini). If found → orders  │
   │   3. Extract strike (e.g. $72,250 above) from market                          │
-  │   4. hist_p = empirical P(close above/below strike) from past N days (365)   │
-  │   5. vol_p  = volatility model (optional, --use-volatility)                  │
-  │   6. Compare hist_p vs market YES price → BUY YES / BUY NO / SKIP            │
-  │   7. If not SKIP → add to pending_orders (limit price = bid × (1−dip_pct))    │
+  │   4. hist_p = empirical + vol blend (--use-volatility; EWMA vol when enabled)  │
+  │   5. Compare hist_p vs market YES price → BUY YES / BUY NO / SKIP            │
+  │   6. If not SKIP → add to pending_orders (limit = bid × (1−dip); 15% when P≥90%)│
+  │   7. Record market snapshot (storage) for all evaluated markets               │
   └─────────────────────────────────────────────────────────────────────────────┘
                                                              │
                                                              ▼
@@ -228,10 +250,11 @@ flowchart TB
            │                                      └──────────────────┘  │ pending     │
            ▼                                                                      │
   ┌─────────────────────────────────────────────────────────────────────────────┐
-  │ EXECUTE order: SELL first → then BUY (so balance reflects sell proceeds)    │
-  │   1. SELL: Kalshi + Gemini limit sells at bid                               │
-  │   2. BUY:  Kalshi + Gemini limit buys (skip if open order exists)           │
-  │            Price = bid × (1 − limit_dip_pct) to catch dips                   │
+  │ EXECUTE order: Review → SELL → BUY                                          │
+  │   0. Review: cancel orders no longer wanted or needing higher price          │
+  │   1. SELL: Kalshi + Gemini limit sells at bid (skip if kept)                 │
+  │   2. BUY:  Kalshi + Gemini limit buys (skip if kept; else place/replace)    │
+  │            Price = bid × (1−dip); 15% dip when P(win)≥90%                     │
   └─────────────────────────────────────────────────────────────────────────────┘
                                                              │
                                                              ▼
@@ -293,6 +316,7 @@ When you run `scripts/compare_prices.py`, `scripts/compare_historical.py`, or `s
 
 - **Skip LLM** for cron or non-interactive runs: add `--no-llm`
 - **Override model**: `OLLAMA_MODEL=qwen2.5:3b python3 scripts/compare_prices.py`
+- **Long output truncation**: Very long runs are truncated so the model fits them in context (keeps head + tail). Override via `OLLAMA_MAX_CHARS=25000` (default), `OLLAMA_HEAD_CHARS=8000`, `OLLAMA_TAIL_CHARS=12000`
 
 If Ollama isn’t running or the model is missing, scripts still run and finish without analysis.
 
@@ -348,7 +372,7 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--no-llm` | Skip Ollama analysis |
 | `--log` | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDD.log` (or `--log DIR` for custom dir) |
 
-Config: `strategy.min_edge`, `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, etc. in `config.yaml`.
+Config: `strategy.min_edge`, `strategy.min_yes_price` (skip BUY YES when market YES &lt; 5¢), `strategy.min_no_price` (skip BUY NO when market NO &lt; 5¢), `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.limit_dip_pct_high_confidence` (15% when P(win) ≥ 90%), `strategy.vol_blend_weight` (blend empirical + vol; 0.5 = equal), `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, etc. in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 
@@ -394,14 +418,39 @@ The bot checks for arb *before* making normal BUY YES/NO suggestions. If it find
 Both platforms place **limit orders** (good-til-cancel) so orders rest on the book until filled. To catch dips when the market temporarily drops:
 
 - **`limit_dip_pct`** (default `0.05`): Place buy limits this much *below* the current bid. E.g. `0.05` = 5% below bid — if bid is 40¢, we place at 38¢. Set to `0` to use the bid directly.
-- **Duplicate prevention**: The bot skips placing a new buy if you already have an open limit order for that market and side.
+- **`limit_dip_pct_high_confidence`** (e.g. `0.15`): When P(win) ≥ 90%, use this larger dip instead—e.g. 15% below bid. Prioritizes catching bigger dips on high-certainty contracts (perfect for 10¢ limit on YES/NO we're confident will hit). Set to `0` to use `limit_dip_pct` for all.
+- **`limit_dip_pct_price_decline`** (e.g. `0.10`): When the model suggests the contract price might decrease—e.g. volatility model is active, or 2+ days to expiry—use this larger dip (10%) to prioritize limit orders and catch price dips. Stacks with high-confidence when both apply.
+- **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces. If the existing order is same or better, it keeps it and skips placing a duplicate.
+
+### Local historical storage
+
+**In plain English:** The bot stores data locally to speed runs and to build history for future backtesting and calibration. All data stays on your machine and is **not committed to git**.
+
+| What we store | Purpose |
+|---------------|---------|
+| **yfinance closes cache** | Daily closes cached for 1 hour → fewer API calls, faster runs |
+| **Market snapshots** | For each evaluation: yes/no bids, our hist_p, vol_p, recommendation, threshold, direction. Builds time series for backtesting. |
+| **Resolved outcomes schema** | Ready for when we record contract settlements → calibrate our predictions (e.g. "when we said 70% YES, did we win?") |
+
+**Config** (`config.yaml` → `storage`):
+
+```yaml
+storage:
+  enabled: true
+  data_dir: ~/.trading-bot-data   # Override with TRADING_BOT_DATA_DIR env
+```
+
+Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 
 ### Probability model
 
 **In plain English:** We estimate the chance of YES two ways: (1) **Empirical** = "In the last year, how often did the price end above (or below) the target?" and (2) **Volatility** = Using how much the price typically swings, we calculate the odds. We use the higher of the two when both are available.
 
 - **Empirical**: fraction of past days the close was above/below the threshold.
-- **Volatility** (with `--use-volatility`): log-normal model using historical annualized vol and time-to-expiry. Time-to-expiry is parsed per contract from the title (e.g. "tomorrow at 5pm ET", "March 16 at 5pm") and converted to UTC; falls back to `strategy.days_to_expiry` when parsing fails. Used as `max(empirical, volatility_probability)` for more robust recommendations.
+- **Volatility** (with `--use-volatility`): log-normal model using historical annualized vol and time-to-expiry. Time-to-expiry is parsed per contract from the title (e.g. "tomorrow at 5pm ET", "March 16 at 5pm") and converted to UTC; falls back to `strategy.days_to_expiry` when parsing fails. When both empirical and volatility P are available, uses a weighted blend (`vol_blend_weight`, default 0.5) or `max(empirical, volatility_probability)` if no blend is set. EWMA volatility (`use_ewma_vol: true`, `ewma_lambda: 0.94`) adapts σ to recent regime.
+- **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
+- **min_no_price** (default 0.05): Skip BUY NO when the market prices NO below 5¢ (i.e., YES above ~95¢). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
+- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees** — so 1¢ profit per contract is fine (`min_edge: 0.01`).
 
 ### Quick snapshot: `compare_prices.py`
 
@@ -413,7 +462,17 @@ python3 scripts/compare_prices.py
 
 ### Run every 15 minutes
 
-Run the evaluation locally every 15 minutes for continuous monitoring:
+Run the evaluation locally every 15 minutes for continuous monitoring.
+
+**launchd (recommended on macOS):** Uses Apple's native scheduler. See [`launchd/README.md`](launchd/README.md) for setup. Quick steps:
+
+```bash
+cp launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
+# Edit plist if paths differ (Python, script, WorkingDirectory)
+launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist
+```
+
+**crontab (alternative):**
 
 ```bash
 # crontab -e
@@ -421,7 +480,7 @@ Run the evaluation locally every 15 minutes for continuous monitoring:
 */15 * * * * cd /path/to/trading-bot && .venv/bin/python scripts/compare_historical.py --days 365 --no-llm >> eval.log 2>&1
 ```
 
-Or use a simple loop (for testing):
+**Simple loop (for testing):**
 
 ```bash
 while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
@@ -429,13 +488,13 @@ while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
 
 **Note:** `scripts/compare_prices` and `scripts/compare_historical` do not place orders—they only recommend. `scripts/bot.py` can place orders when `trading.dry_run` is `false` (see below).
 
-### Balance-aware order execution (Kalshi)
+### Balance-aware order execution (Kalshi & Gemini)
 
 **In plain English:** The bot never spends more than a set percentage of your account on a single order (e.g. 20%). If an order fails (e.g. insufficient funds), it logs a warning and continues—it doesn't stop the whole run. When balance is very low (below a threshold), instead of skipping the buy entirely, it places a small limit order at a price you can afford—hoping to get filled if the market dips.
 
 Orders placed via `create_order_safe` are capped to your available balance and never cause the script to crash on 4xx (e.g. insufficient funds).
 
-- **Balance cap:** Each order uses at most `max_pct_of_balance` (configurable in `config.yaml`, e.g. 20%) of your Kalshi balance.
+- **Balance cap:** Each order uses at most `max_pct_of_balance` (configurable in `config.yaml`, e.g. 20%) of your Kalshi balance. Gemini orders similarly capped and use `place_order_safe`.
 - **Low-balance limit fallback:** When balance is below `min_balance_for_limit_fallback_cents` (e.g. 500 = $5) and you can't afford the target order, the bot places a 1-contract limit at a price you can afford (e.g. 60¢ if you have $3 and use 20% per order). Set to `0` to disable.
 - **4xx resilience:** If the API returns 4xx (insufficient funds, invalid market, etc.), the script logs a warning and continues.
 - **Config** (`config.yaml` → `trading`):
@@ -454,12 +513,20 @@ Enable execution in `scripts/bot.py` by setting `buy_yes_below` / `buy_no_below`
 
 If you see `HTTPError: 400 Client Error: Bad Request` when placing orders:
 
-- **Price format**: The script sends prices in the format Kalshi expects (4 decimal places, e.g. `0.4500`). If you've customised price formatting elsewhere, ensure it matches.
+- **`invalid_price`**: Kalshi markets use a tick size (e.g. 1¢ for `linear_cent`). The bot rounds prices via `round_price_to_tick()` using the market's `price_ranges`. If you still see this, the market may use subpenny pricing (`deci_cent`); ensure you have the latest market data.
+- **`insufficient_balance`**: On buys: balance is too low. On sells: no position in that ticker/side, or position was already sold. `create_order_safe` re-fetches positions before sell—stale data can cause this if positions changed between evaluation and execution.
 - **Market closed**: The market may be paused or closed; Kalshi rejects orders for markets that are no longer tradeable.
-- **Insufficient balance/position**: `create_order_safe` caps orders by balance (buys) or position size (sells). If the API still returns 400, check your Kalshi balance and positions.
 - **Order size**: Ensure `count` is at least 1 and within exchange limits.
-- **Error details**: Check the log output—when an order is rejected, the script prints the API error body (e.g. `order rejected (4xx) 400 TICKER - {"error": "..."}`). Use that message to diagnose the cause.
+- **Error details**: The bot parses Kalshi error codes (`code`, `message`) and logs them. Check the log output for the specific code (e.g. `order rejected TICKER - invalid_price (round price to market tick)`).
 - **Resilience**: Order failures are handled so one bad order does not stop the run. Failed orders are logged; the script continues with the next order.
+
+**Gemini (4xx / 406):** The bot uses `place_order_safe`, which catches 4xx/406 and parses `reason`/`message` from the response. Common reasons:
+
+- **`InsufficientFunds`** (406): Balance too low. Add funds or reduce order size.
+- **`InvalidPrice`**: Price must be valid for the market (e.g. 0–1, appropriate tick). Round to 0.01 steps if needed.
+- **`InvalidQuantity`**: Quantity must be a positive integer.
+- **`InvalidSymbol`**: Contract/symbol not found or no longer tradeable.
+- **`MarketNotOpen`**: Market closed or paused. See [Gemini error codes](https://docs.gemini.com/error-codes).
 
 ### Configuring tickers
 
@@ -490,7 +557,7 @@ The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemin
 | Bitcoin | Daily | [BTC price on March 16](https://exchange.gemini.com/predictions/BTC2603162100/btc-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
 | Ether | Daily | [ETH price on March 16](https://exchange.gemini.com/predictions/ETH2603162100/eth-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
 | Solana | Weekly (no daily) | [SOL price on March 20](https://exchange.gemini.com/predictions/SOL2603202100/sol-price-on-march-20?categoryPath=crypto%2Ccrypto_solana&status=active) |
-| XRP (Ripple) | Daily | [XRP price](https://exchange.gemini.com/predictions?categoryPath=crypto&status=active) (if listed) |
+| XRP (Ripple) | Daily | [XRP price on March 16](https://exchange.gemini.com/predictions/XRP2603162100/xrp-price-on-march-16?categoryPath=crypto%2Cdaily&status=active) |
 
 **Note:** With `GEMINI_API_KEY` and `GEMINI_API_SECRET` set, `scripts/compare_historical.py --execute` places limit orders on both Kalshi and Gemini. Use `--preview` to see planned orders without placing them.
 
@@ -504,4 +571,4 @@ The evaluation logic draws on econometric and financial time-series literature:
 | [Campbell, Lo, MacKinlay (1997)](https://www.nrc.gov/docs/ml1208/ML12088A329.pdf) *The Econometrics of Financial Markets* | Event-study methodology; market model reduces variance of abnormal returns |
 | [Tsay](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/files/2017/03/analysis-of-financial-time-series-copy-2ffgm3v.pdf) *Analysis of Financial Time Series* | GARCH, ARIMA, structural breaks for volatility and regime modeling |
 
-See [IMPROVEMENTS.md](IMPROVEMENTS.md) for prioritized enhancements (GARCH, implied vol, market-model adjustment, etc.).
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for prioritized enhancements (GARCH, implied vol, market-model adjustment, etc.).

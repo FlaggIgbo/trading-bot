@@ -53,8 +53,8 @@ def _run() -> int:
     gemini = GeminiPredictionClient()
     gemini_events_by_asset: dict[str, list] = {}
     try:
-        r = gemini.get_events(category="crypto", status="active", limit=200)
-        for evt in r.get("data") or []:
+        events = gemini.get_crypto_events(limit=200)
+        for evt in events:
             asset = _event_to_asset(evt)
             if asset:
                 gemini_events_by_asset.setdefault(asset, []).append(evt)
