@@ -1,6 +1,6 @@
-# Kalshi Prediction Market Trading Bot
+# Prediction Market Trading Bot
 
-A bot that connects to the [Kalshi API](https://docs.kalshi.com/) to monitor selected prediction markets and help you decide when to trade.
+A bot that connects to the [Kalshi API](https://docs.kalshi.com/) and the [Gemini API](https://docs.gemini.com/prediction-markets/markets) to monitor selected prediction markets and help you decide when to trade.
 
 **What is a prediction market?** Think of it like betting on yes/no questions—e.g. "Will Bitcoin be above $81,250 on March 16?" You buy YES if you think it will happen, or NO if you think it won't. If you're right, you profit (usually $1 per contract); if wrong, you lose what you paid. Prices in cents represent the market's estimated probability—e.g. 40¢ means people think there's about a 40% chance. The bot looks for times when that crowd price is off compared to historical data.
 
