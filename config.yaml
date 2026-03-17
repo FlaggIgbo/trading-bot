@@ -42,11 +42,11 @@ strategy:
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
   limit_dip_pct: 0.05 # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
-  limit_order_mode: dynamic_tick # fixed_pct | dynamic_tick | layered
+  limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
   min_stability_duration_seconds: 30 # Require recent mid-price stability before posting new BUY limits
-  min_order_book_depth: 50 # Minimum same-side top-of-book bid size required before posting BUY limits
+  min_order_book_depth: 20 # Depth target; layered mode scales size instead of hard skipping when thinner
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
   cancel_all_on_regime_shift: true # During momentum crash or vol-spike regime, cancel resting BUY limits before re-quoting
   limit_order_ttl_minutes: 30 # Cancel and refresh resting BUY limits older than this TTL

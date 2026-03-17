@@ -3207,13 +3207,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
                 book = _extract_book_fields(m, yes_bid, no_bid)
                 bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
-                if sp.min_order_book_depth > 0 and (bid_size_side is None or float(bid_size_side) < float(sp.min_order_book_depth)):
-                    print(
-                        f"    Why: insufficient book depth for {side.upper()} "
-                        f"({0 if bid_size_side is None else float(bid_size_side):.0f} < {sp.min_order_book_depth})"
-                    )
-                    print()
-                    continue
+                depth_mult = 1.0
+                if sp.min_order_book_depth > 0:
+                    depth_val = float(bid_size_side) if bid_size_side is not None else 0.0
+                    depth_req = float(sp.min_order_book_depth)
+                    if depth_val < depth_req:
+                        # Layered mode: allow thin-book participation but scale size down.
+                        if sp.limit_order_mode == "layered":
+                            depth_mult = max(0.20, min(1.0, depth_val / depth_req)) if depth_val > 0 else 0.20
+                            print(
+                                f"    Note: thin book for {side.upper()} ({depth_val:.0f} < {depth_req:.0f}); "
+                                f"layered mode scales size by {depth_mult:.2f}"
+                            )
+                        else:
+                            print(
+                                f"    Why: insufficient book depth for {side.upper()} "
+                                f"({depth_val:.0f} < {depth_req:.0f})"
+                            )
+                            print()
+                            continue
                 if not _is_midprice_stable(
                     ticker=ticker,
                     platform=PLATFORM_KALSHI,
@@ -3248,6 +3260,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     p_win, price, balance_cents, sp, use_kelly, kelly_fraction_live, min_contracts
                 )
                 liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                liq_mult *= depth_mult
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
@@ -3543,13 +3556,24 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     market_for_book = contract if isinstance(contract, dict) else evt
                     book = _extract_book_fields(market_for_book or {}, impl, no_price)
                     bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
-                    if sp.min_order_book_depth > 0 and (bid_size_side is None or float(bid_size_side) < float(sp.min_order_book_depth)):
-                        print(
-                            f"    Why: insufficient book depth for {side.upper()} "
-                            f"({0 if bid_size_side is None else float(bid_size_side):.0f} < {sp.min_order_book_depth})"
-                        )
-                        print()
-                        continue
+                    depth_mult = 1.0
+                    if sp.min_order_book_depth > 0:
+                        depth_val = float(bid_size_side) if bid_size_side is not None else 0.0
+                        depth_req = float(sp.min_order_book_depth)
+                        if depth_val < depth_req:
+                            if sp.limit_order_mode == "layered":
+                                depth_mult = max(0.20, min(1.0, depth_val / depth_req)) if depth_val > 0 else 0.20
+                                print(
+                                    f"    Note: thin book for {side.upper()} ({depth_val:.0f} < {depth_req:.0f}); "
+                                    f"layered mode scales size by {depth_mult:.2f}"
+                                )
+                            else:
+                                print(
+                                    f"    Why: insufficient book depth for {side.upper()} "
+                                    f"({depth_val:.0f} < {depth_req:.0f})"
+                                )
+                                print()
+                                continue
                     if not _is_midprice_stable(
                         ticker=evt.get("ticker", "?"),
                         platform=PLATFORM_GEMINI,
@@ -3586,6 +3610,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         p_win, price, balance_cents, sp, use_kelly, kelly_fraction_live, min_contracts
                     )
                     liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                    liq_mult *= depth_mult
                     count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                     order_entry = {
                         "platform": PLATFORM_GEMINI,

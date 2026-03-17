@@ -408,11 +408,11 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`limit_dip_pct`** (default `0.05`): Place buy limits this much _below_ the current bid. E.g. `0.05` = 5% below bid — if bid is 40¢, we place at 38¢. Set to `0` to use the bid directly.
 - **`limit_dip_pct_high_confidence`** (e.g. `0.15`): When P(win) ≥ 90%, use this larger dip instead—e.g. 15% below bid. Prioritizes catching bigger dips on high-certainty contracts (perfect for 10¢ limit on YES/NO we're confident will hit). Set to `0` to use `limit_dip_pct` for all.
 - **`limit_dip_pct_price_decline`** (e.g. `0.10`): When the model suggests the contract price might decrease—e.g. volatility model is active, or 2+ days to expiry—use this larger dip (10%) to prioritize limit orders and catch price dips. Stacks with high-confidence when both apply.
-- **`limit_order_mode`**: `fixed_pct` (legacy dip logic), `dynamic_tick` (penny-jump one tick above best bid, capped by model fair value), or `layered` (more passive dynamic tick for larger intents).
+- **`limit_order_mode`**: `fixed_pct` (legacy dip logic), `dynamic_tick` (penny-jump one tick above best bid, capped by model fair value), or `layered` (depth-aware, size-scaled participation for thinner books).
 - **`tick_offset`**: Number of ticks used for dynamic quote stepping (default `1`).
 - **`max_inventory_skew_pct`**: Inventory-aware quote skew; same-side inventory lowers quote aggressiveness, opposite-side inventory can modestly increase it.
 - **`min_stability_duration_seconds`**: Anti-sniping guard; requires recent mid-price stability before posting new BUY limits.
-- **`min_order_book_depth`**: Skip posting BUY limits when same-side top-of-book depth is too thin.
+- **`min_order_book_depth`**: In normal modes, skip posting BUY limits when same-side depth is too thin; in `layered` mode, downscale order size instead of hard-skipping.
 - **`cancel_on_vol_spike`**: When vol-spike safety triggers, cancel resting BUY limits and block new BUYs until regime normalizes.
 - **`limit_order_ttl_minutes`**: Cancel and refresh stale resting BUY limits so order prices are based on current model state.
 - **`cancel_all_on_regime_shift`**: On strong momentum/volatility regime shifts, cancel risky resting BUY limits before re-quoting.
