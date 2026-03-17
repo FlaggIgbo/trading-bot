@@ -183,6 +183,9 @@ class _StrategyParams:
     use_sklearn_calibration: bool
     sklearn_calibration_method: str
     sklearn_calibration_min_samples: int
+    enable_auto_signal_weight_fit: bool
+    signal_weight_fit_min_samples: int
+    signal_weight_fit_l2_c: float
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -252,6 +255,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         use_sklearn_calibration=bool(strategy.get("use_sklearn_calibration", True)),
         sklearn_calibration_method=str(strategy.get("sklearn_calibration_method", "isotonic")),
         sklearn_calibration_min_samples=int(strategy.get("sklearn_calibration_min_samples", 50)),
+        enable_auto_signal_weight_fit=bool(strategy.get("enable_auto_signal_weight_fit", True)),
+        signal_weight_fit_min_samples=int(strategy.get("signal_weight_fit_min_samples", 150)),
+        signal_weight_fit_l2_c=float(strategy.get("signal_weight_fit_l2_c", 1.0)),
     )
 
 
@@ -687,6 +693,82 @@ def _fit_probability_calibrator(
             return _clip01(float(iso.predict([float(p)])[0]))
 
         return _calibrate
+    except Exception:
+        return None
+
+
+def _fit_signal_model_weights(
+    sp: _StrategyParams,
+    cfg: dict,
+) -> dict[str, float] | None:
+    """
+    Learn signal-model feature weights from resolved predictions.
+
+    Uses logistic regression on available prediction columns. Features that are not
+    historically stored (e.g. moneyness, dte_norm) remain at default runtime weights.
+    """
+    if (
+        not sp.enable_auto_signal_weight_fit
+        or not get_predictions_for_backtest
+        or LogisticRegression is None
+    ):
+        return None
+    try:
+        rows = get_predictions_for_backtest(resolved_only=True, config=cfg) or []
+        train = [
+            r for r in rows
+            if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
+        ]
+        if len(train) < max(30, sp.signal_weight_fit_min_samples):
+            return None
+
+        # Feature schema mirrors the runtime scorer where possible.
+        feat_names = [
+            "emp_p",
+            "vol_p",
+            "market_yes",
+            "edge_yes",
+            "edge_no",
+            "spread_norm",
+            "liquidity_consistency",
+        ]
+        x_rows: list[list[float]] = []
+        y_rows: list[int] = []
+
+        for r in train:
+            emp_p = _clip01(float(r.get("hist_p") or 0.5))
+            vol_p = _clip01(float(r.get("vol_p") if r.get("vol_p") is not None else emp_p))
+            market_yes = r.get("bid_at_place")
+            if market_yes is None:
+                market_yes = r.get("theoretical_price")
+            if market_yes is None:
+                market_yes = r.get("entry_price")
+            m = _clip01(float(market_yes or 0.5))
+            spread_bps = float(r.get("spread_bps_at_place") or 0.0)
+            spread_norm = _clip01(spread_bps / 10_000.0)
+
+            edge_yes = max(-1.0, min(1.0, emp_p - m))
+            edge_no = max(-1.0, min(1.0, (1.0 - emp_p) - (1.0 - m)))
+            liq_consistency = 1.0  # Not persisted historically; neutral default.
+
+            x_rows.append([emp_p, vol_p, m, edge_yes, edge_no, spread_norm, liq_consistency])
+            y_rows.append(1 if r.get("outcome") == "win" else 0)
+
+        if len(x_rows) < max(30, sp.signal_weight_fit_min_samples):
+            return None
+
+        lr = LogisticRegression(
+            solver="lbfgs",
+            max_iter=1000,
+            C=max(1e-4, float(sp.signal_weight_fit_l2_c)),
+            class_weight="balanced",
+        )
+        lr.fit(x_rows, y_rows)
+        coefs = lr.coef_[0]
+        learned = {"bias": float(lr.intercept_[0])}
+        for i, name in enumerate(feat_names):
+            learned[name] = float(coefs[i])
+        return learned
     except Exception:
         return None
 
@@ -2027,6 +2109,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     probability_calibrator = _fit_probability_calibrator(sp, cfg)
+    learned_signal_weights = _fit_signal_model_weights(sp, cfg)
+    if learned_signal_weights:
+        merged = dict(sp.signal_model_weights or {})
+        merged.update(learned_signal_weights)
+        sp.signal_model_weights = merged
+        print(
+            f"[Signal Model] Learned weights from resolved data "
+            f"({len(learned_signal_weights) - 1} features + bias)"
+        )
+        print()
 
     # Fill attribution diagnostics (actual vs theoretical execution quality)
     if get_fill_attribution_stats:

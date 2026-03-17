@@ -174,7 +174,9 @@ def _run_synthetic(
     spread_soft = float(bt_cfg.get("synthetic_liquidity_spread_bps_soft", 1500.0))
     spread_hard = float(bt_cfg.get("synthetic_liquidity_spread_bps_hard", 4000.0))
     min_size_mult = float(bt_cfg.get("synthetic_liquidity_min_size_multiplier", 0.2))
-    snaps = get_market_snapshots_for_backtest(
+    # Keep this call so synthetic mode respects the same filter surface as other tools.
+    # Snapshot details are consumed through last_per_ticker below.
+    get_market_snapshots_for_backtest(
         start_ts=start_ts,
         end_ts=end_ts,
         rec_filter=rec_filter,
@@ -185,56 +187,140 @@ def _run_synthetic(
         config=cfg,
     )
     resolved = get_resolved_outcomes(config=cfg)
-    tickers_in_resolved = set(resolved.keys())
     trades: list[dict] = []
-    for ticker, snap in last_per_ticker.items():
-        if ticker not in tickers_in_resolved:
-            continue
-        ro = resolved[ticker]
-        yes_settled = bool(ro.get("yes_settled"))
-        rec = snap.get("rec")
-        side = "yes" if rec == REC_BUY_YES else "no"
-        yes_bid = float(snap.get("yes_bid") or 0)
-        no_bid = float(snap.get("no_bid") or 0)
-        # Ask proxy from opposite bid for binary markets.
-        yes_ask_proxy = (1.0 - no_bid) if (0 < no_bid < 1) else yes_bid
-        no_ask_proxy = (1.0 - yes_bid) if (0 < yes_bid < 1) else no_bid
-        side_bid = yes_bid if side == "yes" else no_bid
-        theoretical_price = side_bid if side_bid > 0 else None
-        ask_proxy = yes_ask_proxy if side == "yes" else no_ask_proxy
-        if ask_proxy <= 0:
-            # Fallback to side bid only if ask proxy is unavailable.
-            ask_proxy = side_bid
-        if ask_proxy <= 0:
-            continue
-        spread_bps = None
-        if side_bid > 0 and ask_proxy >= side_bid:
-            spread_bps = ((ask_proxy - side_bid) / max(0.01, side_bid)) * 10_000.0
-        size_mult = 1.0
-        if spread_bps is not None:
-            if spread_bps >= spread_hard:
-                size_mult = min_size_mult
-            elif spread_bps > spread_soft:
-                frac = (spread_bps - spread_soft) / max(1e-9, (spread_hard - spread_soft))
-                size_mult = 1.0 - frac * (1.0 - min_size_mult)
-        # Add conservative slippage to entry cost.
-        actual_price = min(0.99, max(0.01, ask_proxy * (1.0 + slippage_bps / 10_000.0)))
-        fill_slippage_bps = None
-        if theoretical_price and theoretical_price > 0:
-            fill_slippage_bps = ((actual_price - theoretical_price) / theoretical_price) * 10_000.0
-        won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
-        pnl_cents = ((100 - actual_price * 100) if won else (-actual_price * 100)) * size_mult
-        trades.append({
-            "ticker": ticker,
-            "side": side,
-            "entry_price": actual_price,
-            "theoretical_price": theoretical_price,
-            "size_mult": size_mult,
-            "spread_bps": spread_bps,
-            "fill_slippage_bps": fill_slippage_bps,
-            "won": won,
-            "pnl_cents": pnl_cents,
-        })
+
+    if pd is not None:
+        last_df = pd.DataFrame(
+            [{"ticker": t, **snap} for t, snap in last_per_ticker.items()]
+        )
+        res_df = pd.DataFrame(
+            [{"ticker": t, **row} for t, row in (resolved or {}).items()]
+        )
+        if not last_df.empty and not res_df.empty:
+            df = last_df.merge(res_df[["ticker", "yes_settled"]], on="ticker", how="inner")
+            df = df[df["rec"].isin(rec_filter)].copy()
+            if not df.empty:
+                df["side"] = df["rec"].map(lambda r: "yes" if r == REC_BUY_YES else "no")
+                df["yes_bid"] = df["yes_bid"].fillna(0.0).astype(float)
+                df["no_bid"] = df["no_bid"].fillna(0.0).astype(float)
+
+                df["yes_ask_proxy"] = df.apply(
+                    lambda r: (1.0 - r["no_bid"]) if (0 < r["no_bid"] < 1) else r["yes_bid"],
+                    axis=1,
+                )
+                df["no_ask_proxy"] = df.apply(
+                    lambda r: (1.0 - r["yes_bid"]) if (0 < r["yes_bid"] < 1) else r["no_bid"],
+                    axis=1,
+                )
+                df["side_bid"] = df.apply(
+                    lambda r: r["yes_bid"] if r["side"] == "yes" else r["no_bid"], axis=1
+                )
+                df["ask_proxy"] = df.apply(
+                    lambda r: r["yes_ask_proxy"] if r["side"] == "yes" else r["no_ask_proxy"], axis=1
+                )
+                df["ask_proxy"] = df.apply(
+                    lambda r: r["side_bid"] if r["ask_proxy"] <= 0 else r["ask_proxy"], axis=1
+                )
+                df = df[df["ask_proxy"] > 0].copy()
+
+                df["theoretical_price"] = df["side_bid"].where(df["side_bid"] > 0)
+                df["spread_bps"] = (
+                    (df["ask_proxy"] - df["side_bid"]) / df["side_bid"].clip(lower=0.01) * 10_000.0
+                )
+                df.loc[(df["side_bid"] <= 0) | (df["ask_proxy"] < df["side_bid"]), "spread_bps"] = None
+
+                def _size_mult(spread_val: float | None) -> float:
+                    if spread_val is None or (isinstance(spread_val, float) and math.isnan(spread_val)):
+                        return 1.0
+                    if spread_val >= spread_hard:
+                        return min_size_mult
+                    if spread_val > spread_soft:
+                        frac = (spread_val - spread_soft) / max(1e-9, (spread_hard - spread_soft))
+                        return 1.0 - frac * (1.0 - min_size_mult)
+                    return 1.0
+
+                df["size_mult"] = df["spread_bps"].map(_size_mult).astype(float)
+                df["entry_price"] = (
+                    df["ask_proxy"] * (1.0 + slippage_bps / 10_000.0)
+                ).clip(lower=0.01, upper=0.99)
+                df["fill_slippage_bps"] = (
+                    (df["entry_price"] - df["theoretical_price"]) / df["theoretical_price"] * 10_000.0
+                )
+                df.loc[df["theoretical_price"].isna() | (df["theoretical_price"] <= 0), "fill_slippage_bps"] = None
+
+                df["yes_settled"] = df["yes_settled"].astype(bool)
+                df["won"] = (
+                    ((df["side"] == "yes") & df["yes_settled"])
+                    | ((df["side"] == "no") & (~df["yes_settled"]))
+                )
+                df["pnl_cents"] = df.apply(
+                    lambda r: ((100 - r["entry_price"] * 100) if r["won"] else (-r["entry_price"] * 100)) * r["size_mult"],
+                    axis=1,
+                )
+                trades = df[
+                    [
+                        "ticker",
+                        "side",
+                        "entry_price",
+                        "theoretical_price",
+                        "size_mult",
+                        "spread_bps",
+                        "fill_slippage_bps",
+                        "won",
+                        "pnl_cents",
+                    ]
+                ].to_dict(orient="records")
+
+    if not trades:
+        tickers_in_resolved = set(resolved.keys())
+        for ticker, snap in last_per_ticker.items():
+            if ticker not in tickers_in_resolved:
+                continue
+            ro = resolved[ticker]
+            yes_settled = bool(ro.get("yes_settled"))
+            rec = snap.get("rec")
+            side = "yes" if rec == REC_BUY_YES else "no"
+            yes_bid = float(snap.get("yes_bid") or 0)
+            no_bid = float(snap.get("no_bid") or 0)
+            # Ask proxy from opposite bid for binary markets.
+            yes_ask_proxy = (1.0 - no_bid) if (0 < no_bid < 1) else yes_bid
+            no_ask_proxy = (1.0 - yes_bid) if (0 < yes_bid < 1) else no_bid
+            side_bid = yes_bid if side == "yes" else no_bid
+            theoretical_price = side_bid if side_bid > 0 else None
+            ask_proxy = yes_ask_proxy if side == "yes" else no_ask_proxy
+            if ask_proxy <= 0:
+                # Fallback to side bid only if ask proxy is unavailable.
+                ask_proxy = side_bid
+            if ask_proxy <= 0:
+                continue
+            spread_bps = None
+            if side_bid > 0 and ask_proxy >= side_bid:
+                spread_bps = ((ask_proxy - side_bid) / max(0.01, side_bid)) * 10_000.0
+            size_mult = 1.0
+            if spread_bps is not None:
+                if spread_bps >= spread_hard:
+                    size_mult = min_size_mult
+                elif spread_bps > spread_soft:
+                    frac = (spread_bps - spread_soft) / max(1e-9, (spread_hard - spread_soft))
+                    size_mult = 1.0 - frac * (1.0 - min_size_mult)
+            # Add conservative slippage to entry cost.
+            actual_price = min(0.99, max(0.01, ask_proxy * (1.0 + slippage_bps / 10_000.0)))
+            fill_slippage_bps = None
+            if theoretical_price and theoretical_price > 0:
+                fill_slippage_bps = ((actual_price - theoretical_price) / theoretical_price) * 10_000.0
+            won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
+            pnl_cents = ((100 - actual_price * 100) if won else (-actual_price * 100)) * size_mult
+            trades.append({
+                "ticker": ticker,
+                "side": side,
+                "entry_price": actual_price,
+                "theoretical_price": theoretical_price,
+                "size_mult": size_mult,
+                "spread_bps": spread_bps,
+                "fill_slippage_bps": fill_slippage_bps,
+                "won": won,
+                "pnl_cents": pnl_cents,
+            })
 
     wins = sum(1 for t in trades if t["won"])
     loses = len(trades) - wins
@@ -250,8 +336,16 @@ def _run_synthetic(
         ret = (cumulative[i] - cumulative[i - 1]) / (abs(cumulative[i - 1]) + 1e-9)
         returns.append(ret)
 
-    slippages = [float(t["fill_slippage_bps"]) for t in trades if t.get("fill_slippage_bps") is not None]
-    spreads = [float(t["spread_bps"]) for t in trades if t.get("spread_bps") is not None]
+    slippages = [
+        float(t["fill_slippage_bps"])
+        for t in trades
+        if t.get("fill_slippage_bps") is not None and not math.isnan(float(t["fill_slippage_bps"]))
+    ]
+    spreads = [
+        float(t["spread_bps"])
+        for t in trades
+        if t.get("spread_bps") is not None and not math.isnan(float(t["spread_bps"]))
+    ]
     return {
         "mode": "synthetic",
         "trades": len(trades),

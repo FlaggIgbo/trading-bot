@@ -94,8 +94,8 @@ Current status: partially implemented.
 **Concrete next steps (remaining):**
 
 1. **Model training pipeline**: persist signal-feature rows with outcomes for offline model fitting/validation.
-2. **Feature optimization**: learn `signal_model_weights` from data (instead of hand-tuned defaults).
-3. **Extended pandas usage**: move synthetic/backtest transformations to DataFrame-first flow.
+2. ~~**Feature optimization**: learn `signal_model_weights` from data (instead of hand-tuned defaults).~~ ✓ **Implemented** (`enable_auto_signal_weight_fit`; logistic fit from resolved predictions)
+3. ~~**Extended pandas usage**: move synthetic/backtest transformations to DataFrame-first flow.~~ ✓ **Implemented** (`scripts/backtest.py` synthetic + real mode DataFrame-first paths)
 4. **Statsmodels/GARCH integration**: add optional GARCH(1,1) volatility source.
 
 ---

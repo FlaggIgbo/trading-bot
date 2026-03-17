@@ -102,6 +102,9 @@ strategy:
   use_sklearn_calibration: true # Fit calibrator from resolved predictions (hist_p -> outcome)
   sklearn_calibration_method: isotonic # isotonic or platt
   sklearn_calibration_min_samples: 50 # Minimum resolved samples to fit calibrator
+  enable_auto_signal_weight_fit: true # Learn signal-model feature weights from resolved predictions
+  signal_weight_fit_min_samples: 150 # Minimum resolved predictions needed to fit feature weights
+  signal_weight_fit_l2_c: 1.0 # Logistic regression inverse regularization strength (lower = stronger regularization)
   signal_model_weights:
     bias: 0.0
     emp_p: 1.8
