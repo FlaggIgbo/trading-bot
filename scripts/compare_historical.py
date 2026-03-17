@@ -74,6 +74,7 @@ try:
         get_fill_attribution_stats,
         get_last_snapshot_for_ticker,
         get_limit_order_analysis,
+        get_market_snapshots_for_backtest,
         get_predictions_for_backtest,
         get_realized_pnl_stats,
         get_price_after_buy_from_snapshots,
@@ -86,7 +87,7 @@ try:
         record_resolved,
     )
 except ImportError:
-    get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
+    get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
     get_price_after_buy_from_snapshots = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction = record_prediction_outcome = record_resolved = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
@@ -129,6 +130,15 @@ class _StrategyParams:
     limit_dip_pct: float
     limit_dip_pct_high_confidence: float
     limit_dip_pct_price_decline: float
+    limit_order_mode: str
+    tick_offset: int
+    max_inventory_skew_pct: float
+    min_stability_duration_seconds: int
+    min_order_book_depth: int
+    cancel_on_vol_spike: bool
+    cancel_all_on_regime_shift: bool
+    limit_order_ttl_minutes: int
+    layered_order_levels: int
     vol_blend_weight: float | None
     use_ewma_vol: bool
     ewma_lambda: float
@@ -229,6 +239,15 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_dip_pct=float(strategy.get("limit_dip_pct", 0)),
         limit_dip_pct_high_confidence=float(strategy.get("limit_dip_pct_high_confidence", 0)),
         limit_dip_pct_price_decline=float(strategy.get("limit_dip_pct_price_decline", 0)),
+        limit_order_mode=str(strategy.get("limit_order_mode", "fixed_pct")).strip().lower(),
+        tick_offset=max(1, int(strategy.get("tick_offset", 1))),
+        max_inventory_skew_pct=max(0.0, float(strategy.get("max_inventory_skew_pct", 0.10))),
+        min_stability_duration_seconds=max(0, int(strategy.get("min_stability_duration_seconds", 0))),
+        min_order_book_depth=max(0, int(strategy.get("min_order_book_depth", 0))),
+        cancel_on_vol_spike=bool(strategy.get("cancel_on_vol_spike", True)),
+        cancel_all_on_regime_shift=bool(strategy.get("cancel_all_on_regime_shift", True)),
+        limit_order_ttl_minutes=max(0, int(strategy.get("limit_order_ttl_minutes", 30))),
+        layered_order_levels=max(1, int(strategy.get("layered_order_levels", 3))),
         vol_blend_weight=strategy.get("vol_blend_weight"),
         use_ewma_vol=bool(strategy.get("use_ewma_vol", False)),
         ewma_lambda=float(strategy.get("ewma_lambda", 0.94)),
@@ -384,6 +403,160 @@ def _extract_book_fields(market: dict, yes_bid: float, no_bid: float) -> dict[st
         "yes_ask_size": _f(["yes_ask_size", "yes_ask_qty", "best_yes_ask_size"]),
         "no_ask_size": _f(["no_ask_size", "no_ask_qty", "best_no_ask_size"]),
     }
+
+
+def _clip_price(v: float) -> float:
+    return max(0.01, min(0.99, float(v)))
+
+
+def _inventory_skew_factor(held_count: int, max_skew_pct: float) -> float:
+    """
+    Linear risk-aversion skew: every 100 held contracts adds skew up to max_skew_pct.
+    """
+    if held_count <= 0 or max_skew_pct <= 0:
+        return 0.0
+    return min(float(max_skew_pct), (held_count / 100.0) * float(max_skew_pct))
+
+
+def _is_midprice_stable(
+    *,
+    ticker: str,
+    platform: str,
+    cfg: dict,
+    min_stability_seconds: int,
+    max_mid_move_pct: float = 0.03,
+) -> bool:
+    """
+    Anti-sniping guard: require recent mid-price to remain within a tight range
+    for at least min_stability_seconds.
+    """
+    if min_stability_seconds <= 0 or not get_market_snapshots_for_backtest:
+        return True
+    end_ts = time.time()
+    start_ts = end_ts - max(float(min_stability_seconds + 60), 300.0)
+    snaps = get_market_snapshots_for_backtest(
+        start_ts=start_ts,
+        end_ts=end_ts,
+        platform=platform,
+        config=cfg,
+    ) or []
+    mids: list[tuple[float, float]] = []
+    for s in snaps:
+        if str(s.get("ticker") or "") != str(ticker):
+            continue
+        y = s.get("yes_bid")
+        n = s.get("no_bid")
+        try:
+            yf = float(y) if y is not None else None
+            nf = float(n) if n is not None else None
+        except (TypeError, ValueError):
+            continue
+        if yf is None or nf is None or yf <= 0 or nf <= 0:
+            continue
+        mids.append((float(s.get("ts") or 0.0), (yf + nf) / 2.0))
+    if len(mids) < 2:
+        return False
+    mids.sort(key=lambda x: x[0])
+    if mids[-1][0] - mids[0][0] < float(min_stability_seconds):
+        return False
+    vals = [m for _, m in mids]
+    lo, hi = min(vals), max(vals)
+    move_pct = (hi - lo) / max(0.01, vals[-1])
+    return move_pct <= max(0.0, float(max_mid_move_pct))
+
+
+def _compute_limit_price(
+    *,
+    bid: float,
+    ask: float | None,
+    p_win: float,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+    mode: str,
+    base_dip: float,
+    tick_offset: int,
+    held_same_side: int,
+    held_opp_side: int,
+    max_inventory_skew_pct: float,
+    layered_order_levels: int,
+    order_count: int,
+) -> tuple[float, float]:
+    """
+    Returns (limit_price, dip_used_proxy).
+    dip_used_proxy is for logging/analysis; dynamic modes may return 0.
+    """
+    mode_norm = (mode or "fixed_pct").strip().lower()
+    if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
+        mode_norm = "fixed_pct"
+
+    if mode_norm == "fixed_pct":
+        dip = max(0.0, min(0.25, float(base_dip)))
+        raw_price = bid * (1.0 - dip) if dip > 0 else bid
+    else:
+        tick = max(1, int(tick_offset)) * 0.01
+        fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
+        jump_price = bid + tick
+        if ask is not None and ask > 0:
+            jump_price = min(jump_price, max(0.01, float(ask) - 0.01))
+        raw_price = min(jump_price, fair_cap)
+        dip = 0.0
+        # For larger order intent, make layered mode less revealing / less aggressive.
+        if mode_norm == "layered" and order_count > 1:
+            depth_steps = min(max(1, int(layered_order_levels)) - 1, max(0, int(order_count // 100)))
+            raw_price = raw_price - (depth_steps * 0.01)
+
+    # Inventory-based quote skew: less aggressive on same-side inventory, slightly
+    # more aggressive when holding opposite side (helps rebalance exposure).
+    same_skew = _inventory_skew_factor(int(held_same_side), max_inventory_skew_pct)
+    opp_skew = _inventory_skew_factor(int(held_opp_side), max_inventory_skew_pct) * 0.5
+    skewed = raw_price * (1.0 - same_skew + opp_skew)
+    return _clip_price(skewed), float(dip)
+
+
+def _order_created_ts(order: dict) -> float | None:
+    """Best-effort parse of order created timestamp across APIs."""
+    if not isinstance(order, dict):
+        return None
+    for key in (
+        "created_time",
+        "created_at",
+        "createdAt",
+        "created_ts",
+        "updated_at",
+        "timestamp",
+    ):
+        val = order.get(key)
+        if val is None:
+            continue
+        try:
+            if isinstance(val, (int, float)):
+                ts = float(val)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                return ts if ts > 0 else None
+            s = str(val).strip()
+            if not s:
+                continue
+            if s.isdigit():
+                ts = float(s)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                return ts if ts > 0 else None
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except Exception:
+            continue
+    return None
+
+
+def _is_order_stale(order: dict, ttl_minutes: int, now_ts: float | None = None) -> bool:
+    if ttl_minutes <= 0:
+        return False
+    created_ts = _order_created_ts(order)
+    if created_ts is None:
+        return False
+    now_v = float(now_ts if now_ts is not None else time.time())
+    return (now_v - created_ts) >= (float(ttl_minutes) * 60.0)
 
 
 def _adaptive_kelly_fraction(base_kelly: float, calibration: dict[str, Any], sp: _StrategyParams) -> float:
@@ -2507,6 +2680,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     pending_orders: list[dict] = []
     quote_candidates: list[dict] = []
     pending_sells: list[dict] = []
+    inventory_by_key: dict[tuple[str, str, str], int] = {}
+    if get_unresolved_predictions:
+        try:
+            for p in get_unresolved_predictions(cfg) or []:
+                key = (
+                    str(p.get("platform") or ""),
+                    str(p.get("ticker") or ""),
+                    str(p.get("side") or ""),
+                )
+                cnt = int(p.get("count") or 0)
+                if cnt > 0:
+                    inventory_by_key[key] = inventory_by_key.get(key, 0) + cnt
+        except Exception:
+            pass
     sp = _load_strategy_params(strategy)
     strategy_engine = _build_strategy_engine(strategy)
     print(f"[Strategy] Engine: {strategy.get('strategy_engine', 'vol_regime')}")
@@ -2634,6 +2821,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
     # Build ticker -> (series, yf_ticker, closes, market_data) for sell evaluation
     market_data_cache: dict[str, tuple[str, str, list[float], dict, float]] = {}
+    any_momentum_crash = False
 
     use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
     for series in markets_list:
@@ -2665,6 +2853,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             and yf_ticker in GEMINI_CRYPTO_YF
             and momentum_ret <= sp.momentum_crash_threshold_pct
         )
+        if momentum_crash:
+            any_momentum_crash = True
         curr_vol, base_vol = _volatility_spike_metrics(closes)
         vol_spike_active = (
             sp.enable_vol_spike_safety
@@ -3006,6 +3196,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"    Edge: {abs(diff):.1%}")
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 bid = yes_bid if rec == REC_BUY_YES else no_bid
+                side = "yes" if rec == REC_BUY_YES else "no"
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
                 dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp)
                 # When model suggests contract price might decrease (vol regime or 2+ days to expiry), prioritize limit orders with larger dip
@@ -3014,14 +3205,48 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     dip = max(dip, sp.limit_dip_pct_price_decline)
                 if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
-                # Limit price: bid or below (dip-catch). High confidence → larger dip (e.g. 15%) to catch bigger price drops
-                price = max(0.01, min(0.99, bid * (1 - dip))) if dip else bid
+                book = _extract_book_fields(m, yes_bid, no_bid)
+                bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
+                if sp.min_order_book_depth > 0 and (bid_size_side is None or float(bid_size_side) < float(sp.min_order_book_depth)):
+                    print(
+                        f"    Why: insufficient book depth for {side.upper()} "
+                        f"({0 if bid_size_side is None else float(bid_size_side):.0f} < {sp.min_order_book_depth})"
+                    )
+                    print()
+                    continue
+                if not _is_midprice_stable(
+                    ticker=ticker,
+                    platform=PLATFORM_KALSHI,
+                    cfg=cfg,
+                    min_stability_seconds=sp.min_stability_duration_seconds,
+                ):
+                    print(
+                        f"    Why: mid-price stability guard failed "
+                        f"(<{sp.min_stability_duration_seconds}s stable window)"
+                    )
+                    print()
+                    continue
+                held_same = inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0)
+                held_opp = inventory_by_key.get((PLATFORM_KALSHI, ticker, "no" if side == "yes" else "yes"), 0)
+                ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
+                price, dip_used = _compute_limit_price(
+                    bid=bid,
+                    ask=ask_side,
+                    p_win=p_win,
+                    maker_fee_rate=maker_fee_rate,
+                    min_fee_per_order=sp.min_fee_per_order,
+                    mode=sp.limit_order_mode,
+                    base_dip=dip,
+                    tick_offset=sp.tick_offset,
+                    held_same_side=held_same,
+                    held_opp_side=held_opp,
+                    max_inventory_skew_pct=sp.max_inventory_skew_pct,
+                    layered_order_levels=sp.layered_order_levels,
+                    order_count=inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0) + 1,
+                )
                 count_base = _compute_buy_count(
                     p_win, price, balance_cents, sp, use_kelly, kelly_fraction_live, min_contracts
                 )
-                yes_ask = float(m.get("yes_ask_dollars") or 0) or None
-                no_ask = float(m.get("no_ask_dollars") or 0) or None
-                ask_side = yes_ask if rec == REC_BUY_YES else no_ask
                 liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                 pending_orders.append({
@@ -3029,13 +3254,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "ticker": ticker,
                     "title": title,
                     "rec": rec,
-                    "side": "yes" if rec == REC_BUY_YES else "no",
+                    "side": side,
                     "price": price,
                     "bid_at_place": bid,
                     "theoretical_price": bid,
                     "spread_bps_at_place": spread_bps,
                     "liquidity_mult": liq_mult,
-                    "dip_pct_used": dip,
+                    "dip_pct_used": dip_used,
                     "edge": abs(diff),
                     "count": count,
                     "hist_p": hist_p,
@@ -3043,6 +3268,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "yf_ticker": yf_ticker,
                     "threshold": threshold,
                     "direction": direction,
+                    "limit_order_mode": sp.limit_order_mode,
                 })
             print()
 
@@ -3306,6 +3532,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"    Edge: {abs(diff_gem):.1%}")
                     no_price = 1.0 - impl
                     bid = impl if rec == REC_BUY_YES else no_price
+                    side = "yes" if rec == REC_BUY_YES else "no"
                     p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
                     dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g)
                     price_might_decline = (use_vol and vol_p_gem is not None) or (dte_g is not None and dte_g >= 2)
@@ -3313,13 +3540,51 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         dip = max(dip, sp.limit_dip_pct_price_decline)
                     if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                         dip = max(dip, sp.limit_dip_pct_high_confidence)
-                    price = max(0.01, min(0.99, bid * (1 - dip))) if dip else bid
+                    market_for_book = contract if isinstance(contract, dict) else evt
+                    book = _extract_book_fields(market_for_book or {}, impl, no_price)
+                    bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
+                    if sp.min_order_book_depth > 0 and (bid_size_side is None or float(bid_size_side) < float(sp.min_order_book_depth)):
+                        print(
+                            f"    Why: insufficient book depth for {side.upper()} "
+                            f"({0 if bid_size_side is None else float(bid_size_side):.0f} < {sp.min_order_book_depth})"
+                        )
+                        print()
+                        continue
+                    if not _is_midprice_stable(
+                        ticker=evt.get("ticker", "?"),
+                        platform=PLATFORM_GEMINI,
+                        cfg=cfg,
+                        min_stability_seconds=sp.min_stability_duration_seconds,
+                    ):
+                        print(
+                            f"    Why: mid-price stability guard failed "
+                            f"(<{sp.min_stability_duration_seconds}s stable window)"
+                        )
+                        print()
+                        continue
+                    held_same = inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0)
+                    held_opp = inventory_by_key.get(
+                        (PLATFORM_GEMINI, evt.get("ticker", "?"), "no" if side == "yes" else "yes"), 0
+                    )
+                    ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
+                    price, dip_used = _compute_limit_price(
+                        bid=bid,
+                        ask=ask_side,
+                        p_win=p_win,
+                        maker_fee_rate=maker_fee_rate_gem,
+                        min_fee_per_order=sp.min_fee_per_order,
+                        mode=sp.limit_order_mode,
+                        base_dip=dip,
+                        tick_offset=sp.tick_offset,
+                        held_same_side=held_same,
+                        held_opp_side=held_opp,
+                        max_inventory_skew_pct=sp.max_inventory_skew_pct,
+                        layered_order_levels=sp.layered_order_levels,
+                        order_count=inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0) + 1,
+                    )
                     count_base = _compute_buy_count(
                         p_win, price, balance_cents, sp, use_kelly, kelly_fraction_live, min_contracts
                     )
-                    yes_ask_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
-                    no_ask_g = _gemini_no_ask(evt)
-                    ask_side = yes_ask_g if rec == REC_BUY_YES else no_ask_g
                     liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                     count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                     order_entry = {
@@ -3327,13 +3592,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "ticker": evt.get("ticker", "?"),
                         "title": title,
                         "rec": rec,
-                        "side": "yes" if rec == REC_BUY_YES else "no",
+                        "side": side,
                         "price": price,
                         "bid_at_place": bid,
                         "theoretical_price": bid,
                         "spread_bps_at_place": spread_bps,
                         "liquidity_mult": liq_mult,
-                        "dip_pct_used": dip,
+                        "dip_pct_used": dip_used,
                         "edge": abs(diff_gem),
                         "count": count,
                         "hist_p": hist_p_gem,
@@ -3342,6 +3607,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "threshold": threshold_g,
                         "direction": direction_g,
                         "gemini_evt": evt,
+                        "limit_order_mode": sp.limit_order_mode,
                     }
                     if instrument_symbol:
                         order_entry["instrument_symbol"] = instrument_symbol
@@ -4007,11 +4273,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     max_total_buy_pct = float(trading.get("max_total_buy_pct", 0.50))
     min_balance_fallback = int(trading.get("min_balance_for_limit_fallback_cents", 0))
     dry_run = trading.get("dry_run", True)
+    force_cancel_buy_orders = bool(vol_spike_active and sp.cancel_on_vol_spike)
+    regime_shift_active = bool(
+        sp.cancel_all_on_regime_shift and (force_cancel_buy_orders or any_momentum_crash)
+    )
 
     if emergency_stop and pending_orders:
         blocked = len(pending_orders)
         pending_orders[:] = []
         print(f"[Risk] EMERGENCY_STOP blocked {blocked} pending BUY orders (SELL logic still active).")
+        print()
+    elif force_cancel_buy_orders and pending_orders:
+        blocked = len(pending_orders)
+        pending_orders[:] = []
+        print(
+            f"[Risk] Vol-spike guard blocked {blocked} pending BUY orders and will cancel resting BUY limits."
+        )
+        print()
+    if regime_shift_active:
+        print("[Risk] Regime-shift cleanup active: stale/risky resting BUY limits will be cancelled.")
         print()
     elif sp.enable_two_sided_quotes:
         before_n = len(pending_orders)
@@ -4123,6 +4403,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         gemini_keep_buys: set[tuple[str, str]] = set()
         gemini_keep_sells: set[tuple[str, str]] = set()
         to_cancel: list[dict] = []  # {platform, order_id, label, reason, ticker, side, old_price}
+        now_ts = time.time()
 
         try:
             cursor = ""
@@ -4141,7 +4422,31 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     label = f"{t} {action} {side}"
                     if action == "buy":
                         pend = kalshi_pending_buys.get((t, side))
-                        if not pend:
+                        if regime_shift_active:
+                            to_cancel.append(
+                                {
+                                    "platform": PLATFORM_KALSHI,
+                                    "order_id": oid,
+                                    "label": label,
+                                    "reason": "regime_shift_guard",
+                                    "ticker": t,
+                                    "side": side,
+                                    "old_price": old_price,
+                                }
+                            )
+                        elif _is_order_stale(ord_, sp.limit_order_ttl_minutes, now_ts):
+                            to_cancel.append(
+                                {
+                                    "platform": PLATFORM_KALSHI,
+                                    "order_id": oid,
+                                    "label": label,
+                                    "reason": "stale_ttl",
+                                    "ticker": t,
+                                    "side": side,
+                                    "old_price": old_price,
+                                }
+                            )
+                        elif not pend:
                             to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "no_longer_rec", "ticker": t, "side": side, "old_price": old_price})
                         elif pend["price"] > old_price:
                             to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "want_better_price", "ticker": t, "side": side, "old_price": old_price})
@@ -4176,7 +4481,31 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     label = f"{sym} {side} {out}"
                     if side == "buy":
                         pend = gemini_pending_buys.get(key)
-                        if not pend:
+                        if regime_shift_active:
+                            to_cancel.append(
+                                {
+                                    "platform": PLATFORM_GEMINI,
+                                    "order_id": str(oid),
+                                    "label": label,
+                                    "reason": "regime_shift_guard",
+                                    "ticker": str(sym),
+                                    "side": out,
+                                    "old_price": old_price,
+                                }
+                            )
+                        elif _is_order_stale(ord_, sp.limit_order_ttl_minutes, now_ts):
+                            to_cancel.append(
+                                {
+                                    "platform": PLATFORM_GEMINI,
+                                    "order_id": str(oid),
+                                    "label": label,
+                                    "reason": "stale_ttl",
+                                    "ticker": str(sym),
+                                    "side": out,
+                                    "old_price": old_price,
+                                }
+                            )
+                        elif not pend:
                             to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "no_longer_rec", "ticker": str(sym), "side": out, "old_price": old_price})
                         elif pend["price"] > old_price:
                             to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "want_better_price", "ticker": str(sym), "side": out, "old_price": old_price})

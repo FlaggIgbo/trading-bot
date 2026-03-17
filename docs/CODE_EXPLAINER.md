@@ -345,6 +345,13 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `no_above_cushion` | `skip_buy_no_above_cushion` | 0.01 | Skip BUY NO when price > strike×(1+cushion) |
 | `sell_losing_pct` | `sell_losing_pct` | 0.55 | Sell when P(lose) ≥ this |
 | `limit_dip_pct` | `limit_dip_pct` | 0.05 | Place limit at bid×(1−dip) to catch drops |
+| `limit_order_mode` | `limit_order_mode` | `fixed_pct` fallback | Limit pricing mode: `fixed_pct`, `dynamic_tick`, or `layered` |
+| `tick_offset` | `tick_offset` | 1 | Tick offset used by dynamic tick quote placement |
+| `max_inventory_skew_pct` | `max_inventory_skew_pct` | 0.10 | Inventory-aware quote skew cap (less aggressive when crowded same-side) |
+| `min_stability_duration_seconds` | `min_stability_duration_seconds` | 0 fallback | Mid-price stability gate before posting new BUY limits |
+| `min_order_book_depth` | `min_order_book_depth` | 0 fallback | Minimum same-side depth required before posting BUY limits |
+| `limit_order_ttl_minutes` | `limit_order_ttl_minutes` | 30 fallback | Resting BUY order time-to-live before cancel+refresh |
+| `cancel_all_on_regime_shift` | `cancel_all_on_regime_shift` | true fallback | Cancel resting BUY limits during momentum/volatility regime shifts |
 | `limit_dip_pct_high_confidence` | `limit_dip_pct_high_confidence` | 0.15 | Larger dip when P(win)≥90% |
 | `limit_dip_pct_price_decline` | `limit_dip_pct_price_decline` | 0.10 | Dip when vol model suggests price decline |
 | `vol_blend_weight` | `vol_blend_weight` | 0.5 | Blend emp + vol: w×emp + (1−w)×vol |

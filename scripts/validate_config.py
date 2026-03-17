@@ -38,6 +38,13 @@ def main() -> int:
     min_fee_per_order = _as_float(strategy.get("min_fee_per_order"), 0.01)
     min_yes_price = _as_float(strategy.get("min_yes_price"), 0.05)
     min_no_price = _as_float(strategy.get("min_no_price"), 0.05)
+    limit_order_mode = str(strategy.get("limit_order_mode", "fixed_pct")).strip().lower()
+    tick_offset = _as_int(strategy.get("tick_offset"), 1)
+    max_inventory_skew_pct = _as_float(strategy.get("max_inventory_skew_pct"), 0.10)
+    min_stability_duration_seconds = _as_int(strategy.get("min_stability_duration_seconds"), 0)
+    min_order_book_depth = _as_int(strategy.get("min_order_book_depth"), 0)
+    layered_order_levels = _as_int(strategy.get("layered_order_levels"), 3)
+    limit_order_ttl_minutes = _as_int(strategy.get("limit_order_ttl_minutes"), 30)
 
     kelly = _as_float(strategy.get("kelly_fraction"), 0.25)
     kelly_floor = _as_float(strategy.get("dynamic_kelly_floor"), 0.10)
@@ -68,6 +75,20 @@ def main() -> int:
         errors.append("`strategy.min_edge_easy_win` must be >= 0.")
     if min_edge_easy_win > min_edge:
         errors.append("`strategy.min_edge_easy_win` should be <= `strategy.min_edge`.")
+    if limit_order_mode not in {"fixed_pct", "dynamic_tick", "layered"}:
+        errors.append("`strategy.limit_order_mode` must be one of: fixed_pct, dynamic_tick, layered.")
+    if tick_offset < 1:
+        errors.append("`strategy.tick_offset` must be >= 1.")
+    if not (0.0 <= max_inventory_skew_pct <= 1.0):
+        errors.append("`strategy.max_inventory_skew_pct` must be in [0, 1].")
+    if min_stability_duration_seconds < 0:
+        errors.append("`strategy.min_stability_duration_seconds` must be >= 0.")
+    if min_order_book_depth < 0:
+        errors.append("`strategy.min_order_book_depth` must be >= 0.")
+    if layered_order_levels < 1:
+        errors.append("`strategy.layered_order_levels` must be >= 1.")
+    if limit_order_ttl_minutes < 0:
+        errors.append("`strategy.limit_order_ttl_minutes` must be >= 0.")
 
     # Keep easy-win edge above a practical fee/slippage floor.
     fee_floor = max(min_fee_per_order, 0.01)
