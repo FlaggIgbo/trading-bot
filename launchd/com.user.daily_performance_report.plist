@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.daily_performance_report</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ogechukwuflagg-igbo/git/trading-bot/.venv/bin/python3</string>
+        <string>/Users/ogechukwuflagg-igbo/git/trading-bot/scripts/daily_performance_report.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/ogechukwuflagg-igbo</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/ogechukwuflagg-igbo/git/trading-bot</string>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>55</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/daily_performance_report.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/daily_performance_report.err.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

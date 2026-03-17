@@ -170,26 +170,93 @@ def _run_synthetic(
 
     rec_filter = [REC_BUY_YES, REC_BUY_NO]
     bt_cfg = (cfg or {}).get("backtest", {})
+    strategy_cfg = (cfg or {}).get("strategy", {})
     slippage_bps = float(bt_cfg.get("synthetic_slippage_bps", 100.0))  # 100 bps = 1%
     spread_soft = float(bt_cfg.get("synthetic_liquidity_spread_bps_soft", 1500.0))
     spread_hard = float(bt_cfg.get("synthetic_liquidity_spread_bps_hard", 4000.0))
     min_size_mult = float(bt_cfg.get("synthetic_liquidity_min_size_multiplier", 0.2))
-    # Keep this call so synthetic mode respects the same filter surface as other tools.
-    # Snapshot details are consumed through last_per_ticker below.
-    get_market_snapshots_for_backtest(
+    # Stress realism: tax winning trades by hard spread/slippage friction.
+    win_slippage_tax_bps = float(
+        bt_cfg.get(
+            "synthetic_win_slippage_tax_bps",
+            strategy_cfg.get("liquidity_spread_bps_hard", spread_hard),
+        )
+    )
+    min_dwell_minutes = float(bt_cfg.get("synthetic_fill_min_dwell_minutes", 10.0))
+    liquidity_friction_cents = float(bt_cfg.get("synthetic_liquidity_friction_cents", 0.75))
+    assumed_order_size = int(bt_cfg.get("synthetic_assumed_order_size", 10))
+    # Time-aware synthetic fill modeling: use full snapshot history per ticker.
+    all_snaps = get_market_snapshots_for_backtest(
         start_ts=start_ts,
         end_ts=end_ts,
         rec_filter=rec_filter,
         config=cfg,
-    )
+    ) or []
     last_per_ticker = get_last_snapshot_per_ticker(
         rec_filter=rec_filter,
         config=cfg,
     )
     resolved = get_resolved_outcomes(config=cfg)
     trades: list[dict] = []
+    skipped_not_filled = 0
 
-    if pd is not None:
+    by_ticker: dict[str, list[dict]] = {}
+    for row in all_snaps:
+        tk = str(row.get("ticker") or "")
+        if not tk:
+            continue
+        by_ticker.setdefault(tk, []).append(row)
+    for tk in by_ticker:
+        by_ticker[tk].sort(key=lambda r: float(r.get("ts") or 0.0))
+
+    def _side_price(s: dict, side: str) -> float:
+        yes_bid = float(s.get("yes_bid") or 0.0)
+        no_bid = float(s.get("no_bid") or 0.0) or (1.0 - yes_bid)
+        return yes_bid if side == "yes" else no_bid
+
+    def _fills_with_dwell(ticker: str, side: str, limit_price: float, placed_ts: float, resolution_ts: float | None) -> bool:
+        needed = max(0.0, min_dwell_minutes) * 60.0
+        if needed <= 0:
+            return True
+        snaps = by_ticker.get(ticker) or []
+        if not snaps:
+            return False
+        horizon = float(resolution_ts) if resolution_ts else float("inf")
+        window = [s for s in snaps if float(s.get("ts") or 0.0) >= placed_ts and float(s.get("ts") or 0.0) <= horizon]
+        if not window:
+            return False
+        dwell = 0.0
+        default_step = 15.0 * 60.0
+        for i, snap in enumerate(window):
+            ts_i = float(snap.get("ts") or 0.0)
+            ts_next = float(window[i + 1].get("ts") or ts_i) if i + 1 < len(window) else (ts_i + default_step)
+            dt = max(0.0, ts_next - ts_i)
+            if _side_price(snap, side) <= limit_price:
+                dwell += dt
+                if dwell >= needed:
+                    return True
+            else:
+                dwell = 0.0
+        return False
+
+    def _depth_available_contracts(snap: dict, side: str) -> float | None:
+        keys_yes = ["yes_ask_size", "yes_depth", "yes_liquidity", "yes_available"]
+        keys_no = ["no_ask_size", "no_depth", "no_liquidity", "no_available"]
+        keys = keys_yes if side == "yes" else keys_no
+        for k in keys:
+            v = snap.get(k)
+            if v is None:
+                continue
+            try:
+                f = float(v)
+                if f > 0:
+                    return f
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    use_vectorized = False
+    if use_vectorized and pd is not None:
         last_df = pd.DataFrame(
             [{"ticker": t, **snap} for t, snap in last_per_ticker.items()]
         )
@@ -253,10 +320,14 @@ def _run_synthetic(
                     ((df["side"] == "yes") & df["yes_settled"])
                     | ((df["side"] == "no") & (~df["yes_settled"]))
                 )
-                df["pnl_cents"] = df.apply(
-                    lambda r: ((100 - r["entry_price"] * 100) if r["won"] else (-r["entry_price"] * 100)) * r["size_mult"],
-                    axis=1,
-                )
+                def _pnl_row(r):
+                    gross_win = (100 - r["entry_price"] * 100)
+                    if r["won"]:
+                        gross_win *= max(0.0, 1.0 - win_slippage_tax_bps / 10_000.0)
+                        return gross_win * r["size_mult"]
+                    return (-r["entry_price"] * 100) * r["size_mult"]
+
+                df["pnl_cents"] = df.apply(_pnl_row, axis=1)
                 trades = df[
                     [
                         "ticker",
@@ -303,13 +374,32 @@ def _run_synthetic(
                 elif spread_bps > spread_soft:
                     frac = (spread_bps - spread_soft) / max(1e-9, (spread_hard - spread_soft))
                     size_mult = 1.0 - frac * (1.0 - min_size_mult)
+            # Volume-weighted/partial-fill realism when depth is available.
+            requested_contracts = int(snap.get("count") or assumed_order_size or 10)
+            avail_depth = _depth_available_contracts(snap, side)
+            if avail_depth is not None and requested_contracts > 0:
+                fill_ratio = max(0.0, min(1.0, float(avail_depth) / float(requested_contracts)))
+                size_mult *= fill_ratio
+            if size_mult <= 0.0:
+                skipped_not_filled += 1
+                continue
             # Add conservative slippage to entry cost.
             actual_price = min(0.99, max(0.01, ask_proxy * (1.0 + slippage_bps / 10_000.0)))
             fill_slippage_bps = None
             if theoretical_price and theoretical_price > 0:
                 fill_slippage_bps = ((actual_price - theoretical_price) / theoretical_price) * 10_000.0
             won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
-            pnl_cents = ((100 - actual_price * 100) if won else (-actual_price * 100)) * size_mult
+            placed_ts = float(snap.get("ts") or 0.0)
+            resolution_ts = ro.get("resolution_ts")
+            if not _fills_with_dwell(ticker, side, actual_price, placed_ts, resolution_ts):
+                skipped_not_filled += 1
+                continue
+            gross_win = (100 - actual_price * 100)
+            if won:
+                gross_win *= max(0.0, 1.0 - win_slippage_tax_bps / 10_000.0)
+                pnl_cents = (gross_win * size_mult) - (liquidity_friction_cents * size_mult)
+            else:
+                pnl_cents = ((-actual_price * 100) * size_mult) - (liquidity_friction_cents * size_mult)
             trades.append({
                 "ticker": ticker,
                 "side": side,
@@ -357,6 +447,9 @@ def _run_synthetic(
         "max_drawdown_cents": max_dd,
         "avg_fill_slippage_bps": (sum(slippages) / len(slippages)) if slippages else None,
         "avg_spread_bps": (sum(spreads) / len(spreads)) if spreads else None,
+        "skipped_not_filled": skipped_not_filled,
+        "fill_min_dwell_minutes": min_dwell_minutes,
+        "liquidity_friction_cents": liquidity_friction_cents,
     }
 
 
@@ -412,6 +505,12 @@ def main() -> int:
         print(f"  Avg fill slippage: {out['avg_fill_slippage_bps']:.1f} bps")
     if out.get("avg_spread_bps") is not None:
         print(f"  Avg spread proxy:  {out['avg_spread_bps']:.1f} bps")
+    if out.get("skipped_not_filled") is not None:
+        print(f"  Skipped (not filled): {out['skipped_not_filled']}")
+    if out.get("fill_min_dwell_minutes") is not None:
+        print(f"  Fill dwell rule: >= {out['fill_min_dwell_minutes']:.1f} min")
+    if out.get("liquidity_friction_cents") is not None:
+        print(f"  Liquidity friction: {out['liquidity_friction_cents']:.2f} cents/trade")
     print("=" * 60)
     return 0
 

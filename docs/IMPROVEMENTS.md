@@ -46,6 +46,21 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Easy win (aligned high-confidence)** | —                                       | ✓ When model and market both say ~90%+ (aligned), use `min_edge_easy_win` (0.01 = 1¢) instead of `min_edge` — buy if any profit after fees. Config: `enable_easy_win`, `min_edge_easy_win`, `easy_win_min_p_win`, `easy_win_min_market_p`. |
 | **Live price for model & safety**      | —                                       | ✓ `get_snapshot()` used for S0 in volatility model and all safety checks; reflects sharp moves (e.g. last 10 min). Fallback to closes[-1] when snapshot fails. |
 | **ML-style signal model pipeline**     | AI/ML roadmap                           | ✓ Signal features (empirical, volatility, moneyness, spread/liquidity, market context) are passed through a configurable weighted scorer; optional sklearn calibration (isotonic/platt) on resolved predictions. |
+| **Heavy-tail vol distribution**        | Taylor Ch 4                             | ✓ Optional Student-t (`strategy.vol_distribution: student_t`, `vol_t_df`) for fatter tails vs Gaussian. |
+| **Volatility spike safety mode**       | Taylor structural-break risk            | ✓ When short-horizon realized vol spikes over baseline (`vol_spike_threshold_mult`), raise edge via `vol_spike_edge_multiplier` to avoid regime-break overtrading. |
+| **Directional parity penalty**         | Risk balancing                          | ✓ Dynamic side penalty from recent resolved outcomes (`parity_*` config). Dominant side (YES/NO) gets extra min-edge, reducing one-sided drift. |
+| **Momentum crash protection**          | Execution reality                       | ✓ For crypto, skip BUY YES when live-vs-close move breaches `momentum_crash_threshold_pct` (falling-knife guard). |
+| **Cross-platform exposure cap**        | Portfolio risk                          | ✓ `max_cross_platform_exposure` caps combined Kalshi+Gemini exposure per underlying + resolution window. |
+| **Fee floor + index fee override**     | Kalshi fee nuance                       | ✓ `min_fee_per_order` pessimistic fee floor and `kalshi_sp500_maker_fee_rate` override for S&P-linked markets. |
+| **Backtest win slippage tax**          | Freqtrade realism                       | ✓ Synthetic backtest supports `synthetic_win_slippage_tax_bps` to stress winner-side execution friction (in addition to entry slippage/spread). |
+| **Dwell-time + partial-fill realism**  | Execution realism                       | ✓ Synthetic backtest now enforces dwell-time fills and partial-fill scaling when depth fields are available; supports assumed order-size fallback (`synthetic_fill_min_dwell_minutes`, `synthetic_assumed_order_size`). |
+| **Adaptive Kelly circuit breaker**     | Risk management                         | ✓ Kelly fraction now auto-scales down during calibration stress and recovers when win-rate stabilizes (`dynamic_kelly_*` settings). |
+| **Macro cross-asset signal feature**   | Feature engineering                     | ✓ Signal model now includes `macro_24h_ret` from configurable tickers (default `^GSPC`, `DX-Y.NYB`) to capture risk-on/off context. |
+| **Modular strategy migration**         | Freqtrade architecture                  | ✓ Recommendation + signal feature/scoring paths are now strategy-driven (`strategy_engine`) rather than hardcoded in `compare_historical.py`. |
+| **Push-time performance guard**        | Reliability                             | ✓ Pre-push hook runs configurable backtest gate (`scripts/backtest_guard.py`) and blocks pushes on weak performance thresholds. |
+| **Daily performance report**           | Reliability                             | ✓ Launchd daily report writes dated `.txt` performance summaries (`scripts/daily_performance_report.py`). |
+| **Emergency loss circuit breaker**     | Reliability                             | ✓ `max_daily_loss_pct` / `max_daily_loss_cents` block new BUY orders when realized 24h losses breach limits (SELL handling remains active). |
+| **Depth persistence for snapshots**    | Backtest realism                        | ✓ `market_snapshots` now stores top-of-book asks/sizes (`yes_ask`, `no_ask`, `*_size`) so synthetic partial-fill logic can use real historical depth when available. |
 
 ---
 
@@ -61,6 +76,7 @@ Refactoring, architecture, and code quality changes.
 | **_maybe_add_reentry_order helper** | Shared helper for sell-and-rebuy logic; used by Kalshi (cached + orphan) and Gemini position eval; DRY, consistent edge check. |
 | **_compute_p_lose helper**         | Blends model P(lose) with market odds; time-weighted (half-life decay) so market gets more weight near resolution. |
 | **Calibration loss weighting in storage** | `get_calibration_stats()` accepts `config`; reads `calibration_loss_weight`; applies to bucket and by_direction_side win rates. |
+| **Strategy plugin migration**          | Signal feature building/scoring and recommendation routing are delegated to `strategies/` implementations; `compare_historical.py` handles data/execution plumbing. |
 | **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
 | **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |
 
@@ -68,7 +84,6 @@ Refactoring, architecture, and code quality changes.
 
 | Improvement                         | Effort | Notes |
 | ----------------------------------- | ------ | ----- |
-| **Modular strategy interface**     | Medium | Extract strategy into pluggable classes (Freqtrade-style); swap empirical vs volatility without editing compare_historical.py. |
 | **Position eval extraction**       | Low    | Extract Kalshi/Gemini position eval into `_evaluate_position()` with platform-agnostic core. |
 | **Type hints consistency**          | Low    | Add return types and ParamSpec where missing; improve IDE support. |
 | **Config schema validation**       | Low    | Validate strategy/trading keys at load; fail fast on typos. |
@@ -115,8 +130,8 @@ Run our evaluation logic on _historical_ market snapshots instead of live data. 
 
 - **Scope**: Use stored historical prices (yfinance) + historical Kalshi/Gemini snapshots (if available) or synthetic fills at mid
 - **Output**: Sharpe, win rate, max drawdown, edge decay over time
-- **Implemented**: `scripts/backtest.py` — modes: `real` (resolved predictions from SQLite) and `synthetic` (market_snapshots + resolved_outcomes). Uses SQLite storage (~/.trading-bot-data/), yfinance `get_aggs_as_of()` for point-in-time historical closes. Settlement sync populates `resolved_outcomes` for synthetic backtest. Kalshi `get_historical_market()` added for future use.
-- **TODO**: Edge decay over time; Gemini historical; Kalshi historical orderbook (Dome API)
+- **Implemented**: `scripts/backtest.py` — modes: `real` (resolved predictions from SQLite) and `synthetic` (market_snapshots + resolved_outcomes). Uses SQLite storage (~/.trading-bot-data/), yfinance `get_aggs_as_of()` for point-in-time historical closes. Settlement sync populates `resolved_outcomes` for synthetic backtest. Includes entry slippage, spread-aware sizing, winner-side slippage tax (`synthetic_win_slippage_tax_bps`), dwell-time fill checks (`synthetic_fill_min_dwell_minutes`), and partial-fill scaling when depth is available.
+- **TODO**: Edge decay over time; persist richer historical depth in snapshots/orderbook so partial-fill realism can use true venue depth more often.
 
 ### 2. ~~Kelly Criterion Position Sizing~~ ✓ Done
 
@@ -139,9 +154,9 @@ Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log`
 - **Kept position outcomes**: When we decide KEEP (don't sell), track that position and when it eventually resolves (win/lose). Currently we only record outcomes for placed buys (`record_prediction` → `record_prediction_outcome`). Add `position_evaluations` or link kept positions to predictions so we can measure: "we kept YES at hist_p=0.75, it won."
 - **Cancel reason classification**: Distinguish "no longer recommended" (rec=SKIP) vs "want better limit" (rec still BUY) for finer calibration.
 
-### 6. Modular Strategy Interface (Freqtrade)
+### 6. ~~Modular Strategy Interface (Freqtrade)~~ ✓ Implemented
 
-Extract strategy logic into pluggable classes so we can swap empirical vs volatility vs custom logic without editing `compare_historical.py`.
+`compare_historical.py` now routes recommendation and signal feature/scoring paths through `strategies/` implementations (`strategy_engine`), while execution/data plumbing remains centralized.
 
 ---
 

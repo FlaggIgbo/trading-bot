@@ -16,3 +16,11 @@ repos:
       - id: prettier
         types_or: [yaml, json, markdown]
         exclude: ^(launchd/.*\.plist)$
+
+  - repo: local
+    hooks:
+      - id: backtest-guard
+        name: Backtest guard (pre-push)
+        entry: .venv/bin/python scripts/backtest_guard.py
+        language: system
+        pass_filenames: false

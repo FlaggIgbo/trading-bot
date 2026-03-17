@@ -81,6 +81,12 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             ts REAL NOT NULL,
             yes_bid REAL,
             no_bid REAL,
+            yes_ask REAL,
+            no_ask REAL,
+            yes_bid_size REAL,
+            no_bid_size REAL,
+            yes_ask_size REAL,
+            no_ask_size REAL,
             hist_p REAL,
             vol_p REAL,
             rec TEXT,
@@ -151,6 +157,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """)
     _migrate_predictions_price_after_buy(conn)
     _migrate_predictions_fill_attribution(conn)
+    _migrate_market_snapshots_depth_columns(conn)
 
 
 def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
@@ -173,6 +180,23 @@ def _migrate_predictions_fill_attribution(conn: sqlite3.Connection) -> None:
     ]:
         try:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+
+def _migrate_market_snapshots_depth_columns(conn: sqlite3.Connection) -> None:
+    """Add market depth/top-of-book columns to market_snapshots for backtest realism."""
+    for col in [
+        "yes_ask",
+        "no_ask",
+        "yes_bid_size",
+        "no_bid_size",
+        "yes_ask_size",
+        "no_ask_size",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE market_snapshots ADD COLUMN {col} REAL")
             conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -327,6 +351,12 @@ def record_market_snapshot(
     edge: float | None = None,
     title: str | None = None,
     yf_ticker: str | None = None,
+    yes_ask: float | None = None,
+    no_ask: float | None = None,
+    yes_bid_size: float | None = None,
+    no_bid_size: float | None = None,
+    yes_ask_size: float | None = None,
+    no_ask_size: float | None = None,
     config: dict | None = None,
 ) -> None:
     """
@@ -340,8 +370,10 @@ def record_market_snapshot(
     try:
         conn.execute(
             """INSERT OR IGNORE INTO market_snapshots
-               (platform, ticker, title, yf_ticker, ts, yes_bid, no_bid, hist_p, vol_p, rec, threshold, direction, edge)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (platform, ticker, title, yf_ticker, ts, yes_bid, no_bid, yes_ask, no_ask,
+                yes_bid_size, no_bid_size, yes_ask_size, no_ask_size,
+                hist_p, vol_p, rec, threshold, direction, edge)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 platform,
                 ticker,
@@ -350,6 +382,12 @@ def record_market_snapshot(
                 ts,
                 yes_bid,
                 no_bid,
+                yes_ask,
+                no_ask,
+                yes_bid_size,
+                no_bid_size,
+                yes_ask_size,
+                no_ask_size,
                 hist_p,
                 vol_p,
                 rec or "",
@@ -1201,10 +1239,19 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
             wr = ww / (ww + wl) if (ww + wl) > 0 else 0
             by_direction_side[k] = {"count": v["wins"] + v["loses"], "win_rate": wr}
         # Price-after-buy: how much lower/higher did contract go after we bought "low"
-        rows_with_price = [
-            r for r in rows
-            if r.get("entry_price") and r.get("min_price_after_buy") is not None and r.get("max_price_after_buy") is not None
-        ]
+        rows_with_price = []
+        for r in rows:
+            entry_price = r["entry_price"] if "entry_price" in r.keys() else None
+            min_after = r["min_price_after_buy"] if "min_price_after_buy" in r.keys() else None
+            max_after = r["max_price_after_buy"] if "max_price_after_buy" in r.keys() else None
+            if entry_price is not None and min_after is not None and max_after is not None:
+                rows_with_price.append(
+                    {
+                        "entry_price": float(entry_price),
+                        "min_price_after_buy": float(min_after),
+                        "max_price_after_buy": float(max_after),
+                    }
+                )
         price_after_buy = None
         if rows_with_price:
             entry_prices = [r["entry_price"] for r in rows_with_price]
@@ -1351,7 +1398,11 @@ def get_last_snapshot_per_ticker(
             q = q.replace("(1=1)", f"m2.rec IN ({ph})")
             params.extend(rec_filter)
         # Simplify: just get all, group by ticker and take max ts in Python
-        inner = "SELECT ticker, platform, title, yf_ticker, ts, yes_bid, no_bid, hist_p, vol_p, rec, threshold, direction, edge FROM market_snapshots WHERE 1=1"
+        inner = (
+            "SELECT ticker, platform, title, yf_ticker, ts, yes_bid, no_bid, yes_ask, no_ask, "
+            "yes_bid_size, no_bid_size, yes_ask_size, no_ask_size, "
+            "hist_p, vol_p, rec, threshold, direction, edge FROM market_snapshots WHERE 1=1"
+        )
         if platform:
             inner += " AND platform = ?"
         if rec_filter:
@@ -1398,6 +1449,46 @@ def get_resolved_outcomes(
         return {r["ticker"]: dict(r) for r in rows}
     except Exception:
         return {}
+    finally:
+        conn.close()
+
+
+def get_realized_pnl_stats(
+    *,
+    since_ts: float | None = None,
+    config: dict | None = None,
+) -> dict[str, float | int]:
+    """
+    Aggregate realized prediction outcomes over a time window.
+    Returns total_pnl_cents and counts for wins/losses/resolved.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"resolved_count": 0, "wins": 0, "losses": 0, "total_pnl_cents": 0}
+    try:
+        q = (
+            "SELECT "
+            "COUNT(*) AS resolved_count, "
+            "SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins, "
+            "SUM(CASE WHEN outcome='lose' THEN 1 ELSE 0 END) AS losses, "
+            "SUM(COALESCE(pnl_cents, 0)) AS total_pnl_cents "
+            "FROM predictions WHERE outcome IN ('win','lose')"
+        )
+        params: list[Any] = []
+        if since_ts is not None:
+            q += " AND COALESCE(resolved_ts, ts) >= ?"
+            params.append(float(since_ts))
+        row = conn.execute(q, params).fetchone()
+        if not row:
+            return {"resolved_count": 0, "wins": 0, "losses": 0, "total_pnl_cents": 0}
+        return {
+            "resolved_count": int(row["resolved_count"] or 0),
+            "wins": int(row["wins"] or 0),
+            "losses": int(row["losses"] or 0),
+            "total_pnl_cents": int(row["total_pnl_cents"] or 0),
+        }
+    except Exception:
+        return {"resolved_count": 0, "wins": 0, "losses": 0, "total_pnl_cents": 0}
     finally:
         conn.close()
 

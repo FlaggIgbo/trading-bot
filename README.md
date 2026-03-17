@@ -48,20 +48,20 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) and the [Gemin
 
    Or: `MARKETS=KXBTCD,KXETHD,KXSOLD,KXINXU,KXXRPD`
 
-Run scripts from the project root (e.g. `python scripts/bot.py`). Scripts add the project root to `sys.path` so imports work correctly.
+Run scripts from the project root (e.g. `python scripts/compare_historical.py`). Scripts add the project root to `sys.path` so imports work correctly.
 
 ## Running
 
 ```bash
-python scripts/bot.py
+python scripts/compare_historical.py --preview --no-llm
 ```
 
-The bot will:
+The engine will:
 
 - Connect using your API credentials
-- Fetch open markets for each series/ticker you configured
-- Log prices (YES/NO bids) and status
-- Apply strategy rules when you add them in `config.yaml` / `scripts/bot.py`
+- Evaluate Kalshi and Gemini contracts with empirical + volatility + calibrated signals
+- Recommend BUY YES / BUY NO / SKIP and optionally stage limit orders
+- Apply strategy-engine logic from `strategy.strategy_engine` in `config.yaml`
 
 ## Kalshi API Overview
 
@@ -81,11 +81,11 @@ See [Kalshi API docs](https://docs.kalshi.com/welcome) and [Making your first re
 trading-bot/
 ├── scripts/                 # Runnable entry points (run from project root)
 │   ├── backtest.py          # Backtest: real (resolved preds) or synthetic (snapshots) mode
-│   ├── bot.py               # Main polling bot
 │   ├── compare_historical.py # Evaluate contracts → BUY YES / NO / SKIP
 │   ├── compare_prices.py    # Quick live price snapshot
 │   ├── debug_ollama.py      # Debug Ollama LLM integration (run when analysis fails)
 │   └── test_connection.py   # Test API connections
+├── strategies/              # Pluggable recommendation engines (default: vol_regime)
 ├── docs/                    # Documentation
 │   ├── CODE_EXPLAINER.md    # Step-by-step flow, file-by-file reference, code pointers
 │   └── IMPROVEMENTS.md      # Roadmap and backlog
@@ -112,11 +112,12 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 - **Ruff** (Python): `pip install ruff` then `ruff check . --fix && ruff format .`
 - **Pre-commit** (runs on `git push`): `pip install pre-commit && pre-commit install --hook-type pre-push`
+  - Includes a backtest guard hook (`scripts/backtest_guard.py`) that can block pushes if recent performance falls below thresholds in `config.yaml` (`backtest.pre_push_*`).
 - **Prettier** (YAML/JSON/MD): `npm install` then `npx prettier --write "*.yaml" "*.json" "*.md"` (or use pre-commit)
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: Kelly sizing, recency-weighted empirical probability, dynamic empirical/volatility blending, OTM smile adjustment, uncertainty-aware edge buffer, live-price blending, strike validation, stop-loss exits, liquidity/spread-aware sizing, actual-vs-theoretical fill attribution, synthetic slippage/spread-aware backtesting, and a configurable signal-model pipeline with optional sklearn probability calibration.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA volatility modeling, volatility-spike safety, uncertainty-aware edge buffers, adaptive ARR-based limit dips, directional parity penalties, emergency daily-loss circuit breaker, and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
 ## Contract evaluation workflow
 
@@ -339,6 +340,8 @@ python3 scripts/compare_historical.py --execute --no-llm
 
 Requires `trading.dry_run: false` in config.yaml.
 
+**Strategy engine note:** You do not need to manually switch strategies during normal usage. Keep `strategy.strategy_engine: vol_regime` and treat `default_threshold` as a testing baseline only.
+
 **Flags**
 
 | Flag               | Description                                                                               |
@@ -354,7 +357,7 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--log`            | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket, append within hour; or `--log DIR` for custom dir) |
 | `--limit-analysis` | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
 
-Config: `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, and related keys in `config.yaml`.
+Config: `strategy.strategy_engine`, `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, and related keys in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 
@@ -449,6 +452,7 @@ absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enfo
 - **`enable_sell_and_rebuy`** (default true): When selling a losing position (P(lose) ≥ 55% or rec flip), optionally re-buy the same contract at the current price if the model still sees edge. Bypasses min 5¢ rule for re-entry when profitable.
 - **`p_lose_blend_market_max_weight`** (default 0.5): When computing P(lose) for sell decisions, blend our model with Kalshi/Gemini market odds. At expiry, up to this fraction comes from the market (0 = model only; 0.5 = 50/50).
 - **`p_lose_blend_market_half_life_days`** (default 0.5): Half-life for market-weight decay; closer to resolution → more weight on market odds (more accurate near expiry).
+- **`max_daily_loss_pct` / `max_daily_loss_cents`**: Circuit breaker for live trading. If realized prediction losses over the last 24h exceed thresholds, the bot blocks new BUY orders until performance recovers or limits are adjusted.
 
 ### Local historical storage
 
@@ -462,7 +466,7 @@ Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable v
 | -------------------- | ------------------------------------------------- | -------- | --------------------------------------------- |
 | **yf_cache**         | Daily closes from yfinance (fewer API calls)      | 1 hour   | `(ticker, days_back)`                          |
 | **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
-| **market_snapshots** | Per-evaluation snapshot (yes/no bids, hist_p, rec)| None     | `id` (auto-increment)                          |
+| **market_snapshots** | Per-evaluation snapshot (yes/no bids/asks/sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**      | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
 | **limit_orders**    | Limit orders placed + cancel reasons (learn from unfilled) | None | `id` (auto-increment)                          |
@@ -522,8 +526,10 @@ Run the evaluation locally every 15 minutes for continuous monitoring.
 
 ```bash
 cp launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
+cp launchd/com.user.daily_performance_report.plist ~/Library/LaunchAgents/
 # Edit plist if paths differ (Python, script, WorkingDirectory)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performance_report.plist
 ```
 
 **Keep Mac awake** (otherwise macOS may sleep and pause the timer): run `caffeinate -di` in a separate terminal, or use [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704).
@@ -534,11 +540,16 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_histori
 | ---------------------------------- | --------------------------------------------------------------------------- |
 | View stdout (script output)        | `tail -f /tmp/compare_historical.out.log`                                   |
 | View stderr (errors)               | `tail -f /tmp/compare_historical.err.log`                                   |
+| View daily report stdout           | `tail -f /tmp/daily_performance_report.out.log`                             |
+| View daily report stderr           | `tail -f /tmp/daily_performance_report.err.log`                             |
 | Check if agent is loaded & running | `launchctl list \| grep compare_historical`                                 |
 | Stop (unload)                      | `launchctl unload ~/Library/LaunchAgents/com.user.compare_historical.plist` |
+| Stop daily report                  | `launchctl unload ~/Library/LaunchAgents/com.user.daily_performance_report.plist` |
 
 The script runs every 15 minutes. With `RunAtLoad: false` (default), the first run happens ~15 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
 `cd /path/to/trading-bot && .venv/bin/python3 scripts/compare_historical.py --days 365 --use-volatility --execute --no-llm`
+
+The daily report job runs once per day and writes a dated text file (default: `~/Desktop/trading-bot-reports/performance_YYYYMMDD.txt`).
 
 **crontab (alternative):**
 
@@ -554,7 +565,7 @@ The script runs every 15 minutes. With `RunAtLoad: false` (default), the first r
 while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
 ```
 
-**Note:** `scripts/compare_prices` only shows prices. `scripts/compare_historical` with `--execute` places real orders on Kalshi and Gemini when `trading.dry_run` is `false`. `scripts/bot.py` can also place orders when configured (see below).
+**Note:** `scripts/compare_prices` only shows prices. `scripts/compare_historical` with `--execute` is the production execution path for Kalshi + Gemini when `trading.dry_run` is `false`.
 
 ### Balance-aware order execution (Kalshi & Gemini)
 
@@ -569,13 +580,11 @@ Orders placed via `create_order_safe` are capped to your available balance and n
 
   ```yaml
   trading:
-    dry_run: true # false = place real orders (scripts/bot.py)
+    dry_run: true # false = place real orders (compare_historical --execute)
     max_pct_of_balance: 0.20 # use at most 20% of balance per order (configurable)
     min_contracts: 1 # skip if capped count < this
     min_balance_for_limit_fallback_cents: 100 # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
   ```
-
-Enable execution in `scripts/bot.py` by setting `buy_yes_below` / `buy_no_below` in `strategy` and `dry_run: false`. Add funds manually as needed.
 
 ### Troubleshooting: 400 Bad Request on orders
 

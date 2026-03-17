@@ -26,24 +26,25 @@ yfinance_tickers:
 
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
-  min_edge: 0.10 # Min edge (10%) to recommend buy. historical_p - market_price >= edge
+  strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
+  min_edge: 0.25 # Higher edge requirement (25%) to absorb spread/slippage/fees in thin markets
   # Easy win: when model and market both say ~90%+ (aligned), use relaxed edge — buy if profitable after fees
   enable_easy_win: true # Buy when both agree on high probability and we profit after fees
   min_edge_easy_win: 0.01 # Min 1¢ profit per contract when aligned (covers fees; 0 = any positive)
   easy_win_min_p_win: 0.90 # Model must say P(win) >= this for easy-win
   easy_win_min_market_p: 0.85 # Market must be in ballpark (yes_bid or no_bid >= this)
   min_yes_price: 0.05 # Skip BUY YES when market YES < 5¢ (market thinks <5% chance; often illiquid or model overconfidence). Override: allow when vol model shows ≥95%
-  max_buy_yes_strike_above_pct: 0.05 # Skip BUY YES on "above X" when strike > current*(1+this). E.g. 5%: ETH $2179, strike $2300 (5.6% above) → skip unless vol ≥95%. Avoids far OTM intraday.
-  max_buy_no_strike_above_pct: 0.05 # Skip BUY NO on "below X" when strike > current*(1+this). E.g. 5%: ETH $2179, strike $2300 → BUY NO = "price >$2300" needs 5.6% rally; skip unless vol shows P(NO) ≥95%.
-  min_no_price: 0.05 # Skip BUY NO when market NO < 5¢ (market thinks our side unlikely). Override: allow when vol model shows P(NO) ≥95%
+  max_buy_yes_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
+  max_buy_no_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
+  min_no_price: 0.02 # Allow more NO opportunities while still avoiding extreme tail fills
   days_back: 365 # Days of historical data for P(above/below). Longer = more stable empirical P
   days_to_expiry: 30 # For volatility model (log-normal)
-  skip_buy_no_above_cushion: 0.01 # Skip BUY NO on "above X" when current_price > X * (1+cushion). 1% cushion avoids noise; 10% was too permissive (held NO at $72.5k vs $71.5k strike).
+  skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
   limit_dip_pct: 0.05 # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
   limit_dip_pct_high_confidence: 0.15 # When P(win) >= 90%, use larger dip (15%) — prioritize aggressive limits on high-certainty contracts
   limit_dip_pct_price_decline: 0.10 # When model suggests contract price might decrease (vol model on, or dte >= 2), use this dip (10%) to prioritize limit orders
-  vol_blend_weight: 0.5 # Blend empirical + vol: w*emp + (1-w)*vol when both available. 0.5 = equal; 0 = pure emp; 1 = pure vol. (with --use-volatility)
+  vol_blend_weight: 0.75 # Lean more on volatility model in fast crypto regimes
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
   ewma_lambda: 0.94 # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
@@ -51,7 +52,9 @@ strategy:
   intraday_other_min_p_win_with_vol: 0.80 # When --use-volatility: use 80% instead (vol model already accounts for time & vol)
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
+  kalshi_sp500_maker_fee_rate: 0.00875 # Lower maker fee assumption for S&P 500-style index markets
   gemini_maker_fee_rate: 0.0175 # 1.75% maker; same formula as Kalshi
+  min_fee_per_order: 0.01 # Fee floor used in edge math for small orders/contracts
   # Systematic edges (QuantPedia: arbitrage, cross-platform hedging)
   min_arb_fee: 0.02 # Min edge for arb (2%): buy-all when yes_ask+no_ask < 1 - fee
   enable_intra_arb: true # Intra-exchange: buy YES+NO when sum < 1 (same market)
@@ -59,13 +62,14 @@ strategy:
   # Absolute winner: when buying very cheap (e.g. 1¢) on near-certainty (P≥95%), buy more contracts
   absolute_winner_min_p_win: 0.95 # P(win) must be at least this to treat as "absolute winner"
   absolute_winner_max_price: 0.05 # Price must be at or below this (e.g. 5¢)
-  absolute_winner_max_pct_of_balance: 0.50 # Willing to spend up to this fraction of balance on one slam-dunk
+  absolute_winner_max_pct_of_balance: 0.20 # Safer cap; avoid bankroll-killer concentration
   absolute_winner_max_contracts: 500 # Cap contracts per absolute-winner order (still respects balance)
   # Calibration: use historical prediction outcomes to improve recommendations (FreqAI-style)
   use_calibration: true # Consult resolved predictions; disable favor-YES when "above+YES" underperforms
-  favor_yes_when_above_strike: true # When price above strike, upgrade SKIP→BUY YES if we have edge. Set false to avoid YES bias.
+  favor_yes_when_above_strike: false # Disable SKIP→BUY YES upgrade to reduce YES bias
+  enforce_no_above_rule: false # Disable forced BUY NO suppression when price is above strike
   min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
-  calibration_min_win_rate_above_yes: 0.45 # If "above+YES" win rate < this (and samples met), don't favor YES when above strike
+  calibration_min_win_rate_above_yes: 0.55 # More conservative: require stronger observed above+YES performance
   calibration_extra_edge_above_yes: 0.05 # When "above+YES" underperforms, require this extra edge before BUY YES
   calibration_extra_edge_overall: 0.02 # When overall win rate < 50%, add this to min_edge globally
   min_calibration_samples_overall: 20 # Min resolved trades before applying overall min_edge bump
@@ -79,20 +83,42 @@ strategy:
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
   kelly_fraction: 0.25 # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer; full Kelly can be aggressive)
+  dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
+  dynamic_kelly_floor: 0.10 # Min Kelly fraction floor under stress
+  dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
+  dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
+  dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
+  macro_signal_enabled: true # Include macro cross-asset context in signal model
+  macro_signal_tickers: ["^GSPC", "DX-Y.NYB"] # 24h returns averaged into macro_24h_ret feature
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)
   live_price_weight: 0.6 # When both available: current_price = 0.6*live + 0.4*closes[-1]. Slightly prioritize live. Fallback: closes[-1] if snapshot fails.
   empirical_use_rolling_window: true # Empirical model uses rolling window for faster adaptation
-  empirical_recent_days: 90 # Recent window size for empirical probability / confidence
+  empirical_recent_days: 30 # Shorter memory for faster regime adaptation
   empirical_recent_weight: 3.0 # Weight of recent samples relative to older data
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
-  uncertainty_edge_mult: 0.5 # Extra edge buffer = multiplier * empirical CI half-width
-  stop_loss_pct: 0.50 # Dynamic stop-loss: sell if current side price drops >=50% from recorded entry
+  uncertainty_edge_mult: 0.8 # Larger uncertainty penalty to reduce overconfident bets
+  stop_loss_pct: 0.25 # Cut losing positions earlier
+  weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
+  enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
+  momentum_crash_threshold_pct: -0.02 # Crash threshold for momentum protection (live vs last close)
+  max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
+  max_daily_loss_pct: 0.10 # Circuit breaker: block new buys if last 24h realized loss exceeds this fraction of balance
+  max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
+  enable_vol_spike_safety: true # Safety mode on volatility regime break
+  vol_spike_threshold_mult: 2.0 # Trigger safety mode when short vol > 2x recent baseline
+  vol_spike_edge_multiplier: 2.0 # In safety mode, multiply min_edge by this factor
+  parity_penalty_enabled: true # Add dynamic extra edge to dominant side (YES/NO) from recent outcomes
+  parity_lookback_days: 14 # Lookback window for directional parity stats
+  parity_base_penalty: 0.02 # Base dynamic penalty added to dominant side min_edge
+  parity_max_penalty: 0.10 # Max dynamic dominant-side penalty
   enable_strike_validation: true # Cross-check extracted strike against current price + market odds
   strike_validation_tolerance_pct: 0.05 # Tolerance band for threshold sanity checks
   enable_otm_smile_adjustment: true # Volatility smile proxy: boost vol for OTM strikes to avoid underestimating tails
   otm_smile_strength: 0.35 # Smile intensity; higher = larger OTM vol uplift
   otm_smile_max_mult: 2.0 # Cap OTM vol multiplier
+  vol_distribution: student_t # Heavy-tail volatility distribution: normal or student_t
+  vol_t_df: 6.0 # Degrees of freedom for Student-t; lower => fatter tails
   liquidity_spread_bps_soft: 1500 # Start reducing size when spread proxy > 15%
   liquidity_spread_bps_hard: 4000 # Max size reduction at/above 40% spread proxy
   liquidity_min_size_multiplier: 0.20 # At hard spread, keep at least 20% of base size
@@ -118,8 +144,7 @@ strategy:
     liquidity_consistency: 0.3
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # blacklist: ["KXINXU"]   # Exclude these series (optional)
-  # buy_yes_below: 0.30   # bot.py: buy YES when price < 30 cents
-  # buy_no_below: 0.30    # bot.py: buy NO when price < 30 cents
+  # strategy_engine options: vol_regime (default), default_threshold
 
 # Local historical storage (SQLite). Data in ~/.trading-bot-data/ — not committed to git.
 # Speeds runs (yf cache), builds history for backtesting and calibration.
@@ -140,3 +165,18 @@ trading:
 # Backtest realism settings
 backtest:
   synthetic_slippage_bps: 100 # +1% entry slippage in synthetic mode
+  synthetic_win_slippage_tax_bps: 4000 # Extra realism tax on winners (default mirrors hard spread regime)
+  synthetic_fill_min_dwell_minutes: 10 # Require price to remain favorable this long before counting synthetic fill
+  synthetic_liquidity_friction_cents: 0.75 # Flat friction cost per synthetic trade (spread/rounding drag)
+  synthetic_assumed_order_size: 10 # Used for partial-fill backtest when depth is available
+  daily_report_dir: ~/Desktop/trading-bot-reports # Daily launchd report output directory
+  daily_report_days_short: 7 # Short-window health check shown in daily report
+  daily_report_days_long: 30 # Longer-window trend check shown in daily report
+  pre_push_enabled: true # Run backtest guard on git push
+  pre_push_mode: real # real|synthetic guard mode
+  pre_push_days: 30 # Guard lookback window
+  pre_push_min_trades: 20 # Minimum trades required for meaningful gate
+  pre_push_fail_on_insufficient_trades: false # true blocks push if trades < min_trades
+  pre_push_min_win_rate: 0.35 # Block push when win rate falls below this (prediction-market pnl can be positive below 50%)
+  pre_push_min_pnl_cents: 0 # Block push when pnl below this
+  pre_push_require_positive_sharpe: false # Optional stricter risk-adjusted gate

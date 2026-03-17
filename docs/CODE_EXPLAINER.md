@@ -38,6 +38,14 @@
 6. **Evaluate positions** — For bets we already hold, we decide whether to sell (e.g. we now think we'll lose).
 7. **Execute (optional)** — If `--execute` and `dry_run: false`, the bot places real orders on Kalshi and/or Gemini.
 
+### Production-Grade Upgrades (2026)
+
+- **Modular strategy engine:** `compare_historical.py` now routes recommendation decisions through `strategies/` (`strategy_engine` in config), with `vol_regime` as the production default.
+- **Regime-aware volatility safety:** EWMA/Student-t probability flow is paired with volatility-spike safety to increase required edge during stress regimes.
+- **Adaptive limit pricing:** `limit_dip_pct` is now ARR-inspired (`max(base_dip, 0.5 * avg_relative_move)`) so entries tighten in calm markets and widen in volatile markets.
+- **High-fidelity synthetic backtest:** Synthetic mode supports dwell-time fill checks, partial-fill scaling from persisted depth fields, and per-trade liquidity friction in addition to slippage/spread realism.
+- **Circuit breaker safety:** New BUYs are blocked when 24h realized losses breach configured limits (`max_daily_loss_pct` / `max_daily_loss_cents`).
+
 ---
 
 ## Step-by-Step Flow (Main Script)
@@ -148,11 +156,11 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | File                                | Purpose                                             | Key code pointers                                                                                                                                                                    |
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
-| **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes ask-proxy/slippage realism and spread-aware synthetic sizing metrics                                                                                                 |
-| **`scripts/bot.py`**                | Simple polling bot (buy when price below threshold) | `main()` L34, `_check_market()` L101, `_resolve_markets()` L84                                                                                                                       |
+| **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes slippage/spread realism, winner slippage tax, dwell-time fill modeling, and liquidity friction                                                                                                 |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
 | **`scripts/test_connection.py`**    | Test API connections, balance, markets              | `_run()` L130, `debug_check()` L30, `inspect_output_types()` L86                                                                                                                     |
 | **`scripts/debug_ollama.py`**       | Debug Ollama server, models, chat                   | `main()` L16                                                                                                                                                                         |
+| **`strategies/`**                   | Pluggable recommendation engines                     | `base.py` interface, `default_threshold.py`, `vol_regime.py`                                                                                                                        |
 
 ### Configuration
 
@@ -257,13 +265,15 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 ---
 
-### `scripts/bot.py` — Simple Polling Bot
+### `strategies/` — Pluggable Recommendation Engines
 
-**Purpose:** Continuous loop: poll configured markets, log prices, optionally place buy orders when price falls below threshold.
+**Purpose:** Decouple recommendation logic from execution plumbing in `compare_historical.py`.
 
-**Flow:** `main()` → load config → create KalshiClient → for each item in markets: `_resolve_markets()` turns it into list of market tickers (single ticker or series → `get_markets(series_ticker=...)`) → for each ticker: `_check_market()` fetches market, logs YES/NO bids, and if `buy_yes_below` / `buy_no_below` set in strategy and not dry_run, calls `create_order_safe()`.
+**Current engines:**
+- `vol_regime` (default): production path.
+- `default_threshold`: baseline threshold+fee engine for controlled comparisons.
 
-**Config:** `strategy.buy_yes_below`, `strategy.buy_no_below`, `trading.dry_run`, `poll_interval_seconds`.
+**How selection works:** `config.yaml` → `strategy.strategy_engine`.
 
 ---
 
@@ -296,7 +306,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Function | File | Signature | Purpose |
 |----------|------|-----------|---------|
 | `_empirical_probability` | compare_historical | `(closes, threshold, direction, recent_days, recent_weight, use_rolling_window) -> float` | Recency-weighted empirical probability; uses vectorized NumPy path when available. |
-| `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda, current_price, ...) -> float \| None` | Log-normal P(S>K) or P(S<K); SciPy CDF path when available; optional OTM smile adjustment. |
+| `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda, current_price, ...) -> float \| None` | Regime-aware volatility P(S>K) or P(S<K); Student-t/Normal CDF path; optional OTM smile adjustment. |
 | `_build_signal_features` | compare_historical | `(emp_p, vol_p, market_yes, threshold, current_price, dte_days, spread_bps, no_bid) -> _SignalFeatures` | Builds normalized model features for signal scoring. |
 | `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
 | `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |
@@ -382,6 +392,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `use_volatility_by_default` | `use_volatility_by_default` | true | Apply volatility model even without `--use-volatility` |
 | `vol_dynamic_n0` | `vol_dynamic_n0` | 90 | Sample-size pivot for dynamic empirical/vol blend |
 | `uncertainty_edge_mult` | `uncertainty_edge_mult` | 0.5 | Adds CI-based uncertainty buffer to min edge |
+| `strategy_engine` | `strategy_engine` | `vol_regime` | Select recommendation engine (`vol_regime` default, `default_threshold` optional) |
 | `stop_loss_pct` | `stop_loss_pct` | 0.50 | Stop-loss threshold from recorded entry price |
 | `enable_strike_validation` | `enable_strike_validation` | true | Validate extracted strike against current price and market odds |
 | `strike_validation_tolerance_pct` | `strike_validation_tolerance_pct` | 0.05 | Tolerance band used for strike sanity checks |
@@ -427,10 +438,6 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `--days` | int | 0 | Limit to last N days (0 = all) |
 
 **Example:** `python scripts/backtest.py --mode real --days 90` → backtest last 90 days of real trades.
-
-### `scripts/bot.py`
-
-No arguments. Uses config: `markets`, `strategy.buy_yes_below`, `strategy.buy_no_below`, `trading.dry_run`, `poll_interval_seconds`.
 
 ### `scripts/compare_prices.py`
 
@@ -645,7 +652,7 @@ All data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurab
 | -------------------- | ------------------------------------------------- | -------- | --------------------------------------------- |
 | **yf_cache**         | Daily closes from yfinance (fewer API calls)      | 1 hour   | `(ticker, days_back)`                          |
 | **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
-| **market_snapshots**  | Per-evaluation snapshot (yes/no bids, hist_p, rec)| None     | `id` (auto-increment)                          |
+| **market_snapshots**  | Per-evaluation snapshot (yes/no bids+asks+sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**       | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
 | **limit_orders**      | Limit orders placed + cancel reasons (learn from unfilled) | None     | `id` (auto-increment)                          |
