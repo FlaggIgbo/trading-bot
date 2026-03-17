@@ -94,6 +94,7 @@ trading-bot/
 │   └── com.user.compare_historical.plist
 ├── config.py                # Config loader (yaml + env overrides)
 ├── config.yaml              # Markets, strategy, trading settings
+├── execution_engine.py      # Order sync/cancel lifecycle engine (shared execution plumbing)
 ├── kalshi_client.py         # Kalshi API client
 ├── gemini_client.py         # Gemini Prediction Markets client
 ├── yfinance_client.py       # Price data (yfinance + CoinGecko fallback)
@@ -416,7 +417,7 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`cancel_on_vol_spike`**: When vol-spike safety triggers, cancel resting BUY limits and block new BUYs until regime normalizes.
 - **`limit_order_ttl_minutes`**: Cancel and refresh stale resting BUY limits so order prices are based on current model state.
 - **`cancel_all_on_regime_shift`**: On strong momentum/volatility regime shifts, cancel risky resting BUY limits before re-quoting.
-- **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces. If the existing order is same or better, it keeps it and skips placing a duplicate.
+- **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. This lifecycle now lives in `execution_engine.py` (called by `compare_historical.py`) so execution sync is isolated from probability math. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces. If the existing order is same or better, it keeps it and skips placing a duplicate.
 
 ### Easy win (model and market aligned)
 

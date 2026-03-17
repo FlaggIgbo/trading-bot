@@ -242,7 +242,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
-8. **Execute (if --execute):** Review open orders → cancel stale or needing higher price → SELL first (Kalshi + Gemini) → BUY. Record predictions on fill.
+8. **Execute (if --execute):** Review open orders via `execution_engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price → SELL first (Kalshi + Gemini) → BUY. Record predictions on fill.
 
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
@@ -275,6 +275,19 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 - `default_threshold`: baseline threshold+fee engine for controlled comparisons.
 
 **How selection works:** `config.yaml` → `strategy.strategy_engine`.
+
+---
+
+### `execution_engine.py` — Order Lifecycle Sync/Cancellation
+
+**Purpose:** Isolate open-order management from probability/recommendation logic so execution safety can be unit-tested independently.
+
+**Key responsibility:** `sync_and_cancel_resting_orders(...)`
+- Builds pending buy/sell lookups for Kalshi + Gemini.
+- Reads active resting orders from both venues.
+- Keeps orders already at same/better price.
+- Cancels orders for `stale_ttl`, `no_longer_rec`, `want_better_price`, and `regime_shift_guard`.
+- Records cancel reason to storage through `record_order_cancel(...)`.
 
 ---
 

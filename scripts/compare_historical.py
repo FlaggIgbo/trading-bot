@@ -52,6 +52,7 @@ from constants import (
     REC_RULE_VIOLATION,
     REC_SKIP,
 )
+from execution_engine import sync_and_cancel_resting_orders
 from gemini_client import (
     GeminiPredictionClient,
     GeminiTradingClient,
@@ -511,52 +512,6 @@ def _compute_limit_price(
     opp_skew = _inventory_skew_factor(int(held_opp_side), max_inventory_skew_pct) * 0.5
     skewed = raw_price * (1.0 - same_skew + opp_skew)
     return _clip_price(skewed), float(dip)
-
-
-def _order_created_ts(order: dict) -> float | None:
-    """Best-effort parse of order created timestamp across APIs."""
-    if not isinstance(order, dict):
-        return None
-    for key in (
-        "created_time",
-        "created_at",
-        "createdAt",
-        "created_ts",
-        "updated_at",
-        "timestamp",
-    ):
-        val = order.get(key)
-        if val is None:
-            continue
-        try:
-            if isinstance(val, (int, float)):
-                ts = float(val)
-                if ts > 1e12:
-                    ts = ts / 1000.0
-                return ts if ts > 0 else None
-            s = str(val).strip()
-            if not s:
-                continue
-            if s.isdigit():
-                ts = float(s)
-                if ts > 1e12:
-                    ts = ts / 1000.0
-                return ts if ts > 0 else None
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return dt.timestamp()
-        except Exception:
-            continue
-    return None
-
-
-def _is_order_stale(order: dict, ttl_minutes: int, now_ts: float | None = None) -> bool:
-    if ttl_minutes <= 0:
-        return False
-    created_ts = _order_created_ts(order)
-    if created_ts is None:
-        return False
-    now_v = float(now_ts if now_ts is not None else time.time())
-    return (now_v - created_ts) >= (float(ttl_minutes) * 60.0)
 
 
 def _adaptive_kelly_fraction(base_kelly: float, calibration: dict[str, Any], sp: _StrategyParams) -> float:
@@ -4400,173 +4355,27 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         if gemini_trading is None and (any(o["platform"] == PLATFORM_GEMINI for o in pending_orders) or any(s["platform"] == PLATFORM_GEMINI for s in pending_sells)):
             print("  (Gemini: GEMINI_API_KEY/GEMINI_API_SECRET not set, skipping Gemini orders)")
 
-        # Build pending lookups for order review: (ticker, side) or (symbol, outcome) → {price, count, ...}
-        kalshi_pending_buys = {(o["ticker"], o["side"]): o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI}
-        kalshi_pending_sells = {(s["ticker"], s["side"]): s for s in pending_sells if s.get("platform") == PLATFORM_KALSHI}
-        gemini_pending_buys: dict[tuple[str, str], dict] = {}
-        gemini_pending_sells: dict[tuple[str, str], dict] = {}
-        for o in pending_orders:
-            if o.get("platform") == PLATFORM_GEMINI:
-                sym = o.get("instrument_symbol")
-                if not sym:
-                    evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o.get("ticker", ""))
-                    sym = get_instrument_symbol(evt, o["side"]) if evt else None
-                if sym:
-                    gemini_pending_buys[(str(sym), o["side"])] = o
-        for s in pending_sells:
-            if s.get("platform") == PLATFORM_GEMINI:
-                sym = s.get("instrument_symbol")
-                if not sym:
-                    evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
-                    sym = get_instrument_symbol(evt, s["side"]) if evt else None
-                if sym:
-                    gemini_pending_sells[(str(sym), s["side"])] = s
-
-        # Fetch open orders (buy + sell) and decide: cancel (no longer want / need price update) or keep
-        kalshi_keep_buys: set[tuple[str, str]] = set()
-        kalshi_keep_sells: set[tuple[str, str]] = set()
-        gemini_keep_buys: set[tuple[str, str]] = set()
-        gemini_keep_sells: set[tuple[str, str]] = set()
-        to_cancel: list[dict] = []  # {platform, order_id, label, reason, ticker, side, old_price}
-        now_ts = time.time()
-
-        try:
-            cursor = ""
-            while True:
-                r = kalshi.get_orders(status="resting", limit=200, **{"cursor": cursor} if cursor else {})
-                for ord_ in r.get("orders") or []:
-                    oid = ord_.get("order_id")
-                    t = ord_.get("ticker")
-                    side = (ord_.get("side") or "").lower()
-                    action = (ord_.get("action") or "").lower()
-                    if not oid or not t or not side:
-                        continue
-                    yes_d = ord_.get("yes_price_dollars") or "0"
-                    no_d = ord_.get("no_price_dollars") or "0"
-                    old_price = float(yes_d) if side == "yes" else float(no_d)
-                    label = f"{t} {action} {side}"
-                    if action == "buy":
-                        pend = kalshi_pending_buys.get((t, side))
-                        if regime_shift_active:
-                            to_cancel.append(
-                                {
-                                    "platform": PLATFORM_KALSHI,
-                                    "order_id": oid,
-                                    "label": label,
-                                    "reason": "regime_shift_guard",
-                                    "ticker": t,
-                                    "side": side,
-                                    "old_price": old_price,
-                                }
-                            )
-                        elif _is_order_stale(ord_, sp.limit_order_ttl_minutes, now_ts):
-                            to_cancel.append(
-                                {
-                                    "platform": PLATFORM_KALSHI,
-                                    "order_id": oid,
-                                    "label": label,
-                                    "reason": "stale_ttl",
-                                    "ticker": t,
-                                    "side": side,
-                                    "old_price": old_price,
-                                }
-                            )
-                        elif not pend:
-                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "no_longer_rec", "ticker": t, "side": side, "old_price": old_price})
-                        elif pend["price"] > old_price:
-                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "want_better_price", "ticker": t, "side": side, "old_price": old_price})
-                        else:
-                            kalshi_keep_buys.add((t, side))
-                    else:
-                        pend = kalshi_pending_sells.get((t, side))
-                        if not pend:
-                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "no_longer_rec", "ticker": t, "side": side, "old_price": old_price})
-                        elif pend["price"] > old_price:
-                            to_cancel.append({"platform": PLATFORM_KALSHI, "order_id": oid, "label": label, "reason": "want_better_price", "ticker": t, "side": side, "old_price": old_price})
-                        else:
-                            kalshi_keep_sells.add((t, side))
-                cursor = r.get("cursor") or ""
-                if not cursor:
-                    break
-        except Exception:
-            pass
-
-        if gemini_trading:
-            try:
-                act = gemini_trading.get_active_orders(limit=200)
-                for ord_ in act.get("orders") or []:
-                    oid = ord_.get("orderId") or ord_.get("order_id")
-                    sym = ord_.get("symbol") or ord_.get("instrumentSymbol")
-                    out = (ord_.get("outcome") or ord_.get("label") or "").lower()
-                    side = (ord_.get("side") or "").lower()
-                    if not oid or not sym or out not in ("yes", "no"):
-                        continue
-                    old_price = float(ord_.get("price") or ord_.get("originalAmount") or 0)
-                    key = (str(sym), out)
-                    label = f"{sym} {side} {out}"
-                    if side == "buy":
-                        pend = gemini_pending_buys.get(key)
-                        if regime_shift_active:
-                            to_cancel.append(
-                                {
-                                    "platform": PLATFORM_GEMINI,
-                                    "order_id": str(oid),
-                                    "label": label,
-                                    "reason": "regime_shift_guard",
-                                    "ticker": str(sym),
-                                    "side": out,
-                                    "old_price": old_price,
-                                }
-                            )
-                        elif _is_order_stale(ord_, sp.limit_order_ttl_minutes, now_ts):
-                            to_cancel.append(
-                                {
-                                    "platform": PLATFORM_GEMINI,
-                                    "order_id": str(oid),
-                                    "label": label,
-                                    "reason": "stale_ttl",
-                                    "ticker": str(sym),
-                                    "side": out,
-                                    "old_price": old_price,
-                                }
-                            )
-                        elif not pend:
-                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "no_longer_rec", "ticker": str(sym), "side": out, "old_price": old_price})
-                        elif pend["price"] > old_price:
-                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "want_better_price", "ticker": str(sym), "side": out, "old_price": old_price})
-                        else:
-                            gemini_keep_buys.add(key)
-                    else:
-                        pend = gemini_pending_sells.get(key)
-                        if not pend:
-                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "no_longer_rec", "ticker": str(sym), "side": out, "old_price": old_price})
-                        elif pend["price"] > old_price:
-                            to_cancel.append({"platform": PLATFORM_GEMINI, "order_id": str(oid), "label": label, "reason": "want_better_price", "ticker": str(sym), "side": out, "old_price": old_price})
-                        else:
-                            gemini_keep_sells.add(key)
-            except Exception:
-                pass
-
-        # Execute cancels (record why for limit-order learning)
-        cancels_done = 0
-        for item in to_cancel:
-            platform = item["platform"]
-            order_id = item["order_id"]
-            label = item["label"]
-            reason = item.get("reason", "no_longer_rec")
-            if platform == PLATFORM_KALSHI:
-                if kalshi.cancel_order_safe(order_id, ticker=label):
-                    if record_order_cancel:
-                        record_order_cancel(platform, order_id, reason, cfg, ticker=item.get("ticker"), side=item.get("side"), limit_price=item.get("old_price"))
-                    print(f"  Cancelled (Kalshi) {label} — {reason}")
-                    cancels_done += 1
-            elif platform == PLATFORM_GEMINI and gemini_trading:
-                if gemini_trading.cancel_order_safe(order_id, ticker_label=label):
-                    if record_order_cancel:
-                        record_order_cancel(platform, order_id, reason, cfg, ticker=item.get("ticker"), side=item.get("side"), limit_price=item.get("old_price"))
-                    print(f"  Cancelled (Gemini) {label} — {reason}")
-                    cancels_done += 1
-        if cancels_done:
+        sync_result = sync_and_cancel_resting_orders(
+            kalshi=kalshi,
+            gemini_trading=gemini_trading,
+            pending_orders=pending_orders,
+            pending_sells=pending_sells,
+            regime_shift_active=regime_shift_active,
+            limit_order_ttl_minutes=sp.limit_order_ttl_minutes,
+            platform_kalshi=PLATFORM_KALSHI,
+            platform_gemini=PLATFORM_GEMINI,
+            gemini_events_by_asset=gemini_events_by_asset,
+            find_gemini_event=_find_gemini_event,
+            get_instrument_symbol=get_instrument_symbol,
+            record_order_cancel=record_order_cancel,
+            cfg=cfg,
+            logger=print,
+        )
+        kalshi_keep_buys = sync_result.kalshi_keep_buys
+        kalshi_keep_sells = sync_result.kalshi_keep_sells
+        gemini_keep_buys = sync_result.gemini_keep_buys
+        gemini_keep_sells = sync_result.gemini_keep_sells
+        if sync_result.cancels_done:
             print()
 
         # SELL first so balance reflects proceeds before we place buys

@@ -5,6 +5,7 @@ This setup includes:
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 
 Both jobs use your `.venv` Python so dependencies are available.
+`compare_historical.py` now imports `execution_engine.py` for order-sync/cancel lifecycle logic, so no plist changes are required for this refactor.
 
 ## One-time setup
 
