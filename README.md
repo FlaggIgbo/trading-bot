@@ -508,7 +508,7 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **Optional sklearn calibration**: when enough resolved predictions exist, isotonic or Platt calibration maps raw model probability to calibrated probability (`use_sklearn_calibration`).
 - **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
 - **min_no_price** (current config 0.02): Skip BUY NO when the market prices NO below this floor (i.e., YES near certainty). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
-- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config is intentionally conservative (`min_edge: 0.22`) to absorb fee + slippage drag.
+- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config keeps a conservative buffer while allowing more throughput (`min_edge: 0.20`).
 
 ### Quick snapshot: `compare_prices.py`
 
@@ -576,7 +576,7 @@ while true; do .venv/bin/python scripts/compare_historical.py; sleep 900; done
 Orders placed via `create_order_safe` are capped to your available balance and never cause the script to crash on 4xx (e.g. insufficient funds).
 
 - **Balance cap:** Each order uses at most `max_pct_of_balance` (configurable in `config.yaml`, e.g. 20%) of your balance. Kalshi and Gemini each have separate balances; the bot fetches both and allocates budget per platform. Gemini orders use `place_order_safe` (which fetches balance and caps quantity before placing).
-- **Low-balance limit fallback:** When balance is below `min_balance_for_limit_fallback_cents` (e.g. 100 = $1) and you can't afford the target order, the bot places a 1-contract limit at a price you can afford. Set to `0` to disable.
+- **Low-balance limit fallback:** When balance is below `min_balance_for_limit_fallback_cents` (e.g. 300 = $3) and you can't afford the target order, the bot places a 1-contract limit at a price you can afford. Set to `0` to disable.
 - **4xx resilience:** If the API returns 4xx (insufficient funds, invalid market, etc.), the script logs a warning and continues.
 - **Config** (`config.yaml` → `trading`):
 
@@ -585,7 +585,7 @@ Orders placed via `create_order_safe` are capped to your available balance and n
     dry_run: true # false = place real orders (compare_historical --execute)
     max_pct_of_balance: 0.20 # use at most 20% of balance per order (configurable)
     min_contracts: 1 # skip if capped count < this
-    min_balance_for_limit_fallback_cents: 100 # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
+    min_balance_for_limit_fallback_cents: 300 # when balance < this, place 1-contract limit instead of skipping; 0 = disabled
   ```
 
 ### Troubleshooting: 400 Bad Request on orders

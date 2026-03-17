@@ -395,7 +395,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `vol_dynamic_n0` | `vol_dynamic_n0` | 90 | Sample-size pivot for dynamic empirical/vol blend |
 | `uncertainty_edge_mult` | `uncertainty_edge_mult` | 0.5 | Adds CI-based uncertainty buffer to min edge |
 | `strategy_engine` | `strategy_engine` | `vol_regime` | Select recommendation engine (`vol_regime` default, `default_threshold` optional) |
-| `stop_loss_pct` | `stop_loss_pct` | 0.50 | Stop-loss threshold from recorded entry price |
+| `stop_loss_pct` | `stop_loss_pct` | 0.50 fallback | Stop-loss threshold from recorded entry price (current config 0.20) |
 | `enable_strike_validation` | `enable_strike_validation` | true | Validate extracted strike against current price and market odds |
 | `strike_validation_tolerance_pct` | `strike_validation_tolerance_pct` | 0.05 | Tolerance band used for strike sanity checks |
 | `enable_otm_smile_adjustment` | `enable_otm_smile_adjustment` | true | Apply OTM smile proxy in volatility probability |

@@ -27,7 +27,7 @@ yfinance_tickers:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
-  min_edge: 0.22 # Slightly more aggressive than 25% while still leaving strong fee/slippage buffer
+  min_edge: 0.20 # More active than 0.22 while still preserving a conservative fee/slippage buffer
   # Easy win: when model and market both say ~90%+ (aligned), use relaxed edge — buy if profitable after fees
   enable_easy_win: true # Buy when both agree on high probability and we profit after fees
   min_edge_easy_win: 0.02 # Require at least 2¢ net edge for easy-win fills to better absorb slippage
@@ -101,10 +101,10 @@ strategy:
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
   uncertainty_edge_mult: 0.8 # Larger uncertainty penalty to reduce overconfident bets
-  stop_loss_pct: 0.25 # Cut losing positions earlier
+  stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
   weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
-  momentum_crash_threshold_pct: -0.02 # Crash threshold for momentum protection (live vs last close)
+  momentum_crash_threshold_pct: -0.035 # Less hair-trigger momentum lockout in high-vol regimes
   max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
   max_daily_loss_pct: 0.10 # Circuit breaker: block new buys if last 24h realized loss exceeds this fraction of balance
   max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
@@ -121,7 +121,7 @@ strategy:
   otm_smile_strength: 0.35 # Smile intensity; higher = larger OTM vol uplift
   otm_smile_max_mult: 2.0 # Cap OTM vol multiplier
   vol_distribution: student_t # Heavy-tail volatility distribution: normal or student_t
-  vol_t_df: 6.0 # Degrees of freedom for Student-t; lower => fatter tails
+  vol_t_df: 4.5 # Stronger fat-tail penalty for extreme-fear volatility regimes
   liquidity_spread_bps_soft: 1500 # Start reducing size when spread proxy > 15%
   liquidity_spread_bps_hard: 4000 # Max size reduction at/above 40% spread proxy
   liquidity_min_size_multiplier: 0.20 # At hard spread, keep at least 20% of base size
@@ -163,7 +163,7 @@ trading:
   min_contracts: 1 # skip if capped count < this
   # When balance is below this (cents), place a limit order instead of skipping
   # E.g. 500 = $5: with $3 balance, place 1-contract limit at price we can afford (e.g. 60¢)
-  min_balance_for_limit_fallback_cents: 100 # $1 minimum; 0 = disabled
+  min_balance_for_limit_fallback_cents: 300 # $3 minimum; avoids ultra-small fallback orders in thin books
 
 # Backtest realism settings
 backtest:
@@ -180,6 +180,6 @@ backtest:
   pre_push_days: 30 # Guard lookback window
   pre_push_min_trades: 20 # Minimum trades required for meaningful gate
   pre_push_fail_on_insufficient_trades: false # true blocks push if trades < min_trades
-  pre_push_min_win_rate: 0.35 # Block push when win rate falls below this (prediction-market pnl can be positive below 50%)
+  pre_push_min_win_rate: 0.35 # Keep realistic for high-edge payout profile; guard still enforces pnl floor
   pre_push_min_pnl_cents: 0 # Block push when pnl below this
   pre_push_require_positive_sharpe: false # Optional stricter risk-adjusted gate
