@@ -157,6 +157,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
 | **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes slippage/spread realism, winner slippage tax, dwell-time fill modeling, and liquidity friction                                                                                                 |
+| **`scripts/validate_config.py`**    | Config sanity validator                              | Runs pre-push checks for edge/fee consistency, Kelly bounds, EWMA ranges, exposure/loss caps, and macro/two-sided settings before backtest guard                                                                                                                         |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
 | **`scripts/test_connection.py`**    | Test API connections, balance, markets              | `_run()` L130, `debug_check()` L30, `inspect_output_types()` L86                                                                                                                     |
 | **`scripts/debug_ollama.py`**       | Debug Ollama server, models, chat                   | `main()` L16                                                                                                                                                                         |
@@ -310,7 +311,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `_build_signal_features` | compare_historical | `(emp_p, vol_p, market_yes, threshold, current_price, dte_days, spread_bps, no_bid) -> _SignalFeatures` | Builds normalized model features for signal scoring. |
 | `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
 | `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |
-| `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win: when model+market both ≥90%, uses min_edge_easy_win (e.g. 1¢) instead. Prefers larger edge when both qualify. |
+| `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win: when model+market both ≥90%, uses min_edge_easy_win (current config 2¢) instead. Prefers larger edge when both qualify. |
 | `_recommend_strict` | compare_historical | `(hist_p, market_yes, min_p_win, min_edge, fee) -> str` | Same as _recommend but also requires hist_p ≥ min_p_win for YES (or 1-hist_p ≥ min_p_win for NO). For non-standard intraday. |
 | `_extract_strike` | compare_historical | `(market) -> (threshold, direction)` | Parse floor/cap from market API or title regex ("above $X", "below $Y"). |
 | `_get_closes_for_empirical` | compare_historical | `(yf_ticker, days_back, closes_daily, market, sp, cfg) -> list[float]` | For intraday + use_intraday_empirical: return intraday prices at resolution hour; else daily closes. |
@@ -349,10 +350,11 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `vol_blend_weight` | `vol_blend_weight` | 0.5 | Blend emp + vol: w×emp + (1−w)×vol |
 | `use_ewma_vol` | `use_ewma_vol` | true | EWMA vs sample variance for vol |
 | `ewma_lambda` | `ewma_lambda` | 0.94 | EWMA decay (RiskMetrics-style) |
+| `intraday_ewma_lambda` | `intraday_ewma_lambda` | 0.94 fallback | Intraday-specific EWMA decay override (current config 0.90) |
 | `intraday_other_min_p_win` | `intraday_other_min_p_win` | 0.90 | For non-5pm/4pm intraday: require P(win)≥90% |
 | `intraday_other_min_p_win_with_vol` | `intraday_other_min_p_win_with_vol` | 0.80 | Same but when --use-volatility |
 | `enable_easy_win` | `enable_easy_win` | true | Buy when model+market aligned (90%+) with relaxed min_edge |
-| `min_edge_easy_win` | `min_edge_easy_win` | 0.01 | Min profit (1¢) when easy-win; 0 = any profit after fees |
+| `min_edge_easy_win` | `min_edge_easy_win` | 0.01 fallback | Min profit when easy-win; current config uses 0.02 (2¢) |
 | `easy_win_min_p_win` | `easy_win_min_p_win` | 0.90 | Model P(win) ≥ this for easy-win |
 | `easy_win_min_market_p` | `easy_win_min_market_p` | 0.85 | Market price ≥ this (same ballpark) for easy-win |
 | `min_arb_fee` | `min_arb_fee` | 0.02 | Min edge for arb (yes+no < 1−fee) |

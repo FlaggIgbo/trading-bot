@@ -19,6 +19,11 @@ repos:
 
   - repo: local
     hooks:
+      - id: config-validator
+        name: Config validator (pre-push)
+        entry: .venv/bin/python scripts/validate_config.py
+        language: system
+        pass_filenames: false
       - id: backtest-guard
         name: Backtest guard (pre-push)
         entry: .venv/bin/python scripts/backtest_guard.py

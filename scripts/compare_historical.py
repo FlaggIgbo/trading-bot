@@ -132,6 +132,7 @@ class _StrategyParams:
     vol_blend_weight: float | None
     use_ewma_vol: bool
     ewma_lambda: float
+    intraday_ewma_lambda: float
     intraday_other_min_p_win: float
     intraday_other_min_p_win_with_vol: float
     min_arb_fee: float
@@ -169,6 +170,8 @@ class _StrategyParams:
     dynamic_kelly_stress_fraction: float
     dynamic_kelly_stress_win_rate: float
     dynamic_kelly_recovery_win_rate: float
+    enable_two_sided_quotes: bool
+    two_sided_quote_min_edge: float
     macro_signal_enabled: bool
     macro_signal_tickers: list[str]
     enable_easy_win: bool
@@ -229,6 +232,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         vol_blend_weight=strategy.get("vol_blend_weight"),
         use_ewma_vol=bool(strategy.get("use_ewma_vol", False)),
         ewma_lambda=float(strategy.get("ewma_lambda", 0.94)),
+        intraday_ewma_lambda=float(strategy.get("intraday_ewma_lambda", strategy.get("ewma_lambda", 0.94))),
         intraday_other_min_p_win=float(strategy.get("intraday_other_min_p_win", 0.90)),
         intraday_other_min_p_win_with_vol=float(strategy.get("intraday_other_min_p_win_with_vol", 0.80)),
         min_arb_fee=float(strategy.get("min_arb_fee", 0.02)),
@@ -266,6 +270,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         dynamic_kelly_stress_fraction=float(strategy.get("dynamic_kelly_stress_fraction", 0.10)),
         dynamic_kelly_stress_win_rate=float(strategy.get("dynamic_kelly_stress_win_rate", 0.45)),
         dynamic_kelly_recovery_win_rate=float(strategy.get("dynamic_kelly_recovery_win_rate", 0.55)),
+        enable_two_sided_quotes=bool(strategy.get("enable_two_sided_quotes", True)),
+        two_sided_quote_min_edge=float(strategy.get("two_sided_quote_min_edge", 0.02)),
         macro_signal_enabled=bool(strategy.get("macro_signal_enabled", True)),
         macro_signal_tickers=[str(x) for x in (strategy.get("macro_signal_tickers") or ["^GSPC", "DX-Y.NYB"])],
         enable_easy_win=bool(strategy.get("enable_easy_win", True)),
@@ -1074,6 +1080,13 @@ def _get_closes_for_empirical(
             if intraday:
                 return intraday
     return closes_daily
+
+
+def _ewma_lambda_for_market(sp: "_StrategyParams", market_or_title: dict | str, yf_ticker: str) -> float:
+    """Use a faster EWMA decay for intraday contracts when configured."""
+    if _is_intraday_market(market_or_title, yf_ticker):
+        return float(sp.intraday_ewma_lambda)
+    return float(sp.ewma_lambda)
 
 
 def _ewma_variance(returns: list[float], lam: float = 0.94) -> float:
@@ -2169,6 +2182,99 @@ def _cap_cross_platform_exposure(
             used += price_c * int(o.get("count", 0))
 
 
+def _maybe_add_two_sided_quotes(
+    pending_orders: list[dict],
+    candidates: list[dict],
+    *,
+    sp: _StrategyParams,
+    balance_cents: int,
+    use_kelly: bool,
+    kelly_fraction: float,
+    min_contracts: int,
+) -> None:
+    if not sp.enable_two_sided_quotes or not candidates:
+        return
+    grouped: dict[tuple[str, str, str, str], list[dict]] = {}
+    for c in candidates:
+        key = (c["platform"], c["yf_ticker"], c["resolution_key"], c["direction"])
+        grouped.setdefault(key, []).append(c)
+    existing = {(o.get("platform"), o.get("ticker"), o.get("side")) for o in pending_orders}
+
+    for key, rows in grouped.items():
+        if len(rows) < 3:
+            continue
+        fair = min(rows, key=lambda r: abs(float(r.get("hist_p", 0.5)) - 0.5)).get("threshold")
+        if fair is None:
+            continue
+        direction = key[3]
+
+        def _is_yes_side(r: dict) -> bool:
+            t = float(r["threshold"])
+            return t <= float(fair) if direction == "above" else t >= float(fair)
+
+        def _is_no_side(r: dict) -> bool:
+            t = float(r["threshold"])
+            return t >= float(fair) if direction == "above" else t <= float(fair)
+
+        yes_cands = [r for r in rows if _is_yes_side(r)]
+        no_cands = [r for r in rows if _is_no_side(r)]
+        best_yes = max(yes_cands, key=lambda r: float(r.get("edge_yes_net", -9e9)), default=None)
+        best_no = max(no_cands, key=lambda r: float(r.get("edge_no_net", -9e9)), default=None)
+        picks: list[tuple[str, dict]] = []
+        if best_yes and float(best_yes.get("edge_yes_net", -1.0)) >= sp.two_sided_quote_min_edge:
+            picks.append(("yes", best_yes))
+        if best_no and float(best_no.get("edge_no_net", -1.0)) >= sp.two_sided_quote_min_edge:
+            picks.append(("no", best_no))
+
+        for side, c in picks:
+            ex_key = (c["platform"], c["ticker"], side)
+            if ex_key in existing:
+                continue
+            bid = float(c["yes_bid"] if side == "yes" else c["no_bid"])
+            if bid <= 0:
+                continue
+            p_win = float(c["hist_p"] if side == "yes" else (1.0 - c["hist_p"]))
+            dip = max(0.0, min(0.25, float(c.get("arr_dip", sp.limit_dip_pct))))
+            if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
+                dip = max(dip, sp.limit_dip_pct_high_confidence)
+            price = max(0.01, min(0.99, bid * (1.0 - dip))) if dip else bid
+            count_base = _compute_buy_count(
+                p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
+            )
+            ask_side = c.get("yes_ask") if side == "yes" else c.get("no_ask")
+            liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+            count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
+            if count <= 0:
+                continue
+            order = {
+                "platform": c["platform"],
+                "ticker": c["ticker"],
+                "title": c["title"],
+                "rec": REC_BUY_YES if side == "yes" else REC_BUY_NO,
+                "side": side,
+                "price": price,
+                "bid_at_place": bid,
+                "theoretical_price": bid,
+                "spread_bps_at_place": spread_bps,
+                "liquidity_mult": liq_mult,
+                "dip_pct_used": dip,
+                "edge": float(c["edge_yes_net"] if side == "yes" else c["edge_no_net"]),
+                "count": count,
+                "hist_p": float(c["hist_p"]),
+                "vol_p": c.get("vol_p"),
+                "yf_ticker": c["yf_ticker"],
+                "threshold": float(c["threshold"]),
+                "direction": c["direction"],
+                "paired_quote": True,
+            }
+            if c.get("gemini_evt") is not None:
+                order["gemini_evt"] = c.get("gemini_evt")
+            if c.get("instrument_symbol"):
+                order["instrument_symbol"] = c.get("instrument_symbol")
+            pending_orders.append(order)
+            existing.add(ex_key)
+
+
 def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
     """Fetch Kalshi settlements and update our unresolved predictions with outcomes."""
     if not get_unresolved_predictions or not record_prediction_outcome:
@@ -2399,6 +2505,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print("[Gemini] Tip: If using a proxy (HTTP_PROXY/HTTPS_PROXY), api.gemini.com may be blocked. Try: NO_PROXY=api.gemini.com,*.gemini.com")
 
     pending_orders: list[dict] = []
+    quote_candidates: list[dict] = []
     pending_sells: list[dict] = []
     sp = _load_strategy_params(strategy)
     strategy_engine = _build_strategy_engine(strategy)
@@ -2665,6 +2772,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
             hist_p = emp
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
+            ewma_lambda_used = _ewma_lambda_for_market(sp, m, yf_ticker)
             vol_p = (
                 _volatility_probability(
                     closes,
@@ -2672,7 +2780,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     direction,
                     dte,
                     use_ewma=sp.use_ewma_vol,
-                    ewma_lambda=sp.ewma_lambda,
+                    ewma_lambda=ewma_lambda_used,
                     current_price=current_price,
                     enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                     otm_smile_strength=sp.otm_smile_strength,
@@ -2808,6 +2916,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 violates_rule,
                 maker_fee_rate,
                 min_fee_per_order=sp.min_fee_per_order,
+            )
+            no_bid_for_quote = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
+            fee_yes_q = _fee_per_contract(yes_bid, maker_fee_rate, sp.min_fee_per_order)
+            fee_no_q = _fee_per_contract(no_bid_for_quote, maker_fee_rate, sp.min_fee_per_order)
+            book_q = _extract_book_fields(m, yes_bid, no_bid_for_quote)
+            quote_candidates.append(
+                {
+                    "platform": PLATFORM_KALSHI,
+                    "ticker": ticker,
+                    "title": title,
+                    "yf_ticker": yf_ticker,
+                    "resolution_key": _extract_resolution_key_from_ticker(ticker) or "",
+                    "direction": direction,
+                    "threshold": threshold,
+                    "hist_p": hist_p,
+                    "vol_p": vol_p,
+                    "yes_bid": yes_bid,
+                    "no_bid": no_bid_for_quote,
+                    "yes_ask": book_q.get("yes_ask"),
+                    "no_ask": book_q.get("no_ask"),
+                    "edge_yes_net": hist_p - yes_bid - fee_yes_q,
+                    "edge_no_net": (1.0 - hist_p) - no_bid_for_quote - fee_no_q,
+                    "arr_dip": _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp),
+                }
             )
 
             print(f"  {ticker}")
@@ -2971,6 +3103,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     use_rolling_window=sp.empirical_use_rolling_window,
                 )
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
+                ewma_lambda_used_g = _ewma_lambda_for_market(sp, evt, yf_ticker)
                 vol_p_gem = (
                     _volatility_probability(
                         closes,
@@ -2978,7 +3111,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         direction_g,
                         dte_g,
                         use_ewma=sp.use_ewma_vol,
-                        ewma_lambda=sp.ewma_lambda,
+                        ewma_lambda=ewma_lambda_used_g,
                         current_price=current_price,
                         enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                         otm_smile_strength=sp.otm_smile_strength,
@@ -3104,6 +3237,33 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     violates_rule_g,
                     maker_fee_rate_gem,
                     min_fee_per_order=sp.min_fee_per_order,
+                )
+                no_price_gem_q = 1.0 - impl
+                fee_yes_gq = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
+                fee_no_gq = _fee_per_contract(no_price_gem_q, maker_fee_rate_gem, sp.min_fee_per_order)
+                market_for_book_q = contract if isinstance(contract, dict) else evt
+                book_gq = _extract_book_fields(market_for_book_q or {}, impl, no_price_gem_q)
+                quote_candidates.append(
+                    {
+                        "platform": PLATFORM_GEMINI,
+                        "ticker": evt.get("ticker", "?"),
+                        "title": title,
+                        "yf_ticker": yf_ticker,
+                        "resolution_key": _extract_resolution_key_from_gemini_ticker(evt.get("ticker", "")) or "",
+                        "direction": direction_g,
+                        "threshold": threshold_g,
+                        "hist_p": hist_p_gem,
+                        "vol_p": vol_p_gem,
+                        "yes_bid": impl,
+                        "no_bid": no_price_gem_q,
+                        "yes_ask": book_gq.get("yes_ask"),
+                        "no_ask": book_gq.get("no_ask"),
+                        "edge_yes_net": hist_p_gem - impl - fee_yes_gq,
+                        "edge_no_net": (1.0 - hist_p_gem) - no_price_gem_q - fee_no_gq,
+                        "arr_dip": _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g),
+                        "gemini_evt": evt,
+                        "instrument_symbol": instrument_symbol,
+                    }
                 )
                 print(f"  [Gemini] {evt.get('ticker','?')}")
                 h = _hours_until_resolution(title, yf_ticker)
@@ -3302,6 +3462,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         )
                                         hist_p = emp_pos
                                         dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
+                                        ewma_lambda_pos = _ewma_lambda_for_market(sp, m, pos_yf)
                                         last_close_pos = float(closes[-1])
                                         _snap_pos = yf_get_snapshot(pos_yf) if sp.use_live_price else None
                                         if _snap_pos is not None and _snap_pos > 0:
@@ -3315,7 +3476,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 direction,
                                                 dte_pos,
                                                 use_ewma=sp.use_ewma_vol,
-                                                ewma_lambda=sp.ewma_lambda,
+                                                ewma_lambda=ewma_lambda_pos,
                                                 current_price=current_price_pos,
                                                 enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                                                 otm_smile_strength=sp.otm_smile_strength,
@@ -3464,6 +3625,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 hist_p = emp_cached
                 dte_cached = _get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
+                ewma_lambda_cached = _ewma_lambda_for_market(sp, m, _yf)
                 vol_p = (
                     _volatility_probability(
                         closes,
@@ -3471,7 +3633,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         direction,
                         dte_cached,
                         use_ewma=sp.use_ewma_vol,
-                        ewma_lambda=sp.ewma_lambda,
+                        ewma_lambda=ewma_lambda_cached,
                         current_price=current_price_cached,
                         enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                         otm_smile_strength=sp.otm_smile_strength,
@@ -3681,6 +3843,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             use_rolling_window=sp.empirical_use_rolling_window,
                         )
                         dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
+                        ewma_lambda_g = _ewma_lambda_for_market(sp, evt, pos_yf)
                         vol_p_g = (
                             _volatility_probability(
                                 closes,
@@ -3688,7 +3851,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 direction_g,
                                 dte_g,
                                 use_ewma=sp.use_ewma_vol,
-                                ewma_lambda=sp.ewma_lambda,
+                                ewma_lambda=ewma_lambda_g,
                                 current_price=current_price_g,
                                 enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                                 otm_smile_strength=sp.otm_smile_strength,
@@ -3850,6 +4013,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         pending_orders[:] = []
         print(f"[Risk] EMERGENCY_STOP blocked {blocked} pending BUY orders (SELL logic still active).")
         print()
+    elif sp.enable_two_sided_quotes:
+        before_n = len(pending_orders)
+        _maybe_add_two_sided_quotes(
+            pending_orders,
+            quote_candidates,
+            sp=sp,
+            balance_cents=balance_cents,
+            use_kelly=use_kelly,
+            kelly_fraction=kelly_fraction_live,
+            min_contracts=min_contracts,
+        )
+        added = len(pending_orders) - before_n
+        if added > 0:
+            print(f"[Strategy] Added {added} paired YES/NO quote orders around inferred fair levels.")
+            print()
 
     # Skip BUYs that contradict kept positions or other pending BUYs (e.g. NO on SOL>$87 + YES on SOL>$93).
     # Per-platform only: cross-platform bets are allowed (e.g. NO Kalshi + YES Gemini on same underlying).

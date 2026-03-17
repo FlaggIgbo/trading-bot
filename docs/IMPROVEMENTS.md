@@ -43,7 +43,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Calibration loss weighting**       | —                                       | ✓ `strategy.calibration_loss_weight` (default 1.5); losers weighted higher in calibration; `get_calibration_stats()` uses weighted wins/loses for bucket and by_direction_side win rates. Learn more from mistakes. |
 | **Sell and re-buy losers**            | —                                       | ✓ `strategy.enable_sell_and_rebuy`; when selling a losing position (LIKELY_LOSE or rec flip), optionally re-buy same contract at current price if model still sees edge; bypasses min 5¢ rule for re-entry. Kalshi + Gemini. |
 | **P(lose) with market odds blend**    | —                                       | ✓ `_compute_p_lose()` blends model (hist_p) with Kalshi/Gemini market odds; market weight increases as we approach resolution (more accurate near expiry). Config: `p_lose_blend_market_max_weight` (0.5), `p_lose_blend_market_half_life_days` (0.5). |
-| **Easy win (aligned high-confidence)** | —                                       | ✓ When model and market both say ~90%+ (aligned), use `min_edge_easy_win` (0.01 = 1¢) instead of `min_edge` — buy if any profit after fees. Config: `enable_easy_win`, `min_edge_easy_win`, `easy_win_min_p_win`, `easy_win_min_market_p`. |
+| **Easy win (aligned high-confidence)** | —                                       | ✓ When model and market both say ~90%+ (aligned), use `min_edge_easy_win` (current config 0.02 = 2¢) instead of full `min_edge` — still requires positive net edge after fees. Config: `enable_easy_win`, `min_edge_easy_win`, `easy_win_min_p_win`, `easy_win_min_market_p`. |
 | **Live price for model & safety**      | —                                       | ✓ `get_snapshot()` used for S0 in volatility model and all safety checks; reflects sharp moves (e.g. last 10 min). Fallback to closes[-1] when snapshot fails. |
 | **ML-style signal model pipeline**     | AI/ML roadmap                           | ✓ Signal features (empirical, volatility, moneyness, spread/liquidity, market context) are passed through a configurable weighted scorer; optional sklearn calibration (isotonic/platt) on resolved predictions. |
 | **Heavy-tail vol distribution**        | Taylor Ch 4                             | ✓ Optional Student-t (`strategy.vol_distribution: student_t`, `vol_t_df`) for fatter tails vs Gaussian. |
@@ -55,7 +55,8 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Backtest win slippage tax**          | Freqtrade realism                       | ✓ Synthetic backtest supports `synthetic_win_slippage_tax_bps` to stress winner-side execution friction (in addition to entry slippage/spread). |
 | **Dwell-time + partial-fill realism**  | Execution realism                       | ✓ Synthetic backtest now enforces dwell-time fills and partial-fill scaling when depth fields are available; supports assumed order-size fallback (`synthetic_fill_min_dwell_minutes`, `synthetic_assumed_order_size`). |
 | **Adaptive Kelly circuit breaker**     | Risk management                         | ✓ Kelly fraction now auto-scales down during calibration stress and recovers when win-rate stabilizes (`dynamic_kelly_*` settings). |
-| **Macro cross-asset signal feature**   | Feature engineering                     | ✓ Signal model now includes `macro_24h_ret` from configurable tickers (default `^GSPC`, `DX-Y.NYB`) to capture risk-on/off context. |
+| **Macro cross-asset signal feature**   | Feature engineering                     | ✓ Signal model now includes `macro_24h_ret` from configurable tickers (current config `SPY`, `UUP`) to capture risk-on/off context with more reliable intraday feeds. |
+| **Config validator gate (pre-push)**   | Reliability                             | ✓ `scripts/validate_config.py` runs on pre-push to catch invalid/conflicting risk settings before backtest gate and remote push. |
 | **Modular strategy migration**         | Freqtrade architecture                  | ✓ Recommendation + signal feature/scoring paths are now strategy-driven (`strategy_engine`) rather than hardcoded in `compare_historical.py`. |
 | **Push-time performance guard**        | Reliability                             | ✓ Pre-push hook runs configurable backtest gate (`scripts/backtest_guard.py`) and blocks pushes on weak performance thresholds. |
 | **Daily performance report**           | Reliability                             | ✓ Launchd daily report writes dated `.txt` performance summaries (`scripts/daily_performance_report.py`). |
@@ -86,7 +87,7 @@ Refactoring, architecture, and code quality changes.
 | ----------------------------------- | ------ | ----- |
 | **Position eval extraction**       | Low    | Extract Kalshi/Gemini position eval into `_evaluate_position()` with platform-agnostic core. |
 | **Type hints consistency**          | Low    | Add return types and ParamSpec where missing; improve IDE support. |
-| **Config schema validation**       | Low    | Validate strategy/trading keys at load; fail fast on typos. |
+| **Stricter runtime schema validation** | Low | Current validator runs on pre-push; optional next step is hard fail at process startup for invalid config. |
 | **Unit tests for edge cases**      | Medium | Test `_recommend()`, `_fee_per_contract()`, `_apply_bucket_penalty()` with fixture data. |
 | **Docstrings for public APIs**     | Low    | Ensure storage, kalshi_client, gemini_client have clear module docstrings. |
 

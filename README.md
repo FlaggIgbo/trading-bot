@@ -100,7 +100,7 @@ trading-bot/
 ├── storage.py               # Local SQLite storage (yf cache, market snapshots, resolved outcomes)
 ├── ollama_analysis.py       # Ollama LLM analysis integration
 ├── pyproject.toml           # Ruff (linter/formatter) config
-├── .pre-commit-config.yaml  # Ruff + Prettier on git push
+├── .pre-commit-config.yaml  # Ruff + Prettier + config/backtest guards on git push
 └── .env                     # Credentials (from .env.example)
 ```
 
@@ -112,6 +112,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 - **Ruff** (Python): `pip install ruff` then `ruff check . --fix && ruff format .`
 - **Pre-commit** (runs on `git push`): `pip install pre-commit && pre-commit install --hook-type pre-push`
+  - Includes a config validator hook (`scripts/validate_config.py`) that catches invalid or conflicting risk settings before push.
   - Includes a backtest guard hook (`scripts/backtest_guard.py`) that can block pushes if recent performance falls below thresholds in `config.yaml` (`backtest.pre_push_*`).
 - **Prettier** (YAML/JSON/MD): `npm install` then `npx prettier --write "*.yaml" "*.json" "*.md"` (or use pre-commit)
 
@@ -411,13 +412,13 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 
 ### Easy win (model and market aligned)
 
-**In plain English:** When both our model and the market agree the outcome is likely (e.g. both say ~90%+), we can accept a smaller edge—as long as we still profit after fees. For example: model says 92%, market charges 88¢ → net edge ~2¢. Normally we'd skip (need 10% edge), but with easy win we buy (1¢ profit is enough).
+**In plain English:** When both our model and the market agree the outcome is likely (e.g. both say ~90%+), we can accept a smaller edge—as long as we still profit after fees. For example: model says 92%, market charges 88¢ → net edge ~2¢. Normally we'd skip (need 10% edge), but with easy win we buy (2¢ profit is enough).
 
 **Config** (`config.yaml` → `strategy`):
 
 ```yaml
 enable_easy_win: true # Buy when model+market aligned and we profit after fees
-min_edge_easy_win: 0.01 # Min 1¢ profit per contract when aligned (0 = any profit)
+min_edge_easy_win: 0.02 # Min 2¢ profit per contract when aligned (0 = any profit)
 easy_win_min_p_win: 0.90 # Model must say P(win) >= this for easy-win
 easy_win_min_market_p: 0.85 # Market must be in ballpark (yes_bid or no_bid >= this)
 ```
@@ -501,12 +502,13 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **Empirical**: fraction of past days the close was above/below the threshold.
 - **Empirical**: recency-weighted and rolling-window capable (`empirical_recent_days`, `empirical_recent_weight`, `empirical_use_rolling_window`) with regime-sensitive weight boosts.
 - **Volatility**: log-normal model using EWMA/sample variance and time-to-expiry; uses SciPy normal CDF when available. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts.
+- **Intraday EWMA override**: intraday contracts can use a faster EWMA decay (`intraday_ewma_lambda`, currently 0.90) while daily contracts keep `ewma_lambda` (0.94).
 - **Dynamic blend**: empirical/vol blend weight adapts with sample size (`vol_dynamic_n0`) rather than relying on a fixed blend only.
 - **Signal model layer**: when enabled (`enable_signal_model`), normalized signals are passed through a weighted logistic scorer (`signal_model_weights`) to produce final P(YES).
 - **Optional sklearn calibration**: when enough resolved predictions exist, isotonic or Platt calibration maps raw model probability to calibrated probability (`use_sklearn_calibration`).
 - **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
-- **min_no_price** (default 0.05): Skip BUY NO when the market prices NO below 5¢ (i.e., YES above ~95¢). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
-- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees** — so 1¢ profit per contract is fine (`min_edge: 0.01`).
+- **min_no_price** (current config 0.02): Skip BUY NO when the market prices NO below this floor (i.e., YES near certainty). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
+- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config is intentionally conservative (`min_edge: 0.22`) to absorb fee + slippage drag.
 
 ### Quick snapshot: `compare_prices.py`
 
@@ -549,7 +551,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performan
 The script runs every 15 minutes. With `RunAtLoad: false` (default), the first run happens ~15 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
 `cd /path/to/trading-bot && .venv/bin/python3 scripts/compare_historical.py --days 365 --use-volatility --execute --no-llm`
 
-The daily report job runs once per day and writes a dated text file (default: `~/Desktop/trading-bot-reports/performance_YYYYMMDD.txt`).
+The daily report job runs once per day and writes a dated text file (default: `~/.trading-bot-data/reports/performance_YYYYMMDD.txt`).
 
 **crontab (alternative):**
 

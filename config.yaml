@@ -27,10 +27,10 @@ yfinance_tickers:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
-  min_edge: 0.25 # Higher edge requirement (25%) to absorb spread/slippage/fees in thin markets
+  min_edge: 0.22 # Slightly more aggressive than 25% while still leaving strong fee/slippage buffer
   # Easy win: when model and market both say ~90%+ (aligned), use relaxed edge — buy if profitable after fees
   enable_easy_win: true # Buy when both agree on high probability and we profit after fees
-  min_edge_easy_win: 0.01 # Min 1¢ profit per contract when aligned (covers fees; 0 = any positive)
+  min_edge_easy_win: 0.02 # Require at least 2¢ net edge for easy-win fills to better absorb slippage
   easy_win_min_p_win: 0.90 # Model must say P(win) >= this for easy-win
   easy_win_min_market_p: 0.85 # Market must be in ballpark (yes_bid or no_bid >= this)
   min_yes_price: 0.05 # Skip BUY YES when market YES < 5¢ (market thinks <5% chance; often illiquid or model overconfidence). Override: allow when vol model shows ≥95%
@@ -48,6 +48,7 @@ strategy:
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
   ewma_lambda: 0.94 # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
+  intraday_ewma_lambda: 0.90 # Faster intraday EWMA response for flash moves while keeping daily lambda stable
   intraday_other_min_p_win: 0.90 # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)
   intraday_other_min_p_win_with_vol: 0.80 # When --use-volatility: use 80% instead (vol model already accounts for time & vol)
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
@@ -88,8 +89,10 @@ strategy:
   dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
   dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
   dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
+  enable_two_sided_quotes: true # Infer fair level and allow symmetric YES/NO opportunities around it
+  two_sided_quote_min_edge: 0.02 # Minimum net edge for paired quote orders
   macro_signal_enabled: true # Include macro cross-asset context in signal model
-  macro_signal_tickers: ["^GSPC", "DX-Y.NYB"] # 24h returns averaged into macro_24h_ret feature
+  macro_signal_tickers: ["SPY", "UUP"] # More reliable intraday proxy tickers for risk-on/risk-off macro signal
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)
   live_price_weight: 0.6 # When both available: current_price = 0.6*live + 0.4*closes[-1]. Slightly prioritize live. Fallback: closes[-1] if snapshot fails.
   empirical_use_rolling_window: true # Empirical model uses rolling window for faster adaptation
@@ -169,7 +172,7 @@ backtest:
   synthetic_fill_min_dwell_minutes: 10 # Require price to remain favorable this long before counting synthetic fill
   synthetic_liquidity_friction_cents: 0.75 # Flat friction cost per synthetic trade (spread/rounding drag)
   synthetic_assumed_order_size: 10 # Used for partial-fill backtest when depth is available
-  daily_report_dir: ~/Desktop/trading-bot-reports # Daily launchd report output directory
+  daily_report_dir: ~/.trading-bot-data/reports # Daily launchd report output directory (avoids macOS Desktop privacy restrictions)
   daily_report_days_short: 7 # Short-window health check shown in daily report
   daily_report_days_long: 30 # Longer-window trend check shown in daily report
   pre_push_enabled: true # Run backtest guard on git push
