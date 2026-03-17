@@ -12,10 +12,10 @@ This LaunchAgent runs `scripts/compare_historical.py` every 10 minutes with `--u
 
    If your project or username is different, edit the plist first: update `ProgramArguments` and `WorkingDirectory` to your absolute paths.
 
-2. **Load the agent**:
+2. **Bootstrap the agent**:
 
    ```bash
-   launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist
    ```
 
 3. **Optional: Keep Mac awake** (otherwise macOS may sleep and pause the timer):
@@ -26,7 +26,7 @@ This LaunchAgent runs `scripts/compare_historical.py` every 10 minutes with `--u
 
 | Action        | Command                                                                     |
 | ------------- | --------------------------------------------------------------------------- |
-| Start (load)  | `launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist`   |
+| Start (bootstrap)  | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist`   |
 | Stop (unload) | `launchctl unload ~/Library/LaunchAgents/com.user.compare_historical.plist` |
 | View stdout   | `tail -f /tmp/compare_historical.out.log`                                   |
 | View stderr   | `tail -f /tmp/compare_historical.err.log`                                   |

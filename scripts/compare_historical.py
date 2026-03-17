@@ -55,6 +55,7 @@ from gemini_client import (
     GeminiPredictionClient,
     GeminiTradingClient,
     _event_to_asset,
+    _get_no_contract,
     _get_yes_contract,
     expand_gemini_events_to_markets,
     extract_strike_from_event,
@@ -68,8 +69,10 @@ from ollama_analysis import analyze_single_trade, capture_and_analyze
 try:
     from storage import (
         get_calibration_stats,
+        get_fill_attribution_stats,
         get_last_snapshot_for_ticker,
         get_limit_order_analysis,
+        get_predictions_for_backtest,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
         record_limit_order,
@@ -80,9 +83,29 @@ try:
         record_resolved,
     )
 except ImportError:
-    get_calibration_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_unresolved_predictions = None
+    get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_predictions_for_backtest = get_unresolved_predictions = None
     get_price_after_buy_from_snapshots = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction = record_prediction_outcome = record_resolved = None
-from yfinance_client import get_aggs as yf_get_aggs, get_intraday_aggs_at_hour as yf_get_intraday_aggs
+from yfinance_client import (
+    get_aggs as yf_get_aggs,
+    get_intraday_aggs_at_hour as yf_get_intraday_aggs,
+    get_snapshot as yf_get_snapshot,
+)
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    from scipy.stats import norm as scipy_norm
+except ImportError:
+    scipy_norm = None
+
+try:
+    from sklearn.isotonic import IsotonicRegression
+    from sklearn.linear_model import LogisticRegression
+except ImportError:
+    IsotonicRegression = LogisticRegression = None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -137,6 +160,29 @@ class _StrategyParams:
     min_edge_easy_win: float
     easy_win_min_p_win: float
     easy_win_min_market_p: float
+    use_live_price: bool
+    live_price_weight: float
+    empirical_recent_days: int
+    empirical_recent_weight: float
+    empirical_use_rolling_window: bool
+    use_volatility_by_default: bool
+    vol_dynamic_n0: float
+    uncertainty_edge_mult: float
+    stop_loss_pct: float
+    enable_strike_validation: bool
+    strike_validation_tolerance_pct: float
+    enable_otm_smile_adjustment: bool
+    otm_smile_strength: float
+    otm_smile_max_mult: float
+    liquidity_spread_bps_soft: float
+    liquidity_spread_bps_hard: float
+    liquidity_min_size_multiplier: float
+    liquidity_missing_ask_multiplier: float
+    enable_signal_model: bool
+    signal_model_weights: dict[str, float]
+    use_sklearn_calibration: bool
+    sklearn_calibration_method: str
+    sklearn_calibration_min_samples: int
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -183,6 +229,29 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_edge_easy_win=float(strategy.get("min_edge_easy_win", 0.01)),
         easy_win_min_p_win=float(strategy.get("easy_win_min_p_win", 0.90)),
         easy_win_min_market_p=float(strategy.get("easy_win_min_market_p", 0.85)),
+        use_live_price=bool(strategy.get("use_live_price", True)),
+        live_price_weight=float(strategy.get("live_price_weight", 0.6)),
+        empirical_recent_days=int(strategy.get("empirical_recent_days", 90)),
+        empirical_recent_weight=float(strategy.get("empirical_recent_weight", 3.0)),
+        empirical_use_rolling_window=bool(strategy.get("empirical_use_rolling_window", True)),
+        use_volatility_by_default=bool(strategy.get("use_volatility_by_default", True)),
+        vol_dynamic_n0=float(strategy.get("vol_dynamic_n0", 90.0)),
+        uncertainty_edge_mult=float(strategy.get("uncertainty_edge_mult", 0.5)),
+        stop_loss_pct=float(strategy.get("stop_loss_pct", 0.5)),
+        enable_strike_validation=bool(strategy.get("enable_strike_validation", True)),
+        strike_validation_tolerance_pct=float(strategy.get("strike_validation_tolerance_pct", 0.05)),
+        enable_otm_smile_adjustment=bool(strategy.get("enable_otm_smile_adjustment", True)),
+        otm_smile_strength=float(strategy.get("otm_smile_strength", 0.35)),
+        otm_smile_max_mult=float(strategy.get("otm_smile_max_mult", 2.0)),
+        liquidity_spread_bps_soft=float(strategy.get("liquidity_spread_bps_soft", 1500)),
+        liquidity_spread_bps_hard=float(strategy.get("liquidity_spread_bps_hard", 4000)),
+        liquidity_min_size_multiplier=float(strategy.get("liquidity_min_size_multiplier", 0.2)),
+        liquidity_missing_ask_multiplier=float(strategy.get("liquidity_missing_ask_multiplier", 0.8)),
+        enable_signal_model=bool(strategy.get("enable_signal_model", True)),
+        signal_model_weights=dict(strategy.get("signal_model_weights", {})),
+        use_sklearn_calibration=bool(strategy.get("use_sklearn_calibration", True)),
+        sklearn_calibration_method=str(strategy.get("sklearn_calibration_method", "isotonic")),
+        sklearn_calibration_min_samples=int(strategy.get("sklearn_calibration_min_samples", 50)),
     )
 
 
@@ -486,14 +555,264 @@ def _extract_strike(market: dict) -> tuple[float | None, str | None]:
 # ---------------------------------------------------------------------------
 # Probability models
 # ---------------------------------------------------------------------------
-def _empirical_probability(closes: list[float], threshold: float, direction: str) -> float:
-    """P(close above/below threshold) from historical daily closes.
-    Simple fraction: count of days above/below threshold divided by total days."""
+def _empirical_probability(
+    closes: list[float],
+    threshold: float,
+    direction: str,
+    *,
+    recent_days: int = 90,
+    recent_weight: float = 3.0,
+    use_rolling_window: bool = True,
+) -> float:
+    """P(close above/below threshold) from historical closes with recency weighting.
+
+    - If use_rolling_window, keep only the most recent `recent_days`.
+    - Apply extra weight to the most recent `recent_days` samples.
+    """
     if not closes:
         return 0.0
-    if direction == "above":
-        return sum(1 for c in closes if c > threshold) / len(closes)
-    return sum(1 for c in closes if c < threshold) / len(closes)
+    data = closes[-recent_days:] if (use_rolling_window and recent_days > 0) else closes
+    n = len(data)
+    if n == 0:
+        return 0.0
+    if np is not None:
+        arr = np.asarray(data, dtype=float)
+        if recent_days <= 0 or recent_weight <= 1.0:
+            if direction == "above":
+                return float(np.mean(arr > threshold))
+            return float(np.mean(arr < threshold))
+        weights = np.ones(n, dtype=float)
+        cutoff = max(0, n - recent_days)
+        weights[cutoff:] = float(recent_weight)
+        if direction == "above":
+            wins = np.where(arr > threshold, weights, 0.0).sum()
+        else:
+            wins = np.where(arr < threshold, weights, 0.0).sum()
+        total_w = float(weights.sum())
+        return float(wins / total_w) if total_w > 0 else 0.0
+
+    if recent_days <= 0 or recent_weight <= 1.0:
+        if direction == "above":
+            return sum(1 for c in data if c > threshold) / n
+        return sum(1 for c in data if c < threshold) / n
+
+    cutoff = max(0, n - recent_days)
+    wins = 0.0
+    total_w = 0.0
+    for i, c in enumerate(data):
+        w = recent_weight if i >= cutoff else 1.0
+        total_w += w
+        if direction == "above":
+            wins += w if c > threshold else 0.0
+        else:
+            wins += w if c < threshold else 0.0
+    return wins / total_w if total_w > 0 else 0.0
+
+
+def _empirical_ci_halfwidth(p_hat: float, n: int, z: float = 1.64) -> float:
+    """Approximate confidence half-width for Bernoulli p (Wilson-ish normal approx)."""
+    if n <= 0:
+        return 0.0
+    p = max(0.0, min(1.0, p_hat))
+    return z * math.sqrt(max(1e-9, p * (1 - p) / n))
+
+
+def _dynamic_empirical_weight(base_w: float | None, sample_n: int, n0: float) -> float:
+    """Dynamic empirical weight: more empirical with more samples, more vol with fewer."""
+    base = 0.5 if base_w is None else float(base_w)
+    base = max(0.0, min(1.0, base))
+    n = max(0.0, float(sample_n))
+    n0 = max(1.0, float(n0))
+    data_conf = n / (n + n0)
+    # Blend configured preference with data confidence.
+    w = 0.5 * base + 0.5 * data_conf
+    return max(0.1, min(0.9, w))
+
+
+@dataclass
+class _SignalFeatures:
+    """Normalized feature set passed to the signal model."""
+
+    emp_p: float
+    vol_p: float
+    market_yes: float
+    edge_yes: float
+    edge_no: float
+    moneyness: float
+    dte_norm: float
+    spread_norm: float
+    liquidity_consistency: float
+
+
+def _clip01(v: float) -> float:
+    return max(0.0, min(1.0, float(v)))
+
+
+def _fit_probability_calibrator(
+    sp: _StrategyParams,
+    cfg: dict,
+) -> callable | None:
+    """
+    Fit a lightweight sklearn calibrator on resolved predictions (hist_p -> outcome).
+    Returns callable p->calibrated_p or None if unavailable/insufficient data.
+    """
+    if not sp.use_sklearn_calibration or not get_predictions_for_backtest:
+        return None
+    if (IsotonicRegression is None) or (LogisticRegression is None):
+        return None
+    try:
+        rows = get_predictions_for_backtest(resolved_only=True, config=cfg) or []
+        train = [
+            r for r in rows
+            if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
+        ]
+        if len(train) < max(10, sp.sklearn_calibration_min_samples):
+            return None
+        x = [float(r["hist_p"]) for r in train]
+        y = [1 if r["outcome"] == "win" else 0 for r in train]
+        method = (sp.sklearn_calibration_method or "isotonic").strip().lower()
+        if method == "platt":
+            lr = LogisticRegression(solver="lbfgs")
+            x2 = [[v] for v in x]
+            lr.fit(x2, y)
+
+            def _calibrate(p: float) -> float:
+                return _clip01(float(lr.predict_proba([[float(p)]])[0][1]))
+
+            return _calibrate
+        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso.fit(x, y)
+
+        def _calibrate(p: float) -> float:
+            return _clip01(float(iso.predict([float(p)])[0]))
+
+        return _calibrate
+    except Exception:
+        return None
+
+
+def _build_signal_features(
+    *,
+    emp_p: float,
+    vol_p: float | None,
+    market_yes: float,
+    threshold: float,
+    current_price: float,
+    dte_days: float | None,
+    spread_bps: float | None,
+    no_bid: float | None,
+) -> _SignalFeatures:
+    vol = _clip01(vol_p if vol_p is not None else emp_p)
+    mkt = _clip01(market_yes)
+    edge_yes = emp_p - mkt
+    edge_no = (1.0 - emp_p) - (1.0 - mkt)
+    if threshold > 0 and current_price > 0:
+        moneyness = math.log(max(1e-9, current_price / threshold))
+    else:
+        moneyness = 0.0
+    dte_norm = _clip01((float(dte_days or 0.0)) / 30.0)
+    spread_norm = _clip01((float(spread_bps or 0.0)) / 10_000.0)
+    consistency = 1.0
+    if no_bid is not None:
+        consistency = 1.0 - abs((mkt + _clip01(float(no_bid))) - 1.0)
+    return _SignalFeatures(
+        emp_p=_clip01(emp_p),
+        vol_p=vol,
+        market_yes=mkt,
+        edge_yes=max(-1.0, min(1.0, edge_yes)),
+        edge_no=max(-1.0, min(1.0, edge_no)),
+        moneyness=max(-2.0, min(2.0, moneyness)),
+        dte_norm=dte_norm,
+        spread_norm=spread_norm,
+        liquidity_consistency=_clip01(consistency),
+    )
+
+
+def _score_signal_model(features: _SignalFeatures, sp: _StrategyParams) -> float:
+    """
+    Simple interpretable signal model: weighted logistic over normalized features.
+    Weights are fully configurable in strategy.signal_model_weights.
+    """
+    w = {
+        "bias": 0.0,
+        "emp_p": 1.8,
+        "vol_p": 1.3,
+        "market_yes": 0.3,
+        "edge_yes": 1.2,
+        "edge_no": -0.8,
+        "moneyness": 0.2,
+        "dte_norm": 0.1,
+        "spread_norm": -0.5,
+        "liquidity_consistency": 0.3,
+    }
+    w.update(sp.signal_model_weights or {})
+    z = (
+        float(w["bias"])
+        + float(w["emp_p"]) * features.emp_p
+        + float(w["vol_p"]) * features.vol_p
+        + float(w["market_yes"]) * features.market_yes
+        + float(w["edge_yes"]) * features.edge_yes
+        + float(w["edge_no"]) * features.edge_no
+        + float(w["moneyness"]) * features.moneyness
+        + float(w["dte_norm"]) * features.dte_norm
+        + float(w["spread_norm"]) * features.spread_norm
+        + float(w["liquidity_consistency"]) * features.liquidity_consistency
+    )
+    if np is not None:
+        return _clip01(float(1.0 / (1.0 + np.exp(-z))))
+    return _clip01(1.0 / (1.0 + math.exp(-z)))
+
+
+def _regime_adjusted_recent_weight(
+    closes: list[float],
+    base_recent_weight: float,
+    lookback: int = 30,
+    vol_ratio_trigger: float = 1.5,
+    boost: float = 1.5,
+) -> float:
+    """Increase recency weight in fast-changing regimes (recent vol >> long-run vol)."""
+    if base_recent_weight <= 1.0 or len(closes) < max(lookback + 2, 20):
+        return base_recent_weight
+    rets: list[float] = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] > 0:
+            rets.append(math.log(closes[i] / closes[i - 1]))
+    if len(rets) < max(lookback, 10):
+        return base_recent_weight
+    recent = rets[-lookback:]
+    full = rets
+    recent_vol = math.sqrt(sum(r * r for r in recent) / max(1, len(recent)))
+    full_vol = math.sqrt(sum(r * r for r in full) / max(1, len(full)))
+    if full_vol <= 1e-12:
+        return base_recent_weight
+    ratio = recent_vol / full_vol
+    return base_recent_weight * boost if ratio >= vol_ratio_trigger else base_recent_weight
+
+
+def _validate_threshold_with_market(
+    *,
+    threshold: float,
+    direction: str,
+    current_price: float,
+    yes_bid: float,
+    tolerance_pct: float,
+) -> bool:
+    """Cross-check threshold extraction against current price and market probability."""
+    if threshold <= 0 or current_price <= 0 or not (0 <= yes_bid <= 1):
+        return False
+    tol = max(0.0, tolerance_pct)
+    # If price is clearly above threshold, YES should not be tiny.
+    if direction == "above" and current_price > threshold * (1 + tol) and yes_bid < 0.2:
+        return False
+    # If price is clearly below threshold, YES should not be near-certain.
+    if direction == "above" and current_price < threshold * (1 - tol) and yes_bid > 0.8:
+        return False
+    # Mirror check for "below" contracts.
+    if direction == "below" and current_price < threshold * (1 - tol) and yes_bid < 0.2:
+        return False
+    if direction == "below" and current_price > threshold * (1 + tol) and yes_bid > 0.8:
+        return False
+    return True
 
 
 def _get_closes_for_empirical(
@@ -524,6 +843,13 @@ def _ewma_variance(returns: list[float], lam: float = 0.94) -> float:
     n = len(returns)
     if n < 3:
         return 0.0
+    if np is not None:
+        arr = np.asarray(returns, dtype=float)
+        init_n = min(20, max(3, n // 2))
+        var = float(np.mean(arr[:init_n] ** 2))
+        for i in range(init_n, n):
+            var = lam * var + (1 - lam) * float(arr[i] ** 2)
+        return var
     # Initialize with sample variance of first half (or first 20)
     init_n = min(20, max(3, n // 2))
     init_var = sum(r**2 for r in returns[:init_n]) / init_n
@@ -540,15 +866,22 @@ def _volatility_probability(
     days_to_expiry: float = 30.0,
     use_ewma: bool = False,
     ewma_lambda: float = 0.94,
+    current_price: float | None = None,
+    *,
+    enable_otm_smile_adjustment: bool = True,
+    otm_smile_strength: float = 0.35,
+    otm_smile_max_mult: float = 2.0,
 ) -> float | None:
     """
     Log-normal / Black-Scholes style: P(price above/below K at expiry) using historical vol.
     use_ewma: if True, use EWMA variance instead of sample variance (time-varying vol).
+    current_price: if provided and >0, use as S0 (live price) instead of closes[-1]; reflects
+        very recent moves for better safety. Fallback to closes[-1] when None.
     Returns None if insufficient data.
     """
     if not closes or len(closes) < 5 or threshold <= 0:
         return None
-    S0 = float(closes[-1])
+    S0 = float(current_price) if (current_price is not None and current_price > 0) else float(closes[-1])
     if S0 <= 0:
         return None
     # Log returns
@@ -566,13 +899,26 @@ def _volatility_probability(
         variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
     sigma_daily = variance ** 0.5
     sigma_annual = sigma_daily * (252 ** 0.5)
+    # OTM smile adjustment: increase vol for OTM strikes so tail probabilities are less understated.
+    if enable_otm_smile_adjustment and sigma_annual > 0:
+        m = math.log(max(1e-12, threshold / S0))
+        is_otm_for_yes = (direction == "above" and threshold > S0) or (
+            direction == "below" and threshold < S0
+        )
+        if is_otm_for_yes:
+            mult = 1.0 + max(0.0, otm_smile_strength) * abs(m)
+            mult = min(max(1.0, mult), max(1.0, otm_smile_max_mult))
+            sigma_annual *= mult
     T = max(0.01, days_to_expiry / 365.0)
     if sigma_annual < 1e-8:
         return None
     # d = (ln(S0/K) - sigma^2*T/2) / (sigma*sqrt(T)); P(S>K) = Φ(d)
     d = (math.log(S0 / threshold) - 0.5 * sigma_annual**2 * T) / (sigma_annual * (T ** 0.5))
-    # Φ(x) = (1 + erf(x/sqrt(2))) / 2
-    phi_d = 0.5 * (1 + math.erf(d / (2 ** 0.5)))
+    if scipy_norm is not None:
+        phi_d = float(scipy_norm.cdf(d))
+    else:
+        # Φ(x) = (1 + erf(x/sqrt(2))) / 2
+        phi_d = 0.5 * (1 + math.erf(d / (2 ** 0.5)))
     phi_d = max(0.0, min(1.0, phi_d))
     if direction == "above":
         return phi_d
@@ -698,7 +1044,10 @@ def _compute_p_lose(
         return p_model
     dte = max(0.01, days_to_expiry) if days_to_expiry is not None else 1.0
     half = max(0.01, sp.p_lose_blend_market_half_life_days)
-    weight_market = sp.p_lose_blend_market_max_weight * (1.0 / (1.0 + dte / half))
+    # Reduce market influence in low-liquidity regimes using bid/ask consistency proxy.
+    consistency = 1.0 - abs((yes_bid + no_bid) - 1.0)
+    consistency = max(0.0, min(1.0, consistency))
+    weight_market = sp.p_lose_blend_market_max_weight * consistency * (1.0 / (1.0 + dte / half))
     return (1.0 - weight_market) * p_model + weight_market * p_market
 
 
@@ -1027,6 +1376,97 @@ def _compute_buy_count(
             p_win, price, balance_cents, kelly_fraction, min_contracts
         )
     return 10
+
+
+def _extract_actual_fill_price(result: dict | None, fallback: float) -> float:
+    """Best-effort extraction of actual fill/limit price from broker response."""
+    if not isinstance(result, dict):
+        return float(fallback)
+    order = result.get("order", result)
+    if isinstance(order, dict):
+        for key in (
+            "price",
+            "limit_price",
+            "yes_price_dollars",
+            "no_price_dollars",
+            "yes_price",
+            "no_price",
+        ):
+            val = order.get(key)
+            if val is not None:
+                try:
+                    f = float(val)
+                    if 0 < f < 1.01:
+                        return f
+                    if 1 < f <= 100:
+                        return f / 100.0
+                except (TypeError, ValueError):
+                    pass
+    return float(fallback)
+
+
+def _fill_slippage_bps(actual_fill: float, theoretical: float | None) -> float | None:
+    """Positive = worse fill than theoretical for buy orders."""
+    if theoretical is None or theoretical <= 0:
+        return None
+    return ((actual_fill - theoretical) / theoretical) * 10_000.0
+
+
+def _gemini_yes_ask(contract: dict | None) -> float | None:
+    if not contract:
+        return None
+    prices = contract.get("prices") or {}
+    val = prices.get("bestAsk")
+    if val is None:
+        val = (prices.get("sell") or {}).get("yes")
+    try:
+        f = float(val) if val is not None else None
+        return f if (f is not None and 0 < f < 1) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _gemini_no_ask(event: dict | None) -> float | None:
+    if not event:
+        return None
+    no_c = _get_no_contract(event) or {}
+    prices = no_c.get("prices") or {}
+    val = prices.get("bestAsk")
+    if val is None:
+        val = (prices.get("sell") or {}).get("no")
+    try:
+        f = float(val) if val is not None else None
+        return f if (f is not None and 0 < f < 1) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _liquidity_size_multiplier(
+    bid: float,
+    ask: float | None,
+    sp: _StrategyParams,
+) -> tuple[float, float | None]:
+    """
+    Return (size_mult, spread_bps). Wide spreads reduce size.
+    Missing ask gets a conservative haircut.
+    """
+    b = float(bid) if bid is not None else 0.0
+    if b <= 0:
+        return 0.0, None
+    if ask is None or ask <= 0:
+        return max(0.0, min(1.0, sp.liquidity_missing_ask_multiplier)), None
+    a = float(ask)
+    spread = max(0.0, a - b)
+    spread_bps = spread / max(0.01, b) * 10_000.0
+    soft = max(0.0, sp.liquidity_spread_bps_soft)
+    hard = max(soft + 1.0, sp.liquidity_spread_bps_hard)
+    floor = max(0.0, min(1.0, sp.liquidity_min_size_multiplier))
+    if spread_bps <= soft:
+        return 1.0, spread_bps
+    if spread_bps >= hard:
+        return floor, spread_bps
+    frac = (spread_bps - soft) / (hard - soft)
+    return 1.0 - frac * (1.0 - floor), spread_bps
 
 
 def _find_gemini_event(gemini_events_by_asset: dict, ticker: str) -> dict:
@@ -1586,6 +2026,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
         except Exception:
             pass
+    probability_calibrator = _fit_probability_calibrator(sp, cfg)
+
+    # Fill attribution diagnostics (actual vs theoretical execution quality)
+    if get_fill_attribution_stats:
+        try:
+            fill_stats = get_fill_attribution_stats(cfg)
+            if fill_stats.get("enabled") and fill_stats.get("count", 0) > 0:
+                avg_slip = fill_stats.get("avg_fill_slippage_bps")
+                avg_spread = fill_stats.get("avg_spread_bps_at_place")
+                with_th = fill_stats.get("with_theoretical", 0)
+                msg = (
+                    f"[Fill Attribution] {fill_stats['count']} fills ({with_th} with theoretical) | "
+                    f"avg slippage {avg_slip:.1f} bps | avg spread {avg_spread:.1f} bps"
+                    if avg_slip is not None and avg_spread is not None
+                    else f"[Fill Attribution] {fill_stats['count']} fills ({with_th} with theoretical)"
+                )
+                print(msg)
+                print()
+        except Exception:
+            pass
 
     # Limit order analysis: learn from unfilled limit orders (why they didn't hit)
     if getattr(args, "limit_analysis", False) and get_limit_order_analysis:
@@ -1611,9 +2071,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             pass
 
     # Build ticker -> (series, yf_ticker, closes, market_data) for sell evaluation
-    market_data_cache: dict[str, tuple[str, str, list[float], dict]] = {}
+    market_data_cache: dict[str, tuple[str, str, list[float], dict, float]] = {}
 
-    use_vol = getattr(args, "use_volatility", False)
+    use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
     for series in markets_list:
         series = series.strip()
         yf_ticker = yf_mapping.get(series.upper())
@@ -1626,8 +2086,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"[{series}] No close data for {yf_ticker}")
             continue
 
-        current_price = closes[-1]
-        print(f"\n[{series}] → {yf_ticker} | ${current_price:,.2f} | {len(closes)} days")
+        # Blend live + closes[-1] when both available — use all signals, slightly prioritize live
+        last_close = float(closes[-1])
+        _snap = yf_get_snapshot(yf_ticker) if sp.use_live_price else None
+        if _snap is not None and _snap > 0:
+            live_f = float(_snap)
+            w = sp.live_price_weight
+            current_price = w * live_f + (1 - w) * last_close
+            live_note = " (blend live+close)"
+        else:
+            current_price = last_close
+            live_note = ""
+        print(f"\n[{series}] → {yf_ticker} | ${current_price:,.2f}{live_note} | {len(closes)} days")
 
         mkt_list = kalshi_markets_by_series.get(series, [])
 
@@ -1654,8 +2124,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # Skip: empirical and vol models both require a threshold (from title, API, or ticker)
                 print(f"  {ticker}: YES {yes_bid:.2f} | (no threshold) {title}")
                 continue
+            if sp.enable_strike_validation and not _validate_threshold_with_market(
+                threshold=threshold,
+                direction=direction,
+                current_price=current_price,
+                yes_bid=yes_bid,
+                tolerance_pct=sp.strike_validation_tolerance_pct,
+            ):
+                print(f"  {ticker}: SKIP (threshold validation failed) | {title}")
+                continue
 
-            market_data_cache[ticker] = (series, yf_ticker, closes, m)
+            market_data_cache[ticker] = (series, yf_ticker, closes, m, current_price)
 
             # Systematic edges: intra-exchange arb (buy YES+NO when sum < 1 - fee)
             arb_used = False
@@ -1700,11 +2179,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 continue
 
             closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg)
-            emp = _empirical_probability(closes_for_emp, threshold, direction)
+            recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
+            emp = _empirical_probability(
+                closes_for_emp,
+                threshold,
+                direction,
+                recent_days=sp.empirical_recent_days,
+                recent_weight=recent_w,
+                use_rolling_window=sp.empirical_use_rolling_window,
+            )
             hist_p = emp
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             vol_p = (
-                _volatility_probability(closes, threshold, direction, dte, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                _volatility_probability(
+                    closes,
+                    threshold,
+                    direction,
+                    dte,
+                    use_ewma=sp.use_ewma_vol,
+                    ewma_lambda=sp.ewma_lambda,
+                    current_price=current_price,
+                    enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
+                    otm_smile_strength=sp.otm_smile_strength,
+                    otm_smile_max_mult=sp.otm_smile_max_mult,
+                )
                 if use_vol else None
             )
             if vol_p is not None and use_vol:
@@ -1712,14 +2210,37 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if _is_intraday_market(m, yf_ticker) and not sp.use_intraday_empirical:
                     hist_p = vol_p
                 elif _is_intraday_market(m, yf_ticker) and sp.use_intraday_empirical:
-                    hist_p = (sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None else max(emp, vol_p)
+                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
+                    hist_p = w_emp * emp + (1 - w_emp) * vol_p
                 elif sp.vol_blend_weight is not None:
-                    hist_p = sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p
+                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
+                    hist_p = w_emp * emp + (1 - w_emp) * vol_p
                 else:
                     hist_p = max(emp, vol_p)
-            # Bucket penalty: dampen hist_p when bucket underperforms (overconfidence correction)
+            # Bucket penalty + optional sklearn probability calibration.
             hist_p = _apply_bucket_penalty(hist_p, calibration, sp)
+            if probability_calibrator:
+                hist_p = probability_calibrator(hist_p)
+            no_bid_signal = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
+            yes_ask_signal = float(m.get("yes_ask_dollars") or 0) or None
+            spread_bps_signal = None
+            if yes_ask_signal and yes_bid > 0 and yes_ask_signal >= yes_bid:
+                spread_bps_signal = ((yes_ask_signal - yes_bid) / max(0.01, yes_bid)) * 10_000.0
+            if sp.enable_signal_model:
+                feats = _build_signal_features(
+                    emp_p=emp,
+                    vol_p=vol_p,
+                    market_yes=yes_bid,
+                    threshold=threshold,
+                    current_price=current_price,
+                    dte_days=dte,
+                    spread_bps=spread_bps_signal,
+                    no_bid=no_bid_signal,
+                )
+                hist_p = _score_signal_model(feats, sp)
             effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
+            ci_half = _empirical_ci_halfwidth(emp, len(closes_for_emp))
+            effective_min += sp.uncertainty_edge_mult * ci_half
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
             rec = (
@@ -1779,13 +2300,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if vol_p is None:
                 p_label = "P(YES)"
             else:
-                emp_kalshi = _empirical_probability(closes, threshold, direction)
+                emp_kalshi = _empirical_probability(
+                    closes,
+                    threshold,
+                    direction,
+                    recent_days=sp.empirical_recent_days,
+                    recent_weight=sp.empirical_recent_weight,
+                    use_rolling_window=sp.empirical_use_rolling_window,
+                )
                 p_label = f"P(YES) [emp={emp_kalshi:.1%} vol={vol_p:.1%}]"
             print(f"    {p_label}: {hist_p:.1%}  Market YES: {yes_bid:.1%}  →  {rec}")
             reason = _format_reason(
                 rec, hist_p, yes_bid, threshold, current_price, direction,
                 violates_rule, vol_p, sp.min_yes_price, sp.min_no_price,
-                sp.max_buy_yes_strike_above_pct, no_bid_early, min_edge, use_vol,
+                sp.max_buy_yes_strike_above_pct, no_bid_early, effective_min, use_vol,
             )
             print(f"    Why: {reason}")
             if getattr(args, "verbose", False):
@@ -1812,9 +2340,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
                 # Limit price: bid or below (dip-catch). High confidence → larger dip (e.g. 15%) to catch bigger price drops
                 price = max(0.01, min(0.99, bid * (1 - dip))) if dip else bid
-                count = _compute_buy_count(
+                count_base = _compute_buy_count(
                     p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
                 )
+                yes_ask = float(m.get("yes_ask_dollars") or 0) or None
+                no_ask = float(m.get("no_ask_dollars") or 0) or None
+                ask_side = yes_ask if rec == REC_BUY_YES else no_ask
+                liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
                     "ticker": ticker,
@@ -1823,6 +2356,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "side": "yes" if rec == REC_BUY_YES else "no",
                     "price": price,
                     "bid_at_place": bid,
+                    "theoretical_price": bid,
+                    "spread_bps_at_place": spread_bps,
+                    "liquidity_mult": liq_mult,
                     "dip_pct_used": dip,
                     "edge": abs(diff),
                     "count": count,
@@ -1840,7 +2376,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             gemini_markets = expand_gemini_events_to_markets(gemini_evts)
             if args.markets > 0:
                 gemini_markets = gemini_markets[: args.markets]
-            use_vol = getattr(args, "use_volatility", False)
+            use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
             for mkt in gemini_markets:
                 evt = mkt["event"]
                 contract = mkt.get("contract")
@@ -1871,22 +2407,70 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if arb_used_g:
                     print()
                     continue
+                if sp.enable_strike_validation and not _validate_threshold_with_market(
+                    threshold=threshold_g,
+                    direction=direction_g,
+                    current_price=current_price,
+                    yes_bid=impl,
+                    tolerance_pct=sp.strike_validation_tolerance_pct,
+                ):
+                    print(f"  [Gemini] {g_ticker}: SKIP (threshold validation failed) | {title}")
+                    continue
                 closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
-                emp = _empirical_probability(closes_for_emp_g, threshold_g, direction_g)
+                recent_w_g = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
+                emp = _empirical_probability(
+                    closes_for_emp_g,
+                    threshold_g,
+                    direction_g,
+                    recent_days=sp.empirical_recent_days,
+                    recent_weight=recent_w_g,
+                    use_rolling_window=sp.empirical_use_rolling_window,
+                )
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
                 vol_p_gem = (
-                    _volatility_probability(closes, threshold_g, direction_g, dte_g, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                    _volatility_probability(
+                        closes,
+                        threshold_g,
+                        direction_g,
+                        dte_g,
+                        use_ewma=sp.use_ewma_vol,
+                        ewma_lambda=sp.ewma_lambda,
+                        current_price=current_price,
+                        enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
+                        otm_smile_strength=sp.otm_smile_strength,
+                        otm_smile_max_mult=sp.otm_smile_max_mult,
+                    )
                     if use_vol else None
                 )
                 if vol_p_gem is not None and use_vol:
                     hist_p_gem = vol_p_gem if (_is_intraday_market(evt, yf_ticker) and not sp.use_intraday_empirical) else (
-                        (sp.vol_blend_weight * emp + (1 - sp.vol_blend_weight) * vol_p_gem) if sp.vol_blend_weight is not None
+                        (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0) * emp
+                         + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0)) * vol_p_gem) if sp.vol_blend_weight is not None
                         else max(emp, vol_p_gem)
                     )
                 else:
                     hist_p_gem = emp
                 hist_p_gem = _apply_bucket_penalty(hist_p_gem, calibration, sp)
+                if probability_calibrator:
+                    hist_p_gem = probability_calibrator(hist_p_gem)
+                yes_ask_sig_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
+                spread_bps_sig_g = None
+                if yes_ask_sig_g and impl > 0 and yes_ask_sig_g >= impl:
+                    spread_bps_sig_g = ((yes_ask_sig_g - impl) / max(0.01, impl)) * 10_000.0
+                if sp.enable_signal_model:
+                    feats_g = _build_signal_features(
+                        emp_p=emp,
+                        vol_p=vol_p_gem,
+                        market_yes=impl,
+                        threshold=threshold_g,
+                        current_price=current_price,
+                        dte_days=dte_g,
+                        spread_bps=spread_bps_sig_g,
+                        no_bid=(1.0 - impl),
+                    )
+                    hist_p_gem = _score_signal_model(feats_g, sp)
                 effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
+                effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, len(closes_for_emp_g))
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
                 rec = (
@@ -1963,9 +2547,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                         dip = max(dip, sp.limit_dip_pct_high_confidence)
                     price = max(0.01, min(0.99, bid * (1 - dip))) if dip else bid
-                    count = _compute_buy_count(
+                    count_base = _compute_buy_count(
                         p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
                     )
+                    yes_ask_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
+                    no_ask_g = _gemini_no_ask(evt)
+                    ask_side = yes_ask_g if rec == REC_BUY_YES else no_ask_g
+                    liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                    count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                     order_entry = {
                         "platform": PLATFORM_GEMINI,
                         "ticker": evt.get("ticker", "?"),
@@ -1974,6 +2563,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "side": "yes" if rec == REC_BUY_YES else "no",
                         "price": price,
                         "bid_at_place": bid,
+                        "theoretical_price": bid,
+                        "spread_bps_at_place": spread_bps,
+                        "liquidity_mult": liq_mult,
                         "dip_pct_used": dip,
                         "edge": abs(diff_gem),
                         "count": count,
@@ -1988,6 +2580,28 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         order_entry["instrument_symbol"] = instrument_symbol
                     pending_orders.append(order_entry)
                 print()
+
+    # Latest unresolved entries for dynamic stop-loss checks: (platform, ticker, side) -> entry_price
+    latest_entry_by_key: dict[tuple[str, str, str], float] = {}
+    latest_entry_ts_by_key: dict[tuple[str, str, str], float] = {}
+    if get_unresolved_predictions:
+        try:
+            for p in get_unresolved_predictions(cfg) or []:
+                key = (
+                    str(p.get("platform") or ""),
+                    str(p.get("ticker") or ""),
+                    str(p.get("side") or ""),
+                )
+                ep = float(p.get("entry_price") or 0)
+                ts = float(p.get("ts") or 0)
+                if ep <= 0:
+                    continue
+                prev_ts = latest_entry_ts_by_key.get(key)
+                if prev_ts is None or ts >= prev_ts:
+                    latest_entry_by_key[key] = ep
+                    latest_entry_ts_by_key[key] = ts
+        except Exception:
+            pass
 
     # Evaluate ALL positions (crypto / S&P 500) for sell when bet looks like a loser
     # Kalshi API: position_fp is signed (positive=YES, negative=NO); no "side"/"position" fields
@@ -2070,16 +2684,42 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                                         no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                                         closes_for_emp_pos = _get_closes_for_empirical(pos_yf, args.days, closes, m, sp, cfg)
-                                        emp_pos = _empirical_probability(closes_for_emp_pos, threshold, direction)
+                                        recent_w_pos = _regime_adjusted_recent_weight(closes_for_emp_pos, sp.empirical_recent_weight)
+                                        emp_pos = _empirical_probability(
+                                            closes_for_emp_pos,
+                                            threshold,
+                                            direction,
+                                            recent_days=sp.empirical_recent_days,
+                                            recent_weight=recent_w_pos,
+                                            use_rolling_window=sp.empirical_use_rolling_window,
+                                        )
                                         hist_p = emp_pos
                                         dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
+                                        last_close_pos = float(closes[-1])
+                                        _snap_pos = yf_get_snapshot(pos_yf) if sp.use_live_price else None
+                                        if _snap_pos is not None and _snap_pos > 0:
+                                            current_price_pos = sp.live_price_weight * float(_snap_pos) + (1 - sp.live_price_weight) * last_close_pos
+                                        else:
+                                            current_price_pos = last_close_pos
                                         vol_p = (
-                                            _volatility_probability(closes, threshold, direction, dte_pos, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                                            _volatility_probability(
+                                                closes,
+                                                threshold,
+                                                direction,
+                                                dte_pos,
+                                                use_ewma=sp.use_ewma_vol,
+                                                ewma_lambda=sp.ewma_lambda,
+                                                current_price=current_price_pos,
+                                                enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
+                                                otm_smile_strength=sp.otm_smile_strength,
+                                                otm_smile_max_mult=sp.otm_smile_max_mult,
+                                            )
                                             if use_vol else None
                                         )
                                         if vol_p is not None and use_vol:
                                             hist_p = vol_p if (_is_intraday_market(m, pos_yf) and not sp.use_intraday_empirical) else (
-                                                (sp.vol_blend_weight * emp_pos + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
+                                                (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_pos), sp.vol_dynamic_n0) * emp_pos
+                                                 + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_pos), sp.vol_dynamic_n0)) * vol_p) if sp.vol_blend_weight is not None
                                                 else max(emp_pos, vol_p)
                                             )
                                     rec = _recommend(
@@ -2088,7 +2728,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         easy_win_min_p_win=sp.easy_win_min_p_win,
                                         easy_win_min_market_p=sp.easy_win_min_market_p,
                                     )
-                                    current_price_pos = closes[-1]
                                     sell_price = yes_bid if side == "yes" else no_bid
                                     # Persist orphan position eval for calibration (positions not in main market loop)
                                     if record_market_snapshot:
@@ -2097,6 +2736,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             PLATFORM_KALSHI, ticker, yes_bid, no_bid, hist_p, rec,
                                             threshold, direction, vol_p, abs(diff), m.get("title"), pos_yf, cfg,
                                         )
+                                    # Dynamic stop-loss: cut losers before expiry if contract price moves against us.
+                                    entry_price = latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side))
+                                    current_side_price = yes_bid if side == "yes" else no_bid
+                                    if entry_price and current_side_price <= entry_price * (1 - sp.stop_loss_pct):
+                                        pending_sells.append({
+                                            "platform": PLATFORM_KALSHI,
+                                            "ticker": ticker,
+                                            "title": (m.get("title") or "")[:55],
+                                            "side": side,
+                                            "action": "sell",
+                                            "count": position_count,
+                                            "price": sell_price,
+                                            "rec": "STOP_LOSS",
+                                        })
+                                        continue
                                     # SELL when definitely a loser
                                     p_lose = _compute_p_lose(hist_p, yes_bid, no_bid, side, dte_pos, sp)
                                     if p_lose >= sp.sell_losing_pct:
@@ -2153,22 +2807,43 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if getattr(args, "verbose", False):
                             print(f"    (could not evaluate {ticker}: {ex})")
                     continue
-                _series, _yf, closes, m = cached
+                _series, _yf, closes, m = cached[:4]
+                current_price_cached = cached[4] if len(cached) > 4 else closes[-1]
                 threshold, direction = _extract_strike(m)
                 if threshold is None or direction is None:
                     continue
                 yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                 closes_for_emp_cached = _get_closes_for_empirical(_yf, args.days, closes, m, sp, cfg)
-                emp_cached = _empirical_probability(closes_for_emp_cached, threshold, direction)
+                recent_w_cached = _regime_adjusted_recent_weight(closes_for_emp_cached, sp.empirical_recent_weight)
+                emp_cached = _empirical_probability(
+                    closes_for_emp_cached,
+                    threshold,
+                    direction,
+                    recent_days=sp.empirical_recent_days,
+                    recent_weight=recent_w_cached,
+                    use_rolling_window=sp.empirical_use_rolling_window,
+                )
                 hist_p = emp_cached
                 dte_cached = _get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
                 vol_p = (
-                    _volatility_probability(closes, threshold, direction, dte_cached, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                    _volatility_probability(
+                        closes,
+                        threshold,
+                        direction,
+                        dte_cached,
+                        use_ewma=sp.use_ewma_vol,
+                        ewma_lambda=sp.ewma_lambda,
+                        current_price=current_price_cached,
+                        enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
+                        otm_smile_strength=sp.otm_smile_strength,
+                        otm_smile_max_mult=sp.otm_smile_max_mult,
+                    )
                     if use_vol else None
                 )
                 if vol_p is not None and use_vol:
                     hist_p = vol_p if (_is_intraday_market(m, _yf) and not sp.use_intraday_empirical) else (
-                        (sp.vol_blend_weight * emp_cached + (1 - sp.vol_blend_weight) * vol_p) if sp.vol_blend_weight is not None
+                        (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_cached), sp.vol_dynamic_n0) * emp_cached
+                         + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_cached), sp.vol_dynamic_n0)) * vol_p) if sp.vol_blend_weight is not None
                         else max(emp_cached, vol_p)
                     )
                 rec = _recommend(
@@ -2177,10 +2852,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     easy_win_min_p_win=sp.easy_win_min_p_win,
                     easy_win_min_market_p=sp.easy_win_min_market_p,
                 )
-                current_price_pos = closes[-1]
+                current_price_pos = current_price_cached
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 sell_price = yes_bid if side == "yes" else no_bid
 
+                # Dynamic stop-loss: cut losers before expiry if contract price moves against us.
+                entry_price = latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side))
+                current_side_price = yes_bid if side == "yes" else no_bid
+                if entry_price and current_side_price <= entry_price * (1 - sp.stop_loss_pct):
+                    pending_sells.append({
+                        "platform": PLATFORM_KALSHI,
+                        "ticker": ticker,
+                        "title": (m.get("title") or "")[:55],
+                        "side": side,
+                        "action": "sell",
+                        "count": position_count,
+                        "price": sell_price,
+                        "rec": "STOP_LOSS",
+                    })
+                    continue
                 # SELL when we think position will lose: P(lose) > sell_losing_pct
                 p_lose = _compute_p_lose(hist_p, yes_bid, no_bid, side, dte_cached, sp)
                 if p_lose >= sp.sell_losing_pct:
@@ -2309,19 +2999,45 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if getattr(args, "verbose", False):
                                 print(f"    (no hist data for Gemini {ticker_g}, skip sell eval)")
                             continue
+                        last_close_g = float(closes[-1])
+                        _snap_g = yf_get_snapshot(pos_yf) if sp.use_live_price else None
+                        if _snap_g is not None and _snap_g > 0:
+                            current_price_g = sp.live_price_weight * float(_snap_g) + (1 - sp.live_price_weight) * last_close_g
+                        else:
+                            current_price_g = last_close_g
                         impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
                         no_price_g = 1.0 - impl if 0 < impl < 1 else impl
                         closes_for_emp_g = _get_closes_for_empirical(pos_yf, args.days, closes, evt, sp, cfg)
-                        emp_g = _empirical_probability(closes_for_emp_g, threshold_g, direction_g)
+                        recent_w_gp = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
+                        emp_g = _empirical_probability(
+                            closes_for_emp_g,
+                            threshold_g,
+                            direction_g,
+                            recent_days=sp.empirical_recent_days,
+                            recent_weight=recent_w_gp,
+                            use_rolling_window=sp.empirical_use_rolling_window,
+                        )
                         dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
                         vol_p_g = (
-                            _volatility_probability(closes, threshold_g, direction_g, dte_g, use_ewma=sp.use_ewma_vol, ewma_lambda=sp.ewma_lambda)
+                            _volatility_probability(
+                                closes,
+                                threshold_g,
+                                direction_g,
+                                dte_g,
+                                use_ewma=sp.use_ewma_vol,
+                                ewma_lambda=sp.ewma_lambda,
+                                current_price=current_price_g,
+                                enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
+                                otm_smile_strength=sp.otm_smile_strength,
+                                otm_smile_max_mult=sp.otm_smile_max_mult,
+                            )
                             if use_vol else None
                         )
                         hist_p_g = emp_g
                         if vol_p_g is not None and use_vol:
                             hist_p_g = vol_p_g if (_is_intraday_market(evt, pos_yf) and not sp.use_intraday_empirical) else (
-                                (sp.vol_blend_weight * emp_g + (1 - sp.vol_blend_weight) * vol_p_g)
+                                (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0) * emp_g
+                                 + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0)) * vol_p_g)
                                 if sp.vol_blend_weight is not None else max(emp_g, vol_p_g)
                             )
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
@@ -2335,10 +3051,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 easy_win_min_market_p=sp.easy_win_min_market_p,
                             )
                         )
-                        violates_g = _violates_no_above_rule(closes[-1], threshold_g, direction_g, sp.no_above_cushion)
+                        violates_g = _violates_no_above_rule(current_price_g, threshold_g, direction_g, sp.no_above_cushion)
                         if rec == REC_BUY_NO and violates_g:
                             rec = REC_SKIP
-                        current_price_g = closes[-1]
                         sell_price = impl if side == "yes" else no_price_g
                         # Persist position eval for calibration (same as Kalshi orphan positions)
                         if record_market_snapshot:
@@ -2347,6 +3062,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 PLATFORM_GEMINI, ticker_g, impl, no_price_g, hist_p_g, rec,
                                 threshold_g, direction_g, vol_p_g, abs(diff_g), title, pos_yf, cfg,
                             )
+                        entry_price_g = latest_entry_by_key.get((PLATFORM_GEMINI, ticker_g, side))
+                        current_side_price_g = impl if side == "yes" else no_price_g
+                        if entry_price_g and current_side_price_g <= entry_price_g * (1 - sp.stop_loss_pct):
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": sell_price,
+                                "rec": "STOP_LOSS",
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                            continue
                         p_lose = _compute_p_lose(hist_p_g, impl, no_price_g, side, dte_g, sp)
                         if p_lose >= sp.sell_losing_pct:
                             pending_sells.append({
@@ -2681,12 +3412,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if record_prediction and o.get("rec") in (REC_BUY_YES, REC_BUY_NO) and o.get("hist_p") is not None:
                             ord_obj = result.get("order", result)
                             oid = ord_obj.get("order_id") if isinstance(ord_obj, dict) else None
+                            actual_fill_price = _extract_actual_fill_price(result, float(o["price"]))
+                            theoretical_price = o.get("theoretical_price")
+                            fill_slip_bps = _fill_slippage_bps(actual_fill_price, theoretical_price)
                             record_prediction(
                                 platform=PLATFORM_KALSHI,
                                 ticker=o["ticker"],
                                 side=o["side"],
                                 hist_p=o["hist_p"],
-                                entry_price=o["price"],
+                                entry_price=actual_fill_price,
                                 count=count,
                                 order_id=oid,
                                 vol_p=o.get("vol_p"),
@@ -2694,6 +3428,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 threshold=o.get("threshold"),
                                 direction=o.get("direction"),
                                 rec=o.get("rec"),
+                                theoretical_price=theoretical_price,
+                                bid_at_place=o.get("bid_at_place"),
+                                spread_bps_at_place=o.get("spread_bps_at_place"),
+                                fill_slippage_bps=fill_slip_bps,
                                 config=cfg,
                             )
                             if record_limit_order and oid:
@@ -2745,12 +3483,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         buys_placed += 1
                         if record_prediction and o.get("rec") in (REC_BUY_YES, REC_BUY_NO) and o.get("hist_p") is not None:
                             oid = str(result.get("orderId") or result.get("order_id", "")) if isinstance(result, dict) else None
+                            actual_fill_price = _extract_actual_fill_price(result, float(o["price"]))
+                            theoretical_price = o.get("theoretical_price")
+                            fill_slip_bps = _fill_slippage_bps(actual_fill_price, theoretical_price)
                             record_prediction(
                                 platform=PLATFORM_GEMINI,
                                 ticker=o["ticker"],
                                 side=o["side"],
                                 hist_p=o["hist_p"],
-                                entry_price=o["price"],
+                                entry_price=actual_fill_price,
                                 count=count,
                                 order_id=oid,
                                 vol_p=o.get("vol_p"),
@@ -2758,6 +3499,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 threshold=o.get("threshold"),
                                 direction=o.get("direction"),
                                 rec=o.get("rec"),
+                                theoretical_price=theoretical_price,
+                                bid_at_place=o.get("bid_at_place"),
+                                spread_bps_at_place=o.get("spread_bps_at_place"),
+                                fill_slippage_bps=fill_slip_bps,
                                 config=cfg,
                             )
                             if record_limit_order and oid:

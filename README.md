@@ -116,7 +116,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented: Kelly criterion, whitelist/blacklist, file logging, volatility-based probability (per-contract resolution time; volatility-aware intraday threshold 80%), systematic edges (intra- and inter-exchange arbitrage), XRP support, low-balance limit-order fallback, Ollama LLM analysis (llama3.2:1b fallback), recommendation constants, order review (cancel/update/keep open limit orders on Kalshi + Gemini), Kalshi/Gemini 4xx error handling (parse error codes, round prices to valid tick), **local historical storage** (yfinance cache, intraday cache, market snapshots, resolved-outcomes schema for backtesting and calibration; see [Local historical storage](#local-historical-storage) for schema + TTL), **BUY YES/NO preference** (when both have edge, prefer whichever yields larger net return), **contradictory-position avoidance** (skip BUYs that would conflict with existing positions on the same underlying), **backtest script** (`scripts/backtest.py`), **Gemini balance checking** (get_balance, place_order_safe caps by balance like Kalshi), **per-platform budget allocation** (Kalshi and Gemini balances allocated separately), **Gemini nonce fix**, **Gemini crypto events** (daily/weekly for BTC, ETH, SOL, XRP; hourly category may return 400—we gracefully skip and use crypto only), **Gemini position sell (losers)** (evaluates Gemini positions like Kalshi; sells when P(lose) ≥ 55%, rec flip, or rule violation), **calibration loss weighting** (`calibration_loss_weight`: losers count 1.5× in calibration; learn more from mistakes), **sell and re-buy** (`enable_sell_and_rebuy`: re-buy same contract at lower price when selling a loser if model still sees edge; bypasses min 5¢), **P(lose) with market odds blend** (blend model with Kalshi/Gemini odds; market weight increases near resolution), **intraday empirical P** (`use_intraday_empirical`: use yfinance 1h data at 5pm/4pm ET for empirical P on intraday markets; falls back to daily closes if intraday fails), **easy win** (`enable_easy_win`: buy when model and market both say ~90%+ and we profit after fees; uses `min_edge_easy_win` instead of `min_edge`), **limit order tracking** (`limit_orders` table: record every limit order + cancel reasons; `--limit-analysis` prints unfilled orders and "would have filled" stats for limit_dip_pct tuning).
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: Kelly sizing, recency-weighted empirical probability, dynamic empirical/volatility blending, OTM smile adjustment, uncertainty-aware edge buffer, live-price blending, strike validation, stop-loss exits, liquidity/spread-aware sizing, actual-vs-theoretical fill attribution, synthetic slippage/spread-aware backtesting, and a configurable signal-model pipeline with optional sklearn probability calibration.
 
 ## Contract evaluation workflow
 
@@ -312,39 +312,12 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 
 ## Scripts
 
-Scripts send their output to a local [Ollama](https://ollama.com) model for trading opinions. Install and run Ollama, then pull a model:
-
-```bash
-# Install Ollama from https://ollama.com, then:
-ollama pull llama3.2
-```
-
-When you run `scripts/compare_prices.py`, `scripts/compare_historical.py`, or `scripts/test_connection.py`, the script prints verbose data as usual, then adds an **OLLAMA ANALYSIS** section with the model’s take (e.g. mispriced contracts, risks, suggestions). Uses free local models (`llama3.2`, `mistral`, `phi3`, etc.).
-
-- **Skip LLM** for cron or non-interactive runs: add `--no-llm`
-- **Override model**: `OLLAMA_MODEL=qwen2.5:3b python3 scripts/compare_prices.py`
-- **Long output truncation**: Very long runs are truncated so the model fits them in context (keeps head + tail). Override via `OLLAMA_MAX_CHARS=25000` (default), `OLLAMA_HEAD_CHARS=8000`, `OLLAMA_TAIL_CHARS=12000`
-
-If Ollama isn’t running or the model is missing, scripts still run and finish without analysis.
-
-## Scripts
-
 | Script                                      | Purpose                                                |
 | ------------------------------------------- | ------------------------------------------------------ |
 | `python3 scripts/test_connection.py`        | Test Kalshi & Gemini connections                       |
 | `python3 scripts/compare_prices.py`        | Quick live snapshot (prices only)                       |
 | **`python3 scripts/compare_historical.py`** | **Evaluate contracts → BUY YES / BUY NO / SKIP** |
 | `python3 scripts/backtest.py`              | Backtest on historical data (`--mode real` or `synthetic`) |
-
-### Ollama LLM analysis (local, free)
-
-All three scripts send their raw output to a local [Ollama](https://ollama.com) LLM for a brief analysis: which contracts look mispriced, risks, and suggestions.
-
-1. Install & run Ollama: [ollama.com](https://ollama.com)
-2. Pull a model: `ollama pull llama3.2` (or `mistral`, `phi3`, `qwen2.5:3b`)
-3. Run any script; the last output is Ollama's opinion
-
-To skip LLM analysis (e.g. for cron): `python3 scripts/compare_historical.py --no-llm`
 
 ### Main evaluation: `scripts/compare_historical.py`
 
@@ -375,13 +348,13 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--edge`           | Min "bargain size" to recommend buy—how much cheaper than fair we need (default: 15%)     |
 | `--execute`        | Place real Kalshi orders for buys and sells (requires dry_run: false)                     |
 | `--preview`        | **Preview mode**: print Kalshi/Gemini API calls we would make, without placing any orders |
-| `--use-volatility` | Add volatility-based probability (option-style log-normal model) alongside empirical P    |
+| `--use-volatility` | Force-enable volatility model for this run (also enabled by default when `use_volatility_by_default: true`)    |
 | `--verbose`, `-v`  | Show closes range vs threshold (explains historical P)                                    |
 | `--no-llm`         | Skip Ollama analysis                                                                      |
 | `--log`            | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket, append within hour; or `--log DIR` for custom dir) |
 | `--limit-analysis` | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
 
-Config: `strategy.min_edge`, `strategy.enable_easy_win` (buy when model+market aligned ~90%+ and we profit after fees; uses `min_edge_easy_win` instead of `min_edge`), `strategy.min_yes_price` (skip BUY YES when market YES &lt; 5¢), `strategy.min_no_price` (skip BUY NO when market NO &lt; 5¢), `strategy.days_back`, `strategy.days_to_expiry`, `strategy.limit_dip_pct`, `strategy.limit_dip_pct_high_confidence` (15% when P(win) ≥ 90%), `strategy.vol_blend_weight` (blend empirical + vol; 0.5 = equal), `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.intraday_other_min_p_win`, `strategy.intraday_other_min_p_win_with_vol`, `strategy.use_kelly`, `strategy.min_arb_fee`, `strategy.enable_intra_arb`, `strategy.enable_inter_arb`, `strategy.calibration_loss_weight` (1.5 = weight losers higher), `strategy.enable_sell_and_rebuy` (re-buy after selling loser if edge), etc. in `config.yaml`.
+Config: `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, and related keys in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 
@@ -518,10 +491,15 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 
 ### Probability model
 
-**In plain English:** We estimate the chance of YES two ways: (1) **Empirical** = "In the last year, how often did the price end above (or below) the target?" and (2) **Volatility** = Using how much the price typically swings, we calculate the odds. We use the higher of the two when both are available.
+**In plain English:** We estimate the chance of YES from multiple signals: empirical history, volatility model, live-vs-close context, liquidity cues, and market pricing. Those signals are blended into a final model probability used for recommendations.
 
+- **Live price blend for S0 and safety**: The bot uses **both** signals—live price (via `get_snapshot`) and the last close (`closes[-1]`)—blended with slightly more weight on live (`live_price_weight`, default 0.6). So `current_price = 0.6×live + 0.4×closes[-1]` when both are available. This reflects sharp recent moves while anchoring to the last close. Falls back to `closes[-1]` if the snapshot API fails.
 - **Empirical**: fraction of past days the close was above/below the threshold.
-- **Volatility** (with `--use-volatility`): log-normal model using historical annualized vol and time-to-expiry. Time-to-expiry is parsed per contract from the title (e.g. "tomorrow at 5pm ET", "March 16 at 5pm") and converted to UTC; falls back to `strategy.days_to_expiry` when parsing fails. When both empirical and volatility P are available, uses a weighted blend (`vol_blend_weight`, default 0.5) or `max(empirical, volatility_probability)` if no blend is set. EWMA volatility (`use_ewma_vol: true`, `ewma_lambda: 0.94`) adapts σ to recent regime.
+- **Empirical**: recency-weighted and rolling-window capable (`empirical_recent_days`, `empirical_recent_weight`, `empirical_use_rolling_window`) with regime-sensitive weight boosts.
+- **Volatility**: log-normal model using EWMA/sample variance and time-to-expiry; uses SciPy normal CDF when available. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts.
+- **Dynamic blend**: empirical/vol blend weight adapts with sample size (`vol_dynamic_n0`) rather than relying on a fixed blend only.
+- **Signal model layer**: when enabled (`enable_signal_model`), normalized signals are passed through a weighted logistic scorer (`signal_model_weights`) to produce final P(YES).
+- **Optional sklearn calibration**: when enough resolved predictions exist, isotonic or Platt calibration maps raw model probability to calibrated probability (`use_sklearn_calibration`).
 - **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
 - **min_no_price** (default 0.05): Skip BUY NO when the market prices NO below 5¢ (i.e., YES above ~95¢). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
 - **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees** — so 1¢ profit per contract is fine (`min_edge: 0.01`).
@@ -545,7 +523,7 @@ Run the evaluation locally every 15 minutes for continuous monitoring.
 ```bash
 cp launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
 # Edit plist if paths differ (Python, script, WorkingDirectory)
-launchctl load ~/Library/LaunchAgents/com.user.compare_historical.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist
 ```
 
 **Keep Mac awake** (otherwise macOS may sleep and pause the timer): run `caffeinate -di` in a separate terminal, or use [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704).

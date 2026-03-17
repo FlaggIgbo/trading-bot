@@ -20,9 +20,9 @@
 12. [Error Handling & Edge Cases](#error-handling--edge-cases)
 13. [Example Walkthrough](#example-walkthrough)
 14. [Data Flow Diagram](#data-flow-diagram)
-13. [Local Storage Schema](#local-storage-schema)
-14. [Key Concepts (Layman's Terms)](#key-concepts-laymans-terms)
-15. [Quick Reference](#quick-reference)
+15. [Local Storage Schema](#local-storage-schema)
+16. [Key Concepts (Layman's Terms)](#key-concepts-laymans-terms)
+17. [Quick Reference](#quick-reference)
 
 ---
 
@@ -80,9 +80,9 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Check intra-arb             | YES+NO < 1−fee on same market → BUY BOTH                    | `compare_historical.py:1169` → `_check_intra_arb_kalshi()`    |
 | Check inter-arb             | Kalshi YES + Gemini NO < 1−fee → hedge                      | `compare_historical.py:1182` → `_check_inter_arb()`           |
 | Extract strike              | Parse "above $81,250" or "below $72,000" from title or ticker (e.g. -T82.9999) | `compare_historical.py:389` → `_extract_strike()`             |
-| Compute empirical P(YES)    | Fraction of past days above/below threshold                 | `compare_historical.py:434` → `_empirical_probability()`      |
-| Compute volatility P(YES)   | Log-normal model using EWMA vol, time-to-expiry             | `compare_historical.py:463` → `_volatility_probability()`     |
-| Blend probabilities         | `vol_blend_weight * emp + (1−w) * vol` when both available  | `compare_historical.py:1220-1223`                             |
+| Compute empirical P(YES)    | Recency-weighted/rolling empirical probability (NumPy path when installed) | `compare_historical.py` → `_empirical_probability()`      |
+| Compute volatility P(YES)   | Log-normal model (EWMA/sample variance), optional OTM smile; S0 uses live+close blend | `compare_historical.py` → `_volatility_probability()`     |
+| Blend + score signals       | Dynamic empirical/vol blend, optional sklearn calibration, then signal-model scoring | `compare_historical.py` → `_dynamic_empirical_weight()`, `_fit_probability_calibrator()`, `_score_signal_model()` |
 | Recommend                   | Compare hist_p vs market price → BUY YES / BUY NO / SKIP    | `compare_historical.py:535` → `_recommend()`                  |
 | Apply safety rules          | Skip BUY NO when price above strike; skip BUY YES when < 5¢ | `compare_historical.py:1232-1258`                             |
 | Add limit order             | Price = bid × (1−dip) for "dip catching"                    | `compare_historical.py:1286-1316` → `pending_orders.append()` |
@@ -148,7 +148,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | File                                | Purpose                                             | Key code pointers                                                                                                                                                                    |
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
-| **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); Sharpe, win rate, max drawdown                                                                                                 |
+| **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes ask-proxy/slippage realism and spread-aware synthetic sizing metrics                                                                                                 |
 | **`scripts/bot.py`**                | Simple polling bot (buy when price below threshold) | `main()` L34, `_check_market()` L101, `_resolve_markets()` L84                                                                                                                       |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
 | **`scripts/test_connection.py`**    | Test API connections, balance, markets              | `_run()` L130, `debug_check()` L30, `inspect_output_types()` L86                                                                                                                     |
@@ -182,7 +182,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | File                                            | Purpose                                                   |
 | ----------------------------------------------- | --------------------------------------------------------- |
 | **`launchd/com.user.compare_historical.plist`** | Run `compare_historical` every 10 min on macOS (configurable) |
-| **`launchd/README.md`**                         | Setup: copy plist, `launchctl load`, caffeinate           |
+| **`launchd/README.md`**                         | Setup: copy plist, `launchctl bootstrap`, caffeinate           |
 | **`package.json`**                              | Prettier dev dependency for YAML/JSON/MD formatting       |
 | **`.pre-commit-config.yaml`**                   | Ruff (Python linter/formatter) + Prettier on git push     |
 | **`docs/IMPROVEMENTS.md`**                      | Ideas and backlog for future work                         |
@@ -238,7 +238,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
 - `pending_sells`: list of dicts with platform, ticker, side, action="sell", count, price, rec.
-- `market_data_cache`: ticker → (series, yf_ticker, closes, market_dict).
+- `market_data_cache`: ticker → (series, yf_ticker, closes, market_dict, current_price). current_price is live when available.
 - `existing_by_underlying`: (yf_ticker, res_key, platform) → [(threshold, direction, side), ...] for conflict check.
 
 ---
@@ -249,7 +249,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 **Modes:**
 - **real:** Uses `predictions` table (rows with outcome = win/lose). Only trades we actually placed and that have resolved. Computes cumulative PnL, daily returns, Sharpe, max drawdown.
-- **synthetic:** Uses `market_snapshots` + `resolved_outcomes`. For each ticker that (a) has a last snapshot with rec in [BUY YES, BUY NO] and (b) is in resolved_outcomes, simulates one contract at snapshot price. Infers outcome from resolved yes_settled.
+- **synthetic:** Uses `market_snapshots` + `resolved_outcomes`. Uses ask-side proxy + configurable slippage and spread-aware size multiplier; reports avg fill slippage and spread proxy metrics.
 
 **Flow:** `main()` → parse --mode, --days → call `_run_real()` or `_run_synthetic()` → print results.
 
@@ -295,8 +295,11 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | Function | File | Signature | Purpose |
 |----------|------|-----------|---------|
-| `_empirical_probability` | compare_historical | `(closes, threshold, direction) -> float` | Fraction of closes above (direction="above") or below (direction="below") threshold. |
-| `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda) -> float \| None` | Log-normal P(S>K) or P(S<K) using historical vol; EWMA variance when use_ewma. |
+| `_empirical_probability` | compare_historical | `(closes, threshold, direction, recent_days, recent_weight, use_rolling_window) -> float` | Recency-weighted empirical probability; uses vectorized NumPy path when available. |
+| `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda, current_price, ...) -> float \| None` | Log-normal P(S>K) or P(S<K); SciPy CDF path when available; optional OTM smile adjustment. |
+| `_build_signal_features` | compare_historical | `(emp_p, vol_p, market_yes, threshold, current_price, dte_days, spread_bps, no_bid) -> _SignalFeatures` | Builds normalized model features for signal scoring. |
+| `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
+| `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |
 | `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win: when model+market both ≥90%, uses min_edge_easy_win (e.g. 1¢) instead. Prefers larger edge when both qualify. |
 | `_recommend_strict` | compare_historical | `(hist_p, market_yes, min_p_win, min_edge, fee) -> str` | Same as _recommend but also requires hist_p ≥ min_p_win for YES (or 1-hist_p ≥ min_p_win for NO). For non-standard intraday. |
 | `_extract_strike` | compare_historical | `(market) -> (threshold, direction)` | Parse floor/cap from market API or title regex ("above $X", "below $Y"). |
@@ -317,7 +320,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 **`config.yaml` structure:**
 - **markets:** List of Kalshi series or tickers (e.g. KXBTCD, KXETHD). Env override: `MARKETS=KXBTCD,KXETHD`.
 - **yfinance_tickers:** Map series → Yahoo ticker (KXBTCD→BTC-USD, KXINXU→^GSPC).
-- **strategy:** min_edge, min_yes_price, min_no_price, days_back, vol_blend_weight, use_intraday_empirical, intraday_other_min_p_win, etc. See README for full list.
+- **strategy:** min_edge, dynamic empirical/vol settings, smile/liquidity controls, signal-model and calibration keys, and risk rules. See README for full list.
 - **storage:** enabled, data_dir.
 - **trading:** dry_run, max_pct_of_balance, min_contracts.
 
@@ -370,9 +373,30 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `p_lose_blend_market_half_life_days` | `p_lose_blend_market_half_life_days` | 0.5 | Half-life for market-weight decay |
 | `use_intraday_empirical` | `use_intraday_empirical` | true | Use 1h prices at resolution hour for intraday empirical |
 | `use_kelly` | `use_kelly` | true | Kelly criterion for position sizing; reduces size for farther-OTM (lower P(win)) |
-| `kelly_fraction` | `kelly_fraction` | 0.25 | Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer) |
-| `use_kelly` | `use_kelly` | true | Kelly criterion for position sizing; reduces size for farther-OTM (lower P(win)) |
 | `kelly_fraction` | `kelly_fraction` | 0.25 | Fractional Kelly (0.25 = quarter-Kelly; safer than full Kelly) |
+| `use_live_price` | `use_live_price` | true | Blend live + closes[-1] for vol model & safety; reflects sharp moves |
+| `live_price_weight` | `live_price_weight` | 0.6 | When both available: 60% live + 40% closes[-1]; slightly prioritize live |
+| `empirical_use_rolling_window` | `empirical_use_rolling_window` | true | Use rolling window for empirical probability |
+| `empirical_recent_days` | `empirical_recent_days` | 90 | Recent window length for empirical model |
+| `empirical_recent_weight` | `empirical_recent_weight` | 3.0 | Extra weight applied to recent samples |
+| `use_volatility_by_default` | `use_volatility_by_default` | true | Apply volatility model even without `--use-volatility` |
+| `vol_dynamic_n0` | `vol_dynamic_n0` | 90 | Sample-size pivot for dynamic empirical/vol blend |
+| `uncertainty_edge_mult` | `uncertainty_edge_mult` | 0.5 | Adds CI-based uncertainty buffer to min edge |
+| `stop_loss_pct` | `stop_loss_pct` | 0.50 | Stop-loss threshold from recorded entry price |
+| `enable_strike_validation` | `enable_strike_validation` | true | Validate extracted strike against current price and market odds |
+| `strike_validation_tolerance_pct` | `strike_validation_tolerance_pct` | 0.05 | Tolerance band used for strike sanity checks |
+| `enable_otm_smile_adjustment` | `enable_otm_smile_adjustment` | true | Apply OTM smile proxy in volatility probability |
+| `otm_smile_strength` | `otm_smile_strength` | 0.35 | Smile intensity |
+| `otm_smile_max_mult` | `otm_smile_max_mult` | 2.0 | Cap for smile volatility multiplier |
+| `liquidity_spread_bps_soft` | `liquidity_spread_bps_soft` | 1500 | Start reducing size when spread proxy is wide |
+| `liquidity_spread_bps_hard` | `liquidity_spread_bps_hard` | 4000 | Maximum spread threshold for size haircut |
+| `liquidity_min_size_multiplier` | `liquidity_min_size_multiplier` | 0.20 | Minimum size multiplier under poor liquidity |
+| `liquidity_missing_ask_multiplier` | `liquidity_missing_ask_multiplier` | 0.80 | Size multiplier when ask data is missing |
+| `enable_signal_model` | `enable_signal_model` | true | Route features through weighted signal model for final P(YES) |
+| `signal_model_weights` | `signal_model_weights` | `{...}` | Feature weights for logistic-style scorer |
+| `use_sklearn_calibration` | `use_sklearn_calibration` | true | Enable sklearn calibration from resolved predictions |
+| `sklearn_calibration_method` | `sklearn_calibration_method` | isotonic | Calibration method (`isotonic` or `platt`) |
+| `sklearn_calibration_min_samples` | `sklearn_calibration_min_samples` | 50 | Minimum resolved samples required for calibration fit |
 
 ---
 
@@ -389,7 +413,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `--verbose` / `-v` | flag | — | Show closes range vs threshold (explains hist_p) |
 | `--preview` | flag | — | Show planned orders, no API calls |
 | `--execute` | flag | — | Place real buy/sell orders (requires `dry_run: false` in config) |
-| `--use-volatility` | flag | — | Enable volatility model; blend with empirical |
+| `--use-volatility` | flag | — | Force-enable volatility model (also on by default when `use_volatility_by_default` is true) |
 | `--limit-analysis` | flag | — | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
 | `--log` [DIR] | optional | — | Log output to `~/Desktop/trading-bot-logs/` or specified dir (eval_YYYYMMDDHH.log per hour) |
 
@@ -493,6 +517,7 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 | `record_market_snapshot(...)` | After each market eval in compare_historical | Appends `market_snapshots` (yes_bid, no_bid, hist_p, rec, etc.) |
 | `record_prediction(...)` | When order fills (Kalshi/Gemini) | Inserts `predictions` with order_id, side, entry_price, hist_p |
 | `record_prediction_outcome(...)` | `_sync_kalshi_settlements()` on resolve | Updates predictions with outcome, pnl_cents, resolved_ts |
+| `get_fill_attribution_stats(...)` | compare_historical startup diagnostics | Summarizes actual-vs-theoretical fill quality (avg slippage/spread) |
 | `record_resolved(...)` | `_sync_kalshi_settlements()` | Upserts `resolved_outcomes` (yes_settled, our_last_rec, etc.) |
 | `record_limit_order(...)` | When placing BUY limit order | Inserts `limit_orders` (limit_price, bid_at_place, dip_pct_used, hist_p, etc.) |
 | `record_order_cancel(...)` | When cancelling resting order | Updates `limit_orders` with status=cancelled, cancel_reason (no_longer_rec|want_better_price) |
@@ -548,6 +573,8 @@ All recommendation and platform identifiers live in `constants.py`:
 ## Error Handling & Edge Cases
 
 **When yfinance returns no data:** `get_aggs()` returns `[]`. Empirical P becomes 0. Market is skipped or falls back to volatility-only when available.
+
+**When get_snapshot fails (proxy, API down):** Live price falls back to `closes[-1]` (last historical close). Model and safety rules still run; sharp recent moves are not reflected until the next successful snapshot.
 
 **When Kalshi/Gemini API fails (429, 500, auth):** Clients log and re-raise or return empty. Script continues with other markets. `create_order_safe` / `place_order_safe` cap by balance and retry on transient errors.
 
@@ -686,7 +713,11 @@ predictions
 ├── pnl_cents        INTEGER
 ├── resolved_ts      REAL
 ├── min_price_after_buy REAL
-└── max_price_after_buy REAL
+├── max_price_after_buy REAL
+├── theoretical_price REAL
+├── bid_at_place     REAL
+├── spread_bps_at_place REAL
+└── fill_slippage_bps REAL
 
 limit_orders
 ├── id               INTEGER   (auto-increment)

@@ -21,6 +21,11 @@ from datetime import datetime, timedelta
 
 from pathlib import Path
 
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
@@ -92,6 +97,28 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     wins = sum(1 for p in preds if p.get("outcome") == "win")
     loses = sum(1 for p in preds if p.get("outcome") == "lose")
     total_pnl = sum(p.get("pnl_cents") or 0 for p in preds)
+    if pd is not None:
+        df = pd.DataFrame(preds)
+        if not df.empty:
+            df["pnl_cents"] = df["pnl_cents"].fillna(0.0).astype(float)
+            cumulative = df["pnl_cents"].cumsum().tolist()
+            returns = (
+                df["pnl_cents"] / (df["pnl_cents"].cumsum().shift(1).abs() + 1e-9)
+            ).replace([float("inf"), float("-inf")], 0.0).fillna(0.0).tolist()
+        else:
+            cumulative = []
+            returns = []
+        max_dd, _, _ = _compute_max_drawdown(cumulative)
+        return {
+            "mode": "real",
+            "trades": len(preds),
+            "win_count": wins,
+            "lose_count": loses,
+            "total_pnl_cents": total_pnl,
+            "win_rate": wins / (wins + loses) if (wins + loses) > 0 else None,
+            "sharpe": _compute_sharpe(returns) if returns else None,
+            "max_drawdown_cents": max_dd,
+        }
     cumulative: list[float] = []
     run = 0
     for p in preds:
@@ -127,7 +154,10 @@ def _run_synthetic(
     start_ts: float | None,
     end_ts: float | None,
 ) -> dict:
-    """Backtest from market snapshots + resolved_outcomes (synthetic fills at mid)."""
+    """Backtest from market snapshots + resolved_outcomes.
+
+    Uses a conservative ask proxy and slippage to better reflect executable fills.
+    """
     try:
         from storage import (
             get_last_snapshot_per_ticker,
@@ -139,6 +169,11 @@ def _run_synthetic(
         return {"error": "storage not available"}
 
     rec_filter = [REC_BUY_YES, REC_BUY_NO]
+    bt_cfg = (cfg or {}).get("backtest", {})
+    slippage_bps = float(bt_cfg.get("synthetic_slippage_bps", 100.0))  # 100 bps = 1%
+    spread_soft = float(bt_cfg.get("synthetic_liquidity_spread_bps_soft", 1500.0))
+    spread_hard = float(bt_cfg.get("synthetic_liquidity_spread_bps_hard", 4000.0))
+    min_size_mult = float(bt_cfg.get("synthetic_liquidity_min_size_multiplier", 0.2))
     snaps = get_market_snapshots_for_backtest(
         start_ts=start_ts,
         end_ts=end_ts,
@@ -159,28 +194,55 @@ def _run_synthetic(
         yes_settled = bool(ro.get("yes_settled"))
         rec = snap.get("rec")
         side = "yes" if rec == REC_BUY_YES else "no"
-        price = float(snap.get("yes_bid") or 0) if side == "yes" else float(snap.get("no_bid") or 0)
-        if price <= 0:
-            price = 0.5
-        count = 1
+        yes_bid = float(snap.get("yes_bid") or 0)
+        no_bid = float(snap.get("no_bid") or 0)
+        # Ask proxy from opposite bid for binary markets.
+        yes_ask_proxy = (1.0 - no_bid) if (0 < no_bid < 1) else yes_bid
+        no_ask_proxy = (1.0 - yes_bid) if (0 < yes_bid < 1) else no_bid
+        side_bid = yes_bid if side == "yes" else no_bid
+        theoretical_price = side_bid if side_bid > 0 else None
+        ask_proxy = yes_ask_proxy if side == "yes" else no_ask_proxy
+        if ask_proxy <= 0:
+            # Fallback to side bid only if ask proxy is unavailable.
+            ask_proxy = side_bid
+        if ask_proxy <= 0:
+            continue
+        spread_bps = None
+        if side_bid > 0 and ask_proxy >= side_bid:
+            spread_bps = ((ask_proxy - side_bid) / max(0.01, side_bid)) * 10_000.0
+        size_mult = 1.0
+        if spread_bps is not None:
+            if spread_bps >= spread_hard:
+                size_mult = min_size_mult
+            elif spread_bps > spread_soft:
+                frac = (spread_bps - spread_soft) / max(1e-9, (spread_hard - spread_soft))
+                size_mult = 1.0 - frac * (1.0 - min_size_mult)
+        # Add conservative slippage to entry cost.
+        actual_price = min(0.99, max(0.01, ask_proxy * (1.0 + slippage_bps / 10_000.0)))
+        fill_slippage_bps = None
+        if theoretical_price and theoretical_price > 0:
+            fill_slippage_bps = ((actual_price - theoretical_price) / theoretical_price) * 10_000.0
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
-        pnl_cents = int((100 - price * 100) * count) if won else int(-price * 100 * count)
+        pnl_cents = ((100 - actual_price * 100) if won else (-actual_price * 100)) * size_mult
         trades.append({
             "ticker": ticker,
             "side": side,
-            "entry_price": price,
-            "count": count,
+            "entry_price": actual_price,
+            "theoretical_price": theoretical_price,
+            "size_mult": size_mult,
+            "spread_bps": spread_bps,
+            "fill_slippage_bps": fill_slippage_bps,
             "won": won,
             "pnl_cents": pnl_cents,
         })
 
     wins = sum(1 for t in trades if t["won"])
     loses = len(trades) - wins
-    total_pnl = sum(t["pnl_cents"] for t in trades)
+    total_pnl = sum(float(t["pnl_cents"]) for t in trades)
     cumulative = []
     run = 0
     for t in trades:
-        run += t["pnl_cents"]
+        run += float(t["pnl_cents"])
         cumulative.append(float(run))
     max_dd, _, _ = _compute_max_drawdown(cumulative)
     returns = []
@@ -188,15 +250,19 @@ def _run_synthetic(
         ret = (cumulative[i] - cumulative[i - 1]) / (abs(cumulative[i - 1]) + 1e-9)
         returns.append(ret)
 
+    slippages = [float(t["fill_slippage_bps"]) for t in trades if t.get("fill_slippage_bps") is not None]
+    spreads = [float(t["spread_bps"]) for t in trades if t.get("spread_bps") is not None]
     return {
         "mode": "synthetic",
         "trades": len(trades),
         "win_count": wins,
         "lose_count": loses,
-        "total_pnl_cents": total_pnl,
+        "total_pnl_cents": int(round(total_pnl)),
         "win_rate": wins / len(trades) if trades else None,
         "sharpe": _compute_sharpe(returns) if returns else None,
         "max_drawdown_cents": max_dd,
+        "avg_fill_slippage_bps": (sum(slippages) / len(slippages)) if slippages else None,
+        "avg_spread_bps": (sum(spreads) / len(spreads)) if spreads else None,
     }
 
 
@@ -248,6 +314,10 @@ def main() -> int:
         print(f"  Sharpe:   {out['sharpe']:.2f}")
     if out.get("max_drawdown_cents") is not None:
         print(f"  Max DD:   ${out['max_drawdown_cents'] / 100:,.2f}")
+    if out.get("avg_fill_slippage_bps") is not None:
+        print(f"  Avg fill slippage: {out['avg_fill_slippage_bps']:.1f} bps")
+    if out.get("avg_spread_bps") is not None:
+        print(f"  Avg spread proxy:  {out['avg_spread_bps']:.1f} bps")
     print("=" * 60)
     return 0
 

@@ -79,6 +79,40 @@ strategy:
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
   kelly_fraction: 0.25 # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer; full Kelly can be aggressive)
+  use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)
+  live_price_weight: 0.6 # When both available: current_price = 0.6*live + 0.4*closes[-1]. Slightly prioritize live. Fallback: closes[-1] if snapshot fails.
+  empirical_use_rolling_window: true # Empirical model uses rolling window for faster adaptation
+  empirical_recent_days: 90 # Recent window size for empirical probability / confidence
+  empirical_recent_weight: 3.0 # Weight of recent samples relative to older data
+  use_volatility_by_default: true # Use volatility model even without --use-volatility
+  vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
+  uncertainty_edge_mult: 0.5 # Extra edge buffer = multiplier * empirical CI half-width
+  stop_loss_pct: 0.50 # Dynamic stop-loss: sell if current side price drops >=50% from recorded entry
+  enable_strike_validation: true # Cross-check extracted strike against current price + market odds
+  strike_validation_tolerance_pct: 0.05 # Tolerance band for threshold sanity checks
+  enable_otm_smile_adjustment: true # Volatility smile proxy: boost vol for OTM strikes to avoid underestimating tails
+  otm_smile_strength: 0.35 # Smile intensity; higher = larger OTM vol uplift
+  otm_smile_max_mult: 2.0 # Cap OTM vol multiplier
+  liquidity_spread_bps_soft: 1500 # Start reducing size when spread proxy > 15%
+  liquidity_spread_bps_hard: 4000 # Max size reduction at/above 40% spread proxy
+  liquidity_min_size_multiplier: 0.20 # At hard spread, keep at least 20% of base size
+  liquidity_missing_ask_multiplier: 0.80 # If ask unavailable, apply conservative 20% size haircut
+  # ML/AI-style signal model: combine multiple signals into a unified P(YES)
+  enable_signal_model: true # Use weighted feature model on top of empirical/volatility signals
+  use_sklearn_calibration: true # Fit calibrator from resolved predictions (hist_p -> outcome)
+  sklearn_calibration_method: isotonic # isotonic or platt
+  sklearn_calibration_min_samples: 50 # Minimum resolved samples to fit calibrator
+  signal_model_weights:
+    bias: 0.0
+    emp_p: 1.8
+    vol_p: 1.3
+    market_yes: 0.3
+    edge_yes: 1.2
+    edge_no: -0.8
+    moneyness: 0.2
+    dte_norm: 0.1
+    spread_norm: -0.5
+    liquidity_consistency: 0.3
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # blacklist: ["KXINXU"]   # Exclude these series (optional)
   # buy_yes_below: 0.30   # bot.py: buy YES when price < 30 cents
@@ -99,3 +133,7 @@ trading:
   # When balance is below this (cents), place a limit order instead of skipping
   # E.g. 500 = $5: with $3 balance, place 1-contract limit at price we can afford (e.g. 60¢)
   min_balance_for_limit_fallback_cents: 100 # $1 minimum; 0 = disabled
+
+# Backtest realism settings
+backtest:
+  synthetic_slippage_bps: 100 # +1% entry slippage in synthetic mode

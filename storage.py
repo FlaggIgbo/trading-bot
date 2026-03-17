@@ -150,6 +150,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_limit_orders_status ON limit_orders(status);
     """)
     _migrate_predictions_price_after_buy(conn)
+    _migrate_predictions_fill_attribution(conn)
 
 
 def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
@@ -160,6 +161,21 @@ def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+
+def _migrate_predictions_fill_attribution(conn: sqlite3.Connection) -> None:
+    """Add fill-attribution columns to predictions (actual vs theoretical execution)."""
+    for col in [
+        "theoretical_price",
+        "bid_at_place",
+        "spread_bps_at_place",
+        "fill_slippage_bps",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def get_price_after_buy_from_snapshots(
@@ -1004,6 +1020,10 @@ def record_prediction(
     threshold: float | None = None,
     direction: str | None = None,
     rec: str | None = None,
+    theoretical_price: float | None = None,
+    bid_at_place: float | None = None,
+    spread_bps_at_place: float | None = None,
+    fill_slippage_bps: float | None = None,
     config: dict | None = None,
 ) -> int | None:
     """
@@ -1017,8 +1037,9 @@ def record_prediction(
     try:
         cur = conn.execute(
             """INSERT INTO predictions
-               (platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, yf_ticker, threshold, direction, rec)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, yf_ticker, threshold, direction, rec,
+                theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 platform,
                 ticker,
@@ -1033,6 +1054,10 @@ def record_prediction(
                 threshold,
                 direction or "",
                 rec or "",
+                theoretical_price,
+                bid_at_place,
+                spread_bps_at_place,
+                fill_slippage_bps,
             ),
         )
         conn.commit()
@@ -1207,6 +1232,50 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         }
     except Exception:
         return {"enabled": False, "resolved_count": 0}
+    finally:
+        conn.close()
+
+
+def get_fill_attribution_stats(
+    config: dict | None = None,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+) -> dict[str, Any]:
+    """Summarize actual vs theoretical fill quality from predictions."""
+    conn = _get_conn(config)
+    if not conn:
+        return {"enabled": False}
+    try:
+        q = """
+            SELECT entry_price, theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps
+            FROM predictions
+            WHERE entry_price IS NOT NULL
+        """
+        params: list[Any] = []
+        if start_ts is not None:
+            q += " AND ts >= ?"
+            params.append(start_ts)
+        if end_ts is not None:
+            q += " AND ts <= ?"
+            params.append(end_ts)
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            return {"enabled": True, "count": 0}
+        slippages = [float(r["fill_slippage_bps"]) for r in rows if r["fill_slippage_bps"] is not None]
+        spreads = [float(r["spread_bps_at_place"]) for r in rows if r["spread_bps_at_place"] is not None]
+        with_theoretical = sum(1 for r in rows if r["theoretical_price"] is not None)
+        return {
+            "enabled": True,
+            "count": len(rows),
+            "with_theoretical": with_theoretical,
+            "avg_fill_slippage_bps": (sum(slippages) / len(slippages)) if slippages else None,
+            "avg_spread_bps_at_place": (sum(spreads) / len(spreads)) if spreads else None,
+            "pct_positive_slippage": (
+                (sum(1 for s in slippages if s > 0) / len(slippages) * 100.0) if slippages else None
+            ),
+        }
+    except Exception:
+        return {"enabled": False}
     finally:
         conn.close()
 
