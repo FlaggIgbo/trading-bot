@@ -163,7 +163,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_dte_confidence_dip()` (DTE-confidence dip scaling), `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
 | **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes slippage/spread realism, winner slippage tax, dwell-time fill modeling, and liquidity friction                                                                                                 |
-| **`scripts/daily_performance_report.py`** | Daily P&L text report + PNG performance charts | Generates green bars (wins), red bars (losses), blue cumulative P&L line; outputs alongside text report |
+| **`scripts/daily_performance_report.py`** | Daily P&L text report + PNG performance charts + bet accuracy | Generates green bars (wins), red bars (losses), blue cumulative P&L line; includes bet-vs-resolution accuracy metrics (distance from threshold); outputs alongside text report |
 | **`scripts/validate_config.py`**    | Config sanity validator                              | Runs pre-push checks for edge/fee consistency, Kelly bounds, EWMA ranges, exposure/loss caps, and macro/two-sided settings before backtest guard                                                                                                                         |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
 | **`scripts/test_connection.py`**    | Test API connections, balance, markets              | `_run()` L130, `debug_check()` L30, `inspect_output_types()` L86                                                                                                                     |
@@ -190,7 +190,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | File                              | Purpose                | Key functions                                                                                                                                |
 | --------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`constants.py`**                 | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`                           |
-| **`data/storage.py`**              | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `record_limit_order()`, `record_order_cancel()`, `get_limit_order_analysis()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58. Root `storage.py` shim re-exports. |
+| **`data/storage.py`**              | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `record_limit_order()`, `record_order_cancel()`, `get_limit_order_analysis()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `get_bet_accuracy_stats()`, `_init_schema()` L58. Root `storage.py` shim re-exports. |
 | **`signals/ollama_analysis.py`**   | Local LLM analysis     | `capture_and_analyze()`, `run_analysis()`, `analyze_single_trade()` L117, `_get_analysis()` L78. Root `ollama_analysis.py` shim re-exports.                                              |
 | **`execution/engine.py`**          | Order lifecycle sync   | `sync_and_cancel_resting_orders()`. Root `execution_engine.py` shim re-exports. |
 | **`execution/fill_reconciliation.py`** | Confirmed fill ingestion | `reconcile_confirmed_fills()`. Root `fill_reconciliation.py` shim re-exports. |
@@ -361,7 +361,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `resolve_position_evaluations` | storage | `(ticker, yes_settled, config) -> int` | Link unresolved position evaluations to outcomes when market settles. |
 | `get_position_evaluation_stats` | storage | `(config, days) -> dict` | KEEP vs SELL win rates, PnL, win rate by hist_p bucket for position evaluations. |
 | `record_prediction` | storage | `(platform, ticker, side, hist_p, entry_price, count, ...) -> int \| None` | Insert row into predictions when order fills. |
-| `record_prediction_outcome` | storage | `(prediction_id, yes_settled, pnl_cents, ...) -> bool` | Update predictions with outcome=win/lose, pnl_cents, resolved_ts. |
+| `record_prediction_outcome` | storage | `(prediction_id, yes_settled, pnl_cents, ..., resolution_price) -> bool` | Update predictions with outcome=win/lose, pnl_cents, resolved_ts, and optionally the underlying asset resolution price. |
+| `get_bet_accuracy_stats` | storage | `(config, start_ts, end_ts) -> dict` | Compute bet-vs-resolution accuracy from resolved predictions with threshold/direction/resolution_price. Returns distance metrics for model accuracy tracking. |
 | `capture_and_analyze` | ollama_analysis | `(run_fn, script_name, use_llm, per_trade_analysis) -> int` | Runs run_fn. If use_llm and per_trade_analysis, script does its own per-trade Ollama; else captures stdout and runs one batch analysis. |
 
 ---
@@ -583,7 +584,8 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 | `set_yf_intraday_at_hour(...)` | After intraday fetch | Writes `yf_intraday_cache` |
 | `record_market_snapshot(...)` | After each market eval in compare_historical | Appends `market_snapshots` (yes_bid, no_bid, hist_p, rec, etc.) |
 | `record_prediction(...)` | When order fills (Kalshi/Gemini) | Inserts `predictions` with order_id, side, entry_price, hist_p |
-| `record_prediction_outcome(...)` | `_sync_kalshi_settlements()` on resolve | Updates predictions with outcome, pnl_cents, resolved_ts |
+| `record_prediction_outcome(...)` | `_sync_kalshi_settlements()` on resolve | Updates predictions with outcome, pnl_cents, resolved_ts, and resolution_price (actual underlying price at settlement) |
+| `get_bet_accuracy_stats(...)` | daily_performance_report.py, backtest analysis | Computes bet-vs-resolution distance metrics from resolved predictions (mean/median/stddev distance, correct-side %) |
 | `get_fill_attribution_stats(...)` | compare_historical startup diagnostics | Summarizes actual-vs-theoretical fill quality (avg slippage/spread) |
 | `record_resolved(...)` | `_sync_kalshi_settlements()` | Upserts `resolved_outcomes` (yes_settled, our_last_rec, etc.) |
 | `record_limit_order(...)` | When placing BUY limit order | Inserts `limit_orders` (limit_price, bid_at_place, dip_pct_used, hist_p, etc.) |
@@ -785,7 +787,8 @@ predictions
 ├── theoretical_price REAL
 ├── bid_at_place     REAL
 ├── spread_bps_at_place REAL
-└── fill_slippage_bps REAL
+├── fill_slippage_bps REAL
+└── resolution_price REAL      (actual underlying asset price at settlement)
 
 limit_orders
 ├── id               INTEGER   (auto-increment)

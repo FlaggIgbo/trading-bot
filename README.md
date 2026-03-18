@@ -138,7 +138,7 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
 ## Contract evaluation workflow
 
@@ -514,7 +514,7 @@ Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable v
 | **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
 | **market_snapshots** | Per-evaluation snapshot (yes/no bids/asks/sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
-| **predictions**      | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
+| **predictions**      | Placed orders + outcomes + resolution prices (backtest, calibration, accuracy tracking) | None     | `id` (auto-increment)                          |
 | **limit_orders**    | Limit orders placed + cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled` | None | `id` (auto-increment)                          |
 
 #### Table structures (columns)
@@ -524,7 +524,7 @@ yf_cache:           ticker, days_back, closes_json, updated_at
 yf_intraday_cache:  ticker, days_back, resolution_hour_et, closes_json, updated_at
 market_snapshots:   id, platform, ticker, title, yf_ticker, ts, yes_bid, no_bid, hist_p, vol_p, rec, threshold, direction, edge
 resolved_outcomes:  ticker, platform, title, resolution_ts, yes_settled, our_last_rec, our_last_hist_p, market_yes_at_last
-predictions:        id, platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, outcome, pnl_cents, resolved_ts, ...
+predictions:        id, platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, outcome, pnl_cents, resolved_ts, resolution_price, ...
 ```
 
 **TTL behavior:** `yf_cache` and `yf_intraday_cache` entries older than 1 hour are treated as stale; callers re-fetch from yfinance. Other tables are append-only. Full schema details: [docs/CODE_EXPLAINER.md](docs/CODE_EXPLAINER.md#local-storage-schema).
@@ -598,7 +598,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performan
 The script runs every 5 minutes. With `RunAtLoad: false` (default), the first run happens ~5 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
 `cd /path/to/trading-bot && .venv/bin/python3 scripts/compare_historical.py --days 365 --use-volatility --execute --no-llm`
 
-The daily report job runs once per day and writes a dated text file (default: `~/.trading-bot-data/reports/performance_YYYYMMDD.txt`) plus **performance graphs** (PNG) showing per-trade P&L over time — green bars for wins, red for losses, with a cumulative P&L overlay.
+The daily report job runs once per day and writes a dated text file (default: `~/.trading-bot-data/reports/performance_YYYYMMDD.txt`) plus **performance graphs** (PNG) showing per-trade P&L over time — green bars for wins, red for losses, with a cumulative P&L overlay. The report also includes a **bet accuracy** section showing the distance between the bot's bets and actual asset resolution prices — how far the underlying asset price was from the threshold at settlement. This data feeds back into model improvement.
 
 **crontab (alternative):**
 

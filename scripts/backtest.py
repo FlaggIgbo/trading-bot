@@ -68,6 +68,26 @@ def _compute_max_drawdown(cumulative_pnl: list[float]) -> tuple[float, int, int]
     return max_dd, trough_idx, peak_idx
 
 
+def _compute_accuracy_summary(distances: list[float]) -> dict | None:
+    """Summarize bet-vs-resolution distances (% from threshold, signed by direction)."""
+    if not distances:
+        return None
+    n = len(distances)
+    abs_dists = [abs(d) for d in distances]
+    sorted_abs = sorted(abs_dists)
+    median_abs = sorted_abs[n // 2] if n % 2 == 1 else (sorted_abs[n // 2 - 1] + sorted_abs[n // 2]) / 2.0
+    mean_abs = sum(abs_dists) / n
+    mean_signed = sum(distances) / n
+    correct = sum(1 for d in distances if d >= 0)
+    return {
+        "trades_with_resolution_price": n,
+        "mean_abs_distance_pct": round(mean_abs, 2),
+        "median_abs_distance_pct": round(median_abs, 2),
+        "mean_signed_distance_pct": round(mean_signed, 2),
+        "pct_correct_side": round(correct / n * 100.0, 1) if n > 0 else None,
+    }
+
+
 def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     """Backtest from real predictions (resolved trades)."""
     try:
@@ -100,9 +120,10 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     total_pnl = sum(p.get("realized_pnl_cents", p.get("pnl_cents") or 0) or 0 for p in preds)
 
     trade_details = []
+    accuracy_distances: list[float] = []
     for p in preds:
         pnl_c = p.get("realized_pnl_cents", p.get("pnl_cents") or 0) or 0
-        trade_details.append({
+        detail: dict = {
             "ts": p.get("resolved_ts") or p.get("ts") or 0,
             "pnl_cents": float(pnl_c),
             "outcome": p.get("outcome", "unknown"),
@@ -110,7 +131,21 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
             "side": p.get("side", ""),
             "entry_price": float(p.get("entry_price") or 0),
             "exit_price": float(p.get("exit_price") or 0),
-        })
+        }
+        threshold = p.get("threshold")
+        direction = (p.get("direction") or "").lower().strip()
+        res_price = p.get("resolution_price")
+        if threshold and res_price and float(threshold) > 0:
+            dist_pct = ((float(res_price) - float(threshold)) / float(threshold)) * 100.0
+            if direction == "below":
+                dist_pct = -dist_pct
+            detail["distance_pct"] = round(dist_pct, 4)
+            detail["resolution_price"] = float(res_price)
+            detail["threshold"] = float(threshold)
+            accuracy_distances.append(dist_pct)
+        trade_details.append(detail)
+
+    accuracy_summary = _compute_accuracy_summary(accuracy_distances)
 
     if pd is not None:
         df = pd.DataFrame(preds)
@@ -138,6 +173,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
             "sharpe": _compute_sharpe(returns) if returns else None,
             "max_drawdown_cents": max_dd,
             "trade_details": trade_details,
+            "accuracy": accuracy_summary,
         }
     cumulative: list[float] = []
     run = 0
@@ -168,6 +204,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
         "sharpe": _compute_sharpe(returns) if returns else None,
         "max_drawdown_cents": max_dd,
         "trade_details": trade_details,
+        "accuracy": accuracy_summary,
     }
 
 
@@ -533,6 +570,16 @@ def main() -> int:
         print(f"  Fill dwell rule: >= {out['fill_min_dwell_minutes']:.1f} min")
     if out.get("liquidity_friction_cents") is not None:
         print(f"  Liquidity friction: {out['liquidity_friction_cents']:.2f} cents/trade")
+    acc = out.get("accuracy")
+    if acc and acc.get("trades_with_resolution_price", 0) > 0:
+        print("-" * 60)
+        print("  BET ACCURACY (distance: bet threshold vs resolution price)")
+        print(f"  Trades w/ resolution price: {acc['trades_with_resolution_price']}")
+        print(f"  Mean |distance|:   {acc['mean_abs_distance_pct']:.2f}%")
+        print(f"  Median |distance|: {acc['median_abs_distance_pct']:.2f}%")
+        print(f"  Mean signed dist:  {acc['mean_signed_distance_pct']:+.2f}%")
+        if acc.get("pct_correct_side") is not None:
+            print(f"  Correct side:      {acc['pct_correct_side']:.1f}%")
     print("=" * 60)
     return 0
 

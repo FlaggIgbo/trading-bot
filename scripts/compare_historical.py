@@ -3060,10 +3060,18 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
             min_after, max_after = get_price_after_buy_from_snapshots(
                 t, float(buy_ts), side, PLATFORM_KALSHI, cfg
             )
+        res_price: float | None = None
+        yf_t = p.get("yf_ticker") or ""
+        if yf_t:
+            try:
+                res_price = yf_get_snapshot(yf_t)
+            except Exception:
+                pass
         record_prediction_outcome(
             p["id"], yes_settled, pnl_cents, cfg,
             min_price_after_buy=min_after,
             max_price_after_buy=max_after,
+            resolution_price=res_price,
         )
         if resolve_position_evaluations:
             resolve_position_evaluations(t, yes_settled, cfg)

@@ -198,6 +198,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_predictions_exit_columns(conn)
     _migrate_predictions_realized_pnl_column(conn)
     _migrate_market_snapshots_depth_columns(conn)
+    _migrate_predictions_resolution_price(conn)
 
 
 def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
@@ -289,6 +290,15 @@ def _migrate_market_snapshots_depth_columns(conn: sqlite3.Connection) -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
+
+def _migrate_predictions_resolution_price(conn: sqlite3.Connection) -> None:
+    """Add resolution_price column to predictions (actual underlying asset price at settlement)."""
+    try:
+        conn.execute("ALTER TABLE predictions ADD COLUMN resolution_price REAL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def get_price_after_buy_from_snapshots(
@@ -1460,9 +1470,11 @@ def record_prediction_outcome(
     *,
     min_price_after_buy: float | None = None,
     max_price_after_buy: float | None = None,
+    resolution_price: float | None = None,
 ) -> bool:
     """Mark a prediction as resolved. outcome: win if (side==yes and yes_settled) or (side==no and not yes_settled).
-    Optionally store min/max contract price after we bought (from market_snapshots) for calibration."""
+    Optionally store min/max contract price after we bought (from market_snapshots) for calibration.
+    resolution_price: the actual underlying asset price at settlement time (for accuracy tracking)."""
     conn = _get_conn(config)
     if not conn:
         return False
@@ -1477,16 +1489,22 @@ def record_prediction_outcome(
         side = row["side"]
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
         outcome = "win" if won else "lose"
+        now_ts = time.time()
+        set_parts = [
+            "outcome=?", "pnl_cents=?", "realized_pnl_cents=?", "resolved_ts=?",
+        ]
+        params: list[Any] = [outcome, pnl_cents, pnl_cents, now_ts]
         if min_price_after_buy is not None and max_price_after_buy is not None:
-            conn.execute(
-                "UPDATE predictions SET outcome=?, pnl_cents=?, realized_pnl_cents=?, resolved_ts=?, min_price_after_buy=?, max_price_after_buy=? WHERE id=?",
-                (outcome, pnl_cents, pnl_cents, time.time(), min_price_after_buy, max_price_after_buy, prediction_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE predictions SET outcome=?, pnl_cents=?, realized_pnl_cents=?, resolved_ts=? WHERE id=?",
-                (outcome, pnl_cents, pnl_cents, time.time(), prediction_id),
-            )
+            set_parts += ["min_price_after_buy=?", "max_price_after_buy=?"]
+            params += [min_price_after_buy, max_price_after_buy]
+        if resolution_price is not None:
+            set_parts.append("resolution_price=?")
+            params.append(resolution_price)
+        params.append(prediction_id)
+        conn.execute(
+            f"UPDATE predictions SET {', '.join(set_parts)} WHERE id=?",
+            params,
+        )
         conn.commit()
         return True
     except Exception:
@@ -1608,6 +1626,109 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         }
     except Exception:
         return {"enabled": False, "resolved_count": 0}
+    finally:
+        conn.close()
+
+
+def get_bet_accuracy_stats(
+    config: dict | None = None,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+) -> dict[str, Any]:
+    """
+    Compute bet-vs-resolution accuracy from resolved predictions that have
+    threshold, direction, and resolution_price.  Returns aggregate distance
+    metrics that show how close the bot's bets were to the actual outcome.
+
+    Distance = (resolution_price - threshold) / threshold, signed by direction:
+      - For "above" bets: positive distance means asset was above threshold (YES won)
+      - For "below" bets: sign is flipped so positive = bet-favorable
+
+    Returns dict with per-trade details and summary stats (mean, median, stddev,
+    pct_correct_side, avg_distance_when_wrong, avg_distance_when_right).
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"enabled": False, "count": 0}
+    try:
+        q = """SELECT ticker, side, outcome, threshold, direction, resolution_price,
+                      hist_p, entry_price, COALESCE(realized_pnl_cents, pnl_cents) AS pnl_cents,
+                      resolved_ts, yf_ticker
+               FROM predictions
+               WHERE outcome IN ('win','lose')
+                 AND resolution_price IS NOT NULL
+                 AND threshold IS NOT NULL
+                 AND threshold > 0"""
+        params: list[Any] = []
+        if start_ts is not None:
+            q += " AND COALESCE(resolved_ts, ts) >= ?"
+            params.append(float(start_ts))
+        if end_ts is not None:
+            q += " AND COALESCE(resolved_ts, ts) <= ?"
+            params.append(float(end_ts))
+        q += " ORDER BY resolved_ts ASC, ts ASC"
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            return {"enabled": True, "count": 0, "trades": [], "summary": {}}
+
+        trades: list[dict[str, Any]] = []
+        distances: list[float] = []
+        correct_distances: list[float] = []
+        wrong_distances: list[float] = []
+        for r in rows:
+            threshold = float(r["threshold"])
+            res_price = float(r["resolution_price"])
+            direction = (r["direction"] or "").lower().strip()
+            raw_dist_pct = ((res_price - threshold) / threshold) * 100.0
+            if direction == "below":
+                raw_dist_pct = -raw_dist_pct
+            side = (r["side"] or "").lower()
+            outcome = r["outcome"]
+            won = outcome == "win"
+            trade = {
+                "ticker": r["ticker"],
+                "yf_ticker": r["yf_ticker"],
+                "side": side,
+                "direction": direction,
+                "threshold": threshold,
+                "resolution_price": res_price,
+                "distance_pct": round(raw_dist_pct, 4),
+                "abs_distance_pct": round(abs(raw_dist_pct), 4),
+                "hist_p": r["hist_p"],
+                "entry_price": r["entry_price"],
+                "outcome": outcome,
+                "pnl_cents": r["pnl_cents"],
+                "resolved_ts": r["resolved_ts"],
+            }
+            trades.append(trade)
+            distances.append(raw_dist_pct)
+            if won:
+                correct_distances.append(abs(raw_dist_pct))
+            else:
+                wrong_distances.append(abs(raw_dist_pct))
+
+        abs_dists = [abs(d) for d in distances]
+        sorted_abs = sorted(abs_dists)
+        n = len(sorted_abs)
+        median_abs = sorted_abs[n // 2] if n % 2 == 1 else (sorted_abs[n // 2 - 1] + sorted_abs[n // 2]) / 2.0
+        mean_abs = sum(abs_dists) / n
+        mean_signed = sum(distances) / n
+        variance = sum((d - mean_signed) ** 2 for d in distances) / max(1, n - 1)
+        stddev = variance ** 0.5
+
+        summary = {
+            "count": n,
+            "mean_abs_distance_pct": round(mean_abs, 4),
+            "median_abs_distance_pct": round(median_abs, 4),
+            "mean_signed_distance_pct": round(mean_signed, 4),
+            "stddev_distance_pct": round(stddev, 4),
+            "pct_correct_side": round(len(correct_distances) / n * 100.0, 2) if n > 0 else None,
+            "avg_distance_when_correct_pct": round(sum(correct_distances) / len(correct_distances), 4) if correct_distances else None,
+            "avg_distance_when_wrong_pct": round(sum(wrong_distances) / len(wrong_distances), 4) if wrong_distances else None,
+        }
+        return {"enabled": True, "count": n, "trades": trades, "summary": summary}
+    except Exception:
+        return {"enabled": False, "count": 0}
     finally:
         conn.close()
 

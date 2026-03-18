@@ -11,6 +11,11 @@ sys.path.insert(0, str(_ROOT))
 
 from config import get_config
 
+try:
+    from storage import get_bet_accuracy_stats
+except ImportError:
+    get_bet_accuracy_stats = None
+
 
 def _load_backtest_module():
     bt_path = _ROOT / "scripts" / "backtest.py"
@@ -205,6 +210,50 @@ def main() -> int:
     lines.append(f"Max drawdown: {_fmt_pnl_cents(syn_long.get('max_drawdown_cents'))}")
     if syn_long.get("skipped_not_filled") is not None:
         lines.append(f"Skipped (not filled): {syn_long.get('skipped_not_filled')}")
+
+    # --- Bet Accuracy (distance between bet and resolution price) ---
+    def _append_accuracy_section(lines: list[str], result: dict, label: str) -> None:
+        acc = result.get("accuracy")
+        if not acc:
+            return
+        n = acc.get("trades_with_resolution_price", 0)
+        if n == 0:
+            return
+        lines.append("")
+        lines.append(f"Bet Accuracy — {label}")
+        lines.append("-" * 40)
+        lines.append(f"Trades with resolution price: {n}")
+        lines.append(f"Mean |distance|: {acc.get('mean_abs_distance_pct', 'n/a'):.2f}%")
+        lines.append(f"Median |distance|: {acc.get('median_abs_distance_pct', 'n/a'):.2f}%")
+        lines.append(f"Mean signed distance: {acc.get('mean_signed_distance_pct', 'n/a'):+.2f}%")
+        lines.append(f"Correct side: {_fmt_pct(acc.get('pct_correct_side', 0) / 100.0 if acc.get('pct_correct_side') is not None else None)}")
+
+    _append_accuracy_section(lines, real_short, f"Real {report_days_short}d")
+    _append_accuracy_section(lines, real_long, f"Real {report_days_long}d")
+
+    if get_bet_accuracy_stats:
+        end_ts = datetime.utcnow().timestamp()
+        start_short = (datetime.utcnow() - timedelta(days=report_days_short)).timestamp()
+        start_long = (datetime.utcnow() - timedelta(days=report_days_long)).timestamp()
+        acc_short = get_bet_accuracy_stats(cfg, start_ts=start_short, end_ts=end_ts)
+        acc_long = get_bet_accuracy_stats(cfg, start_ts=start_long, end_ts=end_ts)
+        for acc_data, label in [
+            (acc_short, f"Storage {report_days_short}d"),
+            (acc_long, f"Storage {report_days_long}d"),
+        ]:
+            summary = acc_data.get("summary") if acc_data else None
+            if summary and acc_data.get("count", 0) > 0:
+                lines.append("")
+                lines.append(f"Bet Accuracy — {label}")
+                lines.append("-" * 40)
+                lines.append(f"Resolved trades: {summary.get('count', 0)}")
+                lines.append(f"Mean |distance|: {_fmt_num(summary.get('mean_abs_distance_pct'))}%")
+                lines.append(f"Median |distance|: {_fmt_num(summary.get('median_abs_distance_pct'))}%")
+                lines.append(f"Mean signed distance: {_fmt_num(summary.get('mean_signed_distance_pct'))}%")
+                lines.append(f"Std dev: {_fmt_num(summary.get('stddev_distance_pct'))}%")
+                lines.append(f"Correct side: {_fmt_pct(summary.get('pct_correct_side', 0) / 100.0 if summary.get('pct_correct_side') is not None else None)}")
+                lines.append(f"Avg |dist| when correct: {_fmt_num(summary.get('avg_distance_when_correct_pct'))}%")
+                lines.append(f"Avg |dist| when wrong: {_fmt_num(summary.get('avg_distance_when_wrong_pct'))}%")
 
     report = "\n".join(lines) + "\n"
     file_path.write_text(report, encoding="utf-8")
