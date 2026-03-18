@@ -53,6 +53,7 @@ from constants import (
     REC_SKIP,
 )
 from execution_engine import sync_and_cancel_resting_orders
+from fill_reconciliation import reconcile_confirmed_fills
 from gemini_client import (
     GeminiPredictionClient,
     GeminiTradingClient,
@@ -80,16 +81,18 @@ try:
         get_realized_pnl_stats,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
+        mark_prediction_cancelled,
+        record_prediction_from_fill,
+        record_prediction_early_exit,
         record_limit_order,
         record_market_snapshot,
         record_order_cancel,
-        record_prediction,
         record_prediction_outcome,
         record_resolved,
     )
 except ImportError:
     get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
-    get_price_after_buy_from_snapshots = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction = record_prediction_outcome = record_resolved = None
+    get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
@@ -2426,6 +2429,8 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
                 break
     except Exception:
         return
+    sp_sync = _load_strategy_params((cfg or {}).get("strategy", {}))
+    min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
     for p in kalshi_preds:
         t = p.get("ticker")
         s = settlements_by_ticker.get(t) if t else None
@@ -2441,7 +2446,15 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
             continue
         side = (p.get("side") or "").lower()
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
-        pnl_cents = int((100 - entry * 100) * cnt) if won else int(-entry * 100 * cnt)
+        yf_ticker = p.get("yf_ticker")
+        fee_rate = _maker_fee_rate_for_market(
+            sp_sync,
+            PLATFORM_KALSHI,
+            str(yf_ticker or ""),
+        )
+        fee_cents = int(round(_fee_per_contract(entry, fee_rate, min_fee) * 100 * cnt))
+        gross_cents = int((100 - entry * 100) * cnt) if won else int(-entry * 100 * cnt)
+        pnl_cents = gross_cents - fee_cents
         buy_ts = p.get("ts")
         min_after = max_after = None
         if buy_ts is not None and get_price_after_buy_from_snapshots:
@@ -2485,6 +2498,8 @@ def main():
     parser.add_argument("--use-volatility", action="store_true", help="Use volatility-based probability (option-style) in addition to empirical")
     parser.add_argument("--log", metavar="DIR", nargs="?", const="~/Desktop/trading-bot-logs", default=None, help="Log run output to ~/Desktop/trading-bot-logs/ or specified dir (eval_YYYYMMDDHH.log per hour, append within hour)")
     parser.add_argument("--limit-analysis", action="store_true", help="Print analysis of unfilled limit orders (why they didn't hit; inform limit_dip_pct tuning)")
+    parser.add_argument("--reconcile-diagnostics", action="store_true", help="Print fill reconciliation counters (seen/inserted/duplicate/skipped) per platform")
+    parser.add_argument("--reconcile-only", action="store_true", help="Run fill reconciliation pass only, print diagnostics, then exit")
     args = parser.parse_args()
     args.use_llm = not args.no_llm
 
@@ -2631,6 +2646,42 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print(f"[Gemini] No events fetched: {err}")
         if "proxy" in str(err).lower() or "403" in str(err):
             print("[Gemini] Tip: If using a proxy (HTTP_PROXY/HTTPS_PROXY), api.gemini.com may be blocked. Try: NO_PROXY=api.gemini.com,*.gemini.com")
+
+    # Reconcile confirmed fills -> predictions (source of truth), not accepted order responses.
+    try:
+        gemini_trading_recon = None
+        try:
+            gemini_trading_recon = GeminiTradingClient()
+        except ValueError:
+            gemini_trading_recon = None
+        recon_stats = reconcile_confirmed_fills(
+            kalshi=kalshi,
+            gemini_trading=gemini_trading_recon,
+            cfg=cfg,
+            gemini_events_by_asset=gemini_events_by_asset,
+            get_instrument_symbol=get_instrument_symbol,
+            record_prediction_from_fill=record_prediction_from_fill,
+            platform_kalshi=PLATFORM_KALSHI,
+            platform_gemini=PLATFORM_GEMINI,
+            logger=print,
+            lookback_hours=48,
+            diagnostics=bool(getattr(args, "reconcile_diagnostics", False) or getattr(args, "reconcile_only", False)),
+        )
+        if bool(getattr(args, "reconcile_only", False)):
+            print("\n" + "=" * 75)
+            print("Reconciliation-only run complete.")
+            print(
+                f"  Kalshi: seen={recon_stats.get('kalshi_seen', 0)}, inserted={recon_stats.get('kalshi_inserted', 0)}, "
+                f"dup={recon_stats.get('kalshi_duplicate', 0)}, skipped={recon_stats.get('kalshi_skipped', 0)}"
+            )
+            print(
+                f"  Gemini: seen={recon_stats.get('gemini_seen', 0)}, inserted={recon_stats.get('gemini_inserted', 0)}, "
+                f"dup={recon_stats.get('gemini_duplicate', 0)}, skipped={recon_stats.get('gemini_skipped', 0)}"
+            )
+            print("=" * 75)
+            return 0
+    except Exception:
+        pass
 
     pending_orders: list[dict] = []
     quote_candidates: list[dict] = []
@@ -4368,6 +4419,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             find_gemini_event=_find_gemini_event,
             get_instrument_symbol=get_instrument_symbol,
             record_order_cancel=record_order_cancel,
+            mark_prediction_cancelled=mark_prediction_cancelled,
             cfg=cfg,
             logger=print,
         )
@@ -4401,6 +4453,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if result:
                         print(f"  Placed SELL {s['side'].upper()} {s['ticker']} x {s['count']}")
                         sells_placed += 1
+                        if record_prediction_early_exit:
+                            sell_rate = _maker_fee_rate_for_market(
+                                sp, PLATFORM_KALSHI, str(s.get("yf_ticker") or "")
+                            )
+                            record_prediction_early_exit(
+                                platform=PLATFORM_KALSHI,
+                                ticker=str(s["ticker"]),
+                                side=str(s["side"]),
+                                sell_price=float(s["price"]),
+                                count_sold=int(s.get("count") or 0),
+                                maker_fee_rate=float(sell_rate),
+                                min_fee_per_order=float(sp.min_fee_per_order),
+                                exit_reason=str(s.get("rec") or "early_sell"),
+                                config=cfg,
+                            )
                     else:
                         print(f"  (skipped SELL {s['ticker']})")
                 except Exception as ex:
@@ -4420,6 +4487,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if result:
                         print(f"  Placed SELL {s['side'].upper()} (Gemini) {s['ticker']} x {s['count']}")
                         sells_placed += 1
+                        if record_prediction_early_exit:
+                            sell_rate = _maker_fee_rate_for_market(
+                                sp, PLATFORM_GEMINI, str(s.get("yf_ticker") or "")
+                            )
+                            record_prediction_early_exit(
+                                platform=PLATFORM_GEMINI,
+                                ticker=str(s["ticker"]),
+                                side=str(s["side"]),
+                                sell_price=float(s["price"]),
+                                count_sold=int(s.get("count") or 0),
+                                maker_fee_rate=float(sell_rate),
+                                min_fee_per_order=float(sp.min_fee_per_order),
+                                exit_reason=str(s.get("rec") or "early_sell"),
+                                config=cfg,
+                            )
                     else:
                         print(f"  (skipped SELL (Gemini) {s['ticker']} - balance/API constraint)")
 
@@ -4464,51 +4546,28 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if result:
                         print(f"  Placed BUY {o['side'].upper()} {o['ticker']} x {count}")
                         buys_placed += 1
-                        if record_prediction and o.get("rec") in (REC_BUY_YES, REC_BUY_NO) and o.get("hist_p") is not None:
-                            ord_obj = result.get("order", result)
-                            oid = ord_obj.get("order_id") if isinstance(ord_obj, dict) else None
-                            actual_fill_price = _extract_actual_fill_price(result, float(o["price"]))
-                            theoretical_price = o.get("theoretical_price")
-                            fill_slip_bps = _fill_slippage_bps(actual_fill_price, theoretical_price)
-                            record_prediction(
+                        ord_obj = result.get("order", result)
+                        oid = ord_obj.get("order_id") if isinstance(ord_obj, dict) else None
+                        if record_limit_order and oid:
+                            record_limit_order(
                                 platform=PLATFORM_KALSHI,
                                 ticker=o["ticker"],
-                                side=o["side"],
-                                hist_p=o["hist_p"],
-                                entry_price=actual_fill_price,
-                                count=count,
                                 order_id=oid,
+                                side=o["side"],
+                                action="buy",
+                                limit_price=o["price"],
+                                bid_at_place=o.get("bid_at_place"),
+                                dip_pct_used=o.get("dip_pct_used"),
+                                hist_p=o.get("hist_p"),
                                 vol_p=o.get("vol_p"),
+                                edge=o.get("edge"),
+                                rec=o.get("rec"),
+                                count=count,
                                 yf_ticker=o.get("yf_ticker"),
                                 threshold=o.get("threshold"),
                                 direction=o.get("direction"),
-                                rec=o.get("rec"),
-                                theoretical_price=theoretical_price,
-                                bid_at_place=o.get("bid_at_place"),
-                                spread_bps_at_place=o.get("spread_bps_at_place"),
-                                fill_slippage_bps=fill_slip_bps,
                                 config=cfg,
                             )
-                            if record_limit_order and oid:
-                                record_limit_order(
-                                    platform=PLATFORM_KALSHI,
-                                    ticker=o["ticker"],
-                                    order_id=oid,
-                                    side=o["side"],
-                                    action="buy",
-                                    limit_price=o["price"],
-                                    bid_at_place=o.get("bid_at_place"),
-                                    dip_pct_used=o.get("dip_pct_used"),
-                                    hist_p=o.get("hist_p"),
-                                    vol_p=o.get("vol_p"),
-                                    edge=o.get("edge"),
-                                    rec=o.get("rec"),
-                                    count=count,
-                                    yf_ticker=o.get("yf_ticker"),
-                                    threshold=o.get("threshold"),
-                                    direction=o.get("direction"),
-                                    config=cfg,
-                                )
                     else:
                         print(f"  (skipped BUY {o['ticker']} - balance/API constraint)")
                 except Exception as ex:
@@ -4536,50 +4595,27 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if result:
                         print(f"  Placed BUY {o['side'].upper()} (Gemini) {o['ticker']} x {count}")
                         buys_placed += 1
-                        if record_prediction and o.get("rec") in (REC_BUY_YES, REC_BUY_NO) and o.get("hist_p") is not None:
-                            oid = str(result.get("orderId") or result.get("order_id", "")) if isinstance(result, dict) else None
-                            actual_fill_price = _extract_actual_fill_price(result, float(o["price"]))
-                            theoretical_price = o.get("theoretical_price")
-                            fill_slip_bps = _fill_slippage_bps(actual_fill_price, theoretical_price)
-                            record_prediction(
+                        oid = str(result.get("orderId") or result.get("order_id", "")) if isinstance(result, dict) else None
+                        if record_limit_order and oid:
+                            record_limit_order(
                                 platform=PLATFORM_GEMINI,
                                 ticker=o["ticker"],
-                                side=o["side"],
-                                hist_p=o["hist_p"],
-                                entry_price=actual_fill_price,
-                                count=count,
                                 order_id=oid,
+                                side=o["side"],
+                                action="buy",
+                                limit_price=o["price"],
+                                bid_at_place=o.get("bid_at_place"),
+                                dip_pct_used=o.get("dip_pct_used"),
+                                hist_p=o.get("hist_p"),
                                 vol_p=o.get("vol_p"),
+                                edge=o.get("edge"),
+                                rec=o.get("rec"),
+                                count=count,
                                 yf_ticker=o.get("yf_ticker"),
                                 threshold=o.get("threshold"),
                                 direction=o.get("direction"),
-                                rec=o.get("rec"),
-                                theoretical_price=theoretical_price,
-                                bid_at_place=o.get("bid_at_place"),
-                                spread_bps_at_place=o.get("spread_bps_at_place"),
-                                fill_slippage_bps=fill_slip_bps,
                                 config=cfg,
                             )
-                            if record_limit_order and oid:
-                                record_limit_order(
-                                    platform=PLATFORM_GEMINI,
-                                    ticker=o["ticker"],
-                                    order_id=oid,
-                                    side=o["side"],
-                                    action="buy",
-                                    limit_price=o["price"],
-                                    bid_at_place=o.get("bid_at_place"),
-                                    dip_pct_used=o.get("dip_pct_used"),
-                                    hist_p=o.get("hist_p"),
-                                    vol_p=o.get("vol_p"),
-                                    edge=o.get("edge"),
-                                    rec=o.get("rec"),
-                                    count=count,
-                                    yf_ticker=o.get("yf_ticker"),
-                                    threshold=o.get("threshold"),
-                                    direction=o.get("direction"),
-                                    config=cfg,
-                                )
                     else:
                         print(f"  (skipped BUY (Gemini) {o['ticker']} - balance/API constraint)")
                 elif sym and not gemini_trading:

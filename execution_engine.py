@@ -82,6 +82,7 @@ def sync_and_cancel_resting_orders(
     find_gemini_event: Callable[[dict[str, list[dict[str, Any]]], str], dict[str, Any] | None],
     get_instrument_symbol: Callable[[dict[str, Any] | None, str], str | None],
     record_order_cancel: Callable[..., Any] | None,
+    mark_prediction_cancelled: Callable[..., Any] | None,
     cfg: dict[str, Any],
     logger: Callable[[str], None] = print,
 ) -> OrderSyncResult:
@@ -343,6 +344,13 @@ def sync_and_cancel_resting_orders(
                 ticker=item.get("ticker"),
                 side=item.get("side"),
                 limit_price=item.get("old_price"),
+            )
+        if mark_prediction_cancelled:
+            mark_prediction_cancelled(
+                platform=platform,
+                order_id=str(order_id),
+                cancel_reason=str(reason),
+                config=cfg,
             )
         logger(f"  Cancelled ({'Kalshi' if platform == platform_kalshi else 'Gemini'}) {label} — {reason}")
         result.cancels_done += 1

@@ -96,6 +96,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
 
     wins = sum(1 for p in preds if p.get("outcome") == "win")
     loses = sum(1 for p in preds if p.get("outcome") == "lose")
+    sold = sum(1 for p in preds if p.get("outcome") == "sold")
     total_pnl = sum(p.get("pnl_cents") or 0 for p in preds)
     if pd is not None:
         df = pd.DataFrame(preds)
@@ -114,6 +115,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
             "trades": len(preds),
             "win_count": wins,
             "lose_count": loses,
+            "sold_count": sold,
             "total_pnl_cents": total_pnl,
             "win_rate": wins / (wins + loses) if (wins + loses) > 0 else None,
             "sharpe": _compute_sharpe(returns) if returns else None,
@@ -142,6 +144,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
         "trades": len(preds),
         "win_count": wins,
         "lose_count": loses,
+        "sold_count": sold,
         "total_pnl_cents": total_pnl,
         "win_rate": wins / (wins + loses) if (wins + loses) > 0 else None,
         "sharpe": _compute_sharpe(returns) if returns else None,

@@ -332,6 +332,8 @@ python3 scripts/compare_historical.py --preview              # Show planned orde
 python3 scripts/compare_historical.py --execute              # Place real buy/sell orders (one-shot live run)
 python3 scripts/compare_historical.py --execute --no-llm    # Live run, skip LLM analysis
 python3 scripts/compare_historical.py --use-volatility      # Add option-style probability (log-normal model)
+python3 scripts/compare_historical.py --reconcile-only      # Fill reconciliation diagnostics only (no eval/order placement)
+python3 scripts/compare_historical.py --reconcile-diagnostics --preview --no-llm  # Include reconciliation counters in normal run logs
 ```
 
 **Single production live run** — Evaluate markets and place real orders if the bot finds opportunities:
@@ -358,6 +360,8 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--no-llm`         | Skip Ollama analysis                                                                      |
 | `--log`            | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket, append within hour; or `--log DIR` for custom dir) |
 | `--limit-analysis` | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
+| `--reconcile-diagnostics` | Print reconciliation counters per run (`seen / inserted / dup / skipped`) for Kalshi + Gemini fills |
+| `--reconcile-only` | Run fill reconciliation pass only and exit (quick auditing command) |
 
 Config: `strategy.strategy_engine`, `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, and related keys in `config.yaml`.
 
@@ -418,6 +422,9 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`limit_order_ttl_minutes`**: Cancel and refresh stale resting BUY limits so order prices are based on current model state.
 - **`cancel_all_on_regime_shift`**: On strong momentum/volatility regime shifts, cancel risky resting BUY limits before re-quoting.
 - **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. This lifecycle now lives in `execution_engine.py` (called by `compare_historical.py`) so execution sync is isolated from probability math. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces. If the existing order is same or better, it keeps it and skips placing a duplicate.
+- **Intent vs execution accounting**: canceled buy intents are marked `cancelled` (excluded from realized PnL), and successful early sells are recorded as `sold` with FIFO realized PnL so performance stats better match exchange balance movement.
+- **Fee-aware realized PnL**: settlement/early-exit PnL now applies maker-fee estimates (`*_maker_fee_rate`, `min_fee_per_order`) instead of reporting gross-only outcomes.
+- **Confirmed-fill reconciliation**: a dedicated reconciliation pass ingests exchange fills (Kalshi + Gemini) and creates `predictions` from confirmed fills, rather than from order-accepted responses.
 
 ### Easy win (model and market aligned)
 

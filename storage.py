@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import time
+import math
 from pathlib import Path
 from typing import Any
 
@@ -111,23 +112,30 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             platform TEXT NOT NULL,
             ticker TEXT NOT NULL,
             order_id TEXT,
+            fill_id TEXT,
             side TEXT NOT NULL,
             hist_p REAL NOT NULL,
             vol_p REAL,
             entry_price REAL NOT NULL,
             count INTEGER NOT NULL,
             ts REAL NOT NULL,
+            fill_ts REAL,
+            source TEXT,
             yf_ticker TEXT,
             threshold REAL,
             direction TEXT,
             rec TEXT,
             outcome TEXT,
             pnl_cents INTEGER,
-            resolved_ts REAL
+            resolved_ts REAL,
+            exit_price REAL,
+            exit_count INTEGER,
+            exit_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_predictions_ticker ON predictions(ticker);
         CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
         CREATE INDEX IF NOT EXISTS idx_predictions_platform ON predictions(platform);
+        CREATE INDEX IF NOT EXISTS idx_predictions_fill ON predictions(platform, fill_id);
         CREATE TABLE IF NOT EXISTS limit_orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             platform TEXT NOT NULL,
@@ -157,6 +165,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """)
     _migrate_predictions_price_after_buy(conn)
     _migrate_predictions_fill_attribution(conn)
+    _migrate_predictions_fill_identity(conn)
+    _migrate_predictions_exit_columns(conn)
     _migrate_market_snapshots_depth_columns(conn)
 
 
@@ -180,6 +190,39 @@ def _migrate_predictions_fill_attribution(conn: sqlite3.Connection) -> None:
     ]:
         try:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+
+def _migrate_predictions_fill_identity(conn: sqlite3.Connection) -> None:
+    """Add fill identity/source columns for reconciliation-driven inserts."""
+    for col, typ in [
+        ("fill_id", "TEXT"),
+        ("fill_ts", "REAL"),
+        ("source", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {typ}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_predictions_fill ON predictions(platform, fill_id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def _migrate_predictions_exit_columns(conn: sqlite3.Connection) -> None:
+    """Add optional exit-tracking columns for early-sell/cancel lifecycle accounting."""
+    for col, typ in [
+        ("exit_price", "REAL"),
+        ("exit_count", "INTEGER"),
+        ("exit_reason", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {typ}")
             conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -1107,6 +1150,104 @@ def record_prediction(
         conn.close()
 
 
+def record_prediction_from_fill(
+    *,
+    platform: str,
+    ticker: str,
+    side: str,
+    fill_id: str,
+    order_id: str | None,
+    entry_price: float,
+    count: int,
+    fill_ts: float | None = None,
+    source: str = "fill_reconciliation",
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Insert prediction only from confirmed fills (idempotent by platform+fill_id).
+    Pull contextual model metadata from limit_orders when available.
+    """
+    if not fill_id:
+        return {"status": "error", "id": None}
+    qty = int(count or 0)
+    if qty <= 0:
+        return {"status": "error", "id": None}
+    price = float(entry_price or 0.0)
+    if price <= 0:
+        return {"status": "error", "id": None}
+
+    conn = _get_conn(config)
+    if not conn:
+        return {"status": "error", "id": None}
+    try:
+        # Idempotency: skip if this fill was already recorded.
+        existing = conn.execute(
+            "SELECT id FROM predictions WHERE platform=? AND fill_id=? LIMIT 1",
+            (platform, str(fill_id)),
+        ).fetchone()
+        if existing:
+            return {"status": "duplicate", "id": int(existing["id"])}
+
+        ctx = None
+        if order_id:
+            ctx = conn.execute(
+                """SELECT hist_p, vol_p, yf_ticker, threshold, direction, rec,
+                          theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps
+                   FROM limit_orders
+                   WHERE platform=? AND order_id=?
+                   ORDER BY ts DESC LIMIT 1""",
+                (platform, str(order_id)),
+            ).fetchone()
+
+        hist_p = float(ctx["hist_p"]) if ctx and ctx["hist_p"] is not None else 0.5
+        vol_p = float(ctx["vol_p"]) if ctx and ctx["vol_p"] is not None else None
+        yf_ticker = str(ctx["yf_ticker"] or "") if ctx else ""
+        threshold = float(ctx["threshold"]) if ctx and ctx["threshold"] is not None else None
+        direction = str(ctx["direction"] or "") if ctx else ""
+        rec = str(ctx["rec"] or "") if ctx else ""
+        theoretical_price = float(ctx["theoretical_price"]) if ctx and ctx["theoretical_price"] is not None else None
+        bid_at_place = float(ctx["bid_at_place"]) if ctx and ctx["bid_at_place"] is not None else None
+        spread_bps_at_place = float(ctx["spread_bps_at_place"]) if ctx and ctx["spread_bps_at_place"] is not None else None
+        fill_slippage_bps = float(ctx["fill_slippage_bps"]) if ctx and ctx["fill_slippage_bps"] is not None else None
+
+        ts_val = float(fill_ts if fill_ts is not None else time.time())
+        cur = conn.execute(
+            """INSERT INTO predictions
+               (platform, ticker, order_id, fill_id, side, hist_p, vol_p, entry_price, count, ts, fill_ts, source,
+                yf_ticker, threshold, direction, rec, theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                platform,
+                ticker,
+                order_id or "",
+                str(fill_id),
+                side,
+                hist_p,
+                vol_p,
+                price,
+                qty,
+                ts_val,
+                ts_val,
+                source,
+                yf_ticker,
+                threshold,
+                direction,
+                rec,
+                theoretical_price,
+                bid_at_place,
+                spread_bps_at_place,
+                fill_slippage_bps,
+            ),
+        )
+        conn.commit()
+        return {"status": "inserted", "id": int(cur.lastrowid)}
+    except Exception:
+        conn.rollback()
+        return {"status": "error", "id": None}
+    finally:
+        conn.close()
+
+
 def get_unresolved_predictions(config: dict | None = None) -> list[dict]:
     """Return predictions that don't have an outcome yet (market may still be open)."""
     conn = _get_conn(config)
@@ -1114,11 +1255,147 @@ def get_unresolved_predictions(config: dict | None = None) -> list[dict]:
         return []
     try:
         rows = conn.execute(
-            "SELECT id, platform, ticker, side, hist_p, entry_price, count, ts FROM predictions WHERE outcome IS NULL"
+            "SELECT id, platform, ticker, order_id, side, hist_p, entry_price, count, ts, yf_ticker FROM predictions WHERE outcome IS NULL"
         ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
+    finally:
+        conn.close()
+
+
+def _fee_per_contract(price: float, maker_rate: float, min_fee_per_order: float = 0.01) -> float:
+    """Same fee model used by strategy evaluation: rounded-up maker fee with floor."""
+    try:
+        p = float(price)
+        r = float(maker_rate)
+        floor_fee = max(0.0, float(min_fee_per_order))
+    except (TypeError, ValueError):
+        return 0.0
+    fee = r * p * (1.0 - p)
+    if fee <= 0:
+        return 0.0
+    rounded = math.ceil(fee * 100) / 100
+    return max(rounded, floor_fee)
+
+
+def mark_prediction_cancelled(
+    *,
+    platform: str,
+    order_id: str,
+    cancel_reason: str,
+    config: dict | None = None,
+) -> int:
+    """
+    Mark unresolved prediction rows tied to a canceled order as cancelled.
+    Returns number of rows updated.
+    """
+    if not order_id:
+        return 0
+    conn = _get_conn(config)
+    if not conn:
+        return 0
+    try:
+        cur = conn.execute(
+            """UPDATE predictions
+               SET outcome='cancelled', pnl_cents=0, resolved_ts=?, exit_reason=?
+               WHERE outcome IS NULL AND platform=? AND order_id=?""",
+            (time.time(), cancel_reason, platform, str(order_id)),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    except Exception:
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def record_prediction_early_exit(
+    *,
+    platform: str,
+    ticker: str,
+    side: str,
+    sell_price: float,
+    count_sold: int,
+    maker_fee_rate: float = 0.0,
+    min_fee_per_order: float = 0.01,
+    exit_reason: str = "early_sell",
+    config: dict | None = None,
+) -> dict[str, int]:
+    """
+    Realize PnL for early sells using FIFO unresolved prediction lots.
+    Includes entry and exit fee estimates.
+    Returns {"closed_count": int, "pnl_cents": int}.
+    """
+    remaining = max(0, int(count_sold))
+    if remaining <= 0:
+        return {"closed_count": 0, "pnl_cents": 0}
+    conn = _get_conn(config)
+    if not conn:
+        return {"closed_count": 0, "pnl_cents": 0}
+    closed_total = 0
+    pnl_total = 0
+    now_ts = time.time()
+    try:
+        lots = conn.execute(
+            """SELECT * FROM predictions
+               WHERE outcome IS NULL AND platform=? AND ticker=? AND side=?
+               ORDER BY ts ASC, id ASC""",
+            (platform, ticker, side),
+        ).fetchall()
+        pred_cols = [r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()]
+        for lot in lots:
+            if remaining <= 0:
+                break
+            lot_count = int(lot["count"] or 0)
+            if lot_count <= 0:
+                continue
+            qty = min(remaining, lot_count)
+            entry = float(lot["entry_price"] or 0.0)
+            entry_fee = _fee_per_contract(entry, maker_fee_rate, min_fee_per_order)
+            exit_fee = _fee_per_contract(sell_price, maker_fee_rate, min_fee_per_order)
+            pnl_cents = int(round(((float(sell_price) - entry) - entry_fee - exit_fee) * 100.0 * qty))
+
+            if qty == lot_count:
+                conn.execute(
+                    """UPDATE predictions
+                       SET outcome='sold', pnl_cents=?, resolved_ts=?, exit_price=?, exit_count=?, exit_reason=?
+                       WHERE id=?""",
+                    (pnl_cents, now_ts, float(sell_price), qty, exit_reason, int(lot["id"])),
+                )
+            else:
+                conn.execute(
+                    "UPDATE predictions SET count=? WHERE id=?",
+                    (lot_count - qty, int(lot["id"])),
+                )
+                clone = {k: lot[k] for k in lot.keys() if k in pred_cols and k != "id"}
+                clone["count"] = qty
+                clone["outcome"] = "sold"
+                clone["pnl_cents"] = pnl_cents
+                clone["resolved_ts"] = now_ts
+                if "exit_price" in pred_cols:
+                    clone["exit_price"] = float(sell_price)
+                if "exit_count" in pred_cols:
+                    clone["exit_count"] = qty
+                if "exit_reason" in pred_cols:
+                    clone["exit_reason"] = exit_reason
+                cols = list(clone.keys())
+                vals = [clone[c] for c in cols]
+                conn.execute(
+                    f"INSERT INTO predictions ({','.join(cols)}) VALUES ({','.join(['?'] * len(cols))})",
+                    vals,
+                )
+
+            remaining -= qty
+            closed_total += qty
+            pnl_total += pnl_cents
+
+        conn.commit()
+        return {"closed_count": closed_total, "pnl_cents": pnl_total}
+    except Exception:
+        conn.rollback()
+        return {"closed_count": 0, "pnl_cents": 0}
     finally:
         conn.close()
 
@@ -1189,7 +1466,7 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         if has_pab_cols:
             select_cols += ", min_price_after_buy, max_price_after_buy"
         rows = conn.execute(
-            f"""SELECT {select_cols} FROM predictions WHERE outcome IS NOT NULL"""
+            f"""SELECT {select_cols} FROM predictions WHERE outcome IN ('win','lose')"""
         ).fetchall()
         if not rows:
             return {
@@ -1460,19 +1737,20 @@ def get_realized_pnl_stats(
 ) -> dict[str, float | int]:
     """
     Aggregate realized prediction outcomes over a time window.
-    Returns total_pnl_cents and counts for wins/losses/resolved.
+    Returns total_pnl_cents and counts for wins/losses/sold/resolved.
     """
     conn = _get_conn(config)
     if not conn:
-        return {"resolved_count": 0, "wins": 0, "losses": 0, "total_pnl_cents": 0}
+        return {"resolved_count": 0, "wins": 0, "losses": 0, "sold": 0, "total_pnl_cents": 0}
     try:
         q = (
             "SELECT "
             "COUNT(*) AS resolved_count, "
             "SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins, "
             "SUM(CASE WHEN outcome='lose' THEN 1 ELSE 0 END) AS losses, "
+            "SUM(CASE WHEN outcome='sold' THEN 1 ELSE 0 END) AS sold, "
             "SUM(COALESCE(pnl_cents, 0)) AS total_pnl_cents "
-            "FROM predictions WHERE outcome IN ('win','lose')"
+            "FROM predictions WHERE outcome IN ('win','lose','sold')"
         )
         params: list[Any] = []
         if since_ts is not None:
@@ -1480,15 +1758,16 @@ def get_realized_pnl_stats(
             params.append(float(since_ts))
         row = conn.execute(q, params).fetchone()
         if not row:
-            return {"resolved_count": 0, "wins": 0, "losses": 0, "total_pnl_cents": 0}
+            return {"resolved_count": 0, "wins": 0, "losses": 0, "sold": 0, "total_pnl_cents": 0}
         return {
             "resolved_count": int(row["resolved_count"] or 0),
             "wins": int(row["wins"] or 0),
             "losses": int(row["losses"] or 0),
+            "sold": int(row["sold"] or 0),
             "total_pnl_cents": int(row["total_pnl_cents"] or 0),
         }
     except Exception:
-        return {"resolved_count": 0, "wins": 0, "losses": 0, "total_pnl_cents": 0}
+        return {"resolved_count": 0, "wins": 0, "losses": 0, "sold": 0, "total_pnl_cents": 0}
     finally:
         conn.close()
 
@@ -1504,7 +1783,7 @@ def get_predictions_for_backtest(
     if not conn:
         return []
     try:
-        q = "SELECT * FROM predictions WHERE outcome IS NOT NULL" if resolved_only else "SELECT * FROM predictions"
+        q = "SELECT * FROM predictions WHERE outcome IN ('win','lose','sold')" if resolved_only else "SELECT * FROM predictions"
         params: list[Any] = []
         if start_ts is not None:
             ts_col = "resolved_ts" if resolved_only else "ts"
@@ -1555,7 +1834,7 @@ def get_storage_stats(config: dict | None = None) -> dict[str, Any]:
         snap_count = conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
         resolved_count = conn.execute("SELECT COUNT(*) FROM resolved_outcomes").fetchone()[0]
         pred_count = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
-        pred_resolved = conn.execute("SELECT COUNT(*) FROM predictions WHERE outcome IS NOT NULL").fetchone()[0]
+        pred_resolved = conn.execute("SELECT COUNT(*) FROM predictions WHERE outcome IN ('win','lose','sold')").fetchone()[0]
         return {
             "enabled": True,
             "data_dir": str(_get_data_dir(config)),

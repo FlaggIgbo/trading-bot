@@ -242,7 +242,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
-8. **Execute (if --execute):** Review open orders via `execution_engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price → SELL first (Kalshi + Gemini) → BUY. Record predictions on fill.
+8. **Execute (if --execute):** Review open orders via `execution_engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
 
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
@@ -287,7 +287,19 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 - Reads active resting orders from both venues.
 - Keeps orders already at same/better price.
 - Cancels orders for `stale_ttl`, `no_longer_rec`, `want_better_price`, and `regime_shift_guard`.
-- Records cancel reason to storage through `record_order_cancel(...)`.
+- Records cancel reason to storage through `record_order_cancel(...)` and marks linked unresolved prediction intents as `cancelled`.
+
+---
+
+### `fill_reconciliation.py` — Confirmed Fill Ingestion
+
+**Purpose:** Build trading-performance rows from confirmed exchange fills rather than from order placement responses.
+
+**Key responsibility:** `reconcile_confirmed_fills(...)`
+- Pulls recent fills from Kalshi (`/portfolio/fills`) and Gemini fill/trade endpoints.
+- Normalizes fill ID/price/quantity/side across venue response formats.
+- Creates prediction rows idempotently (`platform + fill_id`) through `record_prediction_from_fill(...)`.
+- Attaches model context (`hist_p`, `vol_p`, thresholds, etc.) by joining against `limit_orders` via `order_id`.
 
 ---
 

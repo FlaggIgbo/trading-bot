@@ -426,6 +426,28 @@ class GeminiTradingClient(GeminiPredictionClient):
             body["symbol"] = symbol
         return self._post_auth("/v1/prediction-markets/positions", body)
 
+    def get_fills(self, limit: int = 200, offset: int = 0, symbol: str | None = None) -> dict:
+        """
+        Fetch confirmed fills/trades when available.
+        Gemini endpoint naming can vary; try known variants and return first success.
+        """
+        body = {"limit": min(max(1, int(limit)), 500), "offset": max(0, int(offset))}
+        if symbol:
+            body["symbol"] = symbol
+        paths = [
+            "/v1/prediction-markets/fills",
+            "/v1/prediction-markets/trades",
+            "/v1/prediction-markets/orders/fills",
+        ]
+        for path in paths:
+            try:
+                return self._post_auth(path, body)
+            except requests.HTTPError as e:
+                if e.response is not None and 400 <= e.response.status_code < 500:
+                    continue
+                raise
+        return {"fills": []}
+
     def place_order(
         self,
         symbol: str,
