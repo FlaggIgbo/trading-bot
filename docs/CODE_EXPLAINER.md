@@ -132,7 +132,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Mode               | What happens                                    | Code pointer                               |
 | ------------------ | ----------------------------------------------- | ------------------------------------------ |
 | Filter contradictory | Skip BUYs that conflict with existing or other pending BUYs (same underlying + resolution); Kalshi + Gemini; arb YES+NO allowed | `compare_historical.py:951` → `_filter_contradictory_buys()` |
-| Budget per platform | Kalshi balance for Kalshi orders; Gemini balance for Gemini orders (separate `_allocate_budget_to_orders` calls) | `compare_historical.py:1861` → per-platform allocation |
+| Budget per platform | Kalshi balance for Kalshi orders; Gemini balance for Gemini orders (separate `_allocate_budget_to_orders` calls). Under budget pressure, ranking is capital-efficiency first (expected net return per dollar per hour). | `compare_historical.py:1861` → per-platform allocation |
 | `--preview`        | Print planned orders, no API calls              | `compare_historical.py:1927-1975`          |
 | `--execute`        | Review orders → cancel stale → SELL first → BUY | `compare_historical.py:1671-1925`          |
 | Place Kalshi order | `create_order_safe()` with balance caps         | `kalshi_client.py` → `create_order_safe()` |

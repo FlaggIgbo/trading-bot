@@ -425,6 +425,7 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **Intent vs execution accounting**: canceled buy intents are marked `cancelled` (excluded from realized PnL), and successful early sells are recorded as `sold` with FIFO realized PnL so performance stats better match exchange balance movement.
 - **Fee-aware realized PnL**: settlement/early-exit PnL now applies maker-fee estimates (`*_maker_fee_rate`, `min_fee_per_order`) instead of reporting gross-only outcomes.
 - **Confirmed-fill reconciliation**: a dedicated reconciliation pass ingests exchange fills (Kalshi + Gemini) and creates `predictions` from confirmed fills, rather than from order-accepted responses.
+- **Capital-efficiency allocator**: when budget is constrained, order ranking now prioritizes expected net return per dollar-at-risk per hour-to-resolution (with edge as tie-breaker), improving account-level capital usage.
 
 ### Easy win (model and market aligned)
 

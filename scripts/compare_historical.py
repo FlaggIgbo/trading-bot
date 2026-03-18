@@ -2241,6 +2241,23 @@ def _allocate_budget_to_orders(
     """
     if not pending_orders:
         return
+
+    def _capital_efficiency_score(o: dict) -> float:
+        """
+        Prioritize expected net return per dollar-at-risk per hour until resolution.
+        This lifts account-level capital efficiency over simple edge-only ranking.
+        """
+        edge = max(0.0, float(o.get("edge", 0.0)))
+        price = max(0.01, float(o.get("price", 0.01)))
+        ttl_h = o.get("expected_hours_to_resolution")
+        if ttl_h is None:
+            title = str(o.get("title") or "")
+            yf = str(o.get("yf_ticker") or "")
+            parsed = _hours_until_resolution(title, yf) if title else None
+            ttl_h = parsed
+        ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
+        return (edge / price) / ttl_h
+
     available_cents = int(balance_cents * max_pct)
     total_cost_cents = sum(
         o.get("count", 10) * int(float(o.get("price", 0)) * 100)
@@ -2254,8 +2271,14 @@ def _allocate_budget_to_orders(
         for o in pending_orders:
             o["count"] = 1
         return
-    # Can't afford 1 of each: keep highest-edge trades first
-    by_edge = sorted(pending_orders, key=lambda x: -float(x.get("edge", 0)))
+    # Can't afford 1 of each: keep highest capital-efficiency trades first
+    by_edge = sorted(
+        pending_orders,
+        key=lambda x: (
+            -_capital_efficiency_score(x),
+            -float(x.get("edge", 0)),
+        ),
+    )
     running_cents = 0
     for o in by_edge:
         cost_1 = int(float(o.get("price", 0)) * 100)
@@ -2294,6 +2317,18 @@ def _cap_cross_platform_exposure(
             continue
         grouped.setdefault((str(yf), str(res_key)), []).append(o)
 
+    def _capital_efficiency_score(o: dict) -> float:
+        edge = max(0.0, float(o.get("edge", 0.0)))
+        price = max(0.01, float(o.get("price", 0.01)))
+        ttl_h = o.get("expected_hours_to_resolution")
+        if ttl_h is None:
+            title = str(o.get("title") or "")
+            yf = str(o.get("yf_ticker") or "")
+            parsed = _hours_until_resolution(title, yf) if title else None
+            ttl_h = parsed
+        ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
+        return (edge / price) / ttl_h
+
     for _, orders in grouped.items():
         total_cost = sum(
             int(float(o.get("price", 0)) * 100) * int(o.get("count", 0))
@@ -2301,8 +2336,14 @@ def _cap_cross_platform_exposure(
         )
         if total_cost <= cap_cents:
             continue
-        # Keep highest-edge orders/count first within this grouped thesis.
-        ranked = sorted(orders, key=lambda x: -float(x.get("edge", 0)))
+        # Keep highest capital-efficiency orders/count first within this grouped thesis.
+        ranked = sorted(
+            orders,
+            key=lambda x: (
+                -_capital_efficiency_score(x),
+                -float(x.get("edge", 0)),
+            ),
+        )
         used = 0
         for o in ranked:
             price_c = max(1, int(float(o.get("price", 0)) * 100))
