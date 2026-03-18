@@ -98,6 +98,20 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     loses = sum(1 for p in preds if p.get("outcome") == "lose")
     sold = sum(1 for p in preds if p.get("outcome") == "sold")
     total_pnl = sum(p.get("realized_pnl_cents", p.get("pnl_cents") or 0) or 0 for p in preds)
+
+    trade_details = []
+    for p in preds:
+        pnl_c = p.get("realized_pnl_cents", p.get("pnl_cents") or 0) or 0
+        trade_details.append({
+            "ts": p.get("resolved_ts") or p.get("ts") or 0,
+            "pnl_cents": float(pnl_c),
+            "outcome": p.get("outcome", "unknown"),
+            "ticker": p.get("ticker", ""),
+            "side": p.get("side", ""),
+            "entry_price": float(p.get("entry_price") or 0),
+            "exit_price": float(p.get("exit_price") or 0),
+        })
+
     if pd is not None:
         df = pd.DataFrame(preds)
         if not df.empty:
@@ -123,6 +137,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
             "win_rate": wins / (wins + loses) if (wins + loses) > 0 else None,
             "sharpe": _compute_sharpe(returns) if returns else None,
             "max_drawdown_cents": max_dd,
+            "trade_details": trade_details,
         }
     cumulative: list[float] = []
     run = 0
@@ -152,6 +167,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
         "win_rate": wins / (wins + loses) if (wins + loses) > 0 else None,
         "sharpe": _compute_sharpe(returns) if returns else None,
         "max_drawdown_cents": max_dd,
+        "trade_details": trade_details,
     }
 
 

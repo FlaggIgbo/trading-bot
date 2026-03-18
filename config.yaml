@@ -53,6 +53,16 @@ strategy:
   layered_order_levels: 3 # Used by layered mode to spread large intents across deeper quote levels
   limit_dip_pct_high_confidence: 0.15 # When P(win) >= 90%, use larger dip (15%) — prioritize aggressive limits on high-certainty contracts
   limit_dip_pct_price_decline: 0.10 # When model suggests contract price might decrease (vol model on, or dte >= 2), use this dip (10%) to prioritize limit orders
+  # DTE-confidence dip scaling: when resolution is far out AND model is confident,
+  # place deeper limit orders to catch uncertainty-driven price dips.
+  # Markets with distant resolution are prone to mean-reverting dips even when
+  # the eventual outcome is near-certain; deeper limits capture these.
+  far_dte_dip_scaling_enabled: true # Enable DTE-proportional limit dip scaling
+  far_dte_threshold_days: 3 # Consider resolution "far" when DTE exceeds this
+  far_dte_dip_scale_per_day: 0.015 # Add 1.5% more dip per day of DTE beyond threshold
+  far_dte_max_extra_dip: 0.12 # Cap additional DTE-based dip at 12%
+  far_dte_min_confidence: 0.80 # Only apply DTE dip scaling when P(win) >= 80%
+  far_dte_confidence_boost: 1.5 # When P(win) >= 90%, multiply the DTE extra dip by this
   vol_blend_weight: 0.75 # Lean more on volatility model in fast crypto regimes
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.

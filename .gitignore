@@ -14,6 +14,7 @@ dist/
 build/
 
 # Local historical storage (never commit)
-data/
 *.db
 .trading-bot-data/
+# Ignore data layer __pycache__ but track the code
+data/__pycache__/

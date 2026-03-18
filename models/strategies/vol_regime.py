@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from strategies.default_threshold import DefaultThresholdStrategy
+from models.strategies.default_threshold import DefaultThresholdStrategy
 
 
 @dataclass

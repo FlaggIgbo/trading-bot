@@ -75,37 +75,56 @@ The engine will:
 
 See [Kalshi API docs](https://docs.kalshi.com/welcome) and [Making your first request](https://docs.kalshi.com/getting_started/making_your_first_request).
 
-## Project structure
+## Project structure (ML pipeline)
+
+The repo is organized as an ML pipeline: **signals** (inputs) → **models** (compute) → **execution** (outputs), with **data** for persistence and **scripts** as entry points.
 
 ```
 trading-bot/
-├── scripts/                 # Runnable entry points (run from project root)
-│   ├── backtest.py          # Backtest: real (resolved preds) or synthetic (snapshots) mode
-│   ├── compare_historical.py # Evaluate contracts → BUY YES / NO / SKIP
-│   ├── compare_prices.py    # Quick live price snapshot
-│   ├── debug_ollama.py      # Debug Ollama LLM integration (run when analysis fails)
-│   └── test_connection.py   # Test API connections
-├── strategies/              # Pluggable recommendation engines (default: vol_regime)
-├── docs/                    # Documentation
-│   ├── CODE_EXPLAINER.md    # Step-by-step flow, file-by-file reference, code pointers
-│   └── IMPROVEMENTS.md      # Roadmap and backlog
-├── launchd/                 # macOS scheduling (run every 5 min)
-│   ├── README.md            # Setup instructions
-│   └── com.user.compare_historical.plist
+│
+├── config.yaml              # Signal configuration: markets, strategy params, risk limits
 ├── config.py                # Config loader (yaml + env overrides)
-├── config.yaml              # Markets, strategy, trading settings
-├── execution_engine.py      # Order sync/cancel lifecycle engine (shared execution plumbing)
-├── kalshi_client.py         # Kalshi API client
-├── gemini_client.py         # Gemini Prediction Markets client
-├── yfinance_client.py       # Price data (yfinance + CoinGecko fallback)
-├── storage.py               # Local SQLite storage (yf cache, market snapshots, resolved outcomes)
-├── ollama_analysis.py       # Ollama LLM analysis integration
+├── constants.py             # Shared constants (recommendation strings, platform IDs)
+│
+├── signals/                 # INPUT LAYER — market data source clients
+│   ├── kalshi_client.py     #   Kalshi exchange API (auth, orders, positions)
+│   ├── gemini_client.py     #   Gemini prediction markets API (public + trading)
+│   ├── yfinance_client.py   #   Yahoo Finance historical/live prices + CoinGecko fallback
+│   └── ollama_analysis.py   #   LLM-powered trade analysis (optional)
+│
+├── models/                  # COMPUTE LAYER — ML strategies & signal scoring
+│   └── strategies/          #   Pluggable recommendation engines
+│       ├── base.py          #     Abstract strategy interface
+│       ├── default_threshold.py # Threshold + fee + signal model
+│       └── vol_regime.py    #     Production default (volatility-regime aware)
+│
+├── execution/               # OUTPUT LAYER — trade execution & order lifecycle
+│   ├── engine.py            #   Order sync, cancel, and resting-order management
+│   └── fill_reconciliation.py # Post-trade fill matching and PnL accounting
+│
+├── data/                    # DATA LAYER — persistent storage & calibration
+│   └── storage.py           #   SQLite: predictions, snapshots, cache, resolved outcomes
+│
+├── scripts/                 # Entry points (orchestration)
+│   ├── compare_historical.py #  Main pipeline: evaluate → recommend → execute
+│   ├── backtest.py          #   Backtest: real or synthetic mode
+│   ├── daily_performance_report.py # Daily report + performance graphs
+│   ├── compare_prices.py    #   Quick live price snapshot
+│   └── ...                  #   Test, debug, validation scripts
+│
+├── docs/                    # Documentation
+│   ├── CODE_EXPLAINER.md    #   Step-by-step flow, file-by-file reference
+│   └── IMPROVEMENTS.md      #   Roadmap and backlog
+│
+├── launchd/                 # macOS scheduling (run every 5 min / daily)
 ├── pyproject.toml           # Ruff (linter/formatter) config
-├── .pre-commit-config.yaml  # Ruff + Prettier + config/backtest guards on git push
+├── .pre-commit-config.yaml  # Pre-push hooks (lint, config validation, backtest guard)
 └── .env                     # Credentials (from .env.example)
 ```
 
-All scripts in `scripts/` add the project root to the Python path and load `.env` from the project root, so run them from the project directory: `python scripts/compare_historical.py`.
+**Pipeline flow:** `config.yaml` defines input signals (markets, tickers, strategy params) → `signals/` clients fetch market data → `models/strategies/` compute P(YES) and recommendations → `execution/` places orders on exchanges → `data/storage.py` persists outcomes for calibration.
+
+Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export from the new package locations for backward compatibility. All scripts in `scripts/` add the project root to `sys.path` so both old and new import paths work.
 
 **Code walkthrough:** For a step-by-step flow and file-by-file reference with code pointers, see [docs/CODE_EXPLAINER.md](docs/CODE_EXPLAINER.md).
 
@@ -419,6 +438,7 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`limit_dip_pct`** (default `0.05`): Place buy limits this much _below_ the current bid. E.g. `0.05` = 5% below bid — if bid is 40¢, we place at 38¢. Set to `0` to use the bid directly.
 - **`limit_dip_pct_high_confidence`** (e.g. `0.15`): When P(win) ≥ 90%, use this larger dip instead—e.g. 15% below bid. Prioritizes catching bigger dips on high-certainty contracts (perfect for 10¢ limit on YES/NO we're confident will hit). Set to `0` to use `limit_dip_pct` for all.
 - **`limit_dip_pct_price_decline`** (e.g. `0.10`): When the model suggests the contract price might decrease—e.g. volatility model is active, or 2+ days to expiry—use this larger dip (10%) to prioritize limit orders and catch price dips. Stacks with high-confidence when both apply.
+- **DTE-confidence dip scaling** (`far_dte_*`): When resolution is far out (> `far_dte_threshold_days`, default 3) AND model confidence is high (P(win) >= `far_dte_min_confidence`, default 80%), limit dips scale proportionally with DTE: deeper limits catch the transient uncertainty-driven price drops common in far-dated contracts. Extra dip = `far_dte_dip_scale_per_day` × excess days, capped at `far_dte_max_extra_dip`. When P(win) >= 90%, the DTE extra dip gets an additional `far_dte_confidence_boost` multiplier.
 - **`limit_order_mode`**: `fixed_pct` (legacy dip logic), `dynamic_tick` (penny-jump one tick above best bid, capped by model fair value), or `layered` (depth-aware, size-scaled participation for thinner books).
 - **`tick_offset`**: Number of ticks used for dynamic quote stepping (default `1`).
 - **`max_inventory_skew_pct`**: Inventory-aware quote skew; same-side inventory lowers quote aggressiveness, opposite-side inventory can modestly increase it.
@@ -576,7 +596,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performan
 The script runs every 5 minutes. With `RunAtLoad: false` (default), the first run happens ~5 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
 `cd /path/to/trading-bot && .venv/bin/python3 scripts/compare_historical.py --days 365 --use-volatility --execute --no-llm`
 
-The daily report job runs once per day and writes a dated text file (default: `~/.trading-bot-data/reports/performance_YYYYMMDD.txt`).
+The daily report job runs once per day and writes a dated text file (default: `~/.trading-bot-data/reports/performance_YYYYMMDD.txt`) plus **performance graphs** (PNG) showing per-trade P&L over time — green bars for wins, red for losses, with a cumulative P&L overlay.
 
 **crontab (alternative):**
 

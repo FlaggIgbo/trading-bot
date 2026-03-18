@@ -73,6 +73,8 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Daily performance report**           | Reliability                             | ✓ Launchd daily report writes dated `.txt` performance summaries (`scripts/daily_performance_report.py`). |
 | **Emergency loss circuit breaker**     | Reliability                             | ✓ `max_daily_loss_pct` / `max_daily_loss_cents` block new BUY orders when realized 24h losses breach limits (SELL handling remains active). |
 | **Depth persistence for snapshots**    | Backtest realism                        | ✓ `market_snapshots` now stores top-of-book asks/sizes (`yes_ask`, `no_ask`, `*_size`) so synthetic partial-fill logic can use real historical depth when available. |
+| **Daily performance graphs**           | Reliability                             | ✓ `scripts/daily_performance_report.py` now generates PNG performance charts with per-trade P&L bars (green=wins, red=losses) and cumulative P&L overlay line, saved alongside the text report. |
+| **DTE-confidence limit dip scaling**   | —                                       | ✓ New `_dte_confidence_dip()` in compare_historical.py. When resolution is far (>3 days) and model confidence high (P(win)>=80%), limit order dips scale proportionally with DTE to catch uncertainty-driven price drops. Config: `far_dte_*` params. When P(win)>=90%, extra DTE dip gets a 1.5x confidence boost. |
 
 ---
 
@@ -91,6 +93,7 @@ Refactoring, architecture, and code quality changes.
 | **Strategy plugin migration**          | Signal feature building/scoring and recommendation routing are delegated to `strategies/` implementations; `compare_historical.py` handles data/execution plumbing. |
 | **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
 | **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |
+| **ML pipeline repo restructure**    | Reorganized into `signals/` (data clients), `models/strategies/` (ML strategies), `execution/` (order lifecycle), `data/` (persistence). Root-level backward-compat shims preserve existing import paths. Pipeline flow: config.yaml signals → feature engineering → model scoring → trade execution → data persistence. |
 
 ### Future / TODO
 

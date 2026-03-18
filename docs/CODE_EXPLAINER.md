@@ -40,13 +40,15 @@
 
 ### Production-Grade Upgrades (2026)
 
-- **Modular strategy engine:** `compare_historical.py` now routes recommendation decisions through `strategies/` (`strategy_engine` in config), with `vol_regime` as the production default.
+- **Modular strategy engine:** `compare_historical.py` now routes recommendation decisions through `models/strategies/` (`strategy_engine` in config), with `vol_regime` as the production default.
 - **Regime-aware volatility safety:** EWMA/Student-t flow now supports optional GARCH(1,1) in `vol_model: auto`, continuous vol-ratio scaling (edge/dip/size), and volatility-spike safety.
 - **Adaptive limit pricing:** `limit_dip_pct` is now ARR-inspired (`max(base_dip, 0.5 * avg_relative_move)`) so entries tighten in calm markets and widen in volatile markets.
 - **High-fidelity synthetic backtest:** Synthetic mode supports dwell-time fill checks, partial-fill scaling from persisted depth fields, and per-trade liquidity friction in addition to slippage/spread realism.
 - **Circuit breaker safety:** New BUYs are blocked when 24h realized losses breach configured limits (`max_daily_loss_pct` / `max_daily_loss_cents`).
 - **Defensive execution gates:** Dynamic stability windows, cross-exchange sanity gating, and sells-only defensive mode reduce fill risk during flash regimes.
 - **Inter-arb leg safety:** Live execution now applies a paired preflight for `REC_ARB_INTER` groups so one-sided low-balance legs are dropped before placement.
+- **Performance graphs:** `scripts/daily_performance_report.py` generates PNG charts (green bars=wins, red=losses, blue cumulative P&L line) alongside the text report.
+- **DTE-confidence dip scaling:** When resolution is far out (>3 days) and model confidence is high (P(win)>=80%), limit order dips scale proportionally with DTE via `_dte_confidence_dip()`; config: `far_dte_dip_scaling_enabled`, `far_dte_threshold_days`, `far_dte_dip_scale_per_day`, `far_dte_max_extra_dip`, `far_dte_min_confidence`, `far_dte_confidence_boost`.
 
 ---
 
@@ -70,7 +72,7 @@ The main entry point is **`compare_historical.py`**. Here is the exact flow when
 | Step                     | What happens                                            | Code pointer                                                |
 | ------------------------ | ------------------------------------------------------- | ----------------------------------------------------------- |
 | Load config              | Markets (KXBTCD, KXETHD, …), strategy, yfinance mapping | `config.py:19` → `get_config()`                             |
-| Create Kalshi client     | Authenticate with API keys (RSA-PSS), get balance       | `kalshi_client.py` → `KalshiClient()`                       |
+| Create Kalshi client     | Authenticate with API keys (RSA-PSS), get balance       | `signals/kalshi_client.py` → `KalshiClient()`               |
 | Sync settlements         | Update resolved outcomes in storage (for calibration)   | `compare_historical.py:1053` → `_sync_kalshi_settlements()`  |
 | Load strategy params     | All strategy rules in one place                         | `compare_historical.py:115` → `_load_strategy_params()` |
 | Fetch events in parallel | Gemini events + Kalshi markets via `ThreadPoolExecutor` | `compare_historical.py:1252`                           |
@@ -83,8 +85,8 @@ For each series (e.g. KXBTCD → Bitcoin):
 
 | Step                        | What happens                                                | Code pointer                                                  |
 | --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| Get historical closes       | Yahoo Finance (or CoinGecko) for last N days                | `yfinance_client.py:137` → `get_aggs()`                       |
-| Get Kalshi open markets     | `kalshi.get_markets(series_ticker=series, status="open")`   | `kalshi_client.py` → `get_markets()`                          |
+| Get historical closes       | Yahoo Finance (or CoinGecko) for last N days                | `signals/yfinance_client.py:137` → `get_aggs()`               |
+| Get Kalshi open markets     | `kalshi.get_markets(series_ticker=series, status="open")`   | `signals/kalshi_client.py` → `get_markets()`                  |
 | Loop over each market       | For each market in the list                                 | `compare_historical.py:1290` → `for mkt in mkt_list`          |
 | Skip unsupported resolution | Non 5pm crypto / 4pm S&P intraday → skip                    | `compare_historical.py:1182` → `_should_skip_by_resolution()` |
 | Check intra-arb             | YES+NO < 1−fee on same market → BUY BOTH                    | `compare_historical.py:1169` → `_check_intra_arb_kalshi()`    |
@@ -95,7 +97,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Blend + score signals       | Dynamic empirical/vol blend, optional sklearn calibration, then signal-model scoring | `compare_historical.py` → `_dynamic_empirical_weight()`, `_fit_probability_calibrator()`, `_score_signal_model()` |
 | Recommend                   | Compare hist_p vs market price → BUY YES / BUY NO / SKIP    | `compare_historical.py:535` → `_recommend()`                  |
 | Apply safety rules          | Skip BUY NO when price above strike; skip BUY YES when < 5¢ | `compare_historical.py:1232-1258`                             |
-| Add limit order             | Price = bid × (1−dip) for "dip catching"                    | `compare_historical.py:1286-1316` → `pending_orders.append()` |
+| Add limit order             | Price = bid × (1−dip) for "dip catching"; DTE-confidence dip scales when resolution far out (>3 days) and P(win)≥80% | `compare_historical.py:1286-1316` → `pending_orders.append()`, `_dte_confidence_dip()` |
 
 ---
 
@@ -105,9 +107,9 @@ Same logic for Gemini events (BTC, ETH, SOL, XRP):
 
 | Step              | What happens                               | Code pointer                                       |
 | ----------------- | ------------------------------------------ | -------------------------------------------------- |
-| Get Gemini events | `gemini.get_crypto_events()` (crypto category; hourly skipped if API returns 400) | `gemini_client.py:147` → `get_crypto_events()`     |
-| Map asset         | Title/ticker → BTC-USD, ETH-USD, etc.      | `gemini_client.py:74` → `_event_to_asset()`        |
-| Extract strike    | Parse from event title                     | `gemini_client.py` → `extract_strike_from_event()` |
+| Get Gemini events | `gemini.get_crypto_events()` (crypto category; hourly skipped if API returns 400) | `signals/gemini_client.py:147` → `get_crypto_events()`     |
+| Map asset         | Title/ticker → BTC-USD, ETH-USD, etc.      | `signals/gemini_client.py:74` → `_event_to_asset()`        |
+| Extract strike    | Parse from event title                     | `signals/gemini_client.py` → `extract_strike_from_event()` |
 | Same flow         | Arb, P(YES), recommend, rules, limit order | `compare_historical.py:1324-1435`                  |
 
 ---
@@ -137,8 +139,8 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Budget per platform | Kalshi balance for Kalshi orders; Gemini balance for Gemini orders (separate `_allocate_budget_to_orders` calls). Under budget pressure, ranking is capital-efficiency first (expected net return per dollar per hour). | `compare_historical.py:1861` → per-platform allocation |
 | `--preview`        | Print planned orders, no API calls              | `compare_historical.py:1927-1975`          |
 | `--execute`        | Review orders → cancel stale → SELL first → BUY | `compare_historical.py:1671-1925`          |
-| Place Kalshi order | `create_order_safe()` with balance caps         | `kalshi_client.py` → `create_order_safe()` |
-| Place Gemini order | `place_order_safe()`                            | `gemini_client.py` → `place_order_safe()`  |
+| Place Kalshi order | `create_order_safe()` with balance caps         | `signals/kalshi_client.py` → `create_order_safe()` |
+| Place Gemini order | `place_order_safe()`                            | `signals/gemini_client.py` → `place_order_safe()`  |
 
 ---
 
@@ -146,24 +148,27 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | Step                             | What happens                             | Code pointer                                        |
 | -------------------------------- | ---------------------------------------- | --------------------------------------------------- |
-| If Ollama running, no `--no-llm` | Capture output, send to local LLM        | `ollama_analysis.py:78` → `_get_analysis()`         |
-| Per-trade analysis               | Optional analysis of each proposed trade | `ollama_analysis.py:117` → `analyze_single_trade()` |
+| If Ollama running, no `--no-llm` | Capture output, send to local LLM        | `signals/ollama_analysis.py:78` → `_get_analysis()`         |
+| Per-trade analysis               | Optional analysis of each proposed trade | `signals/ollama_analysis.py:117` → `analyze_single_trade()` |
 
 ---
 
 ## Every File in the Repository
 
+The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, and `data/` directories. Root-level shims (e.g. `kalshi_client.py`, `storage.py`) re-export from the new locations for backward compatibility.
+
 ### Core Scripts
 
 | File                                | Purpose                                             | Key code pointers                                                                                                                                                                    |
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
+| **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_dte_confidence_dip()` (DTE-confidence dip scaling), `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
 | **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes slippage/spread realism, winner slippage tax, dwell-time fill modeling, and liquidity friction                                                                                                 |
+| **`scripts/daily_performance_report.py`** | Daily P&L text report + PNG performance charts | Generates green bars (wins), red bars (losses), blue cumulative P&L line; outputs alongside text report |
 | **`scripts/validate_config.py`**    | Config sanity validator                              | Runs pre-push checks for edge/fee consistency, Kelly bounds, EWMA ranges, exposure/loss caps, and macro/two-sided settings before backtest guard                                                                                                                         |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
 | **`scripts/test_connection.py`**    | Test API connections, balance, markets              | `_run()` L130, `debug_check()` L30, `inspect_output_types()` L86                                                                                                                     |
 | **`scripts/debug_ollama.py`**       | Debug Ollama server, models, chat                   | `main()` L16                                                                                                                                                                         |
-| **`strategies/`**                   | Pluggable recommendation engines                     | `base.py` interface, `default_threshold.py`, `vol_regime.py`                                                                                                                        |
+| **`models/strategies/`**            | Pluggable recommendation engines                     | `base.py` interface, `default_threshold.py`, `vol_regime.py`. Root `strategies/` shim re-exports for backward compat.                                                                                                                        |
 
 ### Configuration
 
@@ -172,21 +177,23 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | **`config.yaml`** | Markets, strategy, storage, trading | `markets` L8, `yfinance_tickers` L21, `strategy` L29, `storage` L63, `trading` L67 |
 | **`config.py`**   | Config loader with env overrides    | `get_config()` L19 — reads YAML, overrides via `MARKETS`, `POLL_INTERVAL_SECONDS`  |
 
-### API Clients
+### API Clients (`signals/`)
 
-| File                     | Purpose                            | Key functions                                                                                                                                                                                                                                            |
-| ------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`kalshi_client.py`**   | Kalshi API with RSA-PSS auth       | `KalshiClient`: `get_balance()`, `get_markets()`, `get_positions()`, `get_market()`, `get_historical_market()`, `get_orderbook()`, `create_order_safe()`, `cancel_order_safe()`                                                                        |
-| **`gemini_client.py`**   | Gemini Prediction Markets (crypto) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`; `hourly` category skipped if API returns 400); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. |
-| **`yfinance_client.py`** | Historical prices (no API key)     | `get_aggs()` L137 (daily closes), `get_intraday_aggs_at_hour()` (1h prices at 5pm/4pm ET for intraday empirical P), `get_aggs_as_of()` (point-in-time for backtest), `get_snapshot()` L52 (current price); CoinGecko fallback for crypto |
+| File                              | Purpose                            | Key functions                                                                                                                                                                                                                                            |
+| --------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`signals/kalshi_client.py`**    | Kalshi API with RSA-PSS auth       | `KalshiClient`: `get_balance()`, `get_markets()`, `get_positions()`, `get_market()`, `get_historical_market()`, `get_orderbook()`, `create_order_safe()`, `cancel_order_safe()`. Root `kalshi_client.py` shim re-exports.                                                                        |
+| **`signals/gemini_client.py`**    | Gemini Prediction Markets (crypto) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`; `hourly` category skipped if API returns 400); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. Root `gemini_client.py` shim re-exports. |
+| **`signals/yfinance_client.py`**  | Historical prices (no API key)     | `get_aggs()` L137 (daily closes), `get_intraday_aggs_at_hour()` (1h prices at 5pm/4pm ET for intraday empirical P), `get_aggs_as_of()` (point-in-time for backtest), `get_snapshot()` L52 (current price); CoinGecko fallback for crypto. Root `yfinance_client.py` shim re-exports. |
 
 ### Support Modules
 
-| File                     | Purpose                | Key functions                                                                                                                                |
-| ------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`constants.py`**       | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`                           |
-| **`storage.py`**         | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `record_limit_order()`, `record_order_cancel()`, `get_limit_order_analysis()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58 |
-| **`ollama_analysis.py`** | Local LLM analysis     | `capture_and_analyze()`, `run_analysis()`, `analyze_single_trade()` L117, `_get_analysis()` L78                                              |
+| File                              | Purpose                | Key functions                                                                                                                                |
+| --------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`constants.py`**                 | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`                           |
+| **`data/storage.py`**              | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `record_limit_order()`, `record_order_cancel()`, `get_limit_order_analysis()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `_init_schema()` L58. Root `storage.py` shim re-exports. |
+| **`signals/ollama_analysis.py`**   | Local LLM analysis     | `capture_and_analyze()`, `run_analysis()`, `analyze_single_trade()` L117, `_get_analysis()` L78. Root `ollama_analysis.py` shim re-exports.                                              |
+| **`execution/engine.py`**          | Order lifecycle sync   | `sync_and_cancel_resting_orders()`. Root `execution_engine.py` shim re-exports. |
+| **`execution/fill_reconciliation.py`** | Confirmed fill ingestion | `reconcile_confirmed_fills()`. Root `fill_reconciliation.py` shim re-exports. |
 
 ### Scheduling & Dev Tools
 
@@ -244,7 +251,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
-8. **Execute (if --execute):** Review open orders via `execution_engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
+8. **Execute (if --execute):** Review open orders via `execution.engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
 
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
@@ -268,9 +275,9 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 ---
 
-### `strategies/` — Pluggable Recommendation Engines
+### `models/strategies/` — Pluggable Recommendation Engines
 
-**Purpose:** Decouple recommendation logic from execution plumbing in `compare_historical.py`.
+**Purpose:** Decouple recommendation logic from execution plumbing in `compare_historical.py`. Location: `models/strategies/` (root `strategies/` shim re-exports for backward compat).
 
 **Current engines:**
 - `vol_regime` (default): production path.
@@ -280,9 +287,9 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 ---
 
-### `execution_engine.py` — Order Lifecycle Sync/Cancellation
+### `execution/engine.py` — Order Lifecycle Sync/Cancellation
 
-**Purpose:** Isolate open-order management from probability/recommendation logic so execution safety can be unit-tested independently.
+**Purpose:** Isolate open-order management from probability/recommendation logic so execution safety can be unit-tested independently. Root `execution_engine.py` shim re-exports.
 
 **Key responsibility:** `sync_and_cancel_resting_orders(...)`
 - Builds pending buy/sell lookups for Kalshi + Gemini.
@@ -293,9 +300,9 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 ---
 
-### `fill_reconciliation.py` — Confirmed Fill Ingestion
+### `execution/fill_reconciliation.py` — Confirmed Fill Ingestion
 
-**Purpose:** Build trading-performance rows from confirmed exchange fills rather than from order placement responses.
+**Purpose:** Build trading-performance rows from confirmed exchange fills rather than from order placement responses. Root `fill_reconciliation.py` shim re-exports.
 
 **Key responsibility:** `reconcile_confirmed_fills(...)`
 - Pulls recent fills from Kalshi (`/portfolio/fills`) and Gemini fill/trade endpoints.
@@ -381,6 +388,12 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | `cancel_all_on_regime_shift` | `cancel_all_on_regime_shift` | true fallback | Cancel resting BUY limits during momentum/volatility regime shifts |
 | `limit_dip_pct_high_confidence` | `limit_dip_pct_high_confidence` | 0.15 | Larger dip when P(win)≥90% |
 | `limit_dip_pct_price_decline` | `limit_dip_pct_price_decline` | 0.10 | Dip when vol model suggests price decline |
+| `far_dte_dip_scaling_enabled` | `far_dte_dip_scaling_enabled` | — | DTE-confidence dip: scale limit dips when resolution far out and P(win) high |
+| `far_dte_threshold_days` | `far_dte_threshold_days` | 3 | DTE above which far-dip scaling applies |
+| `far_dte_dip_scale_per_day` | `far_dte_dip_scale_per_day` | — | Extra dip per day when far DTE + high confidence |
+| `far_dte_max_extra_dip` | `far_dte_max_extra_dip` | — | Cap on extra dip from DTE scaling |
+| `far_dte_min_confidence` | `far_dte_min_confidence` | 0.80 | Min P(win) for DTE-confidence dip (e.g. 80%) |
+| `far_dte_confidence_boost` | `far_dte_confidence_boost` | — | Confidence boost factor for far-DTE scaling |
 | `vol_blend_weight` | `vol_blend_weight` | 0.5 | Blend emp + vol: w×emp + (1−w)×vol |
 | `use_ewma_vol` | `use_ewma_vol` | true | EWMA vs sample variance for vol |
 | `ewma_lambda` | `ewma_lambda` | 0.94 | EWMA decay (RiskMetrics-style) |
@@ -498,9 +511,9 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 
 ## API Clients Deep Dive
 
-### `kalshi_client.py` — Kalshi API
+### `signals/kalshi_client.py` — Kalshi API
 
-**Auth:** RSA-PSS signing. Requires `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in `.env`. `KALSHI_BASE_URL` selects demo vs production.
+**Auth:** RSA-PSS signing. Requires `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` in `.env`. `KALSHI_BASE_URL` selects demo vs production. Root `kalshi_client.py` shim re-exports.
 
 **Key methods:**
 - `get_balance()` — Returns `{ balance: cents }`. Fails if keys invalid.
@@ -511,9 +524,10 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 - `create_order_safe(ticker, side, action, count, yes_price_dollars|no_price_dollars, ...)` — Places limit order; caps by `max_pct_of_balance`; retries on 429.
 - `cancel_order_safe(order_id)` — Cancels by order ID.
 
-### `gemini_client.py` — Gemini Prediction Markets (Crypto)
+### `signals/gemini_client.py` — Gemini Prediction Markets (Crypto)
 
-**Two clients:**
+**Two clients:** Root `gemini_client.py` shim re-exports.
+
 1. **GeminiPredictionClient** — Public API for events/contracts (no auth for read).
 2. **GeminiTradingClient** — Place orders; needs `GEMINI_API_KEY` + `GEMINI_API_SECRET`.
 
@@ -529,9 +543,9 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 - `get_positions()` — Positions with `outcome` (yes/no), `totalQuantity`.
 - `get_active_orders()`, `cancel_order_safe()`.
 
-### `yfinance_client.py` — Historical Prices
+### `signals/yfinance_client.py` — Historical Prices
 
-**No API key.** Uses Yahoo Finance (or CoinGecko for crypto if yfinance fails).
+**No API key.** Uses Yahoo Finance (or CoinGecko for crypto if yfinance fails). Root `yfinance_client.py` shim re-exports.
 
 **Key methods:**
 - `get_aggs(ticker, days_back, config)` — Daily closes. Checks `storage.get_yf_closes()` first; if stale/missing, fetches and `storage.set_yf_closes()`.
@@ -545,7 +559,7 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 
 ## Storage Module Deep Dive
 
-**Purpose:** SQLite persistence for yfinance cache, market snapshots, resolved outcomes, and placed predictions. Reduces API calls and enables backtesting/calibration.
+**Purpose:** SQLite persistence for yfinance cache, market snapshots, resolved outcomes, and placed predictions. Reduces API calls and enables backtesting/calibration. Location: `data/storage.py` (root `storage.py` shim re-exports).
 
 **Database location:** `~/.trading-bot-data/trading_bot.db` (or `TRADING_BOT_DATA_DIR`). Schema created on first use via `_init_schema()`.
 
@@ -579,7 +593,7 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 
 ## Ollama Analysis Deep Dive
 
-**Purpose:** Send script output (or per-trade summaries) to a local LLM (Ollama) for analysis. Completely optional; scripts run fine with `--no-llm`.
+**Purpose:** Send script output (or per-trade summaries) to a local LLM (Ollama) for analysis. Completely optional; scripts run fine with `--no-llm`. Location: `signals/ollama_analysis.py` (root `ollama_analysis.py` shim re-exports).
 
 **Flow:**
 1. Script calls `capture_and_analyze(run_fn, script_name, use_llm=..., per_trade_analysis=...)`.
@@ -659,21 +673,21 @@ All recommendation and platform identifiers live in `constants.py`:
                     └──────────────┘              │
                                                   ▼
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────────────────────┐
-│ .env        │────▶│ kalshi_      │     │ compare_historical.py           │
-│ (API keys)  │     │ gemini_      │────▶│ 1. Fetch Gemini + Kalshi       │
-└─────────────┘     │ client       │     │ 2. Fetch yfinance closes (cache) │
-                    └──────────────┘     │ 3. Evaluate each market        │
-                          │              │ 4. Evaluate positions → sells   │
+│ .env        │────▶│ signals/     │     │ compare_historical.py           │
+│ (API keys)  │     │ kalshi_      │────▶│ 1. Fetch Gemini + Kalshi       │
+└─────────────┘     │ gemini_      │     │ 2. Fetch yfinance closes (cache) │
+                    │ client       │     │ 3. Evaluate each market        │
+                    └──────────────┘     │ 4. Evaluate positions → sells   │
                           │              │ 5. Execute or preview            │
                           ▼              └────────────────┬────────────────┘
                     ┌──────────────┐                       │
-                    │ yfinance_   │                       ▼
-                    │ client      │              ┌─────────────────┐
-                    │ get_aggs()  │              │ storage.py      │
-                    └─────────────┘              │ yf_cache,       │
-                          │                     │ market_snapshots│
-                          └─────────────────────▶ predictions     │
-                                                 └─────────────────┘
+                    │ signals/     │                       ▼
+                    │ yfinance_   │              ┌─────────────────┐
+                    │ client      │              │ data/storage.py │
+                    │ get_aggs()  │              │ yf_cache,       │
+                    └─────────────┘              │ market_snapshots│
+                          │                     │ predictions     │
+                          └─────────────────────▶└─────────────────┘
 ```
 
 ---
@@ -816,11 +830,13 @@ limit_orders
 | ------------------------------------ | --------------------------------------------------------------------- |
 | Where is the main evaluation?        | `scripts/compare_historical.py` → `_run_impl()` L1195                 |
 | Where is the backtest?               | `scripts/backtest.py` — `--mode real` or `synthetic`                 |
+| Where are performance graphs?        | `scripts/daily_performance_report.py` — PNG charts (green/red bars, blue P&L line) |
 | Where are strategy params defined?   | `config.yaml` → `strategy:`; loaded in `_load_strategy_params()` L115 |
 | Where is P(YES) computed?            | `_empirical_probability()` L434 + `_volatility_probability()` L463    |
 | Where is P(lose) computed?           | `_compute_p_lose()` L652 — blends model with market odds; more weight near expiry |
-| Where are Kalshi orders placed?      | `kalshi_client.py` → `create_order_safe()`                            |
-| Where are Gemini orders placed?      | `gemini_client.py` → `place_order_safe()`                             |
-| Where is historical price data from? | `yfinance_client.py` → `get_aggs()` (Yahoo Finance / CoinGecko)       |
-| Where is data cached?                | `storage.py` → SQLite in `~/.trading-bot-data/`                       |
+| Where is DTE-confidence dip?         | `_dte_confidence_dip()` in compare_historical — when DTE>3 days and P(win)≥80% |
+| Where are Kalshi orders placed?      | `signals/kalshi_client.py` → `create_order_safe()`                    |
+| Where are Gemini orders placed?      | `signals/gemini_client.py` → `place_order_safe()`                     |
+| Where is historical price data from? | `signals/yfinance_client.py` → `get_aggs()` (Yahoo Finance / CoinGecko) |
+| Where is data cached?                | `data/storage.py` → SQLite in `~/.trading-bot-data/`                  |
 | How to run every 5 min?              | `launchd/` plist; see `launchd/README.md`                             |

@@ -5,7 +5,7 @@ This setup includes:
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 
 Both jobs use your `.venv` Python so dependencies are available.
-`compare_historical.py` now imports `execution_engine.py`, runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), applies inter-arb preflight before BUY execution (with optional single-leg fallback), and uses balance-aware inter-arb route selection.
+`compare_historical.py` now imports `execution/engine.py` (via backward-compat shim), runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), applies inter-arb preflight before BUY execution (with optional single-leg fallback), uses balance-aware inter-arb route selection, and applies DTE-confidence dip scaling for far-dated contracts.
 
 ## One-time setup
 
@@ -48,6 +48,6 @@ Both jobs use your `.venv` Python so dependencies are available.
 - **Compare interval:** 300 seconds (5 minutes). Change `<integer>300</integer>` in `com.user.compare_historical.plist`.
 - **Reconciliation counters in logs:** launchd compare job includes `--reconcile-diagnostics` so each run logs `seen / inserted / dup / skipped` for Kalshi + Gemini fills.
 - **Daily report time:** 23:55 local time (`StartCalendarInterval`) in `com.user.daily_performance_report.plist`.
-- **Daily report file path:** controlled by `config.yaml` → `backtest.daily_report_dir` (default: `~/.trading-bot-data/reports`).
+- **Daily report file path:** controlled by `config.yaml` → `backtest.daily_report_dir` (default: `~/.trading-bot-data/reports`). The report also generates PNG performance graphs (per-trade P&L bars + cumulative line) for the short and long windows.
 - **Run on login:** Set `<key>RunAtLoad</key><true/>` if you want it to run once immediately when loaded.
 - **Paths:** `ProgramArguments[0]` = Python in your venv; `ProgramArguments[1]` = script path; `WorkingDirectory` = project root (for `config.yaml`).

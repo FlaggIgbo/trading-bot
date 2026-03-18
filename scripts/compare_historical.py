@@ -255,6 +255,12 @@ class _StrategyParams:
     enable_auto_signal_weight_fit: bool
     signal_weight_fit_min_samples: int
     signal_weight_fit_l2_c: float
+    far_dte_dip_scaling_enabled: bool
+    far_dte_threshold_days: float
+    far_dte_dip_scale_per_day: float
+    far_dte_max_extra_dip: float
+    far_dte_min_confidence: float
+    far_dte_confidence_boost: float
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -384,6 +390,12 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_auto_signal_weight_fit=bool(strategy.get("enable_auto_signal_weight_fit", True)),
         signal_weight_fit_min_samples=int(strategy.get("signal_weight_fit_min_samples", 150)),
         signal_weight_fit_l2_c=float(strategy.get("signal_weight_fit_l2_c", 1.0)),
+        far_dte_dip_scaling_enabled=bool(strategy.get("far_dte_dip_scaling_enabled", True)),
+        far_dte_threshold_days=float(strategy.get("far_dte_threshold_days", 3.0)),
+        far_dte_dip_scale_per_day=float(strategy.get("far_dte_dip_scale_per_day", 0.015)),
+        far_dte_max_extra_dip=float(strategy.get("far_dte_max_extra_dip", 0.12)),
+        far_dte_min_confidence=float(strategy.get("far_dte_min_confidence", 0.80)),
+        far_dte_confidence_boost=float(strategy.get("far_dte_confidence_boost", 1.5)),
     )
 
 
@@ -418,6 +430,37 @@ def _adaptive_limit_dip(base_dip: float, closes: list[float], *, cap: float = 0.
         return max(0.0, base_dip)
     arr = sum(rel_moves) / len(rel_moves)
     return min(max(0.0, cap), max(float(base_dip), 0.5 * arr))
+
+
+def _dte_confidence_dip(
+    base_dip: float,
+    p_win: float,
+    dte_days: float | None,
+    sp: _StrategyParams,
+) -> float:
+    """
+    Scale limit order dip depth based on DTE × confidence interaction.
+
+    When resolution is far out, contract prices are subject to uncertainty-driven dips
+    even when the eventual outcome is near-certain. High-confidence, far-DTE trades
+    benefit from deeper limits that catch these transient price drops.
+
+    Returns the combined dip (base + DTE extra), capped at 25%.
+    """
+    if not sp.far_dte_dip_scaling_enabled:
+        return base_dip
+    if dte_days is None or dte_days <= sp.far_dte_threshold_days:
+        return base_dip
+    if p_win < sp.far_dte_min_confidence:
+        return base_dip
+
+    excess_days = dte_days - sp.far_dte_threshold_days
+    extra_dip = min(sp.far_dte_max_extra_dip, excess_days * sp.far_dte_dip_scale_per_day)
+
+    if p_win >= 0.90:
+        extra_dip *= sp.far_dte_confidence_boost
+
+    return min(0.25, base_dip + extra_dip)
 
 
 def _extract_book_fields(market: dict, yes_bid: float, no_bid: float) -> dict[str, float | None]:
@@ -2780,6 +2823,7 @@ def _maybe_add_two_sided_quotes(
             dip = max(0.0, min(0.25, float(c.get("arr_dip", sp.limit_dip_pct))))
             if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                 dip = max(dip, sp.limit_dip_pct_high_confidence)
+            dip = _dte_confidence_dip(dip, p_win, c.get("dte"), sp)
             price = max(0.01, min(0.99, bid * (1.0 - dip))) if dip else bid
             count_base = _compute_buy_count(
                 p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
@@ -3626,6 +3670,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "edge_yes_net": hist_p - yes_bid - fee_yes_q,
                     "edge_no_net": (1.0 - hist_p) - no_bid_for_quote - fee_no_q,
                     "arr_dip": min(0.25, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp) * dip_regime_mult),
+                    "dte": dte,
                 }
             )
 
@@ -3704,12 +3749,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
                 dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp)
                 dip = min(0.25, dip * dip_regime_mult)
-                # When model suggests contract price might decrease (vol regime or 2+ days to expiry), prioritize limit orders with larger dip
                 price_might_decline = (use_vol and vol_p is not None) or (dte is not None and dte >= 2)
                 if price_might_decline and sp.limit_dip_pct_price_decline > 0:
                     dip = max(dip, sp.limit_dip_pct_price_decline)
                 if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
+                dip = _dte_confidence_dip(dip, p_win, dte, sp)
                 book = _extract_book_fields(m, yes_bid, no_bid)
                 bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
                 depth_mult = 1.0
@@ -4046,6 +4091,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "edge_yes_net": hist_p_gem - impl - fee_yes_gq,
                         "edge_no_net": (1.0 - hist_p_gem) - no_price_gem_q - fee_no_gq,
                         "arr_dip": min(0.25, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g) * dip_regime_mult),
+                        "dte": dte_g,
                         "gemini_evt": evt,
                         "instrument_symbol": instrument_symbol,
                     }
@@ -4112,6 +4158,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         dip = max(dip, sp.limit_dip_pct_price_decline)
                     if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                         dip = max(dip, sp.limit_dip_pct_high_confidence)
+                    dip = _dte_confidence_dip(dip, p_win, dte_g, sp)
                     market_for_book = contract if isinstance(contract, dict) else evt
                     book = _extract_book_fields(market_for_book or {}, impl, no_price)
                     bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import math
 
 from constants import REC_BUY_NO, REC_BUY_YES, REC_SKIP
-from strategies.base import BaseStrategy
+from models.strategies.base import BaseStrategy
 
 
 @dataclass
