@@ -5,7 +5,7 @@ This setup includes:
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 
 Both jobs use your `.venv` Python so dependencies are available.
-`compare_historical.py` now imports `execution_engine.py` for order-sync/cancel lifecycle logic, so no plist changes are required for this refactor.
+`compare_historical.py` now imports `execution_engine.py` and runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode.
 
 ## One-time setup
 
@@ -46,6 +46,7 @@ Both jobs use your `.venv` Python so dependencies are available.
 ## Configuration
 
 - **Compare interval:** 300 seconds (5 minutes). Change `<integer>300</integer>` in `com.user.compare_historical.plist`.
+- **Reconciliation counters in logs:** launchd compare job includes `--reconcile-diagnostics` so each run logs `seen / inserted / dup / skipped` for Kalshi + Gemini fills.
 - **Daily report time:** 23:55 local time (`StartCalendarInterval`) in `com.user.daily_performance_report.plist`.
 - **Daily report file path:** controlled by `config.yaml` → `backtest.daily_report_dir` (default: `~/.trading-bot-data/reports`).
 - **Run on login:** Set `<key>RunAtLoad</key><true/>` if you want it to run once immediately when loaded.

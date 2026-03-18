@@ -97,11 +97,14 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     wins = sum(1 for p in preds if p.get("outcome") == "win")
     loses = sum(1 for p in preds if p.get("outcome") == "lose")
     sold = sum(1 for p in preds if p.get("outcome") == "sold")
-    total_pnl = sum(p.get("pnl_cents") or 0 for p in preds)
+    total_pnl = sum(p.get("realized_pnl_cents", p.get("pnl_cents") or 0) or 0 for p in preds)
     if pd is not None:
         df = pd.DataFrame(preds)
         if not df.empty:
-            df["pnl_cents"] = df["pnl_cents"].fillna(0.0).astype(float)
+            if "realized_pnl_cents" in df.columns:
+                df["pnl_cents"] = df["realized_pnl_cents"].fillna(df["pnl_cents"]).fillna(0.0).astype(float)
+            else:
+                df["pnl_cents"] = df["pnl_cents"].fillna(0.0).astype(float)
             cumulative = df["pnl_cents"].cumsum().tolist()
             returns = (
                 df["pnl_cents"] / (df["pnl_cents"].cumsum().shift(1).abs() + 1e-9)
@@ -124,7 +127,7 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     cumulative: list[float] = []
     run = 0
     for p in preds:
-        run += p.get("pnl_cents") or 0
+        run += p.get("realized_pnl_cents", p.get("pnl_cents") or 0) or 0
         cumulative.append(float(run))
 
     returns: list[float] = []

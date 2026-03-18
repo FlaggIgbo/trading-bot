@@ -127,6 +127,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             rec TEXT,
             outcome TEXT,
             pnl_cents INTEGER,
+            realized_pnl_cents INTEGER,
             resolved_ts REAL,
             exit_price REAL,
             exit_count INTEGER,
@@ -167,6 +168,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_predictions_fill_attribution(conn)
     _migrate_predictions_fill_identity(conn)
     _migrate_predictions_exit_columns(conn)
+    _migrate_predictions_realized_pnl_column(conn)
     _migrate_market_snapshots_depth_columns(conn)
 
 
@@ -226,6 +228,22 @@ def _migrate_predictions_exit_columns(conn: sqlite3.Connection) -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
+
+def _migrate_predictions_realized_pnl_column(conn: sqlite3.Connection) -> None:
+    """Add explicit realized pnl column and backfill from legacy pnl_cents."""
+    try:
+        conn.execute("ALTER TABLE predictions ADD COLUMN realized_pnl_cents INTEGER")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute(
+            "UPDATE predictions SET realized_pnl_cents = COALESCE(realized_pnl_cents, pnl_cents)"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def _migrate_market_snapshots_depth_columns(conn: sqlite3.Connection) -> None:
@@ -1298,7 +1316,7 @@ def mark_prediction_cancelled(
     try:
         cur = conn.execute(
             """UPDATE predictions
-               SET outcome='cancelled', pnl_cents=0, resolved_ts=?, exit_reason=?
+               SET outcome='cancelled', pnl_cents=0, realized_pnl_cents=0, resolved_ts=?, exit_reason=?
                WHERE outcome IS NULL AND platform=? AND order_id=?""",
             (time.time(), cancel_reason, platform, str(order_id)),
         )
@@ -1360,9 +1378,9 @@ def record_prediction_early_exit(
             if qty == lot_count:
                 conn.execute(
                     """UPDATE predictions
-                       SET outcome='sold', pnl_cents=?, resolved_ts=?, exit_price=?, exit_count=?, exit_reason=?
+                       SET outcome='sold', pnl_cents=?, realized_pnl_cents=?, resolved_ts=?, exit_price=?, exit_count=?, exit_reason=?
                        WHERE id=?""",
-                    (pnl_cents, now_ts, float(sell_price), qty, exit_reason, int(lot["id"])),
+                    (pnl_cents, pnl_cents, now_ts, float(sell_price), qty, exit_reason, int(lot["id"])),
                 )
             else:
                 conn.execute(
@@ -1373,6 +1391,7 @@ def record_prediction_early_exit(
                 clone["count"] = qty
                 clone["outcome"] = "sold"
                 clone["pnl_cents"] = pnl_cents
+                clone["realized_pnl_cents"] = pnl_cents
                 clone["resolved_ts"] = now_ts
                 if "exit_price" in pred_cols:
                     clone["exit_price"] = float(sell_price)
@@ -1427,13 +1446,13 @@ def record_prediction_outcome(
         outcome = "win" if won else "lose"
         if min_price_after_buy is not None and max_price_after_buy is not None:
             conn.execute(
-                "UPDATE predictions SET outcome=?, pnl_cents=?, resolved_ts=?, min_price_after_buy=?, max_price_after_buy=? WHERE id=?",
-                (outcome, pnl_cents, time.time(), min_price_after_buy, max_price_after_buy, prediction_id),
+                "UPDATE predictions SET outcome=?, pnl_cents=?, realized_pnl_cents=?, resolved_ts=?, min_price_after_buy=?, max_price_after_buy=? WHERE id=?",
+                (outcome, pnl_cents, pnl_cents, time.time(), min_price_after_buy, max_price_after_buy, prediction_id),
             )
         else:
             conn.execute(
-                "UPDATE predictions SET outcome=?, pnl_cents=?, resolved_ts=? WHERE id=?",
-                (outcome, pnl_cents, time.time(), prediction_id),
+                "UPDATE predictions SET outcome=?, pnl_cents=?, realized_pnl_cents=?, resolved_ts=? WHERE id=?",
+                (outcome, pnl_cents, pnl_cents, time.time(), prediction_id),
             )
         conn.commit()
         return True
@@ -1462,7 +1481,7 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         return {"enabled": False, "resolved_count": 0}
     try:
         has_pab_cols = _predictions_has_price_after_buy_columns(conn)
-        select_cols = "outcome, pnl_cents, hist_p, direction, side, entry_price"
+        select_cols = "outcome, COALESCE(realized_pnl_cents, pnl_cents) AS pnl_cents, hist_p, direction, side, entry_price"
         if has_pab_cols:
             select_cols += ", min_price_after_buy, max_price_after_buy"
         rows = conn.execute(
@@ -1749,7 +1768,7 @@ def get_realized_pnl_stats(
             "SUM(CASE WHEN outcome='win' THEN 1 ELSE 0 END) AS wins, "
             "SUM(CASE WHEN outcome='lose' THEN 1 ELSE 0 END) AS losses, "
             "SUM(CASE WHEN outcome='sold' THEN 1 ELSE 0 END) AS sold, "
-            "SUM(COALESCE(pnl_cents, 0)) AS total_pnl_cents "
+            "SUM(COALESCE(realized_pnl_cents, pnl_cents, 0)) AS total_pnl_cents "
             "FROM predictions WHERE outcome IN ('win','lose','sold')"
         )
         params: list[Any] = []
