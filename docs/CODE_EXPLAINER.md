@@ -48,7 +48,7 @@
 - **Defensive execution gates:** Dynamic stability windows, cross-exchange sanity gating, and sells-only defensive mode reduce fill risk during flash regimes.
 - **Inter-arb leg safety:** Live execution now applies a paired preflight for `REC_ARB_INTER` groups so one-sided low-balance legs are dropped before placement.
 - **Performance graphs:** `scripts/daily_performance_report.py` generates PNG charts (green bars=wins, red=losses, blue cumulative P&L line) alongside the text report.
-- **DTE-confidence dip scaling:** When resolution is far out (>3 days) and model confidence is high (P(win)>=80%), limit order dips scale proportionally with DTE via `_dte_confidence_dip()`; config: `far_dte_dip_scaling_enabled`, `far_dte_threshold_days`, `far_dte_dip_scale_per_day`, `far_dte_max_extra_dip`, `far_dte_min_confidence`, `far_dte_confidence_boost`.
+- **DTE-confidence dip scaling:** When resolution is more than ~1 hour away (`far_dte_threshold_days: 0.042`) and model confidence is high (P(win)>=80%), limit order dips scale proportionally with DTE via `_dte_confidence_dip()`; config: `far_dte_dip_scaling_enabled`, `far_dte_threshold_days`, `far_dte_dip_scale_per_day`, `far_dte_max_extra_dip`, `far_dte_min_confidence`, `far_dte_confidence_boost`.
 
 ---
 
@@ -395,7 +395,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `limit_dip_pct_high_confidence` | `limit_dip_pct_high_confidence` | 0.15 | Larger dip when P(win)≥90% |
 | `limit_dip_pct_price_decline` | `limit_dip_pct_price_decline` | 0.10 | Dip when vol model suggests price decline |
 | `far_dte_dip_scaling_enabled` | `far_dte_dip_scaling_enabled` | — | DTE-confidence dip: scale limit dips when resolution far out and P(win) high |
-| `far_dte_threshold_days` | `far_dte_threshold_days` | 3 | DTE above which far-dip scaling applies |
+| `far_dte_threshold_days` | `far_dte_threshold_days` | 0.042 | DTE above which far-dip scaling applies (~1 hour; crypto markets can be hourly) |
 | `far_dte_dip_scale_per_day` | `far_dte_dip_scale_per_day` | — | Extra dip per day when far DTE + high confidence |
 | `far_dte_max_extra_dip` | `far_dte_max_extra_dip` | — | Cap on extra dip from DTE scaling |
 | `far_dte_min_confidence` | `far_dte_min_confidence` | 0.80 | Min P(win) for DTE-confidence dip (e.g. 80%) |

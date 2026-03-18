@@ -58,7 +58,7 @@ strategy:
   # Markets with distant resolution are prone to mean-reverting dips even when
   # the eventual outcome is near-certain; deeper limits capture these.
   far_dte_dip_scaling_enabled: true # Enable DTE-proportional limit dip scaling
-  far_dte_threshold_days: 3 # Consider resolution "far" when DTE exceeds this
+  far_dte_threshold_days: 0.042 # Consider resolution "far" when DTE > ~1 hour (crypto can be hourly)
   far_dte_dip_scale_per_day: 0.015 # Add 1.5% more dip per day of DTE beyond threshold
   far_dte_max_extra_dip: 0.12 # Cap additional DTE-based dip at 12%
   far_dte_min_confidence: 0.80 # Only apply DTE dip scaling when P(win) >= 80%

@@ -399,7 +399,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         signal_weight_fit_min_samples=int(strategy.get("signal_weight_fit_min_samples", 150)),
         signal_weight_fit_l2_c=float(strategy.get("signal_weight_fit_l2_c", 1.0)),
         far_dte_dip_scaling_enabled=bool(strategy.get("far_dte_dip_scaling_enabled", True)),
-        far_dte_threshold_days=float(strategy.get("far_dte_threshold_days", 3.0)),
+        far_dte_threshold_days=float(strategy.get("far_dte_threshold_days", 0.042)),
         far_dte_dip_scale_per_day=float(strategy.get("far_dte_dip_scale_per_day", 0.015)),
         far_dte_max_extra_dip=float(strategy.get("far_dte_max_extra_dip", 0.12)),
         far_dte_min_confidence=float(strategy.get("far_dte_min_confidence", 0.80)),
