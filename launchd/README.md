@@ -1,7 +1,7 @@
 # LaunchAgents: Trading Engine + Daily Performance Report
 
 This setup includes:
-- `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 10 minutes.
+- `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes.
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 
 Both jobs use your `.venv` Python so dependencies are available.
@@ -45,7 +45,7 @@ Both jobs use your `.venv` Python so dependencies are available.
 
 ## Configuration
 
-- **Compare interval:** 600 seconds (10 minutes). Change `<integer>600</integer>` in `com.user.compare_historical.plist`.
+- **Compare interval:** 300 seconds (5 minutes). Change `<integer>300</integer>` in `com.user.compare_historical.plist`.
 - **Daily report time:** 23:55 local time (`StartCalendarInterval`) in `com.user.daily_performance_report.plist`.
 - **Daily report file path:** controlled by `config.yaml` → `backtest.daily_report_dir` (default: `~/.trading-bot-data/reports`).
 - **Run on login:** Set `<key>RunAtLoad</key><true/>` if you want it to run once immediately when loaded.
