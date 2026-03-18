@@ -160,6 +160,7 @@ class _StrategyParams:
     enable_intra_arb: bool
     enable_inter_arb: bool
     arb_inter_require_group_preflight: bool
+    inter_arb_balance_aware_routing: bool
     kalshi_maker_fee_rate: float
     kalshi_sp500_maker_fee_rate: float
     gemini_maker_fee_rate: float
@@ -287,6 +288,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
         enable_inter_arb=bool(strategy.get("enable_inter_arb", True)),
         arb_inter_require_group_preflight=bool(strategy.get("arb_inter_require_group_preflight", True)),
+        inter_arb_balance_aware_routing=bool(strategy.get("inter_arb_balance_aware_routing", True)),
         kalshi_maker_fee_rate=float(strategy.get("kalshi_maker_fee_rate", 0.0175)),
         kalshi_sp500_maker_fee_rate=float(strategy.get("kalshi_sp500_maker_fee_rate", 0.00875)),
         gemini_maker_fee_rate=float(strategy.get("gemini_maker_fee_rate", 0.0175)),
@@ -2191,11 +2193,17 @@ def _check_inter_arb(
     kalshi_m: dict,
     gemini_evt: dict,
     min_arb_fee: float,
+    *,
+    kalshi_balance_cents: int = 0,
+    gemini_balance_cents: int = 0,
+    max_pct_of_balance: float = 0.90,
+    balance_aware: bool = True,
 ) -> tuple[str, str, float, float, float, float] | None:
     """
     Inter-exchange arb: buy YES on one platform + NO on other when sum < 1 - fee.
     Returns (best_yes_platform, best_no_platform, yes_price, no_price, other_yes, other_no) or None.
-    Best combination is the one with lowest total cost.
+    In balance-aware mode, prefer routes that maximize paired affordability and
+    place the cheaper leg on the lower-balance account when possible.
     """
     yes_k = float(kalshi_m.get("yes_ask_dollars") or kalshi_m.get("yes_bid_dollars") or 0)
     no_k = float(kalshi_m.get("no_ask_dollars") or kalshi_m.get("no_bid_dollars") or 0)
@@ -2209,11 +2217,89 @@ def _check_inter_arb(
         no_g = 1.0 - yes_g
     cost_k_yes_g_no = yes_k + no_g
     cost_g_yes_k_no = yes_g + no_k
+
+    candidates: list[dict[str, Any]] = []
     if cost_k_yes_g_no < (1.0 - min_arb_fee):
-        return (PLATFORM_KALSHI, PLATFORM_GEMINI, yes_k, no_g, yes_g, no_k)
+        candidates.append(
+            {
+                "yes_platform": PLATFORM_KALSHI,
+                "no_platform": PLATFORM_GEMINI,
+                "yes_price": yes_k,
+                "no_price": no_g,
+                "other_yes": yes_g,
+                "other_no": no_k,
+                "cost": cost_k_yes_g_no,
+            }
+        )
     if cost_g_yes_k_no < (1.0 - min_arb_fee):
-        return (PLATFORM_GEMINI, PLATFORM_KALSHI, yes_g, no_k, yes_k, no_g)
-    return None
+        candidates.append(
+            {
+                "yes_platform": PLATFORM_GEMINI,
+                "no_platform": PLATFORM_KALSHI,
+                "yes_price": yes_g,
+                "no_price": no_k,
+                "other_yes": yes_k,
+                "other_no": no_g,
+                "cost": cost_g_yes_k_no,
+            }
+        )
+    if not candidates:
+        return None
+
+    if not balance_aware:
+        chosen = min(candidates, key=lambda c: c["cost"])
+        return (
+            chosen["yes_platform"],
+            chosen["no_platform"],
+            chosen["yes_price"],
+            chosen["no_price"],
+            chosen["other_yes"],
+            chosen["other_no"],
+        )
+
+    low_balance_platform = (
+        PLATFORM_KALSHI if kalshi_balance_cents <= gemini_balance_cents else PLATFORM_GEMINI
+    )
+    max_pct = max(0.0, float(max_pct_of_balance))
+    kalshi_spend = int(max(0, int(kalshi_balance_cents)) * max_pct)
+    gemini_spend = int(max(0, int(gemini_balance_cents)) * max_pct)
+
+    def _pair_affordable_count(c: dict[str, Any]) -> int:
+        yes_price_c = max(1, int(round(float(c["yes_price"]) * 100)))
+        no_price_c = max(1, int(round(float(c["no_price"]) * 100)))
+        if c["yes_platform"] == PLATFORM_KALSHI:
+            yes_max = kalshi_spend // yes_price_c
+        else:
+            yes_max = gemini_spend // yes_price_c
+        if c["no_platform"] == PLATFORM_KALSHI:
+            no_max = kalshi_spend // no_price_c
+        else:
+            no_max = gemini_spend // no_price_c
+        return max(0, min(yes_max, no_max))
+
+    def _cheap_leg_on_low_balance(c: dict[str, Any]) -> int:
+        if float(c["yes_price"]) <= float(c["no_price"]):
+            cheap_leg_platform = c["yes_platform"]
+        else:
+            cheap_leg_platform = c["no_platform"]
+        return 1 if cheap_leg_platform == low_balance_platform else 0
+
+    chosen = max(
+        candidates,
+        key=lambda c: (
+            _pair_affordable_count(c),
+            _cheap_leg_on_low_balance(c),
+            -float(c["cost"]),
+        ),
+    )
+    return (
+        chosen["yes_platform"],
+        chosen["no_platform"],
+        chosen["yes_price"],
+        chosen["no_price"],
+        chosen["other_yes"],
+        chosen["other_no"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2843,12 +2929,20 @@ def _run(args) -> int:
 def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fraction, min_contracts) -> int:
     min_edge = float(strategy.get("min_edge", args.edge))
     kalshi = KalshiClient()
+    trading_cfg = cfg.get("trading", {})
+    max_pct_for_arb_routing = float(trading_cfg.get("max_pct_of_balance", 0.90))
     balance_cents = 100_00  # default $100 for Kelly when balance unavailable
     try:
         bal = kalshi.get_balance()
         balance_cents = int(bal.get("balance", 100_00))
     except Exception:
         pass
+    gemini_balance_for_arb = 0
+    try:
+        gt_route = GeminiTradingClient()
+        gemini_balance_for_arb = int(gt_route.get_balance().get("balance", 0) or 0)
+    except Exception:
+        gemini_balance_for_arb = 0
     to_date = datetime.utcnow()
     from_date = to_date - timedelta(days=args.days)
     from_ts, to_ts = from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d")
@@ -3229,7 +3323,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if not arb_used and sp.enable_inter_arb and yf_ticker in GEMINI_CRYPTO_YF:
                 gemini_match = _find_matching_gemini_event(gemini_events_by_asset.get(yf_ticker, []), threshold, direction)
                 if gemini_match:
-                    inter = _check_inter_arb(m, gemini_match, sp.min_arb_fee)
+                    inter = _check_inter_arb(
+                        m,
+                        gemini_match,
+                        sp.min_arb_fee,
+                        kalshi_balance_cents=balance_cents,
+                        gemini_balance_cents=gemini_balance_for_arb,
+                        max_pct_of_balance=max_pct_for_arb_routing,
+                        balance_aware=sp.inter_arb_balance_aware_routing,
+                    )
                     if inter:
                         yes_plat, no_plat, yes_p, no_p, _, _ = inter
                         cost = yes_p + no_p

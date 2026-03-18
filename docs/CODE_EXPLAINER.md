@@ -88,7 +88,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Loop over each market       | For each market in the list                                 | `compare_historical.py:1290` → `for mkt in mkt_list`          |
 | Skip unsupported resolution | Non 5pm crypto / 4pm S&P intraday → skip                    | `compare_historical.py:1182` → `_should_skip_by_resolution()` |
 | Check intra-arb             | YES+NO < 1−fee on same market → BUY BOTH                    | `compare_historical.py:1169` → `_check_intra_arb_kalshi()`    |
-| Check inter-arb             | Kalshi YES + Gemini NO < 1−fee → hedge                      | `compare_historical.py:1182` → `_check_inter_arb()`           |
+| Check inter-arb             | Kalshi YES + Gemini NO < 1−fee → hedge (balance-aware route selection can place cheaper leg on lower-balance account) | `compare_historical.py:1182` → `_check_inter_arb()`           |
 | Extract strike              | Parse "above $81,250" or "below $72,000" from title or ticker (e.g. -T82.9999) | `compare_historical.py:389` → `_extract_strike()`             |
 | Compute empirical P(YES)    | Recency-weighted/rolling empirical probability (NumPy path when installed) | `compare_historical.py` → `_empirical_probability()`      |
 | Compute volatility P(YES)   | Log-normal model with `vol_model` (`auto|ewma|garch|sample`), optional OTM smile; S0 uses live+close blend | `compare_historical.py` → `_volatility_probability()`     |
