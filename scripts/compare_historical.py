@@ -1918,6 +1918,9 @@ def _maybe_add_reentry_order(
     maker_rate: float,
     position_count: int,
     extra: dict | None = None,
+    *,
+    current_price: float | None = None,
+    dte_days: float | None = None,
 ) -> None:
     """
     When selling a losing position, optionally add a re-entry BUY at current price
@@ -1926,6 +1929,16 @@ def _maybe_add_reentry_order(
     """
     if not sp.enable_sell_and_rebuy or position_count <= 0:
         return
+    # Block re-entry on ultra-short contracts where the strike guard would block a normal buy
+    if current_price is not None and current_price > 0 and threshold is not None and threshold > 0 and direction:
+        if side == "yes" and direction == "above" and sp.max_buy_yes_strike_above_pct > 0:
+            eff_pct = _dte_adjusted_strike_pct(sp.max_buy_yes_strike_above_pct, dte_days) if dte_days is not None else sp.max_buy_yes_strike_above_pct
+            if threshold > current_price * (1 + eff_pct):
+                return
+        if side == "no" and direction == "below" and sp.max_buy_no_strike_above_pct > 0:
+            eff_pct = _dte_adjusted_strike_pct(sp.max_buy_no_strike_above_pct, dte_days) if dte_days is not None else sp.max_buy_no_strike_above_pct
+            if threshold > current_price * (1 + eff_pct):
+                return
     re_entry_price = yes_bid if side == "yes" else no_bid
     p_win = hist_p if side == "yes" else (1.0 - hist_p)
     fee = _fee_per_contract(re_entry_price, maker_rate, sp.min_fee_per_order)
@@ -3173,45 +3186,45 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
     if not gemini_preds:
         return
     tickers_needed = {p["ticker"] for p in gemini_preds}
-    settled_by_ticker: dict[str, dict] = {}
+    # Map each prediction ticker to its specific contract's resolutionSide
+    resolution_by_ticker: dict[str, dict] = {}  # ticker → {"res_side": "yes"|"no", "evt": {...}}
     try:
         offset = 0
         while True:
-            r = gemini.get_events(category=None, status="settled", limit=200, offset=offset)
+            r = gemini.get_events(category=["crypto", "hourly"], status="settled", limit=200, offset=offset)
             data = r.get("data") or []
             for evt in data:
-                evt_ticker = evt.get("ticker") or ""
-                if evt_ticker in tickers_needed:
-                    settled_by_ticker[evt_ticker] = evt
                 for c in evt.get("contracts") or []:
                     ct = c.get("ticker") or ""
-                    if ct in tickers_needed:
-                        settled_by_ticker[ct] = evt
+                    rs = (c.get("resolutionSide") or "").lower()
+                    if ct in tickers_needed and rs in ("yes", "no"):
+                        resolution_by_ticker[ct] = {"res_side": rs, "evt": evt}
+                evt_ticker = evt.get("ticker") or ""
+                if evt_ticker in tickers_needed and evt_ticker not in resolution_by_ticker:
+                    for c in evt.get("contracts") or []:
+                        rs = (c.get("resolutionSide") or "").lower()
+                        label = (c.get("label") or "").lower()
+                        if rs in ("yes", "no") and label == "yes":
+                            resolution_by_ticker[evt_ticker] = {"res_side": rs, "evt": evt}
+                            break
             if len(data) < 200:
                 break
             offset += len(data)
+            if len(resolution_by_ticker) >= len(tickers_needed):
+                break
     except Exception:
         return
-    if not settled_by_ticker:
+    if not resolution_by_ticker:
         return
     sp_sync = _load_strategy_params((cfg or {}).get("strategy", {}))
     min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
     for p in gemini_preds:
         t = p.get("ticker")
-        evt = settled_by_ticker.get(t) if t else None
-        if not evt:
+        info = resolution_by_ticker.get(t) if t else None
+        if not info:
             continue
-        res_side: str | None = None
-        for c in evt.get("contracts") or []:
-            rs = (c.get("resolutionSide") or "").lower()
-            if rs in ("yes", "no"):
-                res_side = rs
-                break
-        if res_side is None:
-            evt_status = (evt.get("status") or "").lower()
-            if evt_status != "settled":
-                continue
-            res_side = "yes"
+        res_side = info["res_side"]
+        evt = info["evt"]
         yes_settled = res_side == "yes"
         entry = float(p.get("entry_price") or 0)
         cnt = int(p.get("count") or 0)
@@ -3974,9 +3987,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             violates_rule = _violates_no_above_rule(current_price, threshold, direction, sp.no_above_cushion)
             if rec == REC_BUY_NO and sp.enforce_no_above_rule and violates_rule:
                 rec = REC_SKIP
-            # Favor BUY YES when price is well above strike — but only if we have edge and calibration allows it
+            # Favor BUY YES when price is well above strike — but only if we have edge (after fees) and calibration allows it
             if rec == REC_SKIP and violates_rule:
-                if 0 < yes_bid < (1 - effective_min) and hist_p >= yes_bid + effective_min:
+                _favor_fee = _fee_per_contract(yes_bid, maker_fee_rate, sp.min_fee_per_order)
+                if 0 < yes_bid < (1 - effective_min) and hist_p >= yes_bid + effective_min + _favor_fee:
                     should_favor = sp.favor_yes_when_above_strike
                     if should_favor and sp.use_calibration and calibration:
                         above_yes = calibration.get("by_direction_side", {}).get("above+yes", {})
@@ -3992,10 +4006,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rec = REC_SKIP
             # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
             # DTE-aware: tighten allowed gap for short-dated contracts (price can't move far in minutes)
+            # When DTE < 0.1 days (~2.4h), vol override is blocked — not enough time for large moves
             _eff_max_above = _dte_adjusted_strike_pct(sp.max_buy_yes_strike_above_pct, dte)
+            _dte_too_short = dte is not None and dte < 0.1
             if rec == REC_BUY_YES and direction == "above" and _eff_max_above > 0:
                 if threshold > current_price * (1 + _eff_max_above):
-                    if not (use_vol and vol_p is not None and vol_p >= sp.min_vol_confidence_far_otm):
+                    vol_override = use_vol and vol_p is not None and vol_p >= sp.min_vol_confidence_far_otm and not _dte_too_short
+                    if not vol_override:
                         rec = REC_SKIP
             # Skip BUY NO when market prices NO very low (market thinks our side unlikely); same override when vol shows high P(NO)
             no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -4006,7 +4023,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             _eff_max_no_above = _dte_adjusted_strike_pct(sp.max_buy_no_strike_above_pct, dte)
             if rec == REC_BUY_NO and direction == "below" and _eff_max_no_above > 0:
                 if threshold > current_price * (1 + _eff_max_no_above):
-                    if not (use_vol and vol_p is not None and (1 - hist_p) >= 0.95):
+                    vol_override_no = use_vol and vol_p is not None and (1 - hist_p) >= 0.95 and not _dte_too_short
+                    if not vol_override_no:
                         rec = REC_SKIP
             if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(
                 rec, direction, hist_p, yes_bid, min_edge, calibration, sp, maker_fee_rate
@@ -4419,9 +4437,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, sp.no_above_cushion)
                 if rec == REC_BUY_NO and sp.enforce_no_above_rule and violates_rule_g:
                     rec = REC_SKIP
-                # Favor BUY YES when price is well above strike — only if we have edge and calibration allows it
+                # Favor BUY YES when price is well above strike — only if we have edge (after fees) and calibration allows it
                 if rec == REC_SKIP and violates_rule_g:
-                    if 0 < impl < (1 - effective_min_gem) and hist_p_gem >= impl + effective_min_gem:
+                    _favor_fee_g = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
+                    if 0 < impl < (1 - effective_min_gem) and hist_p_gem >= impl + effective_min_gem + _favor_fee_g:
                         should_favor = sp.favor_yes_when_above_strike
                         if should_favor and sp.use_calibration and calibration:
                             above_yes = calibration.get("by_direction_side", {}).get("above+yes", {})
@@ -4437,10 +4456,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         rec = REC_SKIP
                 # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
                 # DTE-aware: tighten allowed gap for short-dated contracts
+                # When DTE < 0.1 days (~2.4h), vol override is blocked
                 _eff_max_above_g = _dte_adjusted_strike_pct(sp.max_buy_yes_strike_above_pct, dte_g)
+                _dte_too_short_g = dte_g is not None and dte_g < 0.1
                 if rec == REC_BUY_YES and direction_g == "above" and _eff_max_above_g > 0:
                     if threshold_g > current_price * (1 + _eff_max_above_g):
-                        if not (use_vol and vol_p_gem is not None and vol_p_gem >= sp.min_vol_confidence_far_otm):
+                        vol_override_g = use_vol and vol_p_gem is not None and vol_p_gem >= sp.min_vol_confidence_far_otm and not _dte_too_short_g
+                        if not vol_override_g:
                             rec = REC_SKIP
                 # Skip BUY NO when market prices NO very low; override when vol model shows P(NO) ≥ 95%
                 no_price_gem = 1.0 - impl
@@ -4451,7 +4473,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _eff_max_no_above_g = _dte_adjusted_strike_pct(sp.max_buy_no_strike_above_pct, dte_g)
                 if rec == REC_BUY_NO and direction_g == "below" and _eff_max_no_above_g > 0:
                     if threshold_g > current_price * (1 + _eff_max_no_above_g):
-                        if not (use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95):
+                        vol_override_no_g = use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95 and not _dte_too_short_g
+                        if not vol_override_no_g:
                             rec = REC_SKIP
                 if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(rec, direction_g, hist_p_gem, impl, min_edge, calibration, sp, maker_fee_rate_gem):
                     rec = REC_SKIP
@@ -4810,11 +4833,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             if use_vol else None
                                         )
                                         if vol_p is not None and use_vol:
-                                            hist_p = vol_p if (_is_intraday_market(m, pos_yf) and not sp.use_intraday_empirical) else (
-                                                (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_pos), sp.vol_dynamic_n0) * emp_pos
-                                                 + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_pos), sp.vol_dynamic_n0)) * vol_p) if sp.vol_blend_weight is not None
-                                                else max(emp_pos, vol_p)
-                                            )
+                                            if _is_intraday_market(m, pos_yf) and not sp.use_intraday_empirical:
+                                                hist_p = vol_p
+                                            elif sp.vol_blend_weight is not None:
+                                                w_emp_pos = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_pos), sp.vol_dynamic_n0)
+                                                w_emp_pos = _dte_adjusted_empirical_weight(w_emp_pos, dte_pos)
+                                                hist_p = w_emp_pos * emp_pos + (1 - w_emp_pos) * vol_p
+                                            else:
+                                                hist_p = max(emp_pos, vol_p)
                                     maker_fee_pos = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
                                     eff_pos_yes = eff_pos + yes_parity_penalty
@@ -4887,6 +4913,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
                                             side, hist_p, yes_bid, no_bid, threshold, direction, pos_yf, vol_p,
                                             maker_fee_pos, position_count,
+                                            current_price=current_price_pos, dte_days=dte_pos,
                                         )
                                     elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                                         pending_sells.append({
@@ -4903,6 +4930,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
                                             side, hist_p, yes_bid, no_bid, threshold, direction, pos_yf, vol_p,
                                             maker_fee_pos, position_count,
+                                            current_price=current_price_pos, dte_days=dte_pos,
                                         )
                                     elif (
                                         side == "no"
@@ -4980,11 +5008,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if use_vol else None
                 )
                 if vol_p is not None and use_vol:
-                    hist_p = vol_p if (_is_intraday_market(m, _yf) and not sp.use_intraday_empirical) else (
-                        (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_cached), sp.vol_dynamic_n0) * emp_cached
-                         + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_cached), sp.vol_dynamic_n0)) * vol_p) if sp.vol_blend_weight is not None
-                        else max(emp_cached, vol_p)
-                    )
+                    if _is_intraday_market(m, _yf) and not sp.use_intraday_empirical:
+                        hist_p = vol_p
+                    elif sp.vol_blend_weight is not None:
+                        w_emp_cached = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_cached), sp.vol_dynamic_n0)
+                        w_emp_cached = _dte_adjusted_empirical_weight(w_emp_cached, dte_cached)
+                        hist_p = w_emp_cached * emp_cached + (1 - w_emp_cached) * vol_p
+                    else:
+                        hist_p = max(emp_cached, vol_p)
                 maker_fee_cached = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, _yf)
                 eff_cached = _get_effective_min_edge(min_edge, direction, calibration, sp)
                 eff_cached_yes = eff_cached + yes_parity_penalty
@@ -5045,6 +5076,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
                         side, hist_p, yes_bid, no_bid, threshold, direction, _yf, vol_p,
                         maker_fee_cached, position_count,
+                        current_price=current_price_pos, dte_days=dte_cached,
                     )
                 # SELL YES when we'd now recommend BUY NO; SELL NO when we'd recommend BUY YES
                 elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
@@ -5062,6 +5094,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         sp, min_edge, pending_orders, PLATFORM_KALSHI, ticker, (m.get("title") or "")[:55],
                         side, hist_p, yes_bid, no_bid, threshold, direction, _yf, vol_p,
                         maker_fee_cached, position_count,
+                        current_price=current_price_pos, dte_days=dte_cached,
                     )
                 # SELL NO when holding NO on "above X" but price already > X * (1 + cushion)
                 elif (
@@ -5212,11 +5245,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         )
                         hist_p_g = emp_g
                         if vol_p_g is not None and use_vol:
-                            hist_p_g = vol_p_g if (_is_intraday_market(evt, pos_yf) and not sp.use_intraday_empirical) else (
-                                (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0) * emp_g
-                                 + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0)) * vol_p_g)
-                                if sp.vol_blend_weight is not None else max(emp_g, vol_p_g)
-                            )
+                            if _is_intraday_market(evt, pos_yf) and not sp.use_intraday_empirical:
+                                hist_p_g = vol_p_g
+                            elif sp.vol_blend_weight is not None:
+                                w_emp_g = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0)
+                                w_emp_g = _dte_adjusted_empirical_weight(w_emp_g, dte_g)
+                                hist_p_g = w_emp_g * emp_g + (1 - w_emp_g) * vol_p_g
+                            else:
+                                hist_p_g = max(emp_g, vol_p_g)
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
                         maker_fee_pos_g = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, pos_yf)
                         pos_min_edge_g = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
@@ -5307,6 +5343,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 side, hist_p_g, impl, no_price_g, threshold_g, direction_g, pos_yf, vol_p_g,
                                 maker_fee_pos_g, position_count,
                                 extra={"instrument_symbol": sym, "gemini_evt": evt},
+                                current_price=current_price_g, dte_days=dte_g,
                             )
                         elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
                             pending_sells.append({
@@ -5326,6 +5363,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 side, hist_p_g, impl, no_price_g, threshold_g, direction_g, pos_yf, vol_p_g,
                                 maker_fee_pos_g, position_count,
                                 extra={"instrument_symbol": sym, "gemini_evt": evt},
+                                current_price=current_price_g, dte_days=dte_g,
                             )
                         elif side == "no" and violates_g:
                             pending_sells.append({
