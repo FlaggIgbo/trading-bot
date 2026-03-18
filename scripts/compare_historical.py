@@ -3532,7 +3532,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     signal_model_weights=sp.signal_model_weights,
                 )
             effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
-            ci_half = _empirical_ci_halfwidth(emp, len(closes_for_emp))
+            emp_n = min(sp.empirical_recent_days, len(closes_for_emp)) if sp.empirical_use_rolling_window else len(closes_for_emp)
+            ci_half = _empirical_ci_halfwidth(emp, emp_n)
             effective_min += sp.uncertainty_edge_mult * ci_half
             effective_min *= edge_regime_mult
             if vol_spike_active:
@@ -3951,7 +3952,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         signal_model_weights=sp.signal_model_weights,
                     )
                 effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
-                effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, len(closes_for_emp_g))
+                emp_n_g = min(sp.empirical_recent_days, len(closes_for_emp_g)) if sp.empirical_use_rolling_window else len(closes_for_emp_g)
+                effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, emp_n_g)
                 effective_min_gem *= edge_regime_mult
                 if vol_spike_active:
                     effective_min_gem *= max(1.0, sp.vol_spike_edge_multiplier)

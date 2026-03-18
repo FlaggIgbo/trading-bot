@@ -75,6 +75,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Depth persistence for snapshots**    | Backtest realism                        | ✓ `market_snapshots` now stores top-of-book asks/sizes (`yes_ask`, `no_ask`, `*_size`) so synthetic partial-fill logic can use real historical depth when available. |
 | **Daily performance graphs**           | Reliability                             | ✓ `scripts/daily_performance_report.py` now generates PNG performance charts with per-trade P&L bars (green=wins, red=losses) and cumulative P&L overlay line, saved alongside the text report. |
 | **DTE-confidence limit dip scaling**   | —                                       | ✓ New `_dte_confidence_dip()` in compare_historical.py. When resolution is far (>3 days) and model confidence high (P(win)>=80%), limit order dips scale proportionally with DTE to catch uncertainty-driven price drops. Config: `far_dte_*` params. When P(win)>=90%, extra DTE dip gets a 1.5x confidence boost. |
+| **CI sample-size fix + wider empirical window** | —                            | ✓ `_empirical_ci_halfwidth` now uses the rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, so the uncertainty penalty honestly reflects the data the empirical model actually used. `empirical_recent_days` increased from 30 → 90 for more stable empirical P estimates while still adapting to regime shifts. |
 
 ---
 
@@ -91,6 +92,7 @@ Refactoring, architecture, and code quality changes.
 | **_compute_p_lose helper**         | Blends model P(lose) with market odds; time-weighted (half-life decay) so market gets more weight near resolution. |
 | **Calibration loss weighting in storage** | `get_calibration_stats()` accepts `config`; reads `calibration_loss_weight`; applies to bucket and by_direction_side win rates. |
 | **Strategy plugin migration**          | Signal feature building/scoring and recommendation routing are delegated to `strategies/` implementations; `compare_historical.py` handles data/execution plumbing. |
+| **CI sample-size honesty**          | `_empirical_ci_halfwidth` now uses the effective rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, preventing artificially tight confidence intervals when rolling window is enabled. |
 | **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
 | **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |
 | **ML pipeline repo restructure**    | Reorganized into `signals/` (data clients), `models/strategies/` (ML strategies), `execution/` (order lifecycle), `data/` (persistence). Root-level backward-compat shims preserve existing import paths. Pipeline flow: config.yaml signals → feature engineering → model scoring → trade execution → data persistence. |

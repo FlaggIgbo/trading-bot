@@ -144,7 +144,7 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 
 **Goal:** Use historical price data to estimate fair probability, then compare to Kalshi/Gemini market prices → recommend **BUY YES** / **BUY NO** / **SKIP**.
 
-**Example in plain English:** Imagine a bet: "Will Bitcoin be above $81,250 on March 16?" The bot looks at the last year of Bitcoin prices and finds that Bitcoin closed above that level only 5% of the time. So the "fair" chance of YES is about 5%. If the market is charging 40¢ for YES (i.e. people think there's a 40% chance), the market is overpricing YES. The bot would recommend **BUY NO** (bet against it) or **SKIP** if the edge isn't big enough.
+**Example in plain English:** Imagine a bet: "Will Bitcoin be above $81,250 on March 16?" The bot looks at the last 90 days of Bitcoin prices (rolling window) and finds that Bitcoin closed above that level only 5% of the time. So the "fair" chance of YES is about 5%. If the market is charging 40¢ for YES (i.e. people think there's a 40% chance), the market is overpricing YES. The bot would recommend **BUY NO** (bet against it) or **SKIP** if the edge isn't big enough.
 
 Run `scripts/compare_historical.py` every **5 minutes** locally for continuous evaluation. See [Cron setup](#run-every-5-minutes) below.
 
@@ -343,7 +343,7 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 
 ### Main evaluation: `scripts/compare_historical.py`
 
-**In plain English:** The bot looks at how often the asset (e.g. Bitcoin) closed above or below a target price in the past year. It compares that "historical chance" to what the market is charging. If the market is underpricing (e.g. we think 30% chance, market says 15¢), we **BUY YES**. If overpricing, we **BUY NO**. If there's not enough of a bargain, we **SKIP**.
+**In plain English:** The bot looks at how often the asset (e.g. Bitcoin) closed above or below a target price in a recent rolling window (default 90 days). It compares that "historical chance" to what the market is charging. If the market is underpricing (e.g. we think 30% chance, market says 15¢), we **BUY YES**. If overpricing, we **BUY NO**. If there's not enough of a bargain, we **SKIP**.
 
 ```bash
 python3 scripts/compare_historical.py --days 365 --markets 0 --edge 0.15   # 0 = all markets
@@ -543,7 +543,7 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 
 - **Live price blend for S0 and safety**: The bot uses **both** signals—live price (via `get_snapshot`) and the last close (`closes[-1]`)—blended with slightly more weight on live (`live_price_weight`, default 0.6). So `current_price = 0.6×live + 0.4×closes[-1]` when both are available. This reflects sharp recent moves while anchoring to the last close. Falls back to `closes[-1]` if the snapshot API fails.
 - **Empirical**: fraction of past days the close was above/below the threshold.
-- **Empirical**: recency-weighted and rolling-window capable (`empirical_recent_days`, `empirical_recent_weight`, `empirical_use_rolling_window`) with regime-sensitive weight boosts.
+- **Empirical**: recency-weighted and rolling-window capable (`empirical_recent_days` default 90, `empirical_recent_weight`, `empirical_use_rolling_window`) with regime-sensitive weight boosts. The confidence-interval uncertainty penalty uses the rolling-window sample size (not full history) so edge requirements honestly reflect the data the model actually used.
 - **Volatility**: log-normal model using `vol_model` (`auto|ewma|garch|sample`) and time-to-expiry. `auto` prefers GARCH(1,1) when available and safely falls back to EWMA/sample. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts.
 - **Intraday EWMA override**: intraday contracts can use a faster EWMA decay (`intraday_ewma_lambda`, currently 0.90) while daily contracts keep `ewma_lambda` (0.94).
 - **Volatility defense stack**: continuous vol-ratio scaling increases `min_edge`, deepens limit dips, and dampens size; extreme-volatility `defensive mode` switches to sells-only; stability window can auto-expand with volatility.

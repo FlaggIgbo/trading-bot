@@ -120,7 +120,7 @@ strategy:
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)
   live_price_weight: 0.6 # When both available: current_price = 0.6*live + 0.4*closes[-1]. Slightly prioritize live. Fallback: closes[-1] if snapshot fails.
   empirical_use_rolling_window: true # Empirical model uses rolling window for faster adaptation
-  empirical_recent_days: 30 # Shorter memory for faster regime adaptation
+  empirical_recent_days: 90 # Wider rolling window for more stable empirical P while still adapting to regime shifts
   empirical_recent_weight: 3.0 # Weight of recent samples relative to older data
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight

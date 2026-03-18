@@ -1,6 +1,6 @@
 # Trading Bot — Code Explainer
 
-> **Layman's summary:** The bot watches prediction markets (e.g. "Will Bitcoin be above $81,250 on March 16?"), checks how often that actually happened in the past year, and compares that "historical chance" to what the market is charging. If the market is wrong, it suggests BUY YES, BUY NO, or SKIP.
+> **Layman's summary:** The bot watches prediction markets (e.g. "Will Bitcoin be above $81,250 on March 16?"), checks how often that actually happened in a recent rolling window (default 90 days), and compares that "historical chance" to what the market is charging. If the market is wrong, it suggests BUY YES, BUY NO, or SKIP.
 
 ---
 
@@ -436,11 +436,11 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `use_live_price` | `use_live_price` | true | Blend live + closes[-1] for vol model & safety; reflects sharp moves |
 | `live_price_weight` | `live_price_weight` | 0.6 | When both available: 60% live + 40% closes[-1]; slightly prioritize live |
 | `empirical_use_rolling_window` | `empirical_use_rolling_window` | true | Use rolling window for empirical probability |
-| `empirical_recent_days` | `empirical_recent_days` | 90 | Recent window length for empirical model |
+| `empirical_recent_days` | `empirical_recent_days` | 90 | Rolling window length for empirical model (CI uses this as sample size when rolling window is on) |
 | `empirical_recent_weight` | `empirical_recent_weight` | 3.0 | Extra weight applied to recent samples |
 | `use_volatility_by_default` | `use_volatility_by_default` | true | Apply volatility model even without `--use-volatility` |
 | `vol_dynamic_n0` | `vol_dynamic_n0` | 90 | Sample-size pivot for dynamic empirical/vol blend |
-| `uncertainty_edge_mult` | `uncertainty_edge_mult` | 0.5 | Adds CI-based uncertainty buffer to min edge |
+| `uncertainty_edge_mult` | `uncertainty_edge_mult` | 0.5 | Adds CI-based uncertainty buffer to min edge; CI sample size matches rolling-window length (not full history) |
 | `strategy_engine` | `strategy_engine` | `vol_regime` | Select recommendation engine (`vol_regime` default, `default_threshold` optional) |
 | `stop_loss_pct` | `stop_loss_pct` | 0.50 fallback | Stop-loss threshold from recorded entry price (current config 0.20) |
 | `enable_strike_validation` | `enable_strike_validation` | true | Validate extracted strike against current price and market odds |
@@ -655,7 +655,7 @@ All recommendation and platform identifiers live in `constants.py`:
 2. **Fetch:** `yf_get_aggs(BTC-USD, 365)` → 365 daily closes. Cache hit if run within last hour.
 3. **Market:** Kalshi returns market with yes_bid=0.40, no_bid=0.58, floor_strike=81250.
 4. **Strike:** `_extract_strike()` → (81250, "above").
-5. **Empirical:** 15 of 365 days closed above 81250 → emp_p = 15/365 ≈ 4.1%.
+5. **Empirical:** With `empirical_use_rolling_window: true` and `empirical_recent_days: 90`, only the last 90 closes are used. 4 of 90 recent days closed above 81250 → emp_p ≈ 4.4% (recency-weighted).
 6. **Volatility (if --use-volatility):** Log-normal P(S>81250) with EWMA vol, dte≈1 → vol_p ≈ 5%.
 7. **Blend:** hist_p = 0.5×0.041 + 0.5×0.05 ≈ 4.6% (or pure emp if no vol).
 8. **Recommend:** yes_bid=0.40; hist_p - 0.40 - fee < 0 → no BUY YES. no_bid=0.58; (1-0.046) - 0.58 - fee ≈ 0.37 > 0.10 → BUY NO.
