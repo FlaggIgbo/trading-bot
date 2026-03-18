@@ -159,6 +159,7 @@ class _StrategyParams:
     max_buy_no_strike_above_pct: float
     enable_intra_arb: bool
     enable_inter_arb: bool
+    arb_inter_require_group_preflight: bool
     kalshi_maker_fee_rate: float
     kalshi_sp500_maker_fee_rate: float
     gemini_maker_fee_rate: float
@@ -285,6 +286,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
         enable_inter_arb=bool(strategy.get("enable_inter_arb", True)),
+        arb_inter_require_group_preflight=bool(strategy.get("arb_inter_require_group_preflight", True)),
         kalshi_maker_fee_rate=float(strategy.get("kalshi_maker_fee_rate", 0.0175)),
         kalshi_sp500_maker_fee_rate=float(strategy.get("kalshi_sp500_maker_fee_rate", 0.00875)),
         gemini_maker_fee_rate=float(strategy.get("gemini_maker_fee_rate", 0.0175)),
@@ -2498,6 +2500,86 @@ def _cap_cross_platform_exposure(
             if curr > max_count:
                 o["count"] = max_count
             used += price_c * int(o.get("count", 0))
+
+
+def _apply_inter_arb_group_preflight(
+    pending_orders: list[dict],
+    *,
+    sp: _StrategyParams,
+    kalshi_balance_cents: int,
+    gemini_balance_cents: int,
+    max_pct_of_balance: float,
+    gemini_ready: bool,
+    logger=print,
+) -> None:
+    """
+    Ensure REC_ARB_INTER orders execute as balanced pairs.
+    Drops incomplete groups and resizes surviving groups to shared affordable count.
+    """
+    if not pending_orders or not sp.enable_inter_arb or not sp.arb_inter_require_group_preflight:
+        return
+
+    groups: dict[str, list[dict]] = {}
+    for o in pending_orders:
+        if o.get("rec") != REC_ARB_INTER:
+            continue
+        gid = str(o.get("arb_group") or "")
+        if gid:
+            groups.setdefault(gid, []).append(o)
+    if not groups:
+        return
+
+    dropped_groups: set[str] = set()
+    resized_legs = 0
+    max_pct = max(0.0, float(max_pct_of_balance))
+
+    def _leg_max_count(leg: dict) -> int:
+        price_c = int(max(1, round(float(leg.get("price", 0.0)) * 100)))
+        if price_c <= 0:
+            return 0
+        platform = str(leg.get("platform") or "")
+        bal = gemini_balance_cents if platform == PLATFORM_GEMINI else kalshi_balance_cents
+        spend = int(max(0, int(bal)) * max_pct)
+        return max(0, spend // price_c)
+
+    for gid, legs in groups.items():
+        platforms = {str(l.get("platform") or "") for l in legs}
+        if platforms != {PLATFORM_KALSHI, PLATFORM_GEMINI}:
+            dropped_groups.add(gid)
+            logger(f"[Arb Preflight] Drop {gid}: missing cross-exchange pair (platforms={sorted(platforms)}).")
+            continue
+        if not gemini_ready:
+            dropped_groups.add(gid)
+            logger(f"[Arb Preflight] Drop {gid}: Gemini client unavailable for paired inter-arb execution.")
+            continue
+        requested = [max(0, int(l.get("count", 0))) for l in legs]
+        affordable = [_leg_max_count(l) for l in legs]
+        paired_count = min(requested + affordable)
+        if paired_count <= 0:
+            dropped_groups.add(gid)
+            logger(
+                f"[Arb Preflight] Drop {gid}: insufficient paired balance "
+                f"(requested={requested}, affordable={affordable})."
+            )
+            continue
+        for leg in legs:
+            old = max(0, int(leg.get("count", 0)))
+            if old != paired_count:
+                resized_legs += 1
+            leg["count"] = paired_count
+
+    if dropped_groups:
+        before = len(pending_orders)
+        pending_orders[:] = [
+            o
+            for o in pending_orders
+            if not (o.get("rec") == REC_ARB_INTER and str(o.get("arb_group") or "") in dropped_groups)
+        ]
+        removed = before - len(pending_orders)
+        if removed > 0:
+            logger(f"[Arb Preflight] Removed {removed} inter-arb legs that could not be executed as full pairs.")
+    if resized_legs > 0:
+        logger(f"[Arb Preflight] Resized {resized_legs} inter-arb legs to matched paired counts.")
 
 
 def _maybe_add_two_sided_quotes(
@@ -4846,6 +4928,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             except Exception:
                 pass
+
+        # Inter-exchange ARB safety: only keep groups that can execute both legs together.
+        _apply_inter_arb_group_preflight(
+            pending_orders,
+            sp=sp,
+            kalshi_balance_cents=balance_cents,
+            gemini_balance_cents=gemini_balance_after,
+            max_pct_of_balance=max_pct,
+            gemini_ready=bool(gemini_trading),
+            logger=print,
+        )
 
         # Then BUY — balance now reflects sell proceeds
         for o in pending_orders:

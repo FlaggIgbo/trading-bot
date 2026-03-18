@@ -45,6 +45,7 @@ def main() -> int:
     min_order_book_depth = _as_int(strategy.get("min_order_book_depth"), 0)
     layered_order_levels = _as_int(strategy.get("layered_order_levels"), 3)
     limit_order_ttl_minutes = _as_int(strategy.get("limit_order_ttl_minutes"), 30)
+    arb_inter_require_group_preflight = strategy.get("arb_inter_require_group_preflight", True)
     vol_model = str(strategy.get("vol_model", "auto")).strip().lower()
     garch_min_returns = _as_int(strategy.get("garch_min_returns"), 80)
     defensive_vol_ratio_threshold = _as_float(strategy.get("defensive_vol_ratio_threshold"), 3.0)
@@ -102,6 +103,8 @@ def main() -> int:
         errors.append("`strategy.layered_order_levels` must be >= 1.")
     if limit_order_ttl_minutes < 0:
         errors.append("`strategy.limit_order_ttl_minutes` must be >= 0.")
+    if not isinstance(arb_inter_require_group_preflight, bool):
+        errors.append("`strategy.arb_inter_require_group_preflight` must be true or false.")
     if vol_model not in {"auto", "ewma", "garch", "sample"}:
         errors.append("`strategy.vol_model` must be one of: auto, ewma, garch, sample.")
     if garch_min_returns < 30:

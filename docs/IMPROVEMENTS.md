@@ -57,6 +57,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Smart limit-order engine**           | Execution realism                       | ✓ Added dynamic tick quoting (`limit_order_mode`, `tick_offset`), inventory skew (`max_inventory_skew_pct`), stability/depth gates (`min_stability_duration_seconds`, `min_order_book_depth`), layered thin-book size scaling, and vol-spike BUY cancel guard (`cancel_on_vol_spike`). |
 | **Volatility hardening stack**         | Execution + risk                        | ✓ Added `vol_model` (`auto|ewma|garch|sample`) with GARCH fallback, continuous vol-ratio scaling (edge/dip/size), dynamic stability-window scaling, and defensive sells-only mode under extreme volatility. |
 | **Cross-exchange sanity gate**         | Execution safety                        | ✓ Added Kalshi↔Gemini repricing divergence checks (`cross_exchange_*`) that block stale-side buys during sharp spot moves. |
+| **Inter-arb group preflight**          | Execution safety                        | ✓ Added paired `REC_ARB_INTER` preflight to drop incomplete/underfunded cross-exchange leg groups and resize surviving pairs to matched affordable counts before BUY execution. |
 | **Active order lifecycle management**  | Execution realism                       | ✓ Resting orders are reviewed each cycle with stale TTL cancellation (`limit_order_ttl_minutes`), no-longer-recommended cleanup, and regime-shift cleanup (`cancel_all_on_regime_shift`). |
 | **Execution engine extraction**        | Code quality / testability              | ✓ Moved order sync/cancel path into `execution_engine.py` so lifecycle safety logic can be tested and evolved independently from model/probability math. |
 | **Accurate realized PnL lifecycle**    | Reliability / reporting accuracy        | ✓ Canceled buy intents are marked `cancelled`, early sells are realized as `sold` (FIFO lots), and settlement/exit PnL applies fee-aware accounting instead of gross-only math. |
@@ -98,6 +99,10 @@ Refactoring, architecture, and code quality changes.
 | **Stricter runtime schema validation** | Low | Current validator runs on pre-push; optional next step is hard fail at process startup for invalid config. |
 | **Unit tests for edge cases**      | Medium | Test `_recommend()`, `_fee_per_contract()`, `_apply_bucket_penalty()` with fixture data. |
 | **Docstrings for public APIs**     | Low    | Ensure storage, kalshi_client, gemini_client have clear module docstrings. |
+| **Inter-arb strict pair mode**     | Medium | Execute `REC_ARB_INTER` as grouped pair transactions instead of leg-by-leg loop iteration. |
+| **Inter-arb partial-fill unwind**  | Medium | If one inter-arb leg fills and the second fails, auto-unwind filled leg within slippage cap. |
+| **Inter-arb budget reservation**   | Medium | Reserve per-platform budget for paired arb groups before directional allocation to reduce leg starvation. |
+| **Inter-arb latency timeout gate** | Low    | Require second leg within short TTL or abort/unwind to limit stale pricing risk. |
 
 ---
 

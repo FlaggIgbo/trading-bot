@@ -398,11 +398,13 @@ For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empiri
 min_arb_fee: 0.02 # Min edge for arb (2%): only act when profit >= 2%
 enable_intra_arb: true # Intra-exchange: buy YES+NO when sum < 1
 enable_inter_arb: true # Inter-exchange: Kalshi↔Gemini cross-hedge
+arb_inter_require_group_preflight: true # Require both inter-arb legs to pass paired balance preflight before execution
 ```
 
 _In plain English:_ `min_arb_fee` is the smallest profit we demand before acting. 0.02 = 2%: we only buy both sides when the guaranteed profit is at least 2¢ per $1 bet (after fees).
 
 The bot checks for arb _before_ making normal BUY YES/NO suggestions. If it finds one, it places both sides of the bet and skips the directional recommendation.
+During live execution, inter-exchange arb groups now run through a paired preflight: if either leg is unaffordable or missing, the entire `ARB_INTER` group is dropped before order placement so you do not get unintentionally legged from a one-sided fill attempt.
 
 ### Limit orders & dip catching (Kalshi + Gemini)
 

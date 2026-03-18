@@ -71,6 +71,7 @@ strategy:
   min_arb_fee: 0.02 # Min edge for arb (2%): buy-all when yes_ask+no_ask < 1 - fee
   enable_intra_arb: true # Intra-exchange: buy YES+NO when sum < 1 (same market)
   enable_inter_arb: true # Inter-exchange: buy YES on one platform + NO on other when sum < 1 (Kalshi/Gemini hedge)
+  arb_inter_require_group_preflight: true # Require both inter-arb legs to pass shared balance preflight before BUY execution
   # Absolute winner: when buying very cheap (e.g. 1¢) on near-certainty (P≥95%), buy more contracts
   absolute_winner_min_p_win: 0.95 # P(win) must be at least this to treat as "absolute winner"
   absolute_winner_max_price: 0.05 # Price must be at or below this (e.g. 5¢)

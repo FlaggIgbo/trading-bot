@@ -5,7 +5,7 @@ This setup includes:
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 
 Both jobs use your `.venv` Python so dependencies are available.
-`compare_historical.py` now imports `execution_engine.py`, runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, and includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate).
+`compare_historical.py` now imports `execution_engine.py`, runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), and applies inter-arb group preflight before BUY execution.
 
 ## One-time setup
 

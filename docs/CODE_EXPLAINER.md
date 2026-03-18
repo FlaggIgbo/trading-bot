@@ -46,6 +46,7 @@
 - **High-fidelity synthetic backtest:** Synthetic mode supports dwell-time fill checks, partial-fill scaling from persisted depth fields, and per-trade liquidity friction in addition to slippage/spread realism.
 - **Circuit breaker safety:** New BUYs are blocked when 24h realized losses breach configured limits (`max_daily_loss_pct` / `max_daily_loss_cents`).
 - **Defensive execution gates:** Dynamic stability windows, cross-exchange sanity gating, and sells-only defensive mode reduce fill risk during flash regimes.
+- **Inter-arb leg safety:** Live execution now applies a paired preflight for `REC_ARB_INTER` groups so one-sided low-balance legs are dropped before placement.
 
 ---
 
@@ -243,7 +244,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
-8. **Execute (if --execute):** Review open orders via `execution_engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
+8. **Execute (if --execute):** Review open orders via `execution_engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb paired preflight (drop `ARB_INTER` groups that cannot fund both legs) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
 
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
