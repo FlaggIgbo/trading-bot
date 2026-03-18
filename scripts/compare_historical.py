@@ -1441,7 +1441,7 @@ def _volatility_probability(
             mult = 1.0 + max(0.0, otm_smile_strength) * abs(m)
             mult = min(max(1.0, mult), max(1.0, otm_smile_max_mult))
             sigma_annual *= mult
-    T = max(0.01, days_to_expiry / 365.0)
+    T = max(1e-6, days_to_expiry / 365.0)
     if sigma_annual < 1e-8:
         return None
     # d = (ln(S0/K) - sigma^2*T/2) / (sigma*sqrt(T))
@@ -1592,13 +1592,37 @@ def _volatility_probability_with_mc(
             mult = 1.0 + max(0.0, otm_smile_strength) * abs(m)
             mult = min(max(1.0, mult), max(1.0, otm_smile_max_mult))
             sigma_annual *= mult
-    T = max(0.01, days_to_expiry / 365.0)
+    T = max(1e-6, days_to_expiry / 365.0)
     mc = _monte_carlo_probability(
         S0, sigma_annual, T, threshold, direction,
         n_paths=mc_paths, distribution=distribution, t_df=t_df,
     )
     w = max(0.0, min(1.0, mc_blend_weight))
     return (1.0 - w) * analytical + w * mc
+
+
+def _dte_adjusted_strike_pct(base_pct: float, dte_days: float, reference_days: float = 1.0) -> float:
+    """Scale a strike-distance percentage by sqrt(time) so that short-dated
+    contracts get tighter limits.  For dte >= reference_days the base_pct
+    is returned unchanged."""
+    if dte_days >= reference_days or reference_days <= 0:
+        return base_pct
+    ratio = max(0.0, dte_days) / reference_days
+    return base_pct * math.sqrt(max(1e-9, ratio))
+
+
+def _dte_adjusted_empirical_weight(
+    base_w: float, dte_days: float, reference_days: float = 1.0,
+) -> float:
+    """Reduce the empirical model's weight when DTE is very short.
+    Empirical probability doesn't condition on current price or remaining
+    time, so it becomes unreliable for sub-day horizons.  We linearly
+    decay the empirical weight toward 0 as dte shrinks below
+    reference_days.  For dte >= reference_days the weight is unchanged."""
+    if dte_days >= reference_days or reference_days <= 0:
+        return base_w
+    ratio = max(0.0, dte_days) / reference_days
+    return base_w * ratio
 
 
 def _violates_no_above_rule(
@@ -3678,9 +3702,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hist_p = vol_p
                 elif _is_intraday_market(m, yf_ticker) and sp.use_intraday_empirical:
                     w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
+                    w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     hist_p = w_emp * emp + (1 - w_emp) * vol_p
                 elif sp.vol_blend_weight is not None:
                     w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
+                    w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     hist_p = w_emp * emp + (1 - w_emp) * vol_p
                 else:
                     hist_p = max(emp, vol_p)
@@ -3798,8 +3824,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if not (use_vol and vol_p is not None and hist_p >= 0.95):  # Override when vol model shows high confidence
                     rec = REC_SKIP
             # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
-            if rec == REC_BUY_YES and direction == "above" and sp.max_buy_yes_strike_above_pct > 0:
-                if threshold > current_price * (1 + sp.max_buy_yes_strike_above_pct):
+            # DTE-aware: tighten allowed gap for short-dated contracts (price can't move far in minutes)
+            _eff_max_above = _dte_adjusted_strike_pct(sp.max_buy_yes_strike_above_pct, dte)
+            if rec == REC_BUY_YES and direction == "above" and _eff_max_above > 0:
+                if threshold > current_price * (1 + _eff_max_above):
                     if not (use_vol and vol_p is not None and vol_p >= sp.min_vol_confidence_far_otm):
                         rec = REC_SKIP
             # Skip BUY NO when market prices NO very low (market thinks our side unlikely); same override when vol shows high P(NO)
@@ -3808,8 +3836,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if not (use_vol and vol_p is not None and (1 - hist_p) >= 0.95):
                     rec = REC_SKIP
             # Skip BUY NO on "below X" when strike is far above current (BUY NO = "price > X" needs big rally) unless vol shows P(NO) ≥95%
-            if rec == REC_BUY_NO and direction == "below" and sp.max_buy_no_strike_above_pct > 0:
-                if threshold > current_price * (1 + sp.max_buy_no_strike_above_pct):
+            _eff_max_no_above = _dte_adjusted_strike_pct(sp.max_buy_no_strike_above_pct, dte)
+            if rec == REC_BUY_NO and direction == "below" and _eff_max_no_above > 0:
+                if threshold > current_price * (1 + _eff_max_no_above):
                     if not (use_vol and vol_p is not None and (1 - hist_p) >= 0.95):
                         rec = REC_SKIP
             if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(
@@ -4101,11 +4130,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if use_vol else None
                 )
                 if vol_p_gem is not None and use_vol:
-                    hist_p_gem = vol_p_gem if (_is_intraday_market(evt, yf_ticker) and not sp.use_intraday_empirical) else (
-                        (_dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0) * emp
-                         + (1 - _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0)) * vol_p_gem) if sp.vol_blend_weight is not None
-                        else max(emp, vol_p_gem)
-                    )
+                    if _is_intraday_market(evt, yf_ticker) and not sp.use_intraday_empirical:
+                        hist_p_gem = vol_p_gem
+                    elif sp.vol_blend_weight is not None:
+                        w_emp_g = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp_g), sp.vol_dynamic_n0)
+                        w_emp_g = _dte_adjusted_empirical_weight(w_emp_g, dte_g)
+                        hist_p_gem = w_emp_g * emp + (1 - w_emp_g) * vol_p_gem
+                    else:
+                        hist_p_gem = max(emp, vol_p_gem)
                 else:
                     hist_p_gem = emp
                 hist_p_gem = strategy_engine.apply_bucket_penalty(
@@ -4223,8 +4255,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if not (use_vol and vol_p_gem is not None and hist_p_gem >= 0.95):
                         rec = REC_SKIP
                 # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
-                if rec == REC_BUY_YES and direction_g == "above" and sp.max_buy_yes_strike_above_pct > 0:
-                    if threshold_g > current_price * (1 + sp.max_buy_yes_strike_above_pct):
+                # DTE-aware: tighten allowed gap for short-dated contracts
+                _eff_max_above_g = _dte_adjusted_strike_pct(sp.max_buy_yes_strike_above_pct, dte_g)
+                if rec == REC_BUY_YES and direction_g == "above" and _eff_max_above_g > 0:
+                    if threshold_g > current_price * (1 + _eff_max_above_g):
                         if not (use_vol and vol_p_gem is not None and vol_p_gem >= sp.min_vol_confidence_far_otm):
                             rec = REC_SKIP
                 # Skip BUY NO when market prices NO very low; override when vol model shows P(NO) ≥ 95%
@@ -4233,8 +4267,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if not (use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95):
                         rec = REC_SKIP
                 # Skip BUY NO on "below X" when strike is far above current (BUY NO = "price > X" needs big rally)
-                if rec == REC_BUY_NO and direction_g == "below" and sp.max_buy_no_strike_above_pct > 0:
-                    if threshold_g > current_price * (1 + sp.max_buy_no_strike_above_pct):
+                _eff_max_no_above_g = _dte_adjusted_strike_pct(sp.max_buy_no_strike_above_pct, dte_g)
+                if rec == REC_BUY_NO and direction_g == "below" and _eff_max_no_above_g > 0:
+                    if threshold_g > current_price * (1 + _eff_max_no_above_g):
                         if not (use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95):
                             rec = REC_SKIP
                 if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(rec, direction_g, hist_p_gem, impl, min_edge, calibration, sp, maker_fee_rate_gem):
