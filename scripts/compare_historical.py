@@ -3122,7 +3122,7 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
             str(yf_ticker or ""),
         )
         fee_cents = int(round(_fee_per_contract(entry, fee_rate, min_fee) * 100 * cnt))
-        gross_cents = int((100 - entry * 100) * cnt) if won else int(-entry * 100 * cnt)
+        gross_cents = int(round((100 - entry * 100) * cnt)) if won else int(round(-entry * 100 * cnt))
         pnl_cents = gross_cents - fee_cents
         buy_ts = p.get("ts")
         min_after = max_after = None
@@ -3144,7 +3144,10 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
             resolution_price=res_price,
         )
         if resolve_position_evaluations:
-            resolve_position_evaluations(t, yes_settled, cfg)
+            resolve_position_evaluations(
+                t, yes_settled, cfg,
+                maker_fee_rate=fee_rate, min_fee_per_order=min_fee,
+            )
         if expire_unfilled_orders:
             expire_unfilled_orders(t, platform=PLATFORM_KALSHI, config=cfg)
         if record_resolved and get_last_snapshot_for_ticker:
@@ -3154,6 +3157,102 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
                 yes_settled=yes_settled,
                 platform=PLATFORM_KALSHI,
                 title=snap.get("title") if snap else None,
+                our_last_rec=snap.get("rec") if snap else None,
+                our_last_hist_p=snap.get("hist_p") if snap else None,
+                market_yes_at_last=snap.get("yes_bid") if snap else None,
+                config=cfg,
+            )
+
+
+def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
+    """Fetch recently settled Gemini events and update our unresolved Gemini predictions with outcomes."""
+    if not get_unresolved_predictions or not record_prediction_outcome:
+        return
+    unresolved = get_unresolved_predictions(cfg)
+    gemini_preds = [p for p in unresolved if p.get("platform") == PLATFORM_GEMINI]
+    if not gemini_preds:
+        return
+    tickers_needed = {p["ticker"] for p in gemini_preds}
+    settled_by_ticker: dict[str, dict] = {}
+    try:
+        offset = 0
+        while True:
+            r = gemini.get_events(category=None, status="settled", limit=200, offset=offset)
+            data = r.get("data") or []
+            for evt in data:
+                evt_ticker = evt.get("ticker") or ""
+                if evt_ticker in tickers_needed:
+                    settled_by_ticker[evt_ticker] = evt
+                for c in evt.get("contracts") or []:
+                    ct = c.get("ticker") or ""
+                    if ct in tickers_needed:
+                        settled_by_ticker[ct] = evt
+            if len(data) < 200:
+                break
+            offset += len(data)
+    except Exception:
+        return
+    if not settled_by_ticker:
+        return
+    sp_sync = _load_strategy_params((cfg or {}).get("strategy", {}))
+    min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
+    for p in gemini_preds:
+        t = p.get("ticker")
+        evt = settled_by_ticker.get(t) if t else None
+        if not evt:
+            continue
+        res_side: str | None = None
+        for c in evt.get("contracts") or []:
+            rs = (c.get("resolutionSide") or "").lower()
+            if rs in ("yes", "no"):
+                res_side = rs
+                break
+        if res_side is None:
+            evt_status = (evt.get("status") or "").lower()
+            if evt_status != "settled":
+                continue
+            res_side = "yes"
+        yes_settled = res_side == "yes"
+        entry = float(p.get("entry_price") or 0)
+        cnt = int(p.get("count") or 0)
+        if cnt <= 0:
+            continue
+        side = (p.get("side") or "").lower()
+        won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
+        yf_ticker = p.get("yf_ticker")
+        fee_rate = _maker_fee_rate_for_market(
+            sp_sync,
+            PLATFORM_GEMINI,
+            str(yf_ticker or ""),
+        )
+        fee_cents = int(round(_fee_per_contract(entry, fee_rate, min_fee) * 100 * cnt))
+        gross_cents = int(round(((100 - entry * 100) * cnt) if won else (-entry * 100 * cnt)))
+        pnl_cents = gross_cents - fee_cents
+        res_price: float | None = None
+        yf_t = p.get("yf_ticker") or ""
+        if yf_t:
+            try:
+                res_price = yf_get_snapshot(yf_t)
+            except Exception:
+                pass
+        record_prediction_outcome(
+            p["id"], yes_settled, pnl_cents, cfg,
+            resolution_price=res_price,
+        )
+        if resolve_position_evaluations:
+            resolve_position_evaluations(
+                t, yes_settled, cfg,
+                maker_fee_rate=fee_rate, min_fee_per_order=min_fee,
+            )
+        if expire_unfilled_orders:
+            expire_unfilled_orders(t, platform=PLATFORM_GEMINI, config=cfg)
+        if record_resolved and get_last_snapshot_for_ticker:
+            snap = get_last_snapshot_for_ticker(t, platform=PLATFORM_GEMINI, config=cfg)
+            record_resolved(
+                ticker=t,
+                yes_settled=yes_settled,
+                platform=PLATFORM_GEMINI,
+                title=snap.get("title") if snap else (evt.get("title") or None),
                 our_last_rec=snap.get("rec") if snap else None,
                 our_last_hist_p=snap.get("hist_p") if snap else None,
                 market_yes_at_last=snap.get("yes_bid") if snap else None,
@@ -3294,6 +3393,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
     # Fetch Gemini events and Kalshi markets in parallel
     gemini = GeminiPredictionClient()
+
+    # Sync Gemini settlements → update unresolved predictions with outcomes
+    try:
+        _sync_gemini_settlements(gemini, cfg)
+    except Exception:
+        pass
     gemini_events_by_asset: dict[str, list] = {}
     kalshi_markets_by_series: dict[str, list] = {}
 

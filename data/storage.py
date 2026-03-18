@@ -2093,6 +2093,9 @@ def resolve_position_evaluations(
     ticker: str,
     yes_settled: bool,
     config: dict | None = None,
+    *,
+    maker_fee_rate: float = 0.0,
+    min_fee_per_order: float = 0.01,
 ) -> int:
     """
     When a market resolves, update all unresolved position evaluations for that ticker.
@@ -2114,7 +2117,12 @@ def resolve_position_evaluations(
             outcome = "win" if won else "lose"
             entry = float(r["entry_price"] or 0)
             cnt = int(r["position_count"] or 0)
-            pnl = int(round(((1.0 - entry) * 100 * cnt) if won else (-entry * 100 * cnt))) if entry > 0 and cnt > 0 else 0
+            if entry > 0 and cnt > 0:
+                fee_cents = int(round(_fee_per_contract(entry, maker_fee_rate, min_fee_per_order) * 100 * cnt))
+                gross = int(round(((1.0 - entry) * 100 * cnt) if won else (-entry * 100 * cnt)))
+                pnl = gross - fee_cents
+            else:
+                pnl = 0
             conn.execute(
                 "UPDATE position_evaluations SET outcome=?, yes_settled=?, pnl_cents=?, resolved_ts=? WHERE id=?",
                 (outcome, 1 if yes_settled else 0, pnl, now, int(r["id"])),
