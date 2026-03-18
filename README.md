@@ -379,6 +379,7 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--no-llm`         | Skip Ollama analysis                                                                      |
 | `--log`            | Log run to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket, append within hour; or `--log DIR` for custom dir) |
 | `--limit-analysis` | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
+| `--position-eval-analysis` | Print position evaluation stats: KEEP vs SELL outcomes, win rate by hist_p bucket |
 | `--reconcile-diagnostics` | Print reconciliation counters per run (`seen / inserted / dup / skipped`) for Kalshi + Gemini fills |
 | `--reconcile-only` | Run fill reconciliation pass only and exit (quick auditing command) |
 
@@ -497,6 +498,7 @@ absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enfo
 - **`p_lose_blend_market_max_weight`** (default 0.5): When computing P(lose) for sell decisions, blend our model with Kalshi/Gemini market odds. At expiry, up to this fraction comes from the market (0 = model only; 0.5 = 50/50).
 - **`p_lose_blend_market_half_life_days`** (default 0.5): Half-life for market-weight decay; closer to resolution → more weight on market odds (more accurate near expiry).
 - **`max_daily_loss_pct` / `max_daily_loss_cents`**: Circuit breaker for live trading. If realized prediction losses over the last 24h exceed thresholds, the bot blocks new BUY orders until performance recovers or limits are adjusted.
+- **Position evaluation tracking**: When the bot evaluates a held position and decides to KEEP it (not sell), the evaluation is persisted to `position_evaluations` with full model context (hist_p, vol_p, p_lose, rec, entry/current price). When the market resolves, the outcome (win/lose) is linked automatically. Use `--position-eval-analysis` to see win rates for KEEP vs SELL decisions and identify if the KEEP threshold should be tightened.
 
 ### Local historical storage
 

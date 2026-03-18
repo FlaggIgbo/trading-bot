@@ -354,6 +354,9 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `get_aggs` | yfinance_client | `(ticker, days_back, config) -> list[float]` | Daily closes from yfinance (or CoinGecko for crypto). Uses storage cache. |
 | `get_intraday_aggs_at_hour` | yfinance_client | `(ticker, days_back, resolution_hour_et, config) -> list[float]` | 1h prices at that ET hour per day. Falls back to daily if intraday fails. |
 | `get_config` | config | `() -> dict` | Load config.yaml; override markets, poll_interval from env. |
+| `record_position_evaluation` | storage | `(*, platform, ticker, side, action, hist_p, vol_p, p_lose, ...) -> int \| None` | Record KEEP or SELL decision for a held position; rate-limited to 1/hour per (platform, ticker, side). |
+| `resolve_position_evaluations` | storage | `(ticker, yes_settled, config) -> int` | Link unresolved position evaluations to outcomes when market settles. |
+| `get_position_evaluation_stats` | storage | `(config, days) -> dict` | KEEP vs SELL win rates, PnL, win rate by hist_p bucket for position evaluations. |
 | `record_prediction` | storage | `(platform, ticker, side, hist_p, entry_price, count, ...) -> int \| None` | Insert row into predictions when order fills. |
 | `record_prediction_outcome` | storage | `(prediction_id, yes_settled, pnl_cents, ...) -> bool` | Update predictions with outcome=win/lose, pnl_cents, resolved_ts. |
 | `capture_and_analyze` | ollama_analysis | `(run_fn, script_name, use_llm, per_trade_analysis) -> int` | Runs run_fn. If use_llm and per_trade_analysis, script does its own per-trade Ollama; else captures stdout and runs one batch analysis. |
@@ -475,6 +478,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `--execute` | flag | — | Place real buy/sell orders (requires `dry_run: false` in config) |
 | `--use-volatility` | flag | — | Force-enable volatility model (also on by default when `use_volatility_by_default` is true) |
 | `--limit-analysis` | flag | — | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
+| `--position-eval-analysis` | flag | — | Print KEEP vs SELL outcome stats from position evaluations (win rate by hist_p bucket) |
 | `--log` [DIR] | optional | — | Log output to `~/Desktop/trading-bot-logs/` or specified dir (eval_YYYYMMDDHH.log per hour) |
 
 **Example:** `python scripts/compare_historical.py --days 365 --preview` → evaluate all markets, no orders, 365 days of history.
@@ -706,6 +710,7 @@ All data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurab
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**       | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
 | **limit_orders**      | Limit orders placed + cancel reasons (learn from unfilled) | None     | `id` (auto-increment)                          |
+| **position_evaluations** | KEEP/SELL decisions for held positions (learn from held positions) | None | `id` (auto-increment)                      |
 
 ### Table Structures
 
@@ -789,7 +794,31 @@ limit_orders
 ├── vol_p            REAL
 ├── ts               REAL
 ├── status           TEXT      (placed | filled | cancelled)
-└── cancel_reason    TEXT      (no_longer_rec | want_better_price, NULL if not cancelled)
+└── cancel_reason    TEXT      (no_longer_rec | want_better_price | stale_ttl | regime_shift_guard)
+
+position_evaluations
+├── id               INTEGER   (auto-increment)
+├── platform         TEXT      (kalshi | gemini)
+├── ticker           TEXT
+├── side             TEXT      (yes | no)
+├── action           TEXT      (keep | sell)
+├── sell_reason      TEXT      (NULL for keep; LIKELY_LOSE, STOP_LOSS, etc. for sell)
+├── hist_p           REAL      (model P(YES) at eval time)
+├── vol_p            REAL
+├── p_lose           REAL      (computed P(lose) at eval time)
+├── yes_bid          REAL
+├── no_bid           REAL
+├── threshold        REAL
+├── direction        TEXT
+├── rec              TEXT      (model recommendation at eval time)
+├── position_count   INTEGER
+├── entry_price      REAL
+├── current_price    REAL      (current side price at eval time)
+├── ts               REAL      (evaluation timestamp)
+├── outcome          TEXT      (NULL until resolved; win | lose)
+├── yes_settled      INTEGER   (NULL until resolved; 1=YES, 0=NO)
+├── pnl_cents        INTEGER   (NULL until resolved)
+└── resolved_ts      REAL      (NULL until resolved)
 ```
 
 ### How Data Flows
@@ -802,6 +831,7 @@ limit_orders
 | **resolved_outcomes**   | `_sync_kalshi_settlements()` → `record_resolved()` | Calibration, backtest                           |
 | **predictions**         | `record_prediction()` on order fill; `record_prediction_outcome()` on settlement | `get_unresolved_predictions()`, `get_calibration_stats()`, `backtest.py` |
 | **limit_orders**       | `record_limit_order()` on place; `record_order_cancel()` on cancel | `get_limit_order_analysis()` for `--limit-analysis` |
+| **position_evaluations** | `record_position_evaluation()` on KEEP; `resolve_position_evaluations()` on settlement | `get_position_evaluation_stats()` for `--position-eval-analysis` |
 
 ### TTL Behavior
 

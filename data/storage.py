@@ -163,6 +163,34 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_limit_orders_ticker ON limit_orders(ticker);
         CREATE INDEX IF NOT EXISTS idx_limit_orders_order_id ON limit_orders(platform, order_id);
         CREATE INDEX IF NOT EXISTS idx_limit_orders_status ON limit_orders(status);
+        CREATE TABLE IF NOT EXISTS position_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL,
+            action TEXT NOT NULL,
+            sell_reason TEXT,
+            hist_p REAL,
+            vol_p REAL,
+            p_lose REAL,
+            yes_bid REAL,
+            no_bid REAL,
+            threshold REAL,
+            direction TEXT,
+            yf_ticker TEXT,
+            rec TEXT,
+            position_count INTEGER,
+            entry_price REAL,
+            current_price REAL,
+            ts REAL NOT NULL,
+            outcome TEXT,
+            yes_settled INTEGER,
+            pnl_cents INTEGER,
+            resolved_ts REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pos_eval_ticker ON position_evaluations(ticker);
+        CREATE INDEX IF NOT EXISTS idx_pos_eval_outcome ON position_evaluations(outcome);
+        CREATE INDEX IF NOT EXISTS idx_pos_eval_ts ON position_evaluations(ts);
     """)
     _migrate_predictions_price_after_buy(conn)
     _migrate_predictions_fill_attribution(conn)
@@ -1044,7 +1072,11 @@ def record_order_cancel(
     limit_price: float | None = None,
 ) -> None:
     """
-    Mark a limit order as cancelled. cancel_reason: 'no_longer_rec' | 'want_better_price'.
+    Mark a limit order as cancelled. cancel_reason classifications:
+    - 'no_longer_rec': model no longer recommends this trade (rec=SKIP)
+    - 'want_better_price': model still recommends but wants to reprice at a better level
+    - 'stale_ttl': order exceeded limit_order_ttl_minutes
+    - 'regime_shift_guard': cancelled during momentum/volatility regime shift
     If we have a row (we placed it), update it. Else insert minimal row for historical record.
     """
     conn = _get_conn(config)
@@ -1843,6 +1875,169 @@ def get_last_snapshot_for_ticker(
         conn.close()
 
 
+def record_position_evaluation(
+    *,
+    platform: str,
+    ticker: str,
+    side: str,
+    action: str,
+    hist_p: float | None = None,
+    vol_p: float | None = None,
+    p_lose: float | None = None,
+    yes_bid: float | None = None,
+    no_bid: float | None = None,
+    threshold: float | None = None,
+    direction: str | None = None,
+    yf_ticker: str | None = None,
+    rec: str | None = None,
+    position_count: int | None = None,
+    entry_price: float | None = None,
+    current_price: float | None = None,
+    sell_reason: str | None = None,
+    config: dict | None = None,
+) -> int | None:
+    """
+    Record a position evaluation (KEEP or SELL decision).
+    Rate-limited: at most one row per (platform, ticker, side) per hour.
+    Returns row id or None.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return None
+    ts = time.time()
+    try:
+        last = conn.execute(
+            "SELECT ts FROM position_evaluations WHERE platform=? AND ticker=? AND side=? ORDER BY ts DESC LIMIT 1",
+            (platform, ticker, side),
+        ).fetchone()
+        if last and (ts - float(last["ts"])) < 3600:
+            return None
+        cur = conn.execute(
+            """INSERT INTO position_evaluations
+               (platform, ticker, side, action, sell_reason, hist_p, vol_p, p_lose, yes_bid, no_bid,
+                threshold, direction, yf_ticker, rec, position_count, entry_price, current_price, ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                platform, ticker, side, action, sell_reason,
+                hist_p, vol_p, p_lose, yes_bid, no_bid,
+                threshold, direction or "", yf_ticker or "", rec or "",
+                position_count, entry_price, current_price, ts,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    except Exception:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def resolve_position_evaluations(
+    ticker: str,
+    yes_settled: bool,
+    config: dict | None = None,
+) -> int:
+    """
+    When a market resolves, update all unresolved position evaluations for that ticker.
+    Returns number of rows updated.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return 0
+    now = time.time()
+    try:
+        rows = conn.execute(
+            "SELECT id, side, entry_price, position_count FROM position_evaluations WHERE ticker=? AND outcome IS NULL",
+            (ticker,),
+        ).fetchall()
+        updated = 0
+        for r in rows:
+            side = (r["side"] or "").lower()
+            won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
+            outcome = "win" if won else "lose"
+            entry = float(r["entry_price"] or 0)
+            cnt = int(r["position_count"] or 0)
+            pnl = int(round(((1.0 - entry) * 100 * cnt) if won else (-entry * 100 * cnt))) if entry > 0 and cnt > 0 else 0
+            conn.execute(
+                "UPDATE position_evaluations SET outcome=?, yes_settled=?, pnl_cents=?, resolved_ts=? WHERE id=?",
+                (outcome, 1 if yes_settled else 0, pnl, now, int(r["id"])),
+            )
+            updated += 1
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def get_position_evaluation_stats(
+    config: dict | None = None,
+    days: int = 90,
+) -> dict[str, Any]:
+    """
+    Analyze position evaluation outcomes: how well did KEEP vs SELL decisions perform?
+    For KEEP decisions, uses the last evaluation per (platform, ticker, side) before resolution.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"enabled": False}
+    since = time.time() - (days * 86400)
+    try:
+        rows = conn.execute(
+            """SELECT pe.*
+               FROM position_evaluations pe
+               INNER JOIN (
+                   SELECT platform, ticker, side, MAX(ts) AS max_ts
+                   FROM position_evaluations
+                   WHERE ts >= ? AND outcome IS NOT NULL
+                   GROUP BY platform, ticker, side
+               ) latest ON pe.platform = latest.platform AND pe.ticker = latest.ticker
+                       AND pe.side = latest.side AND pe.ts = latest.max_ts
+               WHERE pe.outcome IS NOT NULL""",
+            (since,),
+        ).fetchall()
+        if not rows:
+            return {"enabled": True, "total": 0}
+        keep_rows = [r for r in rows if r["action"] == "keep"]
+        sell_rows = [r for r in rows if r["action"] == "sell"]
+        keep_wins = sum(1 for r in keep_rows if r["outcome"] == "win")
+        keep_losses = sum(1 for r in keep_rows if r["outcome"] == "lose")
+        sell_wins = sum(1 for r in sell_rows if r["outcome"] == "win")
+        sell_losses = sum(1 for r in sell_rows if r["outcome"] == "lose")
+        keep_wr = keep_wins / (keep_wins + keep_losses) if (keep_wins + keep_losses) > 0 else None
+        sell_wr = sell_wins / (sell_wins + sell_losses) if (sell_wins + sell_losses) > 0 else None
+        keep_pnl = sum(int(r["pnl_cents"] or 0) for r in keep_rows)
+        sell_pnl = sum(int(r["pnl_cents"] or 0) for r in sell_rows)
+        buckets: dict[str, dict[str, int]] = {}
+        for r in keep_rows:
+            hp = float(r["hist_p"] or 0.5)
+            key = f"{round(hp * 10) / 10:.1f}-{round(hp * 10) / 10 + 0.1:.1f}"
+            if key not in buckets:
+                buckets[key] = {"wins": 0, "losses": 0}
+            if r["outcome"] == "win":
+                buckets[key]["wins"] += 1
+            else:
+                buckets[key]["losses"] += 1
+        bucket_stats = []
+        for k in sorted(buckets):
+            w, l = buckets[k]["wins"], buckets[k]["losses"]
+            bucket_stats.append({"hist_p_range": k, "count": w + l, "win_rate": w / (w + l) if (w + l) > 0 else None})
+        return {
+            "enabled": True,
+            "total": len(rows),
+            "keep": {"count": len(keep_rows), "wins": keep_wins, "losses": keep_losses, "win_rate": keep_wr, "pnl_cents": keep_pnl},
+            "sell": {"count": len(sell_rows), "wins": sell_wins, "losses": sell_losses, "win_rate": sell_wr, "pnl_cents": sell_pnl},
+            "keep_buckets": bucket_stats,
+        }
+    except Exception:
+        return {"enabled": False}
+    finally:
+        conn.close()
+
+
 def get_storage_stats(config: dict | None = None) -> dict[str, Any]:
     """Return counts of cached/snapshot data. Useful for diagnostics."""
     conn = _get_conn(config)
@@ -1854,6 +2049,11 @@ def get_storage_stats(config: dict | None = None) -> dict[str, Any]:
         resolved_count = conn.execute("SELECT COUNT(*) FROM resolved_outcomes").fetchone()[0]
         pred_count = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
         pred_resolved = conn.execute("SELECT COUNT(*) FROM predictions WHERE outcome IN ('win','lose','sold')").fetchone()[0]
+        try:
+            pos_eval_count = conn.execute("SELECT COUNT(*) FROM position_evaluations").fetchone()[0]
+            pos_eval_resolved = conn.execute("SELECT COUNT(*) FROM position_evaluations WHERE outcome IS NOT NULL").fetchone()[0]
+        except Exception:
+            pos_eval_count = pos_eval_resolved = 0
         return {
             "enabled": True,
             "data_dir": str(_get_data_dir(config)),
@@ -1862,6 +2062,8 @@ def get_storage_stats(config: dict | None = None) -> dict[str, Any]:
             "resolved_outcomes": resolved_count,
             "predictions": pred_count,
             "predictions_resolved": pred_resolved,
+            "position_evaluations": pos_eval_count,
+            "position_evaluations_resolved": pos_eval_resolved,
         }
     except Exception:
         return {"enabled": False}

@@ -76,6 +76,7 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Daily performance graphs**           | Reliability                             | ✓ `scripts/daily_performance_report.py` now generates PNG performance charts with per-trade P&L bars (green=wins, red=losses) and cumulative P&L overlay line, saved alongside the text report. |
 | **DTE-confidence limit dip scaling**   | —                                       | ✓ New `_dte_confidence_dip()` in compare_historical.py. When resolution is far (>3 days) and model confidence high (P(win)>=80%), limit order dips scale proportionally with DTE to catch uncertainty-driven price drops. Config: `far_dte_*` params. When P(win)>=90%, extra DTE dip gets a 1.5x confidence boost. |
 | **CI sample-size fix + wider empirical window** | —                            | ✓ `_empirical_ci_halfwidth` now uses the rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, so the uncertainty penalty honestly reflects the data the empirical model actually used. `empirical_recent_days` increased from 30 → 90 for more stable empirical P estimates while still adapting to regime shifts. |
+| **Position evaluation tracking (FreqAI-style)** | FreqAI-style ML              | ✓ New `position_evaluations` table records KEEP decisions with full model context (hist_p, vol_p, p_lose, rec, entry/current price). Outcomes linked on settlement via `resolve_position_evaluations()`. `--position-eval-analysis` prints KEEP vs SELL win rates and PnL. Cancel reasons now fully classified: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`. |
 
 ---
 
@@ -93,6 +94,8 @@ Refactoring, architecture, and code quality changes.
 | **Calibration loss weighting in storage** | `get_calibration_stats()` accepts `config`; reads `calibration_loss_weight`; applies to bucket and by_direction_side win rates. |
 | **Strategy plugin migration**          | Signal feature building/scoring and recommendation routing are delegated to `strategies/` implementations; `compare_historical.py` handles data/execution plumbing. |
 | **CI sample-size honesty**          | `_empirical_ci_halfwidth` now uses the effective rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, preventing artificially tight confidence intervals when rolling window is enabled. |
+| **Position eval persistence**       | New `position_evaluations` table + `record_position_evaluation()` / `resolve_position_evaluations()` / `get_position_evaluation_stats()` in storage; KEEP decisions tracked at all position eval paths (Kalshi cached/uncached + Gemini). |
+| **Cancel reason classification**    | `record_order_cancel` docstring and schema updated to document all 4 cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`. |
 | **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
 | **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |
 | **ML pipeline repo restructure**    | Reorganized into `signals/` (data clients), `models/strategies/` (ML strategies), `execution/` (order lifecycle), `data/` (persistence). Root-level backward-compat shims preserve existing import paths. Pipeline flow: config.yaml signals → feature engineering → model scoring → trade execution → data persistence. |
@@ -169,11 +172,11 @@ Config: `strategy.whitelist`, `strategy.blacklist` in `config.yaml`.
 ~~Log each run (timestamp, recommendations, edge, market ticks) to `logs/eval_YYYYMMDD.log`~~
 Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (per-hour bucket; runs within same hour append), or `--log /path/to/dir` for a custom directory.
 
-### 5. Learn from position & limit order evaluations (FreqAI-style)
+### 5. ~~Learn from position & limit order evaluations (FreqAI-style)~~ ✓ Implemented
 
-**Implemented**: Orphan Kalshi positions and all Gemini position evals persist via `record_market_snapshot`. **Limit order tracking** (`limit_orders` table): we record every limit order placed (platform, ticker, order_id, limit_price, bid_at_place, dip_pct_used, hist_p, etc.) and record cancel reasons (`no_longer_rec`, `want_better_price`). Use `--limit-analysis` to see unfilled orders, min/max price during order lifetime, and "would have filled" stats — informs `limit_dip_pct` tuning.
-- **Kept position outcomes**: When we decide KEEP (don't sell), track that position and when it eventually resolves (win/lose). Currently we only record outcomes for placed buys (`record_prediction` → `record_prediction_outcome`). Add `position_evaluations` or link kept positions to predictions so we can measure: "we kept YES at hist_p=0.75, it won."
-- **Cancel reason classification**: Distinguish "no longer recommended" (rec=SKIP) vs "want better limit" (rec still BUY) for finer calibration.
+**Implemented**: Orphan Kalshi positions and all Gemini position evals persist via `record_market_snapshot`. **Limit order tracking** (`limit_orders` table): we record every limit order placed (platform, ticker, order_id, limit_price, bid_at_place, dip_pct_used, hist_p, etc.) and record cancel reasons. Use `--limit-analysis` to see unfilled orders, min/max price during order lifetime, and "would have filled" stats — informs `limit_dip_pct` tuning.
+- ~~**Kept position outcomes**~~: ✓ New `position_evaluations` table tracks every KEEP decision with model context (hist_p, vol_p, p_lose, rec, entry_price, current_price). When the market resolves, outcomes are linked automatically via `resolve_position_evaluations()` in settlement sync. Use `--position-eval-analysis` to see KEEP vs SELL win rates, PnL, and win rate by hist_p bucket. Rate-limited to one row per (platform, ticker, side) per hour.
+- ~~**Cancel reason classification**~~: ✓ Four distinct cancel reasons are tracked: `no_longer_rec` (model stopped recommending), `want_better_price` (model wants to reprice), `stale_ttl` (order exceeded TTL), `regime_shift_guard` (cancelled during volatility/momentum regime shift). Stored in `limit_orders.cancel_reason`.
 
 ### 6. ~~Modular Strategy Interface (Freqtrade)~~ ✓ Implemented
 

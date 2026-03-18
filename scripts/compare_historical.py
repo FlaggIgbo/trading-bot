@@ -73,11 +73,13 @@ try:
         get_last_snapshot_for_ticker,
         get_limit_order_analysis,
         get_market_snapshots_for_backtest,
+        get_position_evaluation_stats,
         get_predictions_for_backtest,
         get_realized_pnl_stats,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
         mark_prediction_cancelled,
+        record_position_evaluation,
         record_prediction_from_fill,
         record_prediction_early_exit,
         record_limit_order,
@@ -85,10 +87,11 @@ try:
         record_order_cancel,
         record_prediction_outcome,
         record_resolved,
+        resolve_position_evaluations,
     )
 except ImportError:
     get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
-    get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = None
+    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
@@ -2922,6 +2925,8 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
             min_price_after_buy=min_after,
             max_price_after_buy=max_after,
         )
+        if resolve_position_evaluations:
+            resolve_position_evaluations(t, yes_settled, cfg)
         if record_resolved and get_last_snapshot_for_ticker:
             snap = get_last_snapshot_for_ticker(t, platform=PLATFORM_KALSHI, config=cfg)
             record_resolved(
@@ -2954,6 +2959,7 @@ def main():
     parser.add_argument("--use-volatility", action="store_true", help="Use volatility-based probability (option-style) in addition to empirical")
     parser.add_argument("--log", metavar="DIR", nargs="?", const="~/Desktop/trading-bot-logs", default=None, help="Log run output to ~/Desktop/trading-bot-logs/ or specified dir (eval_YYYYMMDDHH.log per hour, append within hour)")
     parser.add_argument("--limit-analysis", action="store_true", help="Print analysis of unfilled limit orders (why they didn't hit; inform limit_dip_pct tuning)")
+    parser.add_argument("--position-eval-analysis", action="store_true", help="Print position evaluation stats (KEEP vs SELL outcomes, win rate by hist_p bucket)")
     parser.add_argument("--reconcile-diagnostics", action="store_true", help="Print fill reconciliation counters (seen/inserted/duplicate/skipped) per platform")
     parser.add_argument("--reconcile-only", action="store_true", help="Run fill reconciliation pass only, print diagnostics, then exit")
     args = parser.parse_args()
@@ -3286,6 +3292,32 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  Summary: {total} unfilled | {would_fill} would have filled if we'd kept/waiting — "
                           f"inform limit_dip_pct tuning")
                 print()
+        except Exception:
+            pass
+
+    # Position evaluation analysis: KEEP vs SELL outcome stats
+    if getattr(args, "position_eval_analysis", False) and get_position_evaluation_stats:
+        try:
+            pe_stats = get_position_evaluation_stats(cfg, days=90)
+            if pe_stats.get("enabled") and pe_stats.get("total", 0) > 0:
+                keep = pe_stats.get("keep", {})
+                sell = pe_stats.get("sell", {})
+                print("[Position Eval Analysis] KEEP vs SELL outcomes (last 90 days, last eval per position):")
+                if keep.get("count", 0) > 0:
+                    wr = f"{keep['win_rate']:.0%}" if keep.get("win_rate") is not None else "N/A"
+                    print(f"  KEEP: {keep['count']} positions | {keep.get('wins',0)} won, {keep.get('losses',0)} lost | win rate {wr} | PnL {keep.get('pnl_cents',0):+d}¢")
+                if sell.get("count", 0) > 0:
+                    wr = f"{sell['win_rate']:.0%}" if sell.get("win_rate") is not None else "N/A"
+                    print(f"  SELL: {sell['count']} positions | {sell.get('wins',0)} won, {sell.get('losses',0)} lost | win rate {wr} | PnL {sell.get('pnl_cents',0):+d}¢")
+                buckets = pe_stats.get("keep_buckets", [])
+                if buckets:
+                    print("  KEEP win rate by hist_p bucket:")
+                    for b in buckets:
+                        wr = f"{b['win_rate']:.0%}" if b.get("win_rate") is not None else "N/A"
+                        print(f"    {b['hist_p_range']}: {b['count']} positions, win rate {wr}")
+                print()
+            elif pe_stats.get("enabled"):
+                print("[Position Eval Analysis] No resolved position evaluations yet.\n")
         except Exception:
             pass
 
@@ -4503,6 +4535,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         if res_key and pos_yf:
                                             key = (pos_yf, res_key, PLATFORM_KALSHI)
                                             existing_by_underlying.setdefault(key, []).append((threshold, direction, side))
+                                        if record_position_evaluation:
+                                            record_position_evaluation(
+                                                platform=PLATFORM_KALSHI, ticker=ticker, side=side, action="keep",
+                                                hist_p=hist_p, vol_p=vol_p, p_lose=p_lose, yes_bid=yes_bid, no_bid=no_bid,
+                                                threshold=threshold, direction=direction, yf_ticker=pos_yf, rec=rec,
+                                                position_count=position_count,
+                                                entry_price=latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side)),
+                                                current_price=current_side_price, config=cfg,
+                                            )
                             elif getattr(args, "verbose", False):
                                 print(f"    (no hist data for {ticker}, skip sell eval)")
                     except Exception as ex:
@@ -4652,6 +4693,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if res_key and _yf:
                         key = (_yf, res_key, PLATFORM_KALSHI)
                         existing_by_underlying.setdefault(key, []).append((threshold, direction, side))
+                    if record_position_evaluation:
+                        record_position_evaluation(
+                            platform=PLATFORM_KALSHI, ticker=ticker, side=side, action="keep",
+                            hist_p=hist_p, vol_p=vol_p, p_lose=p_lose, yes_bid=yes_bid, no_bid=no_bid,
+                            threshold=threshold, direction=direction, yf_ticker=_yf, rec=rec,
+                            position_count=position_count,
+                            entry_price=latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side)),
+                            current_price=current_side_price, config=cfg,
+                        )
 
             # Evaluate Gemini positions for sell when bet looks like a loser (like Kalshi)
             gemini_symbol_to_market: dict[str, dict] = {}
@@ -4902,6 +4952,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if res_key_g and pos_yf:
                                 key = (pos_yf, res_key_g, PLATFORM_GEMINI)
                                 existing_by_underlying.setdefault(key, []).append((threshold_g, direction_g, side))
+                            if record_position_evaluation:
+                                record_position_evaluation(
+                                    platform=PLATFORM_GEMINI, ticker=ticker_g, side=side, action="keep",
+                                    hist_p=hist_p_g, vol_p=vol_p_g, p_lose=p_lose, yes_bid=impl, no_bid=no_price_g,
+                                    threshold=threshold_g, direction=direction_g, yf_ticker=pos_yf, rec=rec,
+                                    position_count=position_count,
+                                    entry_price=latest_entry_by_key.get((PLATFORM_GEMINI, ticker_g, side)),
+                                    current_price=current_side_price_g, config=cfg,
+                                )
                 except Exception as gex:
                     if getattr(args, "verbose", False):
                         print(f"    (Gemini position eval failed: {gex})")
