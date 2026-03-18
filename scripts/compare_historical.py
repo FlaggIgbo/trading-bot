@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import re
 import sys
 import time
@@ -68,6 +69,7 @@ from strategies import BaseStrategy, DefaultThresholdStrategy, VolRegimeStrategy
 
 try:
     from storage import (
+        expire_unfilled_orders,
         get_calibration_stats,
         get_fill_attribution_stats,
         get_last_snapshot_for_ticker,
@@ -90,7 +92,7 @@ try:
         resolve_position_evaluations,
     )
 except ImportError:
-    get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
+    expire_unfilled_orders = get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
     get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
@@ -264,6 +266,9 @@ class _StrategyParams:
     far_dte_max_extra_dip: float
     far_dte_min_confidence: float
     far_dte_confidence_boost: float
+    mc_enabled: bool
+    mc_paths: int
+    mc_blend_weight: float
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -399,6 +404,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         far_dte_max_extra_dip=float(strategy.get("far_dte_max_extra_dip", 0.12)),
         far_dte_min_confidence=float(strategy.get("far_dte_min_confidence", 0.80)),
         far_dte_confidence_boost=float(strategy.get("far_dte_confidence_boost", 1.5)),
+        mc_enabled=bool(strategy.get("mc_enabled", True)),
+        mc_paths=max(100, int(strategy.get("mc_paths", 10000))),
+        mc_blend_weight=max(0.0, min(1.0, float(strategy.get("mc_blend_weight", 0.3)))),
     )
 
 
@@ -1459,6 +1467,138 @@ def _volatility_probability(
     if direction == "above":
         return phi_d
     return 1.0 - phi_d
+
+
+def _monte_carlo_probability(
+    S0: float,
+    sigma_annual: float,
+    T: float,
+    threshold: float,
+    direction: str,
+    n_paths: int = 10000,
+    distribution: str = "normal",
+    t_df: float = 6.0,
+) -> float:
+    """
+    Monte Carlo GBM simulation: run n_paths price paths and return fraction
+    where S_T crosses threshold. Multi-step (daily) to capture path-dependent
+    effects; Student-t innovations for heavy-tail realism.
+    """
+    if S0 <= 0 or sigma_annual < 1e-8 or T <= 0 or threshold <= 0:
+        return 0.5
+    n_steps = max(1, round(T * 365))
+    dt = T / n_steps
+    drift = -0.5 * sigma_annual ** 2 * dt
+    diffusion = sigma_annual * math.sqrt(dt)
+    dist = (distribution or "normal").strip().lower()
+    use_t = dist in ("student_t", "student-t", "t")
+    df = max(2.1, float(t_df)) if use_t else 0.0
+    t_scale = math.sqrt((df - 2.0) / df) if use_t and df > 2.0 else 1.0
+
+    if np is not None:
+        rng = np.random.default_rng()
+        if use_t and scipy_t is not None:
+            innovations = scipy_t.rvs(df, size=(n_paths, n_steps), random_state=rng) * t_scale
+        elif use_t:
+            innovations = rng.standard_normal((n_paths, n_steps)) * t_scale
+        else:
+            innovations = rng.standard_normal((n_paths, n_steps))
+        log_returns = drift + diffusion * innovations
+        log_S_T = math.log(S0) + np.sum(log_returns, axis=1)
+        S_T = np.exp(log_S_T)
+        if direction == "above":
+            return float(np.mean(S_T >= threshold))
+        return float(np.mean(S_T <= threshold))
+
+    hits = 0
+    for _ in range(n_paths):
+        log_s = math.log(S0)
+        for _ in range(n_steps):
+            z = random.gauss(0, t_scale)
+            log_s += drift + diffusion * z
+        S_T = math.exp(log_s)
+        if direction == "above":
+            hits += (S_T >= threshold)
+        else:
+            hits += (S_T <= threshold)
+    return hits / n_paths
+
+
+def _volatility_probability_with_mc(
+    closes: list[float],
+    threshold: float,
+    direction: str,
+    days_to_expiry: float = 30.0,
+    use_ewma: bool = False,
+    ewma_lambda: float = 0.94,
+    current_price: float | None = None,
+    *,
+    vol_model: str = "auto",
+    garch_min_returns: int = 80,
+    enable_otm_smile_adjustment: bool = True,
+    otm_smile_strength: float = 0.35,
+    otm_smile_max_mult: float = 2.0,
+    distribution: str = "normal",
+    t_df: float = 6.0,
+    mc_paths: int = 10000,
+    mc_blend_weight: float = 0.3,
+) -> float | None:
+    """
+    Blended analytical + Monte Carlo volatility probability.
+    Runs _volatility_probability for the analytical CDF result, then
+    _monte_carlo_probability for a simulation-based estimate, and returns
+    the weighted blend. mc_blend_weight controls MC influence (0 = pure
+    analytical, 1 = pure MC).
+    """
+    analytical = _volatility_probability(
+        closes, threshold, direction, days_to_expiry,
+        use_ewma=use_ewma, ewma_lambda=ewma_lambda,
+        current_price=current_price,
+        vol_model=vol_model, garch_min_returns=garch_min_returns,
+        enable_otm_smile_adjustment=enable_otm_smile_adjustment,
+        otm_smile_strength=otm_smile_strength,
+        otm_smile_max_mult=otm_smile_max_mult,
+        distribution=distribution, t_df=t_df,
+    )
+    if analytical is None:
+        return None
+    if mc_paths <= 0 or mc_blend_weight <= 0:
+        return analytical
+    S0 = float(current_price) if (current_price is not None and current_price > 0) else float(closes[-1])
+    returns = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] > 0:
+            returns.append(math.log(closes[i] / closes[i - 1]))
+    if len(returns) < 3:
+        return analytical
+    model = (vol_model or "auto").strip().lower()
+    variance = 0.0
+    if model in {"garch", "auto"}:
+        gv = _garch_variance(returns, min_returns=garch_min_returns)
+        if gv is not None and gv > 0:
+            variance = gv
+    if variance <= 0 and (use_ewma or model in {"ewma", "auto"}):
+        variance = _ewma_variance(returns, ewma_lambda)
+    if variance <= 0:
+        variance = _sample_variance(returns)
+    sigma_daily = variance ** 0.5
+    sigma_annual = sigma_daily * (252 ** 0.5)
+    if enable_otm_smile_adjustment and sigma_annual > 0:
+        m = math.log(max(1e-12, threshold / S0))
+        is_otm_for_yes = (direction == "above" and threshold > S0) or (
+            direction == "below" and threshold < S0
+        )
+        if is_otm_for_yes:
+            mult = 1.0 + max(0.0, otm_smile_strength) * abs(m)
+            mult = min(max(1.0, mult), max(1.0, otm_smile_max_mult))
+            sigma_annual *= mult
+    T = max(0.01, days_to_expiry / 365.0)
+    mc = _monte_carlo_probability(
+        S0, sigma_annual, T, threshold, direction,
+        n_paths=mc_paths, distribution=distribution, t_df=t_df,
+    )
+    w = max(0.0, min(1.0, mc_blend_weight))
+    return (1.0 - w) * analytical + w * mc
 
 
 def _violates_no_above_rule(
@@ -2927,6 +3067,8 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
         )
         if resolve_position_evaluations:
             resolve_position_evaluations(t, yes_settled, cfg)
+        if expire_unfilled_orders:
+            expire_unfilled_orders(t, platform=PLATFORM_KALSHI, config=cfg)
         if record_resolved and get_last_snapshot_for_ticker:
             snap = get_last_snapshot_for_ticker(t, platform=PLATFORM_KALSHI, config=cfg)
             record_resolved(
@@ -3502,7 +3644,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             ewma_lambda_used = _ewma_lambda_for_market(sp, m, yf_ticker)
             vol_p = (
-                _volatility_probability(
+                _volatility_probability_with_mc(
                     closes,
                     threshold,
                     direction,
@@ -3517,6 +3659,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     otm_smile_max_mult=sp.otm_smile_max_mult,
                     distribution=sp.vol_distribution,
                     t_df=sp.vol_t_df,
+                    mc_paths=sp.mc_paths if sp.mc_enabled else 0,
+                    mc_blend_weight=sp.mc_blend_weight,
                 )
                 if use_vol else None
             )
@@ -3928,7 +4072,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
                 ewma_lambda_used_g = _ewma_lambda_for_market(sp, evt, yf_ticker)
                 vol_p_gem = (
-                    _volatility_probability(
+                    _volatility_probability_with_mc(
                         closes,
                         threshold_g,
                         direction_g,
@@ -3943,6 +4087,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         otm_smile_max_mult=sp.otm_smile_max_mult,
                         distribution=sp.vol_distribution,
                         t_df=sp.vol_t_df,
+                        mc_paths=sp.mc_paths if sp.mc_enabled else 0,
+                        mc_blend_weight=sp.mc_blend_weight,
                     )
                     if use_vol else None
                 )
@@ -4402,7 +4548,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         else:
                                             current_price_pos = last_close_pos
                                         vol_p = (
-                                            _volatility_probability(
+                                            _volatility_probability_with_mc(
                                                 closes,
                                                 threshold,
                                                 direction,
@@ -4417,6 +4563,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 otm_smile_max_mult=sp.otm_smile_max_mult,
                                                 distribution=sp.vol_distribution,
                                                 t_df=sp.vol_t_df,
+                                                mc_paths=sp.mc_paths if sp.mc_enabled else 0,
+                                                mc_blend_weight=sp.mc_blend_weight,
                                             )
                                             if use_vol else None
                                         )
@@ -4570,7 +4718,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 dte_cached = _get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
                 ewma_lambda_cached = _ewma_lambda_for_market(sp, m, _yf)
                 vol_p = (
-                    _volatility_probability(
+                    _volatility_probability_with_mc(
                         closes,
                         threshold,
                         direction,
@@ -4585,6 +4733,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         otm_smile_max_mult=sp.otm_smile_max_mult,
                         distribution=sp.vol_distribution,
                         t_df=sp.vol_t_df,
+                        mc_paths=sp.mc_paths if sp.mc_enabled else 0,
+                        mc_blend_weight=sp.mc_blend_weight,
                     )
                     if use_vol else None
                 )
@@ -4799,7 +4949,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
                         ewma_lambda_g = _ewma_lambda_for_market(sp, evt, pos_yf)
                         vol_p_g = (
-                            _volatility_probability(
+                            _volatility_probability_with_mc(
                                 closes,
                                 threshold_g,
                                 direction_g,
@@ -4814,6 +4964,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 otm_smile_max_mult=sp.otm_smile_max_mult,
                                 distribution=sp.vol_distribution,
                                 t_df=sp.vol_t_df,
+                                mc_paths=sp.mc_paths if sp.mc_enabled else 0,
+                                mc_blend_weight=sp.mc_blend_weight,
                             )
                             if use_vol else None
                         )

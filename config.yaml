@@ -161,6 +161,9 @@ strategy:
   otm_smile_max_mult: 2.0 # Cap OTM vol multiplier
   vol_distribution: student_t # Heavy-tail volatility distribution: normal or student_t
   vol_t_df: 4.5 # Stronger fat-tail penalty for extreme-fear volatility regimes
+  mc_enabled: true # Monte Carlo simulation: blend simulated paths with analytical CDF for tail-aware probability
+  mc_paths: 10000 # Number of GBM paths to simulate (higher = more accurate, slower; 10k ≈ 50ms with numpy)
+  mc_blend_weight: 0.3 # Weight of MC result vs analytical (0 = pure analytical, 1 = pure MC; 0.3 = 30% MC)
   liquidity_spread_bps_soft: 1500 # Start reducing size when spread proxy > 15%
   liquidity_spread_bps_hard: 4000 # Max size reduction at/above 40% spread proxy
   liquidity_min_size_multiplier: 0.20 # At hard spread, keep at least 20% of base size

@@ -1077,6 +1077,7 @@ def record_order_cancel(
     - 'want_better_price': model still recommends but wants to reprice at a better level
     - 'stale_ttl': order exceeded limit_order_ttl_minutes
     - 'regime_shift_guard': cancelled during momentum/volatility regime shift
+    - 'expired_unfilled': auto-cancelled by platform at resolution (never filled)
     If we have a row (we placed it), update it. Else insert minimal row for historical record.
     """
     conn = _get_conn(config)
@@ -1871,6 +1872,40 @@ def get_last_snapshot_for_ticker(
         return dict(row) if row else None
     except Exception:
         return None
+    finally:
+        conn.close()
+
+
+def expire_unfilled_orders(
+    ticker: str,
+    platform: str | None = None,
+    config: dict | None = None,
+) -> int:
+    """
+    When a market resolves, mark any still-resting limit orders for that ticker
+    as expired_unfilled. These were auto-cancelled by the platform at resolution.
+    Returns number of rows updated.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return 0
+    now = time.time()
+    try:
+        if platform:
+            cur = conn.execute(
+                "UPDATE limit_orders SET status='cancelled', cancel_reason='expired_unfilled', cancel_ts=? WHERE ticker=? AND platform=? AND status='placed'",
+                (now, ticker, platform),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE limit_orders SET status='cancelled', cancel_reason='expired_unfilled', cancel_ts=? WHERE ticker=? AND status='placed'",
+                (now, ticker),
+            )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    except Exception:
+        conn.rollback()
+        return 0
     finally:
         conn.close()
 

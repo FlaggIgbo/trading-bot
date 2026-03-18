@@ -93,7 +93,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Check inter-arb             | Kalshi YES + Gemini NO < 1−fee → hedge (balance-aware route selection can place cheaper leg on lower-balance account) | `compare_historical.py:1182` → `_check_inter_arb()`           |
 | Extract strike              | Parse "above $81,250" or "below $72,000" from title or ticker (e.g. -T82.9999) | `compare_historical.py:389` → `_extract_strike()`             |
 | Compute empirical P(YES)    | Recency-weighted/rolling empirical probability (NumPy path when installed) | `compare_historical.py` → `_empirical_probability()`      |
-| Compute volatility P(YES)   | Log-normal model with `vol_model` (`auto|ewma|garch|sample`), optional OTM smile; S0 uses live+close blend | `compare_historical.py` → `_volatility_probability()`     |
+| Compute volatility P(YES)   | Log-normal model with `vol_model` (`auto|ewma|garch|sample`), optional OTM smile; S0 uses live+close blend; Monte Carlo GBM blend when `mc_enabled` | `compare_historical.py` → `_volatility_probability_with_mc()` → `_volatility_probability()` + `_monte_carlo_probability()` |
 | Blend + score signals       | Dynamic empirical/vol blend, optional sklearn calibration, then signal-model scoring | `compare_historical.py` → `_dynamic_empirical_weight()`, `_fit_probability_calibrator()`, `_score_signal_model()` |
 | Recommend                   | Compare hist_p vs market price → BUY YES / BUY NO / SKIP    | `compare_historical.py:535` → `_recommend()`                  |
 | Apply safety rules          | Skip BUY NO when price above strike; skip BUY YES when < 5¢ | `compare_historical.py:1232-1258`                             |
@@ -236,7 +236,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
      - Extract strike: `_extract_strike()` from market floor/cap or title regex.
      - Get closes for empirical: `_get_closes_for_empirical()` — for intraday + use_intraday_empirical, fetches 1h prices at resolution hour; else daily closes.
      - Empirical P: `_empirical_probability(closes_for_emp, threshold, direction)` — fraction of days above/below threshold.
-     - Volatility P (if --use-volatility): `_volatility_probability(closes, …)` — log-normal model, EWMA vol.
+     - Volatility P (if --use-volatility): `_volatility_probability_with_mc(closes, …)` — analytical CDF + Monte Carlo GBM blend (when `mc_enabled`).
      - Blend: `hist_p = vol_blend_weight * emp + (1−w) * vol_p` when both; for intraday without use_intraday_empirical, hist_p = vol_p only.
      - Apply bucket penalty: `_apply_bucket_penalty()` — dampen hist_p if that bucket underperforms in calibration.
      - Recommend: `_recommend(hist_p, yes_bid, min_edge)` or `_recommend_strict()` for non-standard intraday.
@@ -341,7 +341,10 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | Function | File | Signature | Purpose |
 |----------|------|-----------|---------|
 | `_empirical_probability` | compare_historical | `(closes, threshold, direction, recent_days, recent_weight, use_rolling_window) -> float` | Recency-weighted empirical probability; uses vectorized NumPy path when available. |
-| `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda, current_price, ...) -> float \| None` | Regime-aware volatility P(S>K) or P(S<K); Student-t/Normal CDF path; optional OTM smile adjustment. |
+| `_volatility_probability` | compare_historical | `(closes, threshold, direction, days_to_expiry, use_ewma, ewma_lambda, current_price, ...) -> float \| None` | Analytical CDF-based P(S>K) or P(S<K); Student-t/Normal; OTM smile adjustment. |
+| `_monte_carlo_probability` | compare_historical | `(S0, sigma_annual, T, threshold, direction, n_paths, distribution, t_df) -> float` | Monte Carlo GBM: N simulated daily-step paths with Student-t or Normal innovations. |
+| `_volatility_probability_with_mc` | compare_historical | `(closes, threshold, direction, ..., mc_paths, mc_blend_weight) -> float \| None` | Blends analytical + MC probability; wraps both functions above. |
+| `expire_unfilled_orders` | storage | `(ticker, platform, config) -> int` | Mark still-placed limit orders as `expired_unfilled` when market resolves. |
 | `_build_signal_features` | compare_historical | `(emp_p, vol_p, market_yes, threshold, current_price, dte_days, spread_bps, no_bid) -> _SignalFeatures` | Builds normalized model features for signal scoring. |
 | `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
 | `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |
@@ -397,6 +400,9 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `far_dte_max_extra_dip` | `far_dte_max_extra_dip` | — | Cap on extra dip from DTE scaling |
 | `far_dte_min_confidence` | `far_dte_min_confidence` | 0.80 | Min P(win) for DTE-confidence dip (e.g. 80%) |
 | `far_dte_confidence_boost` | `far_dte_confidence_boost` | — | Confidence boost factor for far-DTE scaling |
+| `mc_enabled` | `mc_enabled` | true | Enable Monte Carlo GBM path simulation blended with analytical CDF |
+| `mc_paths` | `mc_paths` | 10000 | Number of simulated GBM paths (higher = more accurate, slower) |
+| `mc_blend_weight` | `mc_blend_weight` | 0.3 | Weight of MC result vs analytical CDF (0 = pure analytical, 1 = pure MC) |
 | `vol_blend_weight` | `vol_blend_weight` | 0.5 | Blend emp + vol: w×emp + (1−w)×vol |
 | `use_ewma_vol` | `use_ewma_vol` | true | EWMA vs sample variance for vol |
 | `ewma_lambda` | `ewma_lambda` | 0.94 | EWMA decay (RiskMetrics-style) |
@@ -794,7 +800,7 @@ limit_orders
 ├── vol_p            REAL
 ├── ts               REAL
 ├── status           TEXT      (placed | filled | cancelled)
-└── cancel_reason    TEXT      (no_longer_rec | want_better_price | stale_ttl | regime_shift_guard)
+└── cancel_reason    TEXT      (no_longer_rec | want_better_price | stale_ttl | regime_shift_guard | expired_unfilled)
 
 position_evaluations
 ├── id               INTEGER   (auto-increment)
@@ -862,7 +868,7 @@ position_evaluations
 | Where is the backtest?               | `scripts/backtest.py` — `--mode real` or `synthetic`                 |
 | Where are performance graphs?        | `scripts/daily_performance_report.py` — PNG charts (green/red bars, blue P&L line) |
 | Where are strategy params defined?   | `config.yaml` → `strategy:`; loaded in `_load_strategy_params()` L115 |
-| Where is P(YES) computed?            | `_empirical_probability()` L434 + `_volatility_probability()` L463    |
+| Where is P(YES) computed?            | `_empirical_probability()` + `_volatility_probability_with_mc()` (analytical CDF + MC blend) |
 | Where is P(lose) computed?           | `_compute_p_lose()` L652 — blends model with market odds; more weight near expiry |
 | Where is DTE-confidence dip?         | `_dte_confidence_dip()` in compare_historical — when DTE>3 days and P(win)≥80% |
 | Where are Kalshi orders placed?      | `signals/kalshi_client.py` → `create_order_safe()`                    |

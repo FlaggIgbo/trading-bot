@@ -138,7 +138,7 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
 ## Contract evaluation workflow
 
@@ -383,7 +383,7 @@ Requires `trading.dry_run: false` in config.yaml.
 | `--reconcile-diagnostics` | Print reconciliation counters per run (`seen / inserted / dup / skipped`) for Kalshi + Gemini fills |
 | `--reconcile-only` | Run fill reconciliation pass only and exit (quick auditing command) |
 
-Config: `strategy.strategy_engine`, `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, and related keys in `config.yaml`.
+Config: `strategy.strategy_engine`, `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, `strategy.mc_enabled`, `strategy.mc_paths`, `strategy.mc_blend_weight`, and related keys in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 
@@ -515,7 +515,7 @@ Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable v
 | **market_snapshots** | Per-evaluation snapshot (yes/no bids/asks/sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**      | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
-| **limit_orders**    | Limit orders placed + cancel reasons (learn from unfilled) | None | `id` (auto-increment)                          |
+| **limit_orders**    | Limit orders placed + cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled` | None | `id` (auto-increment)                          |
 
 #### Table structures (columns)
 
@@ -546,7 +546,7 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **Live price blend for S0 and safety**: The bot uses **both** signals—live price (via `get_snapshot`) and the last close (`closes[-1]`)—blended with slightly more weight on live (`live_price_weight`, default 0.6). So `current_price = 0.6×live + 0.4×closes[-1]` when both are available. This reflects sharp recent moves while anchoring to the last close. Falls back to `closes[-1]` if the snapshot API fails.
 - **Empirical**: fraction of past days the close was above/below the threshold.
 - **Empirical**: recency-weighted and rolling-window capable (`empirical_recent_days` default 90, `empirical_recent_weight`, `empirical_use_rolling_window`) with regime-sensitive weight boosts. The confidence-interval uncertainty penalty uses the rolling-window sample size (not full history) so edge requirements honestly reflect the data the model actually used.
-- **Volatility**: log-normal model using `vol_model` (`auto|ewma|garch|sample`) and time-to-expiry. `auto` prefers GARCH(1,1) when available and safely falls back to EWMA/sample. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts.
+- **Volatility**: log-normal model using `vol_model` (`auto|ewma|garch|sample`) and time-to-expiry. `auto` prefers GARCH(1,1) when available and safely falls back to EWMA/sample. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts. **Monte Carlo blend** (`mc_enabled`, `mc_paths: 10000`, `mc_blend_weight: 0.3`): runs N GBM paths (daily steps, Student-t innovations when configured) and blends with the analytical CDF — better captures non-log-normal tails and path-dependent effects.
 - **Intraday EWMA override**: intraday contracts can use a faster EWMA decay (`intraday_ewma_lambda`, currently 0.90) while daily contracts keep `ewma_lambda` (0.94).
 - **Volatility defense stack**: continuous vol-ratio scaling increases `min_edge`, deepens limit dips, and dampens size; extreme-volatility `defensive mode` switches to sells-only; stability window can auto-expand with volatility.
 - **Cross-exchange sanity gate**: blocks stale-side buys when Kalshi/Gemini YES prices diverge beyond tolerance during sharp spot moves.

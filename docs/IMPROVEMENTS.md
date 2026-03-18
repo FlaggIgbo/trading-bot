@@ -76,7 +76,8 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Daily performance graphs**           | Reliability                             | ✓ `scripts/daily_performance_report.py` now generates PNG performance charts with per-trade P&L bars (green=wins, red=losses) and cumulative P&L overlay line, saved alongside the text report. |
 | **DTE-confidence limit dip scaling**   | —                                       | ✓ New `_dte_confidence_dip()` in compare_historical.py. When resolution is far (>3 days) and model confidence high (P(win)>=80%), limit order dips scale proportionally with DTE to catch uncertainty-driven price drops. Config: `far_dte_*` params. When P(win)>=90%, extra DTE dip gets a 1.5x confidence boost. |
 | **CI sample-size fix + wider empirical window** | —                            | ✓ `_empirical_ci_halfwidth` now uses the rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, so the uncertainty penalty honestly reflects the data the empirical model actually used. `empirical_recent_days` increased from 30 → 90 for more stable empirical P estimates while still adapting to regime shifts. |
-| **Position evaluation tracking (FreqAI-style)** | FreqAI-style ML              | ✓ New `position_evaluations` table records KEEP decisions with full model context (hist_p, vol_p, p_lose, rec, entry/current price). Outcomes linked on settlement via `resolve_position_evaluations()`. `--position-eval-analysis` prints KEEP vs SELL win rates and PnL. Cancel reasons now fully classified: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`. |
+| **Position evaluation tracking (FreqAI-style)** | FreqAI-style ML              | ✓ New `position_evaluations` table records KEEP decisions with full model context (hist_p, vol_p, p_lose, rec, entry/current price). Outcomes linked on settlement via `resolve_position_evaluations()`. `--position-eval-analysis` prints KEEP vs SELL win rates and PnL. Cancel reasons now fully classified: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled`. |
+| **Monte Carlo probability paths**               | Stock-Prediction-Models       | ✓ `_monte_carlo_probability()` runs N GBM paths (daily steps, Student-t innovations when configured) blended with analytical CDF via `_volatility_probability_with_mc()`. Config: `mc_enabled`, `mc_paths` (10000), `mc_blend_weight` (0.3). Better tail-risk estimation for non-log-normal behavior. |
 
 ---
 
@@ -95,7 +96,9 @@ Refactoring, architecture, and code quality changes.
 | **Strategy plugin migration**          | Signal feature building/scoring and recommendation routing are delegated to `strategies/` implementations; `compare_historical.py` handles data/execution plumbing. |
 | **CI sample-size honesty**          | `_empirical_ci_halfwidth` now uses the effective rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, preventing artificially tight confidence intervals when rolling window is enabled. |
 | **Position eval persistence**       | New `position_evaluations` table + `record_position_evaluation()` / `resolve_position_evaluations()` / `get_position_evaluation_stats()` in storage; KEEP decisions tracked at all position eval paths (Kalshi cached/uncached + Gemini). |
-| **Cancel reason classification**    | `record_order_cancel` docstring and schema updated to document all 4 cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`. |
+| **Cancel reason classification**    | `record_order_cancel` docstring and schema updated to document all 5 cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled`. |
+| **Monte Carlo GBM simulation**      | `_monte_carlo_probability()` + `_volatility_probability_with_mc()` wrapper; multi-step daily GBM with numpy vectorization (pure-Python fallback); Student-t innovations; blended with analytical CDF at all 5 vol_p call sites. |
+| **Expired unfilled order tracking** | `expire_unfilled_orders()` marks still-placed limit orders as `expired_unfilled` when market resolves (platform auto-cancel). Called from settlement sync. |
 | **Ruff + Prettier**                 | Linting (Ruff) and formatting (Prettier for YAML/JSON/MD); pre-commit hooks on push. |
 | **pyproject.toml**                  | Ruff config, project metadata; single place for tooling. |
 | **ML pipeline repo restructure**    | Reorganized into `signals/` (data clients), `models/strategies/` (ML strategies), `execution/` (order lifecycle), `data/` (persistence). Root-level backward-compat shims preserve existing import paths. Pipeline flow: config.yaml signals → feature engineering → model scoring → trade execution → data persistence. |
@@ -190,9 +193,9 @@ Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log`
 
 ~~Current volatility model uses a fixed historical vol.~~ **Implemented**: EWMA (`strategy.use_ewma_vol`, `ewma_lambda`) and optional GARCH(1,1) path (`vol_model: auto|garch`, `garch_min_returns`) with safe fallback to EWMA/sample when GARCH dependencies or fit conditions are unavailable.
 
-### 8. Monte Carlo Paths (Stock-Prediction-Models)
+### ~~8. Monte Carlo Paths (Stock-Prediction-Models)~~ ✓ Implemented
 
-Instead of single log-normal P(S>K), run N simulated price paths and compute empirical P. Useful for non-log-normal behavior.
+`_monte_carlo_probability()` runs N GBM paths (daily steps, Student-t innovations) blended with analytical CDF via `_volatility_probability_with_mc()`. Config: `mc_enabled`, `mc_paths` (10000), `mc_blend_weight` (0.3).
 
 ### 9. Implied Volatility from Options (if available)
 
@@ -223,7 +226,7 @@ Reference: [Lancaster University PDF](https://www.lancaster.ac.uk/staff/afasjt/a
 | GARCH(1,1) / stronger EWMA regime modeling  | Ch 9-10        | Medium | High   |
 | Implied vol inputs (VIX / options)          | Ch 14-15       | Medium | High   |
 | Intraday / realized volatility              | Ch 12          | High   | High   |
-| Monte Carlo tail-aware probability          | Ch 16          | Medium | Medium |
+| ~~Monte Carlo tail-aware probability~~      | Ch 16          | ✓ Done | ✓ `_monte_carlo_probability()` |
 | Heavy-tail distribution alternatives         | Ch 4           | Medium | Medium |
 
 ### Campbell, Lo, MacKinlay (1997): event-study framing
