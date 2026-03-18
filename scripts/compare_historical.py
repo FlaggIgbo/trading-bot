@@ -161,6 +161,7 @@ class _StrategyParams:
     enable_inter_arb: bool
     arb_inter_require_group_preflight: bool
     inter_arb_balance_aware_routing: bool
+    arb_inter_allow_single_leg_fallback: bool
     kalshi_maker_fee_rate: float
     kalshi_sp500_maker_fee_rate: float
     gemini_maker_fee_rate: float
@@ -289,6 +290,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_inter_arb=bool(strategy.get("enable_inter_arb", True)),
         arb_inter_require_group_preflight=bool(strategy.get("arb_inter_require_group_preflight", True)),
         inter_arb_balance_aware_routing=bool(strategy.get("inter_arb_balance_aware_routing", True)),
+        arb_inter_allow_single_leg_fallback=bool(strategy.get("arb_inter_allow_single_leg_fallback", True)),
         kalshi_maker_fee_rate=float(strategy.get("kalshi_maker_fee_rate", 0.0175)),
         kalshi_sp500_maker_fee_rate=float(strategy.get("kalshi_sp500_maker_fee_rate", 0.00875)),
         gemini_maker_fee_rate=float(strategy.get("gemini_maker_fee_rate", 0.0175)),
@@ -2600,7 +2602,8 @@ def _apply_inter_arb_group_preflight(
 ) -> None:
     """
     Ensure REC_ARB_INTER orders execute as balanced pairs.
-    Drops incomplete groups and resizes surviving groups to shared affordable count.
+    By default, drops incomplete/unfunded groups; optional fallback can keep
+    one funded highest-likelihood leg when pair funding is not possible.
     """
     if not pending_orders or not sp.enable_inter_arb or not sp.arb_inter_require_group_preflight:
         return
@@ -2616,6 +2619,7 @@ def _apply_inter_arb_group_preflight(
         return
 
     dropped_groups: set[str] = set()
+    single_leg_fallback_groups: dict[str, dict] = {}
     resized_legs = 0
     max_pct = max(0.0, float(max_pct_of_balance))
 
@@ -2628,24 +2632,67 @@ def _apply_inter_arb_group_preflight(
         spend = int(max(0, int(bal)) * max_pct)
         return max(0, spend // price_c)
 
+    def _select_single_leg_fallback(gid: str, legs: list[dict], reason: str) -> bool:
+        if not sp.arb_inter_allow_single_leg_fallback:
+            dropped_groups.add(gid)
+            logger(f"[Arb Preflight] Drop {gid}: {reason}.")
+            return False
+        candidates: list[tuple[float, int, float, dict]] = []
+        for leg in legs:
+            requested = max(0, int(leg.get("count", 0)))
+            affordable = _leg_max_count(leg)
+            keep_count = min(requested, affordable)
+            if keep_count <= 0:
+                continue
+            # "Most likely bid": higher contract price implies higher implied win probability.
+            implied_win = max(0.0, min(1.0, float(leg.get("price", 0.0))))
+            edge = float(leg.get("edge", 0.0))
+            candidates.append((implied_win, keep_count, edge, leg))
+        if not candidates:
+            dropped_groups.add(gid)
+            logger(f"[Arb Preflight] Drop {gid}: {reason}; no funded fallback leg available.")
+            return False
+        _, keep_count, _, keep_leg = max(candidates, key=lambda t: (t[0], t[1], t[2]))
+        keep_leg["count"] = keep_count
+        keep_leg["rec"] = REC_BUY_YES if str(keep_leg.get("side", "")) == "yes" else REC_BUY_NO
+        keep_leg["arb_single_leg_fallback"] = True
+        keep_leg["arb_fallback_reason"] = reason
+        for leg in legs:
+            if leg is keep_leg:
+                continue
+            leg["count"] = 0
+        single_leg_fallback_groups[gid] = keep_leg
+        logger(
+            f"[Arb Preflight] Fallback {gid}: keeping single leg "
+            f"{keep_leg.get('platform')} {str(keep_leg.get('side')).upper()} "
+            f"@ ${float(keep_leg.get('price', 0.0)):.2f} x {keep_count} ({reason})."
+        )
+        return True
+
     for gid, legs in groups.items():
         platforms = {str(l.get("platform") or "") for l in legs}
         if platforms != {PLATFORM_KALSHI, PLATFORM_GEMINI}:
-            dropped_groups.add(gid)
-            logger(f"[Arb Preflight] Drop {gid}: missing cross-exchange pair (platforms={sorted(platforms)}).")
+            _select_single_leg_fallback(
+                gid,
+                legs,
+                f"missing cross-exchange pair (platforms={sorted(platforms)})",
+            )
             continue
         if not gemini_ready:
-            dropped_groups.add(gid)
-            logger(f"[Arb Preflight] Drop {gid}: Gemini client unavailable for paired inter-arb execution.")
+            _select_single_leg_fallback(
+                gid,
+                legs,
+                "Gemini client unavailable for paired inter-arb execution",
+            )
             continue
         requested = [max(0, int(l.get("count", 0))) for l in legs]
         affordable = [_leg_max_count(l) for l in legs]
         paired_count = min(requested + affordable)
         if paired_count <= 0:
-            dropped_groups.add(gid)
-            logger(
-                f"[Arb Preflight] Drop {gid}: insufficient paired balance "
-                f"(requested={requested}, affordable={affordable})."
+            _select_single_leg_fallback(
+                gid,
+                legs,
+                f"insufficient paired balance (requested={requested}, affordable={affordable})",
             )
             continue
         for leg in legs:
@@ -2664,6 +2711,16 @@ def _apply_inter_arb_group_preflight(
         removed = before - len(pending_orders)
         if removed > 0:
             logger(f"[Arb Preflight] Removed {removed} inter-arb legs that could not be executed as full pairs.")
+    # Remove zero-count inter-arb legs, including the dropped side of fallback groups.
+    pending_orders[:] = [
+        o
+        for o in pending_orders
+        if not (o.get("rec") == REC_ARB_INTER and int(o.get("count", 0) or 0) <= 0)
+    ]
+    if single_leg_fallback_groups:
+        logger(
+            f"[Arb Preflight] Enabled single-leg fallback for {len(single_leg_fallback_groups)} inter-arb group(s)."
+        )
     if resized_legs > 0:
         logger(f"[Arb Preflight] Resized {resized_legs} inter-arb legs to matched paired counts.")
 

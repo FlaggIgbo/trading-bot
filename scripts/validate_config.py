@@ -47,6 +47,7 @@ def main() -> int:
     limit_order_ttl_minutes = _as_int(strategy.get("limit_order_ttl_minutes"), 30)
     arb_inter_require_group_preflight = strategy.get("arb_inter_require_group_preflight", True)
     inter_arb_balance_aware_routing = strategy.get("inter_arb_balance_aware_routing", True)
+    arb_inter_allow_single_leg_fallback = strategy.get("arb_inter_allow_single_leg_fallback", True)
     vol_model = str(strategy.get("vol_model", "auto")).strip().lower()
     garch_min_returns = _as_int(strategy.get("garch_min_returns"), 80)
     defensive_vol_ratio_threshold = _as_float(strategy.get("defensive_vol_ratio_threshold"), 3.0)
@@ -108,6 +109,8 @@ def main() -> int:
         errors.append("`strategy.arb_inter_require_group_preflight` must be true or false.")
     if not isinstance(inter_arb_balance_aware_routing, bool):
         errors.append("`strategy.inter_arb_balance_aware_routing` must be true or false.")
+    if not isinstance(arb_inter_allow_single_leg_fallback, bool):
+        errors.append("`strategy.arb_inter_allow_single_leg_fallback` must be true or false.")
     if vol_model not in {"auto", "ewma", "garch", "sample"}:
         errors.append("`strategy.vol_model` must be one of: auto, ewma, garch, sample.")
     if garch_min_returns < 30:
