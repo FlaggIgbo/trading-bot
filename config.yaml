@@ -58,6 +58,8 @@ strategy:
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
   ewma_lambda: 0.94 # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
   intraday_ewma_lambda: 0.90 # Faster intraday EWMA response for flash moves while keeping daily lambda stable
+  vol_model: auto # auto|ewma|garch|sample. auto uses GARCH(1,1) when available, then falls back safely.
+  garch_min_returns: 80 # Minimum return observations before enabling GARCH fit in auto/garch mode
   intraday_other_min_p_win: 0.90 # For intraday at non-standard times (e.g. 8pm ET): only buy when P(win) >= 90% (almost certain)
   intraday_other_min_p_win_with_vol: 0.80 # When --use-volatility: use 80% instead (vol model already accounts for time & vol)
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
@@ -120,6 +122,21 @@ strategy:
   enable_vol_spike_safety: true # Safety mode on volatility regime break
   vol_spike_threshold_mult: 2.0 # Trigger safety mode when short vol > 2x recent baseline
   vol_spike_edge_multiplier: 2.0 # In safety mode, multiply min_edge by this factor
+  enable_defensive_mode: true # Extreme-volatility circuit: switch to sells-only mode (no new buys)
+  defensive_vol_ratio_threshold: 3.0 # Trigger defensive mode when short-vs-baseline realized vol ratio exceeds this
+  enable_dynamic_stability_window: true # Scale stability guard window with volatility regime (ATR/vol ratio proxy)
+  stability_vol_ratio_ref: 1.0 # Vol-ratio reference where stability multiplier starts from 1x
+  stability_max_multiplier: 10.0 # Cap on dynamic stability-window expansion in extreme volatility
+  enable_vol_regime_scaling: true # Continuous vol-ratio scaling for edge, limit depth, and size (beyond binary spike mode)
+  vol_regime_edge_mult_per_x: 0.35 # Additional edge multiplier per +1.0x vol-ratio above baseline
+  vol_regime_max_edge_mult: 2.5 # Cap for continuous edge multiplier from vol-ratio scaling
+  vol_regime_dip_mult_per_x: 0.50 # Additional limit-dip multiplier per +1.0x vol-ratio above baseline
+  vol_regime_max_dip_mult: 2.0 # Cap for limit-dip multiplier from vol-ratio scaling
+  vol_regime_size_mult_per_x: 0.50 # Position-size dampening slope per +1.0x vol-ratio above baseline
+  vol_regime_min_size_mult: 0.35 # Minimum retained size multiplier under extreme volatility
+  enable_cross_exchange_sanity_gate: true # Block stale-side buys when one venue lags repricing during sharp spot moves
+  cross_exchange_max_yes_gap: 0.08 # Maximum tolerated YES-price divergence between Gemini and Kalshi before blocking
+  cross_exchange_spot_move_threshold_pct: 0.01 # Spot-move magnitude required before sanity-gate comparisons activate
   parity_penalty_enabled: true # Add dynamic extra edge to dominant side (YES/NO) from recent outcomes
   parity_lookback_days: 14 # Lookback window for directional parity stats
   parity_base_penalty: 0.02 # Base dynamic penalty added to dominant side min_edge

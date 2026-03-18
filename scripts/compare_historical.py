@@ -15,10 +15,6 @@ Run: python3 scripts/compare_historical.py [--days 365] [--markets 0] [--edge 0.
 """
 from __future__ import annotations
 
-# TODO: Add cron/scheduler integration for 15-min runs (e.g. APScheduler, or document crontab)
-# TODO: Add logging to file for historical run analysis
-# TODO: GARCH or EWMA for time-varying volatility
-# TODO: Implied volatility from options market (if available) for richer probability
 import argparse
 import math
 import re
@@ -112,6 +108,11 @@ except ImportError:
     scipy_t = None
 
 try:
+    from arch import arch_model
+except ImportError:
+    arch_model = None
+
+try:
     from sklearn.isotonic import IsotonicRegression
     from sklearn.linear_model import LogisticRegression
 except ImportError:
@@ -122,6 +123,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Gemini supports crypto only (BTC, ETH, SOL, XRP; no S&P 500). Used for event filtering.
 GEMINI_CRYPTO_YF = {"BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"}
+_GARCH_VAR_CACHE: dict[tuple[int, int, int], float] = {}
 
 
 @dataclass
@@ -221,10 +223,27 @@ class _StrategyParams:
     otm_smile_max_mult: float
     vol_distribution: str
     vol_t_df: float
+    vol_model: str
+    garch_min_returns: int
     liquidity_spread_bps_soft: float
     liquidity_spread_bps_hard: float
     liquidity_min_size_multiplier: float
     liquidity_missing_ask_multiplier: float
+    enable_defensive_mode: bool
+    defensive_vol_ratio_threshold: float
+    enable_dynamic_stability_window: bool
+    stability_vol_ratio_ref: float
+    stability_max_multiplier: float
+    enable_vol_regime_scaling: bool
+    vol_regime_edge_mult_per_x: float
+    vol_regime_max_edge_mult: float
+    vol_regime_dip_mult_per_x: float
+    vol_regime_max_dip_mult: float
+    vol_regime_size_mult_per_x: float
+    vol_regime_min_size_mult: float
+    enable_cross_exchange_sanity_gate: bool
+    cross_exchange_max_yes_gap: float
+    cross_exchange_spot_move_threshold_pct: float
     enable_signal_model: bool
     signal_model_weights: dict[str, float]
     use_sklearn_calibration: bool
@@ -330,10 +349,27 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         otm_smile_max_mult=float(strategy.get("otm_smile_max_mult", 2.0)),
         vol_distribution=str(strategy.get("vol_distribution", "student_t")).strip().lower(),
         vol_t_df=float(strategy.get("vol_t_df", 6.0)),
+        vol_model=str(strategy.get("vol_model", "auto")).strip().lower(),
+        garch_min_returns=max(30, int(strategy.get("garch_min_returns", 80))),
         liquidity_spread_bps_soft=float(strategy.get("liquidity_spread_bps_soft", 1500)),
         liquidity_spread_bps_hard=float(strategy.get("liquidity_spread_bps_hard", 4000)),
         liquidity_min_size_multiplier=float(strategy.get("liquidity_min_size_multiplier", 0.2)),
         liquidity_missing_ask_multiplier=float(strategy.get("liquidity_missing_ask_multiplier", 0.8)),
+        enable_defensive_mode=bool(strategy.get("enable_defensive_mode", True)),
+        defensive_vol_ratio_threshold=float(strategy.get("defensive_vol_ratio_threshold", 3.0)),
+        enable_dynamic_stability_window=bool(strategy.get("enable_dynamic_stability_window", True)),
+        stability_vol_ratio_ref=float(strategy.get("stability_vol_ratio_ref", 1.0)),
+        stability_max_multiplier=float(strategy.get("stability_max_multiplier", 10.0)),
+        enable_vol_regime_scaling=bool(strategy.get("enable_vol_regime_scaling", True)),
+        vol_regime_edge_mult_per_x=float(strategy.get("vol_regime_edge_mult_per_x", 0.35)),
+        vol_regime_max_edge_mult=float(strategy.get("vol_regime_max_edge_mult", 2.5)),
+        vol_regime_dip_mult_per_x=float(strategy.get("vol_regime_dip_mult_per_x", 0.50)),
+        vol_regime_max_dip_mult=float(strategy.get("vol_regime_max_dip_mult", 2.0)),
+        vol_regime_size_mult_per_x=float(strategy.get("vol_regime_size_mult_per_x", 0.50)),
+        vol_regime_min_size_mult=float(strategy.get("vol_regime_min_size_mult", 0.35)),
+        enable_cross_exchange_sanity_gate=bool(strategy.get("enable_cross_exchange_sanity_gate", True)),
+        cross_exchange_max_yes_gap=float(strategy.get("cross_exchange_max_yes_gap", 0.08)),
+        cross_exchange_spot_move_threshold_pct=float(strategy.get("cross_exchange_spot_move_threshold_pct", 0.01)),
         enable_signal_model=bool(strategy.get("enable_signal_model", True)),
         signal_model_weights=dict(strategy.get("signal_model_weights", {})),
         use_sklearn_calibration=bool(strategy.get("use_sklearn_calibration", True)),
@@ -1246,6 +1282,46 @@ def _ewma_variance(returns: list[float], lam: float = 0.94) -> float:
     return var
 
 
+def _sample_variance(returns: list[float]) -> float:
+    if len(returns) < 3:
+        return 0.0
+    mean_return = sum(returns) / len(returns)
+    return sum((r - mean_return) ** 2 for r in returns) / len(returns)
+
+
+def _garch_cache_key(returns: list[float]) -> tuple[int, int, int]:
+    if not returns:
+        return (0, 0, 0)
+    tail = returns[-min(24, len(returns)) :]
+    first = int(round(tail[0] * 1_000_000))
+    last = int(round(tail[-1] * 1_000_000))
+    return (len(returns), first, last)
+
+
+def _garch_variance(returns: list[float], min_returns: int = 80) -> float | None:
+    """
+    One-step-ahead GARCH(1,1) conditional variance estimate.
+    Returns None when dependency/model fitting is unavailable.
+    """
+    if arch_model is None or len(returns) < max(30, int(min_returns)):
+        return None
+    key = _garch_cache_key(returns)
+    cached = _GARCH_VAR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        series = [float(r) * 100.0 for r in returns]  # stabilize optimizer scale
+        model = arch_model(series, p=1, q=1, mean="Zero", vol="GARCH", dist="normal", rescale=False)
+        fit = model.fit(disp="off")
+        forecast = fit.forecast(horizon=1)
+        var_pct2 = float(forecast.variance.values[-1, 0])
+        variance = max(0.0, var_pct2 / 10_000.0)
+        _GARCH_VAR_CACHE[key] = variance
+        return variance
+    except Exception:
+        return None
+
+
 def _volatility_probability(
     closes: list[float],
     threshold: float,
@@ -1255,6 +1331,8 @@ def _volatility_probability(
     ewma_lambda: float = 0.94,
     current_price: float | None = None,
     *,
+    vol_model: str = "auto",
+    garch_min_returns: int = 80,
     enable_otm_smile_adjustment: bool = True,
     otm_smile_strength: float = 0.35,
     otm_smile_max_mult: float = 2.0,
@@ -1281,11 +1359,16 @@ def _volatility_probability(
             returns.append(r)
     if len(returns) < 3:
         return None
-    if use_ewma:
+    model = (vol_model or "auto").strip().lower()
+    variance = 0.0
+    if model in {"garch", "auto"}:
+        garch_var = _garch_variance(returns, min_returns=garch_min_returns)
+        if garch_var is not None and garch_var > 0:
+            variance = garch_var
+    if variance <= 0 and (use_ewma or model in {"ewma", "auto"}):
         variance = _ewma_variance(returns, ewma_lambda)
-    else:
-        mean_return = sum(returns) / len(returns)
-        variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+    if variance <= 0:
+        variance = _sample_variance(returns)
     sigma_daily = variance ** 0.5
     sigma_annual = sigma_daily * (252 ** 0.5)
     # OTM smile adjustment: increase vol for OTM strikes so tail probabilities are less understated.
@@ -1413,6 +1496,69 @@ def _volatility_spike_metrics(closes: list[float]) -> tuple[float | None, float 
     curr_vol = math.sqrt(sum(r * r for r in curr_win) / max(1, len(curr_win)))
     base_vol = math.sqrt(sum(r * r for r in base_win) / max(1, len(base_win)))
     return curr_vol, base_vol
+
+
+def _vol_ratio(curr_vol: float | None, base_vol: float | None) -> float:
+    if curr_vol is None or base_vol is None or base_vol <= 0:
+        return 1.0
+    return max(0.0, float(curr_vol) / float(base_vol))
+
+
+def _dynamic_stability_seconds(sp: "_StrategyParams", vol_ratio: float) -> int:
+    base = max(0, int(sp.min_stability_duration_seconds))
+    if base <= 0 or not sp.enable_dynamic_stability_window:
+        return base
+    ref = max(1e-6, float(sp.stability_vol_ratio_ref))
+    ratio = max(1.0, float(vol_ratio) / ref)
+    mult = min(max(1.0, ratio), max(1.0, float(sp.stability_max_multiplier)))
+    return int(round(base * mult))
+
+
+def _vol_regime_scalars(
+    sp: "_StrategyParams",
+    vol_ratio: float,
+) -> tuple[float, float, float]:
+    """
+    Return (edge_mult, dip_mult, size_mult) from continuous volatility ratio.
+    Higher vol raises edge thresholds, deepens limits, and reduces size.
+    """
+    if not sp.enable_vol_regime_scaling:
+        return 1.0, 1.0, 1.0
+    excess = max(0.0, float(vol_ratio) - 1.0)
+    edge_mult = 1.0 + max(0.0, sp.vol_regime_edge_mult_per_x) * excess
+    edge_mult = min(max(1.0, edge_mult), max(1.0, sp.vol_regime_max_edge_mult))
+    dip_mult = 1.0 + max(0.0, sp.vol_regime_dip_mult_per_x) * excess
+    dip_mult = min(max(1.0, dip_mult), max(1.0, sp.vol_regime_max_dip_mult))
+    size_mult = 1.0 / (1.0 + max(0.0, sp.vol_regime_size_mult_per_x) * excess)
+    size_mult = max(min(1.0, size_mult), max(0.01, sp.vol_regime_min_size_mult))
+    return edge_mult, dip_mult, size_mult
+
+
+def _cross_exchange_sanity_block_side(
+    sp: "_StrategyParams",
+    *,
+    momentum_ret: float,
+    local_yes: float,
+    reference_yes: float,
+) -> str | None:
+    """
+    If one venue lags repricing vs another during a sharp move, block the fragile side:
+    - Sharp down move + local YES too high vs reference => block BUY YES.
+    - Sharp up move + local YES too low vs reference => block BUY NO.
+    """
+    if not sp.enable_cross_exchange_sanity_gate:
+        return None
+    if not (0 < local_yes < 1 and 0 < reference_yes < 1):
+        return None
+    if abs(momentum_ret) < max(0.0, sp.cross_exchange_spot_move_threshold_pct):
+        return None
+    gap = float(local_yes) - float(reference_yes)
+    max_gap = max(0.0, float(sp.cross_exchange_max_yes_gap))
+    if momentum_ret < 0 and gap >= max_gap:
+        return "yes"
+    if momentum_ret > 0 and gap <= -max_gap:
+        return "no"
+    return None
 
 
 def _compute_directional_parity_penalty(
@@ -2869,6 +3015,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     # Build ticker -> (series, yf_ticker, closes, market_data) for sell evaluation
     market_data_cache: dict[str, tuple[str, str, list[float], dict, float]] = {}
     any_momentum_crash = False
+    any_vol_spike_active = False
+    any_defensive_mode = False
 
     use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
     for series in markets_list:
@@ -2903,6 +3051,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         if momentum_crash:
             any_momentum_crash = True
         curr_vol, base_vol = _volatility_spike_metrics(closes)
+        vol_ratio = _vol_ratio(curr_vol, base_vol)
+        edge_regime_mult, dip_regime_mult, size_regime_mult = _vol_regime_scalars(sp, vol_ratio)
+        dynamic_stability_seconds = _dynamic_stability_seconds(sp, vol_ratio)
         vol_spike_active = (
             sp.enable_vol_spike_safety
             and curr_vol is not None
@@ -2910,12 +3061,35 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             and base_vol > 0
             and (curr_vol / base_vol) >= sp.vol_spike_threshold_mult
         )
+        if vol_spike_active:
+            any_vol_spike_active = True
+        defensive_mode_active = (
+            sp.enable_defensive_mode
+            and vol_ratio >= max(1.0, sp.defensive_vol_ratio_threshold)
+        )
+        if defensive_mode_active:
+            any_defensive_mode = True
         print(f"\n[{series}] → {yf_ticker} | ${current_price:,.2f}{live_note} | {len(closes)} days")
+        if sp.enable_vol_regime_scaling and vol_ratio > 1.0:
+            print(
+                f"  [Regime] vol ratio={vol_ratio:.2f}x | edge x{edge_regime_mult:.2f} "
+                f"| dip x{dip_regime_mult:.2f} | size x{size_regime_mult:.2f}"
+            )
+        if dynamic_stability_seconds != sp.min_stability_duration_seconds:
+            print(
+                f"  [Execution] stability window scaled to {dynamic_stability_seconds}s "
+                f"(base {sp.min_stability_duration_seconds}s)"
+            )
         if vol_spike_active and curr_vol is not None and base_vol is not None:
             print(
                 f"  [Safety] Vol spike mode: current_vol/base_vol={curr_vol / base_vol:.2f}x "
                 f"(threshold {sp.vol_spike_threshold_mult:.2f}x); "
                 f"edge x{sp.vol_spike_edge_multiplier:.2f}"
+            )
+        if defensive_mode_active:
+            print(
+                f"  [Defensive] Sells-only mode active (vol ratio {vol_ratio:.2f}x >= "
+                f"{sp.defensive_vol_ratio_threshold:.2f}x)"
             )
 
         mkt_list = kalshi_markets_by_series.get(series, [])
@@ -3019,6 +3193,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     use_ewma=sp.use_ewma_vol,
                     ewma_lambda=ewma_lambda_used,
                     current_price=current_price,
+                    vol_model=sp.vol_model,
+                    garch_min_returns=sp.garch_min_returns,
                     enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                     otm_smile_strength=sp.otm_smile_strength,
                     otm_smile_max_mult=sp.otm_smile_max_mult,
@@ -3073,6 +3249,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
             ci_half = _empirical_ci_halfwidth(emp, len(closes_for_emp))
             effective_min += sp.uncertainty_edge_mult * ci_half
+            effective_min *= edge_regime_mult
             if vol_spike_active:
                 effective_min *= max(1.0, sp.vol_spike_edge_multiplier)
             effective_min_yes = effective_min + yes_parity_penalty
@@ -3080,6 +3257,31 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
+            cross_sanity_block_side = None
+            cross_sanity_reason = ""
+            if sp.enable_cross_exchange_sanity_gate and yf_ticker in GEMINI_CRYPTO_YF:
+                try:
+                    gem_ref = _find_matching_gemini_event(
+                        gemini_events_by_asset.get(yf_ticker, []),
+                        threshold,
+                        direction,
+                    )
+                    if gem_ref:
+                        gem_ref_yes = get_yes_price(_get_yes_contract(gem_ref) or {})
+                        cross_sanity_block_side = _cross_exchange_sanity_block_side(
+                            sp,
+                            momentum_ret=momentum_ret,
+                            local_yes=yes_bid,
+                            reference_yes=gem_ref_yes,
+                        )
+                        if cross_sanity_block_side:
+                            cross_sanity_reason = (
+                                "cross-exchange sanity gate: "
+                                f"Kalshi YES {yes_bid:.1%} vs Gemini YES {gem_ref_yes:.1%} during "
+                                f"{momentum_ret:+.2%} spot move"
+                            )
+                except Exception:
+                    pass
             rec = (
                 strategy_engine.recommend_strict(
                     p_yes=hist_p,
@@ -3146,6 +3348,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 rec = REC_SKIP
             if rec == REC_BUY_YES and momentum_crash:
                 rec = REC_SKIP
+            if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
+                rec = REC_SKIP
+            if rec in (REC_BUY_YES, REC_BUY_NO):
+                if rec == REC_BUY_YES and cross_sanity_block_side == "yes":
+                    rec = REC_SKIP
+                elif rec == REC_BUY_NO and cross_sanity_block_side == "no":
+                    rec = REC_SKIP
             diff = _compute_edge_diff(
                 yes_bid,
                 hist_p,
@@ -3175,7 +3384,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "no_ask": book_q.get("no_ask"),
                     "edge_yes_net": hist_p - yes_bid - fee_yes_q,
                     "edge_no_net": (1.0 - hist_p) - no_bid_for_quote - fee_no_q,
-                    "arr_dip": _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp),
+                    "arr_dip": min(0.25, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp) * dip_regime_mult),
                 }
             )
 
@@ -3207,6 +3416,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     f"momentum protection: live-vs-close return {momentum_ret:.2%} <= "
                     f"{sp.momentum_crash_threshold_pct:.2%} threshold"
                 )
+            elif rec == REC_SKIP and defensive_mode_active:
+                reason = (
+                    f"defensive mode: vol ratio {vol_ratio:.2f}x >= "
+                    f"{sp.defensive_vol_ratio_threshold:.2f}x (sells-only)"
+                )
+            elif rec == REC_SKIP and cross_sanity_reason:
+                reason = cross_sanity_reason
             print(f"    Why: {reason}")
             if getattr(args, "verbose", False):
                 mn, mx = min(closes), max(closes)
@@ -3246,6 +3462,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 side = "yes" if rec == REC_BUY_YES else "no"
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
                 dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp)
+                dip = min(0.25, dip * dip_regime_mult)
                 # When model suggests contract price might decrease (vol regime or 2+ days to expiry), prioritize limit orders with larger dip
                 price_might_decline = (use_vol and vol_p is not None) or (dte is not None and dte >= 2)
                 if price_might_decline and sp.limit_dip_pct_price_decline > 0:
@@ -3257,7 +3474,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 depth_mult = 1.0
                 if sp.min_order_book_depth > 0:
                     depth_val = float(bid_size_side) if bid_size_side is not None else 0.0
-                    depth_req = float(sp.min_order_book_depth)
+                    depth_req = float(sp.min_order_book_depth) * min(2.5, max(1.0, vol_ratio))
                     if depth_val < depth_req:
                         # Layered mode: allow thin-book participation but scale size down.
                         if sp.limit_order_mode == "layered":
@@ -3277,11 +3494,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     ticker=ticker,
                     platform=PLATFORM_KALSHI,
                     cfg=cfg,
-                    min_stability_seconds=sp.min_stability_duration_seconds,
+                    min_stability_seconds=dynamic_stability_seconds,
                 ):
                     print(
                         f"    Why: mid-price stability guard failed "
-                        f"(<{sp.min_stability_duration_seconds}s stable window)"
+                        f"(<{dynamic_stability_seconds}s stable window)"
                     )
                     print()
                     continue
@@ -3308,6 +3525,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                 liq_mult *= depth_mult
+                liq_mult *= size_regime_mult
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
@@ -3399,6 +3617,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         use_ewma=sp.use_ewma_vol,
                         ewma_lambda=ewma_lambda_used_g,
                         current_price=current_price,
+                        vol_model=sp.vol_model,
+                        garch_min_returns=sp.garch_min_returns,
                         enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                         otm_smile_strength=sp.otm_smile_strength,
                         otm_smile_max_mult=sp.otm_smile_max_mult,
@@ -3446,6 +3666,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                 effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, len(closes_for_emp_g))
+                effective_min_gem *= edge_regime_mult
                 if vol_spike_active:
                     effective_min_gem *= max(1.0, sp.vol_spike_edge_multiplier)
                 effective_min_yes_g = effective_min_gem + yes_parity_penalty
@@ -3453,6 +3674,36 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
+                cross_sanity_block_side_g = None
+                cross_sanity_reason_g = ""
+                if sp.enable_cross_exchange_sanity_gate:
+                    try:
+                        kalshi_ref = next(
+                            (
+                                mk
+                                for mk in mkt_list
+                                if _extract_strike(mk)[0] == threshold_g and _extract_strike(mk)[1] == direction_g
+                            ),
+                            None,
+                        )
+                        if kalshi_ref:
+                            kalshi_ref_yes = float(kalshi_ref.get("yes_bid_dollars") or 0) or float(
+                                kalshi_ref.get("last_price_dollars") or kalshi_ref.get("yes_ask_dollars") or 0
+                            )
+                            cross_sanity_block_side_g = _cross_exchange_sanity_block_side(
+                                sp,
+                                momentum_ret=momentum_ret,
+                                local_yes=impl,
+                                reference_yes=kalshi_ref_yes,
+                            )
+                            if cross_sanity_block_side_g:
+                                cross_sanity_reason_g = (
+                                    "cross-exchange sanity gate: "
+                                    f"Gemini YES {impl:.1%} vs Kalshi YES {kalshi_ref_yes:.1%} during "
+                                    f"{momentum_ret:+.2%} spot move"
+                                )
+                    except Exception:
+                        pass
                 rec = (
                     strategy_engine.recommend_strict(
                         p_yes=hist_p_gem,
@@ -3516,6 +3767,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rec = REC_SKIP
                 if rec == REC_BUY_YES and momentum_crash:
                     rec = REC_SKIP
+                if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
+                    rec = REC_SKIP
+                if rec in (REC_BUY_YES, REC_BUY_NO):
+                    if rec == REC_BUY_YES and cross_sanity_block_side_g == "yes":
+                        rec = REC_SKIP
+                    elif rec == REC_BUY_NO and cross_sanity_block_side_g == "no":
+                        rec = REC_SKIP
                 diff_gem = _compute_edge_diff(
                     impl,
                     hist_p_gem,
@@ -3546,7 +3804,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "no_ask": book_gq.get("no_ask"),
                         "edge_yes_net": hist_p_gem - impl - fee_yes_gq,
                         "edge_no_net": (1.0 - hist_p_gem) - no_price_gem_q - fee_no_gq,
-                        "arr_dip": _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g),
+                        "arr_dip": min(0.25, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g) * dip_regime_mult),
                         "gemini_evt": evt,
                         "instrument_symbol": instrument_symbol,
                     }
@@ -3561,6 +3819,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 else:
                     p_label_gem = f"P(YES) [emp={emp:.1%} vol={vol_p_gem:.1%}]"
                 print(f"    {p_label_gem}: {hist_p_gem:.1%}  Market YES: {impl:.1%}  →  {rec}")
+                if rec == REC_SKIP and defensive_mode_active:
+                    print(
+                        "    Why: defensive mode (sells-only) due to extreme volatility "
+                        f"(ratio {vol_ratio:.2f}x)"
+                    )
+                elif rec == REC_SKIP and cross_sanity_reason_g:
+                    print(f"    Why: {cross_sanity_reason_g}")
+                elif rec == REC_SKIP and momentum_crash:
+                    print(
+                        "    Why: momentum protection "
+                        f"({momentum_ret:.2%} <= {sp.momentum_crash_threshold_pct:.2%})"
+                    )
                 try:
                     from storage import record_market_snapshot
                     market_for_book = contract if isinstance(contract, dict) else evt
@@ -3595,6 +3865,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     side = "yes" if rec == REC_BUY_YES else "no"
                     p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
                     dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g)
+                    dip = min(0.25, dip * dip_regime_mult)
                     price_might_decline = (use_vol and vol_p_gem is not None) or (dte_g is not None and dte_g >= 2)
                     if price_might_decline and sp.limit_dip_pct_price_decline > 0:
                         dip = max(dip, sp.limit_dip_pct_price_decline)
@@ -3606,7 +3877,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     depth_mult = 1.0
                     if sp.min_order_book_depth > 0:
                         depth_val = float(bid_size_side) if bid_size_side is not None else 0.0
-                        depth_req = float(sp.min_order_book_depth)
+                        depth_req = float(sp.min_order_book_depth) * min(2.5, max(1.0, vol_ratio))
                         if depth_val < depth_req:
                             if sp.limit_order_mode == "layered":
                                 depth_mult = max(0.20, min(1.0, depth_val / depth_req)) if depth_val > 0 else 0.20
@@ -3625,11 +3896,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         ticker=evt.get("ticker", "?"),
                         platform=PLATFORM_GEMINI,
                         cfg=cfg,
-                        min_stability_seconds=sp.min_stability_duration_seconds,
+                        min_stability_seconds=dynamic_stability_seconds,
                     ):
                         print(
                             f"    Why: mid-price stability guard failed "
-                            f"(<{sp.min_stability_duration_seconds}s stable window)"
+                            f"(<{dynamic_stability_seconds}s stable window)"
                         )
                         print()
                         continue
@@ -3658,6 +3929,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                     liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                     liq_mult *= depth_mult
+                    liq_mult *= size_regime_mult
                     count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                     order_entry = {
                         "platform": PLATFORM_GEMINI,
@@ -3816,6 +4088,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 use_ewma=sp.use_ewma_vol,
                                                 ewma_lambda=ewma_lambda_pos,
                                                 current_price=current_price_pos,
+                                                vol_model=sp.vol_model,
+                                                garch_min_returns=sp.garch_min_returns,
                                                 enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                                                 otm_smile_strength=sp.otm_smile_strength,
                                                 otm_smile_max_mult=sp.otm_smile_max_mult,
@@ -3973,6 +4247,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         use_ewma=sp.use_ewma_vol,
                         ewma_lambda=ewma_lambda_cached,
                         current_price=current_price_cached,
+                        vol_model=sp.vol_model,
+                        garch_min_returns=sp.garch_min_returns,
                         enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                         otm_smile_strength=sp.otm_smile_strength,
                         otm_smile_max_mult=sp.otm_smile_max_mult,
@@ -4191,6 +4467,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 use_ewma=sp.use_ewma_vol,
                                 ewma_lambda=ewma_lambda_g,
                                 current_price=current_price_g,
+                                vol_model=sp.vol_model,
+                                garch_min_returns=sp.garch_min_returns,
                                 enable_otm_smile_adjustment=sp.enable_otm_smile_adjustment,
                                 otm_smile_strength=sp.otm_smile_strength,
                                 otm_smile_max_mult=sp.otm_smile_max_mult,
@@ -4345,9 +4623,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     max_total_buy_pct = float(trading.get("max_total_buy_pct", 0.50))
     min_balance_fallback = int(trading.get("min_balance_for_limit_fallback_cents", 0))
     dry_run = trading.get("dry_run", True)
-    force_cancel_buy_orders = bool(vol_spike_active and sp.cancel_on_vol_spike)
+    force_cancel_buy_orders = bool(any_vol_spike_active and sp.cancel_on_vol_spike)
     regime_shift_active = bool(
-        sp.cancel_all_on_regime_shift and (force_cancel_buy_orders or any_momentum_crash)
+        sp.cancel_all_on_regime_shift and (force_cancel_buy_orders or any_momentum_crash or any_defensive_mode)
     )
 
     if emergency_stop and pending_orders:
@@ -4360,6 +4638,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         pending_orders[:] = []
         print(
             f"[Risk] Vol-spike guard blocked {blocked} pending BUY orders and will cancel resting BUY limits."
+        )
+        print()
+    elif any_defensive_mode and pending_orders:
+        blocked = len(pending_orders)
+        pending_orders[:] = []
+        print(
+            f"[Risk] Defensive-mode guard blocked {blocked} pending BUY orders (sells-only while volatility is extreme)."
         )
         print()
     if regime_shift_active:

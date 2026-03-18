@@ -45,6 +45,19 @@ def main() -> int:
     min_order_book_depth = _as_int(strategy.get("min_order_book_depth"), 0)
     layered_order_levels = _as_int(strategy.get("layered_order_levels"), 3)
     limit_order_ttl_minutes = _as_int(strategy.get("limit_order_ttl_minutes"), 30)
+    vol_model = str(strategy.get("vol_model", "auto")).strip().lower()
+    garch_min_returns = _as_int(strategy.get("garch_min_returns"), 80)
+    defensive_vol_ratio_threshold = _as_float(strategy.get("defensive_vol_ratio_threshold"), 3.0)
+    stability_vol_ratio_ref = _as_float(strategy.get("stability_vol_ratio_ref"), 1.0)
+    stability_max_multiplier = _as_float(strategy.get("stability_max_multiplier"), 10.0)
+    vol_regime_edge_mult_per_x = _as_float(strategy.get("vol_regime_edge_mult_per_x"), 0.35)
+    vol_regime_max_edge_mult = _as_float(strategy.get("vol_regime_max_edge_mult"), 2.5)
+    vol_regime_dip_mult_per_x = _as_float(strategy.get("vol_regime_dip_mult_per_x"), 0.50)
+    vol_regime_max_dip_mult = _as_float(strategy.get("vol_regime_max_dip_mult"), 2.0)
+    vol_regime_size_mult_per_x = _as_float(strategy.get("vol_regime_size_mult_per_x"), 0.50)
+    vol_regime_min_size_mult = _as_float(strategy.get("vol_regime_min_size_mult"), 0.35)
+    cross_exchange_max_yes_gap = _as_float(strategy.get("cross_exchange_max_yes_gap"), 0.08)
+    cross_exchange_spot_move_threshold_pct = _as_float(strategy.get("cross_exchange_spot_move_threshold_pct"), 0.01)
 
     kelly = _as_float(strategy.get("kelly_fraction"), 0.25)
     kelly_floor = _as_float(strategy.get("dynamic_kelly_floor"), 0.10)
@@ -89,6 +102,28 @@ def main() -> int:
         errors.append("`strategy.layered_order_levels` must be >= 1.")
     if limit_order_ttl_minutes < 0:
         errors.append("`strategy.limit_order_ttl_minutes` must be >= 0.")
+    if vol_model not in {"auto", "ewma", "garch", "sample"}:
+        errors.append("`strategy.vol_model` must be one of: auto, ewma, garch, sample.")
+    if garch_min_returns < 30:
+        errors.append("`strategy.garch_min_returns` must be >= 30.")
+    if defensive_vol_ratio_threshold < 1.0:
+        errors.append("`strategy.defensive_vol_ratio_threshold` must be >= 1.0.")
+    if stability_vol_ratio_ref <= 0:
+        errors.append("`strategy.stability_vol_ratio_ref` must be > 0.")
+    if stability_max_multiplier < 1.0:
+        errors.append("`strategy.stability_max_multiplier` must be >= 1.0.")
+    if vol_regime_edge_mult_per_x < 0 or vol_regime_dip_mult_per_x < 0 or vol_regime_size_mult_per_x < 0:
+        errors.append("`strategy.vol_regime_*_per_x` slopes must be >= 0.")
+    if vol_regime_max_edge_mult < 1.0:
+        errors.append("`strategy.vol_regime_max_edge_mult` must be >= 1.0.")
+    if vol_regime_max_dip_mult < 1.0:
+        errors.append("`strategy.vol_regime_max_dip_mult` must be >= 1.0.")
+    if not (0.0 < vol_regime_min_size_mult <= 1.0):
+        errors.append("`strategy.vol_regime_min_size_mult` must be in (0, 1].")
+    if not (0.0 <= cross_exchange_max_yes_gap <= 1.0):
+        errors.append("`strategy.cross_exchange_max_yes_gap` must be in [0, 1].")
+    if not (0.0 <= cross_exchange_spot_move_threshold_pct <= 1.0):
+        errors.append("`strategy.cross_exchange_spot_move_threshold_pct` must be in [0, 1].")
 
     # Keep easy-win edge above a practical fee/slippage floor.
     fee_floor = max(min_fee_per_order, 0.01)

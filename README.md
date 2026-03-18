@@ -89,7 +89,7 @@ trading-bot/
 ├── docs/                    # Documentation
 │   ├── CODE_EXPLAINER.md    # Step-by-step flow, file-by-file reference, code pointers
 │   └── IMPROVEMENTS.md      # Roadmap and backlog
-├── launchd/                 # macOS scheduling (run every 15 min)
+├── launchd/                 # macOS scheduling (run every 5 min)
 │   ├── README.md            # Setup instructions
 │   └── com.user.compare_historical.plist
 ├── config.py                # Config loader (yaml + env overrides)
@@ -119,7 +119,7 @@ All scripts in `scripts/` add the project root to the Python path and load `.env
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA volatility modeling, volatility-spike safety, uncertainty-aware edge buffers, adaptive ARR-based limit dips, directional parity penalties, emergency daily-loss circuit breaker, and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
 ## Contract evaluation workflow
 
@@ -127,7 +127,7 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 
 **Example in plain English:** Imagine a bet: "Will Bitcoin be above $81,250 on March 16?" The bot looks at the last year of Bitcoin prices and finds that Bitcoin closed above that level only 5% of the time. So the "fair" chance of YES is about 5%. If the market is charging 40¢ for YES (i.e. people think there's a 40% chance), the market is overpricing YES. The bot would recommend **BUY NO** (bet against it) or **SKIP** if the edge isn't big enough.
 
-Run `scripts/compare_historical.py` every **15 minutes** locally for continuous evaluation. See [Cron setup](#run-every-15-minutes) below.
+Run `scripts/compare_historical.py` every **5 minutes** locally for continuous evaluation. See [Cron setup](#run-every-5-minutes) below.
 
 ### Key terms in plain English
 
@@ -518,8 +518,10 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **Live price blend for S0 and safety**: The bot uses **both** signals—live price (via `get_snapshot`) and the last close (`closes[-1]`)—blended with slightly more weight on live (`live_price_weight`, default 0.6). So `current_price = 0.6×live + 0.4×closes[-1]` when both are available. This reflects sharp recent moves while anchoring to the last close. Falls back to `closes[-1]` if the snapshot API fails.
 - **Empirical**: fraction of past days the close was above/below the threshold.
 - **Empirical**: recency-weighted and rolling-window capable (`empirical_recent_days`, `empirical_recent_weight`, `empirical_use_rolling_window`) with regime-sensitive weight boosts.
-- **Volatility**: log-normal model using EWMA/sample variance and time-to-expiry; uses SciPy normal CDF when available. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts.
+- **Volatility**: log-normal model using `vol_model` (`auto|ewma|garch|sample`) and time-to-expiry. `auto` prefers GARCH(1,1) when available and safely falls back to EWMA/sample. OTM smile proxy (`enable_otm_smile_adjustment`) boosts tail estimates for far-OTM contracts.
 - **Intraday EWMA override**: intraday contracts can use a faster EWMA decay (`intraday_ewma_lambda`, currently 0.90) while daily contracts keep `ewma_lambda` (0.94).
+- **Volatility defense stack**: continuous vol-ratio scaling increases `min_edge`, deepens limit dips, and dampens size; extreme-volatility `defensive mode` switches to sells-only; stability window can auto-expand with volatility.
+- **Cross-exchange sanity gate**: blocks stale-side buys when Kalshi/Gemini YES prices diverge beyond tolerance during sharp spot moves.
 - **Dynamic blend**: empirical/vol blend weight adapts with sample size (`vol_dynamic_n0`) rather than relying on a fixed blend only.
 - **Signal model layer**: when enabled (`enable_signal_model`), normalized signals are passed through a weighted logistic scorer (`signal_model_weights`) to produce final P(YES).
 - **Optional sklearn calibration**: when enough resolved predictions exist, isotonic or Platt calibration maps raw model probability to calibrated probability (`use_sklearn_calibration`).
@@ -535,9 +537,9 @@ Live prices only. For BUY/NO/SKIP recommendations, run `scripts/compare_historic
 python3 scripts/compare_prices.py
 ```
 
-### Run every 15 minutes
+### Run every 5 minutes
 
-Run the evaluation locally every 15 minutes for continuous monitoring.
+Run the evaluation locally every 5 minutes for continuous monitoring.
 
 **launchd (recommended on macOS):** Uses Apple's native scheduler. See [`launchd/README.md`](launchd/README.md) for full setup.
 
@@ -565,7 +567,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performan
 | Stop (unload)                      | `launchctl unload ~/Library/LaunchAgents/com.user.compare_historical.plist` |
 | Stop daily report                  | `launchctl unload ~/Library/LaunchAgents/com.user.daily_performance_report.plist` |
 
-The script runs every 15 minutes. With `RunAtLoad: false` (default), the first run happens ~15 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
+The script runs every 5 minutes. With `RunAtLoad: false` (default), the first run happens ~5 minutes after loading. To run immediately once: `RunAtLoad: true` in plist and reload, or run manually:
 `cd /path/to/trading-bot && .venv/bin/python3 scripts/compare_historical.py --days 365 --use-volatility --execute --no-llm`
 
 The daily report job runs once per day and writes a dated text file (default: `~/.trading-bot-data/reports/performance_YYYYMMDD.txt`).

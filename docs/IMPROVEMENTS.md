@@ -55,6 +55,8 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Backtest win slippage tax**          | Freqtrade realism                       | ✓ Synthetic backtest supports `synthetic_win_slippage_tax_bps` to stress winner-side execution friction (in addition to entry slippage/spread). |
 | **Dwell-time + partial-fill realism**  | Execution realism                       | ✓ Synthetic backtest now enforces dwell-time fills and partial-fill scaling when depth fields are available; supports assumed order-size fallback (`synthetic_fill_min_dwell_minutes`, `synthetic_assumed_order_size`). |
 | **Smart limit-order engine**           | Execution realism                       | ✓ Added dynamic tick quoting (`limit_order_mode`, `tick_offset`), inventory skew (`max_inventory_skew_pct`), stability/depth gates (`min_stability_duration_seconds`, `min_order_book_depth`), layered thin-book size scaling, and vol-spike BUY cancel guard (`cancel_on_vol_spike`). |
+| **Volatility hardening stack**         | Execution + risk                        | ✓ Added `vol_model` (`auto|ewma|garch|sample`) with GARCH fallback, continuous vol-ratio scaling (edge/dip/size), dynamic stability-window scaling, and defensive sells-only mode under extreme volatility. |
+| **Cross-exchange sanity gate**         | Execution safety                        | ✓ Added Kalshi↔Gemini repricing divergence checks (`cross_exchange_*`) that block stale-side buys during sharp spot moves. |
 | **Active order lifecycle management**  | Execution realism                       | ✓ Resting orders are reviewed each cycle with stale TTL cancellation (`limit_order_ttl_minutes`), no-longer-recommended cleanup, and regime-shift cleanup (`cancel_all_on_regime_shift`). |
 | **Execution engine extraction**        | Code quality / testability              | ✓ Moved order sync/cancel path into `execution_engine.py` so lifecycle safety logic can be tested and evolved independently from model/probability math. |
 | **Accurate realized PnL lifecycle**    | Reliability / reporting accuracy        | ✓ Canceled buy intents are marked `cancelled`, early sells are realized as `sold` (FIFO lots), and settlement/exit PnL applies fee-aware accounting instead of gross-only math. |
@@ -109,7 +111,7 @@ Current status: partially implemented.
 | **SciPy**         | `scipy.stats.norm.cdf` in volatility probability model | Low    | Medium — robust probability CDF |
 | **pandas**        | Optional DataFrame path in backtest (`real` mode) for cumulative and return series | Medium | Medium — cleaner data handling |
 | **scikit-learn**  | Probability calibration from resolved predictions (isotonic / Platt) | Medium | High — better calibrated probabilities |
-| **statsmodels**   | GARCH(1,1), ARIMA for time-varying vol; structural break detection | Medium | High — Taylor Ch 9–10 improvements |
+| **statsmodels**   | ARIMA / structural-break extensions beyond current EWMA/GARCH path | Medium | Medium — useful after current volatility stack stabilizes |
 | **PyTorch / JAX** | Gradient-based calibration, custom loss for P(YES); research-grade ML models | Research | Research — if we move to learned probability models |
 | **optuna / hyperopt** | Hyperparameter tuning for `min_edge`, `limit_dip_pct`, `vol_blend_weight` on backtest data | Medium | High — data-driven strategy param optimization |
 
@@ -118,7 +120,7 @@ Current status: partially implemented.
 1. **Model training pipeline**: persist signal-feature rows with outcomes for offline model fitting/validation.
 2. ~~**Feature optimization**: learn `signal_model_weights` from data (instead of hand-tuned defaults).~~ ✓ **Implemented** (`enable_auto_signal_weight_fit`; logistic fit from resolved predictions)
 3. ~~**Extended pandas usage**: move synthetic/backtest transformations to DataFrame-first flow.~~ ✓ **Implemented** (`scripts/backtest.py` synthetic + real mode DataFrame-first paths)
-4. **Statsmodels/GARCH integration**: add optional GARCH(1,1) volatility source.
+4. ~~Statsmodels/GARCH integration~~ ✓ **Implemented (runtime optional)**: `vol_model: auto` now uses GARCH(1,1) when available and falls back to EWMA/sample safely.
 
 ---
 
@@ -169,9 +171,9 @@ Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log`
 
 ## Medium Priority (More Effort)
 
-### 7. ~~GARCH / EWMA for Time-Varying Volatility~~ ✓ EWMA Done (Stock-Prediction-Models)
+### 7. ~~GARCH / EWMA for Time-Varying Volatility~~ ✓ EWMA + Optional GARCH Done (Stock-Prediction-Models)
 
-~~Current volatility model uses a fixed historical vol.~~ **EWMA implemented**: `strategy.use_ewma_vol: true`, `ewma_lambda: 0.94`; σ²*t = λ·σ²*{t-1} + (1−λ)·r²_t. GARCH(1,1) remains a future upgrade for full regime adaptation.
+~~Current volatility model uses a fixed historical vol.~~ **Implemented**: EWMA (`strategy.use_ewma_vol`, `ewma_lambda`) and optional GARCH(1,1) path (`vol_model: auto|garch`, `garch_min_returns`) with safe fallback to EWMA/sample when GARCH dependencies or fit conditions are unavailable.
 
 ### 8. Monte Carlo Paths (Stock-Prediction-Models)
 

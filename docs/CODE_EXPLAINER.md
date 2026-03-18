@@ -41,10 +41,11 @@
 ### Production-Grade Upgrades (2026)
 
 - **Modular strategy engine:** `compare_historical.py` now routes recommendation decisions through `strategies/` (`strategy_engine` in config), with `vol_regime` as the production default.
-- **Regime-aware volatility safety:** EWMA/Student-t probability flow is paired with volatility-spike safety to increase required edge during stress regimes.
+- **Regime-aware volatility safety:** EWMA/Student-t flow now supports optional GARCH(1,1) in `vol_model: auto`, continuous vol-ratio scaling (edge/dip/size), and volatility-spike safety.
 - **Adaptive limit pricing:** `limit_dip_pct` is now ARR-inspired (`max(base_dip, 0.5 * avg_relative_move)`) so entries tighten in calm markets and widen in volatile markets.
 - **High-fidelity synthetic backtest:** Synthetic mode supports dwell-time fill checks, partial-fill scaling from persisted depth fields, and per-trade liquidity friction in addition to slippage/spread realism.
 - **Circuit breaker safety:** New BUYs are blocked when 24h realized losses breach configured limits (`max_daily_loss_pct` / `max_daily_loss_cents`).
+- **Defensive execution gates:** Dynamic stability windows, cross-exchange sanity gating, and sells-only defensive mode reduce fill risk during flash regimes.
 
 ---
 
@@ -89,7 +90,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Check inter-arb             | Kalshi YES + Gemini NO < 1−fee → hedge                      | `compare_historical.py:1182` → `_check_inter_arb()`           |
 | Extract strike              | Parse "above $81,250" or "below $72,000" from title or ticker (e.g. -T82.9999) | `compare_historical.py:389` → `_extract_strike()`             |
 | Compute empirical P(YES)    | Recency-weighted/rolling empirical probability (NumPy path when installed) | `compare_historical.py` → `_empirical_probability()`      |
-| Compute volatility P(YES)   | Log-normal model (EWMA/sample variance), optional OTM smile; S0 uses live+close blend | `compare_historical.py` → `_volatility_probability()`     |
+| Compute volatility P(YES)   | Log-normal model with `vol_model` (`auto|ewma|garch|sample`), optional OTM smile; S0 uses live+close blend | `compare_historical.py` → `_volatility_probability()`     |
 | Blend + score signals       | Dynamic empirical/vol blend, optional sklearn calibration, then signal-model scoring | `compare_historical.py` → `_dynamic_empirical_weight()`, `_fit_probability_calibrator()`, `_score_signal_model()` |
 | Recommend                   | Compare hist_p vs market price → BUY YES / BUY NO / SKIP    | `compare_historical.py:535` → `_recommend()`                  |
 | Apply safety rules          | Skip BUY NO when price above strike; skip BUY YES when < 5¢ | `compare_historical.py:1232-1258`                             |
@@ -190,7 +191,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | File                                            | Purpose                                                   |
 | ----------------------------------------------- | --------------------------------------------------------- |
-| **`launchd/com.user.compare_historical.plist`** | Run `compare_historical` every 10 min on macOS (configurable) |
+| **`launchd/com.user.compare_historical.plist`** | Run `compare_historical` every 5 min on macOS (configurable) |
 | **`launchd/README.md`**                         | Setup: copy plist, `launchctl bootstrap`, caffeinate           |
 | **`package.json`**                              | Prettier dev dependency for YAML/JSON/MD formatting       |
 | **`.pre-commit-config.yaml`**                   | Ruff (Python linter/formatter) + Prettier on git push     |
@@ -821,4 +822,4 @@ limit_orders
 | Where are Gemini orders placed?      | `gemini_client.py` → `place_order_safe()`                             |
 | Where is historical price data from? | `yfinance_client.py` → `get_aggs()` (Yahoo Finance / CoinGecko)       |
 | Where is data cached?                | `storage.py` → SQLite in `~/.trading-bot-data/`                       |
-| How to run every 15 min?             | `launchd/` plist; see `launchd/README.md`                             |
+| How to run every 5 min?              | `launchd/` plist; see `launchd/README.md`                             |
