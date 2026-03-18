@@ -2116,6 +2116,52 @@ def _compute_edge_diff(
     return raw - fee_no
 
 
+def _fmt_dte(dte_days: float | None) -> str:
+    """Format days-to-expiry as a human-readable string."""
+    if dte_days is None:
+        return "unknown"
+    if dte_days < 1 / 24:
+        return f"{dte_days * 24 * 60:.0f} min"
+    if dte_days < 1:
+        h = dte_days * 24
+        return f"{h:.1f} hr" if h >= 1.05 else f"{dte_days * 24 * 60:.0f} min"
+    if dte_days < 2:
+        return f"{dte_days * 24:.0f} hr"
+    return f"{dte_days:.1f} days"
+
+
+def _fmt_distance(current_price: float, threshold: float, direction: str) -> str:
+    """Human-readable distance between current price and the threshold."""
+    if current_price <= 0 or threshold <= 0:
+        return ""
+    diff = threshold - current_price
+    pct = abs(diff / current_price) * 100
+    if direction == "above":
+        if diff > 0:
+            return f"${abs(diff):,.0f} below strike ({pct:.2f}% gap to cover)"
+        return f"${abs(diff):,.0f} above strike (already in-the-money)"
+    else:
+        if diff < 0:
+            return f"${abs(diff):,.0f} above strike ({pct:.2f}% gap to cover)"
+        return f"${abs(diff):,.0f} below strike (already in-the-money)"
+
+
+def _fmt_rec_plain(rec: str, side: str | None, direction: str, threshold: float,
+                   current_price: float, dte_days: float | None) -> str:
+    """One-line plain-English explanation of a recommendation."""
+    dte_str = _fmt_dte(dte_days)
+    thresh = f"${threshold:,.0f}"
+    if rec == REC_BUY_YES and direction == "above":
+        return f"Betting the price WILL be above {thresh} (resolves in {dte_str})"
+    if rec == REC_BUY_YES and direction == "below":
+        return f"Betting the price WILL be below {thresh} (resolves in {dte_str})"
+    if rec == REC_BUY_NO and direction == "above":
+        return f"Betting the price will NOT be above {thresh} (resolves in {dte_str})"
+    if rec == REC_BUY_NO and direction == "below":
+        return f"Betting the price will NOT be below {thresh} (resolves in {dte_str})"
+    return f"No trade — insufficient edge or safety block (resolves in {dte_str})"
+
+
 def _format_reason(
     rec: str,
     hist_p: float,
@@ -3228,11 +3274,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     from_date = to_date - timedelta(days=args.days)
     from_ts, to_ts = from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d")
 
-    print("Contract Evaluation: Historical Data → Buy/Skip Recommendation")
+    print()
     print("=" * 75)
-    print(f"Period: {from_ts} to {to_ts} ({args.days} days) | min_edge={min_edge:.0%}")
-    print("Historical P(YES) = fraction of those days the close was above/below threshold.")
-    print("  Use --verbose to see closes range (explains why 0%% when threshold is far from price).")
+    print("  TRADING BOT — Contract Evaluation Run")
+    print("=" * 75)
+    print(f"  Time:        {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"  History:     {from_ts} → {to_ts} ({args.days} days)")
+    print(f"  Min edge:    {min_edge:.0%}")
+    print(f"  Volatility:  {'enabled' if bool(getattr(args, 'use_volatility', False) or strategy.get('use_volatility_by_default')) else 'disabled'}")
+    print(f"  Mode:        {'EXECUTE (live orders)' if getattr(args, 'execute', False) else 'PREVIEW' if getattr(args, 'preview', False) else 'evaluate only (use --execute to trade)'}")
+    print("=" * 75)
     print()
 
     # Sync Kalshi settlements → update unresolved predictions with outcomes
@@ -3497,6 +3548,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
     # Build ticker -> (series, yf_ticker, closes, market_data) for sell evaluation
     market_data_cache: dict[str, tuple[str, str, list[float], dict, float]] = {}
+    _eval_count_total = 0
+    _eval_count_skip = 0
+    _eval_count_buy = 0
     any_momentum_crash = False
     any_vol_spike_active = False
     any_defensive_mode = False
@@ -3552,7 +3606,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         )
         if defensive_mode_active:
             any_defensive_mode = True
-        print(f"\n[{series}] → {yf_ticker} | ${current_price:,.2f}{live_note} | {len(closes)} days")
+        _daily_chg = ((current_price - last_close) / last_close * 100) if last_close > 0 else 0.0
+        _chg_sign = "+" if _daily_chg >= 0 else ""
+        _hi = max(closes[-min(20, len(closes)):])
+        _lo = min(closes[-min(20, len(closes)):])
+        print(f"\n{'─' * 75}")
+        print(f"  {series} ({yf_ticker})")
+        print(f"  Current Price:  ${current_price:,.2f}{live_note}  ({_chg_sign}{_daily_chg:.2f}% vs last close)")
+        print(f"  20-Day Range:   ${_lo:,.2f} – ${_hi:,.2f}")
+        print(f"  History:        {len(closes)} daily closes loaded")
         if sp.enable_vol_regime_scaling and vol_ratio > 1.0:
             print(
                 f"  [Regime] vol ratio={vol_ratio:.2f}x | edge x{edge_regime_mult:.2f} "
@@ -3888,14 +3950,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 }
             )
 
-            print(f"  {ticker}")
-            h = _hours_until_resolution(title, yf_ticker)
-            hours_str = f" (in {h:.1f} hours)" if h is not None else ""
-            print(f"    {title}{hours_str}")
-            print(f"    Threshold: ${threshold:,.0f} ({direction})")
-            if vol_p is None:
-                p_label = "P(YES)"
-            else:
+            _dist_str = _fmt_distance(current_price, threshold, direction)
+            _dte_str = _fmt_dte(dte)
+            _rec_plain = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction, threshold, current_price, dte)
+            print(f"\n    {'·' * 60}")
+            print(f"    {ticker}  [Kalshi]")
+            print(f"    {(m.get('title') or title)[:70]}")
+            print(f"    ├─ Strike:       ${threshold:,.0f} ({direction})")
+            print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str}")
+            print(f"    ├─ Resolves in:  {_dte_str}")
+            if vol_p is not None:
                 emp_kalshi = _empirical_probability(
                     closes,
                     threshold,
@@ -3904,8 +3968,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     recent_weight=sp.empirical_recent_weight,
                     use_rolling_window=sp.empirical_use_rolling_window,
                 )
-                p_label = f"P(YES) [emp={emp_kalshi:.1%} vol={vol_p:.1%}]"
-            print(f"    {p_label}: {hist_p:.1%}  Market YES: {yes_bid:.1%}  →  {rec}")
+                print(f"    ├─ Empirical P:  {emp_kalshi:.1%}  (historical frequency)")
+                print(f"    ├─ Volatility P: {vol_p:.1%}  (model based on current price + DTE)")
+                print(f"    ├─ Blended P:    {hist_p:.1%}  (final model probability)")
+            else:
+                print(f"    ├─ Model P(YES): {hist_p:.1%}")
+            print(f"    ├─ Market YES:   {yes_bid:.1%}  (what the market is pricing)")
+            print(f"    ├─ Verdict:      {rec}")
+            print(f"    │    → {_rec_plain}")
             reason = _format_reason(
                 rec, hist_p, yes_bid, threshold, current_price, direction,
                 violates_rule, vol_p, sp.min_yes_price, sp.min_no_price,
@@ -3923,11 +3993,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             elif rec == REC_SKIP and cross_sanity_reason:
                 reason = cross_sanity_reason
-            print(f"    Why: {reason}")
+            print(f"    └─ Reason:       {reason}")
             if getattr(args, "verbose", False):
                 mn, mx = min(closes), max(closes)
                 n = sum(1 for c in closes if (c > threshold if direction == "above" else c < threshold))
-                print(f"    (closes ${mn:,.0f}-${mx:,.0f}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
+                print(f"       (closes ${mn:,.0f}–${mx:,.0f}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
             try:
                 from storage import record_market_snapshot
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -3956,11 +4026,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             except ImportError:
                 pass
             if rec != REC_SKIP:
-                print(f"    Edge: {abs(diff):.1%}")
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 bid = yes_bid if rec == REC_BUY_YES else no_bid
                 side = "yes" if rec == REC_BUY_YES else "no"
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
+                print(f"       Edge: {abs(diff):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
                 dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp)
                 dip = min(0.25, dip * dip_regime_mult)
                 price_might_decline = (use_vol and vol_p is not None) or (dte is not None and dte >= 2)
@@ -4047,7 +4117,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "threshold": threshold,
                     "direction": direction,
                     "limit_order_mode": sp.limit_order_mode,
+                    "dte": dte,
                 })
+            _eval_count_total += 1
+            if rec == REC_SKIP:
+                _eval_count_skip += 1
+            else:
+                _eval_count_buy += 1
             print()
 
         # Gemini crypto — expand to individual markets (binary: 1 per event; categorical: 1 per strike contract)
@@ -4319,28 +4395,39 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "instrument_symbol": instrument_symbol,
                     }
                 )
-                print(f"  [Gemini] {evt.get('ticker','?')}")
-                h = _hours_until_resolution(title, yf_ticker)
-                hours_str = f" (in {h:.1f} hours)" if h is not None else ""
-                print(f"    {title}{hours_str}")
-                print(f"    Threshold: ${threshold_g:,.0f} ({direction_g})")
-                if vol_p_gem is None:
-                    p_label_gem = "P(YES)"
+                _dist_str_g = _fmt_distance(current_price, threshold_g, direction_g)
+                _dte_str_g = _fmt_dte(dte_g)
+                _rec_plain_g = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction_g, threshold_g, current_price, dte_g)
+                print(f"\n    {'·' * 60}")
+                print(f"    {evt.get('ticker','?')}  [Gemini]")
+                print(f"    {title[:70]}")
+                print(f"    ├─ Strike:       ${threshold_g:,.0f} ({direction_g})")
+                print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str_g}")
+                print(f"    ├─ Resolves in:  {_dte_str_g}")
+                if vol_p_gem is not None:
+                    print(f"    ├─ Empirical P:  {emp:.1%}  (historical frequency)")
+                    print(f"    ├─ Volatility P: {vol_p_gem:.1%}  (model based on current price + DTE)")
+                    print(f"    ├─ Blended P:    {hist_p_gem:.1%}  (final model probability)")
                 else:
-                    p_label_gem = f"P(YES) [emp={emp:.1%} vol={vol_p_gem:.1%}]"
-                print(f"    {p_label_gem}: {hist_p_gem:.1%}  Market YES: {impl:.1%}  →  {rec}")
+                    print(f"    ├─ Model P(YES): {hist_p_gem:.1%}")
+                print(f"    ├─ Market YES:   {impl:.1%}  (what the market is pricing)")
+                print(f"    ├─ Verdict:      {rec}")
+                print(f"    │    → {_rec_plain_g}")
+                _reason_g = ""
                 if rec == REC_SKIP and defensive_mode_active:
-                    print(
-                        "    Why: defensive mode (sells-only) due to extreme volatility "
+                    _reason_g = (
+                        f"defensive mode (sells-only) due to extreme volatility "
                         f"(ratio {vol_ratio:.2f}x)"
                     )
                 elif rec == REC_SKIP and cross_sanity_reason_g:
-                    print(f"    Why: {cross_sanity_reason_g}")
+                    _reason_g = cross_sanity_reason_g
                 elif rec == REC_SKIP and momentum_crash:
-                    print(
-                        "    Why: momentum protection "
+                    _reason_g = (
+                        f"momentum protection "
                         f"({momentum_ret:.2%} <= {sp.momentum_crash_threshold_pct:.2%})"
                     )
+                if _reason_g:
+                    print(f"    └─ Reason:       {_reason_g}")
                 try:
                     from storage import record_market_snapshot
                     market_for_book = contract if isinstance(contract, dict) else evt
@@ -4369,11 +4456,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 except ImportError:
                     pass
                 if rec != REC_SKIP:
-                    print(f"    Edge: {abs(diff_gem):.1%}")
                     no_price = 1.0 - impl
                     bid = impl if rec == REC_BUY_YES else no_price
                     side = "yes" if rec == REC_BUY_YES else "no"
                     p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
+                    print(f"       Edge: {abs(diff_gem):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
                     dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g)
                     dip = min(0.25, dip * dip_regime_mult)
                     price_might_decline = (use_vol and vol_p_gem is not None) or (dte_g is not None and dte_g >= 2)
@@ -4461,12 +4548,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "yf_ticker": yf_ticker,
                         "threshold": threshold_g,
                         "direction": direction_g,
+                        "dte": dte_g,
                         "gemini_evt": evt,
                         "limit_order_mode": sp.limit_order_mode,
                     }
                     if instrument_symbol:
                         order_entry["instrument_symbol"] = instrument_symbol
                     pending_orders.append(order_entry)
+                _eval_count_total += 1
+                if rec == REC_SKIP:
+                    _eval_count_skip += 1
+                else:
+                    _eval_count_buy += 1
                 print()
 
     # Latest unresolved entries for dynamic stop-loss checks: (platform, ticker, side) -> entry_price
@@ -5239,22 +5332,45 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print("\n" + "=" * 75)
         print("PROPOSED TRADES")
         print("=" * 75)
+        _total_buy_cost = 0
         use_llm = getattr(args, "use_llm", True)
+        if pending_sells:
+            print(f"\n  --- SELLS ({len(pending_sells)}) ---")
         for i, s in enumerate(pending_sells, 1):
-            print(f"\n  SELL {i}. [{s['platform'].upper()}] SELL {s['side'].upper()} {s['ticker']} | {s.get('title', '')[:55]}")
-            print(f"   Count: {s['count']} @ ${s['price']:.2f} ({s.get('rec', '')})")
+            _sell_total = s['count'] * s['price']
+            print(f"\n  SELL {i}. [{s['platform'].upper()}] {s['ticker']}")
+            print(f"         {s.get('title', '')[:65]}")
+            print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Proceeds: ~${_sell_total:.2f}")
+            print(f"         Trigger: {s.get('rec', 'unknown')}")
             if use_llm:
                 analysis = analyze_single_trade(s, "sell")
                 if analysis:
-                    print(f"   [Ollama] {analysis}")
+                    print(f"         [Ollama] {analysis}")
+        if pending_orders:
+            print(f"\n  --- BUYS ({len(pending_orders)}) ---")
         for i, o in enumerate(pending_orders, 1):
-            print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['rec']} {o['ticker']} | {(o.get('title') or '')[:55]}")
-            print(f"   Edge: {o['edge']:.1%} | Price: ${o['price']:.2f} | Count: {o.get('count', 10)}")
+            _count = o.get("count", 10)
+            _cost = _count * o["price"]
+            _total_buy_cost += _cost
+            _p_win = o.get("hist_p", 0) if o.get("rec") == REC_BUY_YES else (1 - o.get("hist_p", 1))
+            _ev = _p_win * (1.0 - o["price"]) - (1 - _p_win) * o["price"]
+            _thresh = o.get("threshold")
+            _dir = o.get("direction", "")
+            _dte_o = o.get("dte")
+            print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['ticker']}")
+            print(f"         {(o.get('title') or '')[:65]}")
+            if _thresh and _dir:
+                print(f"         Bet: price {'above' if _dir == 'above' else 'below'} ${_thresh:,.0f}  |  Resolves in: {_fmt_dte(_dte_o)}")
+            print(f"         Side: {o['rec'].replace('BUY_', '')}  |  Count: {_count}  |  Limit: ${o['price']:.2f}  |  Total cost: ${_cost:.2f}")
+            print(f"         Edge: {o['edge']:.1%}  |  P(win): {_p_win:.1%}  |  EV/contract: {'+' if _ev >= 0 else ''}${_ev:.2f}")
             if use_llm:
                 analysis = analyze_single_trade(o, "buy")
                 if analysis:
-                    print(f"   [Ollama] {analysis}")
+                    print(f"         [Ollama] {analysis}")
         print()
+        if pending_orders:
+            print(f"  Total buy cost: ${_total_buy_cost:.2f} across {len(pending_orders)} order(s)")
+            print()
 
     if getattr(args, "execute", False):
         if dry_run:
@@ -5507,14 +5623,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print("=" * 75)
     elif getattr(args, "preview", False) and (pending_orders or pending_sells):
         print("\n" + "=" * 75)
-        print("PREVIEW: Orders we would place (--preview mode, no actual orders)")
-        print("  SELLs first, then BUYs (so balance reflects proceeds before buys)")
+        print("PREVIEW: Orders that would be placed (--execute to go live)")
         print("=" * 75)
 
+        if pending_sells:
+            print(f"\n  --- SELLS ({len(pending_sells)}) — executed first so balance reflects proceeds ---")
         for i, s in enumerate(pending_sells, 1):
-            print(f"\n  SELL {i}. [{s['platform'].upper()}] SELL {s['side'].upper()} {s['ticker']}")
-            print(f"   {s['title']}")
-            print(f"   Count: {s['count']} @ {s['price']:.2f} (edge flipped → now {s['rec']})")
+            _sell_total = s['count'] * s['price']
+            print(f"\n  SELL {i}. [{s['platform'].upper()}] {s['ticker']}")
+            print(f"         {s['title']}")
+            print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Proceeds: ~${_sell_total:.2f}")
+            print(f"         Trigger: {s['rec']}")
             if s["platform"] == PLATFORM_KALSHI:
                 payload = {
                     "ticker": s["ticker"],
@@ -5523,15 +5642,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "count": s["count"],
                 }
                 payload["yes_price_dollars" if s["side"] == "yes" else "no_price_dollars"] = f"{s['price']:.2f}"
-                print(f"   API: POST /portfolio/orders")
-                print(f"   Payload: {payload}")
+                print(f"         API: POST /portfolio/orders → {payload}")
             elif s["platform"] == PLATFORM_GEMINI:
-                print(f"   API: POST /v1/prediction-markets/order (place_order, side=sell)")
+                print(f"         API: POST /v1/prediction-markets/order (side=sell)")
 
+        if pending_orders:
+            print(f"\n  --- BUYS ({len(pending_orders)}) ---")
         for i, o in enumerate(pending_orders, 1):
-            print(f"\n{i}. [{o['platform'].upper()}] {o['rec']} {o['ticker']}")
-            print(f"   {o['title']}")
-            print(f"   Edge: {o['edge']:.1%}")
+            _count = o.get("count", 10)
+            _cost = _count * o["price"]
+            _p_win_prev = o.get("hist_p", 0) if o.get("rec") == REC_BUY_YES else (1 - o.get("hist_p", 1))
+            _thresh = o.get("threshold")
+            _dir = o.get("direction", "")
+            _dte_prev = o.get("dte")
+            print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['ticker']}")
+            print(f"         {(o.get('title') or '')[:65]}")
+            if _thresh and _dir:
+                print(f"         Bet: price {'above' if _dir == 'above' else 'below'} ${_thresh:,.0f}  |  Resolves in: {_fmt_dte(_dte_prev)}")
+            print(f"         Side: {o['rec'].replace('BUY_', '')}  |  Count: {_count}  |  Limit: ${o['price']:.2f}  |  Total cost: ${_cost:.2f}")
+            print(f"         Edge: {o['edge']:.1%}  |  P(win): {_p_win_prev:.1%}")
             if o["platform"] == PLATFORM_KALSHI:
                 side, action = o["side"], "buy"
                 price_str = f"{o['price']:.2f}"
@@ -5541,9 +5670,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     payload["yes_price_dollars"] = price_str
                 else:
                     payload["no_price_dollars"] = price_str
-                print(f"   API: POST /portfolio/orders")
-                print(f"   Payload: {payload}")
-                print(f"   (count capped by balance * {max_pct:.0%} via create_order_safe)")
+                print(f"         API: POST /portfolio/orders → {payload}")
             else:
                 count = o.get("count", 10)
                 if count <= 0:
@@ -5557,22 +5684,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     else None
                 )
                 if sym:
-                    print(f"   API: POST /v1/prediction-markets/order (place_order)")
-                    print(f"   Payload: symbol={sym}, side=buy, outcome={o['side']}, quantity={count}, price={o['price']:.2f}")
+                    print(f"         API: POST /v1/prediction-markets/order → symbol={sym}, side=buy, outcome={o['side']}, qty={count}, price={o['price']:.2f}")
                 else:
-                    print(f"   Would: {o['rec']} at {o['price']:.2f} (side={o['side']}, count={count})")
+                    print(f"         Would: {o['rec']} at {o['price']:.2f} (side={o['side']}, count={count})")
 
         print("\n" + "=" * 75)
 
     print("\n" + "=" * 75)
+    print("  RUN SUMMARY")
+    print("=" * 75)
+    print(f"  Markets evaluated:   {_eval_count_total}")
+    print(f"  Recommendations:     {_eval_count_buy} BUY  |  {_eval_count_skip} SKIP")
+    print(f"  Proposed buys:       {len(pending_orders)}")
+    print(f"  Proposed sells:      {len(pending_sells)}")
     if pending_sells and not (getattr(args, "preview", False) or getattr(args, "execute", False)):
-        print(f"  Note: {len(pending_sells)} position(s) look like losers. Run with --preview to see details, --execute to sell.")
+        print(f"\n  Note: {len(pending_sells)} position(s) look like losers.")
+        print("  Run with --preview to see details, --execute to sell.")
     if getattr(args, "execute", False):
-        print("Done. Run with --execute for future live runs (or set up cron).")
+        print("\n  Run with --execute for future live runs (or set up cron).")
     else:
-        print("Done. Run every 15 min (cron) for continuous evaluation. See README.")
-        if not pending_sells:
-            print("  Use --preview to see positions we would SELL (losers / rule violations).")
+        if not getattr(args, "preview", False):
+            print("\n  Run every 15 min (cron) for continuous evaluation. See README.")
+            if not pending_sells:
+                print("  Use --preview to see what orders would be placed.")
+    print("=" * 75)
     return 0
 
 
