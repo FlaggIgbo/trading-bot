@@ -195,7 +195,7 @@ flowchart TB
     end
 
     subgraph positions["3. Evaluate Positions"]
-        L[Kalshi: get_positions | Gemini: get_positions] --> M[Parse: position_fp (Kalshi) or outcome/qty (Gemini)]
+        L["Kalshi: get_positions + Gemini: get_positions"] --> M["Parse: position_fp or outcome/qty"]
         L2[Gemini get_positions] --> M2[Map symbol→market; parse outcome, qty]
         M --> N{Cached or fetch market}
         N --> O[Compute P lose, rec with vol blend]
