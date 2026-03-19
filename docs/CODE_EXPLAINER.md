@@ -51,6 +51,7 @@
 - **Performance graphs:** `scripts/daily_performance_report.py` generates PNG charts (green bars=wins, red=losses, blue cumulative P&L line) alongside the text report.
 - **DTE-confidence dip scaling:** When resolution is more than ~1 hour away (`far_dte_threshold_days: 0.042`) and model confidence is high (P(win)>=80%), limit order dips scale proportionally with DTE via `_dte_confidence_dip()`; config: `far_dte_dip_scaling_enabled`, `far_dte_threshold_days`, `far_dte_dip_scale_per_day`, `far_dte_max_extra_dip`, `far_dte_min_confidence`, `far_dte_confidence_boost`.
 - **Alpha engine:** `models/alpha_engine.py` provides four composable modules applied after anti-hallucination and before order placement: **(1) Order Book Imbalance (OBI)** — directional signal from bid/ask depth that adjusts required edge; **(2) Markout PnL / toxic flow** — tracks post-fill adverse selection and penalizes toxic tickers; **(3) Volatility-adjusted Kelly** — scales Kelly fraction inversely with realized vol to auto-shrink positions in choppy markets; **(4) Lead-lag signal** — uses correlated asset moves (e.g. SPY→KXINXU) as leading indicator for edge adjustments. Config: `strategy.alpha_engine.*`.
+- **Dynamic EV-optimal sell threshold:** `_ev_sell_threshold()` replaces the fixed `sell_losing_pct` (55%) with an EV-optimal threshold derived from the current bid and exit fee: `P(lose) > 1 − (sell_price − exit_fee)`. High bids (~90¢) → sell readily (threshold ~11%); low bids (~20¢) → only sell if nearly certain to lose (threshold ~81%). Config: `strategy.dynamic_sell_threshold` (default true).
 
 ---
 
@@ -129,7 +130,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Parse position           | Kalshi: `position_fp` positive = YES, negative = NO; Gemini: `outcome`, `totalQuantity` | `compare_historical.py:1668-1676`, `1878-1886`     |
 | Use cached or fresh data | Market data from earlier loop or fresh fetch (Kalshi); Gemini uses events  | `compare_historical.py:1672`, `1887`                    |
 | Compute P(lose)          | Blends model (hist_p) with market odds (yes_bid/no_bid); market weight increases near resolution via `_compute_p_lose()` | `compare_historical.py` → `_compute_p_lose()`           |
-| SELL triggers            | LIKELY_LOSE (P≥55%), rec flip, RULE_VIOLATION (price above strike on NO), unsupported resolution | `compare_historical.py` → `pending_sells.append()` |
+| SELL triggers            | LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` via `_ev_sell_threshold()` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip, RULE_VIOLATION, unsupported resolution | `compare_historical.py` → `pending_sells.append()`, `_ev_sell_threshold()` |
 | Re-entry (optional)      | If `enable_sell_and_rebuy`: when selling loser, add BUY at current price if edge ≥ min_edge; bypasses min 5¢ | `_maybe_add_reentry_order()`                      |
 | Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `pending_sells.append()`                               |
 
@@ -253,7 +254,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 5. **Position evaluation:** Fetch Kalshi positions (`get_positions()`), Gemini positions (`GeminiTradingClient.get_positions()`). For each position:
    - If ticker in `market_data_cache`, use cached closes/market. Else fetch market + closes for orphan positions.
    - Compute P(lose) via `_compute_p_lose()` — blends model with market odds; more weight on market near resolution.
-   - SELL triggers: LIKELY_LOSE (P≥55%), rec flip (we now say BUY NO but we hold YES), RULE_VIOLATION (hold NO on "above X" but price > X×(1+cushion)), INTRADAY_MARKET (unsupported resolution).
+   - SELL triggers: LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip (we now say BUY NO but we hold YES), RULE_VIOLATION (hold NO on "above X" but price > X×(1+cushion)), INTRADAY_MARKET (unsupported resolution).
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
@@ -376,6 +377,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `_extract_strike` | compare_historical | `(market) -> (threshold, direction)` | Parse floor/cap from market API or title regex ("above $X", "below $Y"). |
 | `_get_closes_for_empirical` | compare_historical | `(yf_ticker, days_back, closes_daily, market, sp, cfg) -> list[float]` | For intraday + use_intraday_empirical: return intraday prices at resolution hour; else daily closes. |
 | `_compute_p_lose` | compare_historical | `(hist_p, yes_bid, no_bid, side, dte, sp) -> float` | P(our position loses). Blends model prob with market odds; market weight increases as dte→0 (half-life decay). |
+| `_ev_sell_threshold` | compare_historical | `(sell_price, maker_fee_rate, min_fee_per_order) -> float` | EV-optimal sell threshold for binary contracts. Returns breakeven P(lose) where selling now equals EV of holding: `1 − (sell_price − exit_fee)`. High bids → low threshold (~11% at 90¢); low bids → high threshold (~81% at 20¢). Clamped to [0.01, 0.99]. |
 | `_filter_contradictory_buys` | compare_historical | `(pending_orders, existing_by_underlying) -> None` | Removes BUYs that would conflict with kept positions or other pending BUYs (same underlying+resolution). |
 | `get_aggs` | yfinance_client | `(ticker, days_back, config) -> list[float]` | Daily closes from yfinance (or CoinGecko for crypto). Uses storage cache. |
 | `get_intraday_aggs_at_hour` | yfinance_client | `(ticker, days_back, resolution_hour_et, config) -> list[float]` | 1h prices at that ET hour per day. Falls back to daily if intraday fails. |
@@ -407,7 +409,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 |------------------------|-----------------|---------|---------|
 | `days_to_expiry` | `days_to_expiry` | 30 | Days (or fraction) to resolution for vol model |
 | `no_above_cushion` | `skip_buy_no_above_cushion` | 0.01 | Skip BUY NO when price > strike×(1+cushion) |
-| `sell_losing_pct` | `sell_losing_pct` | 0.55 | Sell when P(lose) ≥ this |
+| `dynamic_sell_threshold` | `dynamic_sell_threshold` | true | Use EV-optimal sell threshold computed from current bid and exit fee (`_ev_sell_threshold()`); when false, falls back to fixed `sell_losing_pct` |
+| `sell_losing_pct` | `sell_losing_pct` | 0.55 | Fixed fallback sell threshold when `dynamic_sell_threshold` is false |
 | `limit_dip_pct` | `limit_dip_pct` | 0.05 | Place limit at bid×(1−dip) to catch drops |
 | `limit_order_mode` | `limit_order_mode` | `fixed_pct` fallback | Limit pricing mode: `fixed_pct`, `dynamic_tick`, or `layered` |
 | `tick_offset` | `tick_offset` | 1 | Tick offset used by dynamic tick quote placement |

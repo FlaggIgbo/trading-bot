@@ -142,8 +142,9 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), **alpha engine** (Order Book Imbalance signal, markout PnL / toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
-### Recent fixes (2026-03-19)
+### Recent changes (2026-03-19)
 
+- **Dynamic EV-optimal sell threshold** (`dynamic_sell_threshold: true`): The sell trigger for held positions is now computed dynamically from the current sell price (bid) and exit fee, rather than using a fixed percentage. The formula `P(lose) > 1 − (sell_price − exit_fee)` maximizes expected value by comparing the guaranteed net proceeds of selling immediately against the expected value of holding to settlement. High bids → low threshold (sell readily to lock in profit); low bids → high threshold (hold unless very likely to lose). Applied to all three sell paths: Kalshi orphan positions, Kalshi regular positions, and Gemini positions. Configurable via `strategy.dynamic_sell_threshold`; falls back to `sell_losing_pct` when disabled.
 - **Per-ticker entry cap** (`max_entries_per_ticker: 3`): Prevents the bot from re-entering the same losing contract every cycle. Previously, tickers like `KXBTCD-26MAR1617-T75249.99` accumulated 54 entries with zero wins. Now, once a ticker has 3 entries in the predictions table (filled or pending, excluding cancelled), new orders for that ticker are blocked. Configurable via `strategy.max_entries_per_ticker`.
 - **Near-expiry order protection** (`near_expiry_keep_dte: 0.02`): The `want_better_price` cancellation logic no longer cancels resting BUY orders when the contract resolves within ~30 minutes. This prevents losing winning ITM positions by chasing pennies near expiry — e.g. SOL > $87 at 1am EDT was cancelled for `want_better_price` with 3 minutes left, and the replacement didn't fill.
 - **Anti-hallucination pipeline tuning:** Reduced aggressive dampening that was causing the pipeline to SKIP most ITM contracts despite clear edge. Key changes:
@@ -217,7 +218,7 @@ flowchart TB
         M --> N{Cached or fetch market}
         N --> O[Compute P lose, rec with vol blend]
         O --> P{Sell trigger?}
-        P -->|LIKELY_LOSE ≥55%| Q[pending_sells]
+        P -->|EV-optimal sell threshold| Q[pending_sells]
         P -->|Edge flip| Q
         P -->|RULE_VIOLATION| Q
         P -->|INTRADAY unsupported| Q
@@ -280,7 +281,7 @@ flowchart TB
   │   • Parse position_fp (positive=YES, negative=NO) for each position          │
   │   • Cached? Use market_data_cache. Uncached? Fetch market + closes           │
   │   • Sell triggers (when we recommend selling a position you hold):            │
-  │       - LIKELY_LOSE:     We now think the bet will probably lose (≥55% chance)│
+  │       - LIKELY_LOSE:     EV-optimal: sell when P(lose) > 1 − (bid − fee)     │
   │       - Edge flip:       We used to say BUY YES; now we say BUY NO (or vice versa) — cut losses, don't double down
   │       - RULE_VIOLATION:  You hold NO on "price above X" but price already > X — the bet is going against you
   │       - INTRADAY_MARKET: Non–crypto/non–S&P intraday → exit position         │
@@ -512,8 +513,10 @@ absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enfo
 
 ### Calibration and sell-and-rebuy
 
+- **`dynamic_sell_threshold`** (default true): EV-optimal sell threshold for binary contracts. Instead of a fixed `sell_losing_pct`, the sell trigger is computed dynamically via `_ev_sell_threshold(sell_price, maker_fee_rate, min_fee_per_order)`: sell when `P(lose) > 1 − (sell_price − exit_fee)`. At high bids (90¢), threshold ≈ 11% (sell unless very confident); at low bids (20¢), threshold ≈ 81% (only sell if almost certain to lose). Entry price is a sunk cost and does not factor into the EV-optimal decision. When disabled, falls back to the fixed `sell_losing_pct`.
+- **`sell_losing_pct`** (default 0.55): Fixed fallback sell threshold when `dynamic_sell_threshold` is false. Sell when P(lose) ≥ this.
 - **`calibration_loss_weight`** (default 1.5): Weight losers higher in calibration so the bot learns more from mistakes. Bucket and direction-side win rates use weighted loses; higher values make the system more conservative.
-- **`enable_sell_and_rebuy`** (default true): When selling a losing position (P(lose) ≥ 55% or rec flip), optionally re-buy the same contract at the current price if the model still sees edge. Bypasses min 5¢ rule for re-entry when profitable.
+- **`enable_sell_and_rebuy`** (default true): When selling a losing position (via dynamic or fixed threshold, or rec flip), optionally re-buy the same contract at the current price if the model still sees edge. Bypasses min 5¢ rule for re-entry when profitable.
 - **`p_lose_blend_market_max_weight`** (default 0.5): When computing P(lose) for sell decisions, blend our model with Kalshi/Gemini market odds. At expiry, up to this fraction comes from the market (0 = model only; 0.5 = 50/50).
 - **`p_lose_blend_market_half_life_days`** (default 0.5): Half-life for market-weight decay; closer to resolution → more weight on market odds (more accurate near expiry).
 - **`max_daily_loss_pct` / `max_daily_loss_cents`**: Circuit breaker for live trading. If realized prediction losses over the last 24h exceed thresholds, the bot blocks new BUY orders until performance recovers or limits are adjusted.

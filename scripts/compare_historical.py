@@ -205,6 +205,7 @@ class _StrategyParams:
     min_bucket_samples: int
     min_vol_confidence_far_otm: float
     enable_sell_and_rebuy: bool
+    dynamic_sell_threshold: bool
     p_lose_blend_market_max_weight: float
     p_lose_blend_market_half_life_days: float
     use_intraday_empirical: bool
@@ -345,6 +346,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
         min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),
         enable_sell_and_rebuy=bool(strategy.get("enable_sell_and_rebuy", False)),
+        dynamic_sell_threshold=bool(strategy.get("dynamic_sell_threshold", True)),
         p_lose_blend_market_max_weight=float(strategy.get("p_lose_blend_market_max_weight", 0.5)),
         p_lose_blend_market_half_life_days=float(strategy.get("p_lose_blend_market_half_life_days", 0.5)),
         use_intraday_empirical=bool(strategy.get("use_intraday_empirical", True)),
@@ -1921,6 +1923,26 @@ def _compute_p_lose(
     consistency = max(0.0, min(1.0, consistency))
     weight_market = sp.p_lose_blend_market_max_weight * consistency * (1.0 / (1.0 + dte / half))
     return (1.0 - weight_market) * p_model + weight_market * p_market
+
+
+def _ev_sell_threshold(
+    sell_price: float,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+) -> float:
+    """
+    EV-optimal sell threshold for binary contracts.
+
+    Hold-vs-sell breakeven: sell when EV(hold) < net(sell).
+      EV(hold)  = 1 - p_lose
+      net(sell)  = sell_price - exit_fee
+    Rearranged: sell when p_lose > 1 - (sell_price - exit_fee).
+
+    At high bids (90¢) → threshold ~11%: sell unless very confident.
+    At low bids (20¢) → threshold ~81%: only sell if almost certain to lose.
+    """
+    exit_fee = _fee_per_contract(sell_price, maker_fee_rate, min_fee_per_order)
+    return max(0.01, min(0.99, 1.0 - (sell_price - exit_fee)))
 
 
 def _maybe_add_reentry_order(
@@ -5131,7 +5153,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         p_lose_blend_market_max_weight=sp.p_lose_blend_market_max_weight,
                                         p_lose_blend_market_half_life_days=sp.p_lose_blend_market_half_life_days,
                                     )
-                                    if p_lose >= sp.sell_losing_pct:
+                                    sell_threshold = (
+                                        _ev_sell_threshold(sell_price, maker_fee_pos, sp.min_fee_per_order)
+                                        if sp.dynamic_sell_threshold
+                                        else sp.sell_losing_pct
+                                    )
+                                    if p_lose >= sell_threshold:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -5284,7 +5311,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "rec": "STOP_LOSS",
                     })
                     continue
-                # SELL when we think position will lose: P(lose) > sell_losing_pct
+                # SELL when EV of holding < net proceeds from selling at current bid
                 p_lose = strategy_engine.compute_p_lose(
                     hist_p=hist_p,
                     yes_bid=yes_bid,
@@ -5294,7 +5321,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     p_lose_blend_market_max_weight=sp.p_lose_blend_market_max_weight,
                     p_lose_blend_market_half_life_days=sp.p_lose_blend_market_half_life_days,
                 )
-                if p_lose >= sp.sell_losing_pct:
+                sell_threshold = (
+                    _ev_sell_threshold(sell_price, maker_fee_cached, sp.min_fee_per_order)
+                    if sp.dynamic_sell_threshold
+                    else sp.sell_losing_pct
+                )
+                if p_lose >= sell_threshold:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -5558,7 +5590,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             p_lose_blend_market_max_weight=sp.p_lose_blend_market_max_weight,
                             p_lose_blend_market_half_life_days=sp.p_lose_blend_market_half_life_days,
                         )
-                        if p_lose >= sp.sell_losing_pct:
+                        sell_threshold = (
+                            _ev_sell_threshold(sell_price, maker_fee_pos_g, sp.min_fee_per_order)
+                            if sp.dynamic_sell_threshold
+                            else sp.sell_losing_pct
+                        )
+                        if p_lose >= sell_threshold:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,

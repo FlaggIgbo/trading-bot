@@ -40,7 +40,8 @@ strategy:
   days_back: 365 # Days of historical data for P(above/below). Longer = more stable empirical P
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
-  sell_losing_pct: 0.55 # Sell position when we estimate P(lose) >= 55% (e.g. hold NO, hist says 60% above strike)
+  sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
+  dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
   limit_dip_pct: 0.05 # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
