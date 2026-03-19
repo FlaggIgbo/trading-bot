@@ -97,6 +97,7 @@ try:
         get_realized_pnl_stats,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
+        get_ticker_entry_counts,
         mark_prediction_cancelled,
         record_position_evaluation,
         record_prediction_from_fill,
@@ -110,7 +111,7 @@ try:
         get_markout_history,
     )
 except ImportError:
-    expire_unfilled_orders = get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
+    expire_unfilled_orders = get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = get_ticker_entry_counts = None
     get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
@@ -5701,6 +5702,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         int(balance_cents) + int(gemini_balance_cents),
         sp.max_cross_platform_exposure,
     )
+
+    max_entries_per_ticker = int(strategy.get("max_entries_per_ticker", 3))
+    if max_entries_per_ticker > 0 and get_ticker_entry_counts and pending_orders:
+        ticker_counts = get_ticker_entry_counts(cfg)
+        before_cap = len(pending_orders)
+        capped_tickers: list[str] = []
+        kept: list[dict] = []
+        for o in pending_orders:
+            t = o.get("ticker", "")
+            if ticker_counts.get(t, 0) >= max_entries_per_ticker:
+                capped_tickers.append(t)
+            else:
+                kept.append(o)
+        if capped_tickers:
+            pending_orders[:] = kept
+            unique_capped = set(capped_tickers)
+            print(f"[Risk] Per-ticker cap ({max_entries_per_ticker}): blocked {len(capped_tickers)} order(s) across {len(unique_capped)} ticker(s) already at entry limit.")
+            for t in sorted(unique_capped):
+                print(f"         {t} ({ticker_counts.get(t, 0)} existing entries)")
+            print()
 
     # Proposed trades + per-trade Ollama: print each trade and Ollama's interpretation
     if pending_orders or pending_sells:

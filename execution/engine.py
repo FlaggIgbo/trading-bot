@@ -93,6 +93,8 @@ def sync_and_cancel_resting_orders(
     """
     result = OrderSyncResult()
 
+    near_expiry_dte = float(cfg.get("strategy", {}).get("near_expiry_keep_dte", 0.02))
+
     kalshi_pending_buys = {(o["ticker"], o["side"]): o for o in pending_orders if o.get("platform") == platform_kalshi}
     kalshi_pending_sells = {(s["ticker"], s["side"]): s for s in pending_sells if s.get("platform") == platform_kalshi}
     gemini_pending_buys: dict[tuple[str, str], dict[str, Any]] = {}
@@ -177,17 +179,21 @@ def sync_and_cancel_resting_orders(
                             }
                         )
                     elif _safe_float(pend.get("price"), 0.0) > old_price:
-                        to_cancel.append(
-                            {
-                                "platform": platform_kalshi,
-                                "order_id": oid,
-                                "label": label,
-                                "reason": "want_better_price",
-                                "ticker": ticker,
-                                "side": side,
-                                "old_price": old_price,
-                            }
-                        )
+                        pend_dte = _safe_float(pend.get("dte"), 999.0)
+                        if pend_dte < near_expiry_dte:
+                            result.kalshi_keep_buys.add((ticker, side))
+                        else:
+                            to_cancel.append(
+                                {
+                                    "platform": platform_kalshi,
+                                    "order_id": oid,
+                                    "label": label,
+                                    "reason": "want_better_price",
+                                    "ticker": ticker,
+                                    "side": side,
+                                    "old_price": old_price,
+                                }
+                            )
                     else:
                         result.kalshi_keep_buys.add((ticker, side))
                 else:
@@ -278,17 +284,21 @@ def sync_and_cancel_resting_orders(
                             }
                         )
                     elif _safe_float(pend.get("price"), 0.0) > old_price:
-                        to_cancel.append(
-                            {
-                                "platform": platform_gemini,
-                                "order_id": str(oid),
-                                "label": label,
-                                "reason": "want_better_price",
-                                "ticker": str(symbol),
-                                "side": outcome,
-                                "old_price": old_price,
-                            }
-                        )
+                        pend_dte = _safe_float(pend.get("dte"), 999.0)
+                        if pend_dte < near_expiry_dte:
+                            result.gemini_keep_buys.add(key)
+                        else:
+                            to_cancel.append(
+                                {
+                                    "platform": platform_gemini,
+                                    "order_id": str(oid),
+                                    "label": label,
+                                    "reason": "want_better_price",
+                                    "ticker": str(symbol),
+                                    "side": outcome,
+                                    "old_price": old_price,
+                                }
+                            )
                     else:
                         result.gemini_keep_buys.add(key)
                 else:

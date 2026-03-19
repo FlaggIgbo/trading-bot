@@ -257,7 +257,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
-8. **Execute (if --execute):** Review open orders via `execution.engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
+8. **Per-ticker entry cap** (`max_entries_per_ticker`, default 3): Before execution, `get_ticker_entry_counts()` loads non-cancelled entry counts per ticker from the predictions table. Orders for tickers that already have ≥ cap entries are blocked. Prevents the bot from re-entering the same losing contract every cycle (e.g. 54 entries on one BTC ticker with 0 wins).
+9. **Execute (if --execute):** Review open orders via `execution.engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`; near-expiry orders kept) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
 
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
@@ -302,6 +303,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 - Reads active resting orders from both venues.
 - Keeps orders already at same/better price.
 - Cancels orders for `stale_ttl`, `no_longer_rec`, `want_better_price`, and `regime_shift_guard`.
+- **Near-expiry protection**: when a pending order's DTE < `near_expiry_keep_dte` (default 0.02 ≈ 30 min), `want_better_price` cancellations are suppressed — the existing resting BUY order is kept to avoid losing a winning ITM position by chasing pennies near resolution.
 - Records cancel reason to storage through `record_order_cancel(...)` and marks linked unresolved prediction intents as `cancelled`.
 
 ---
@@ -618,6 +620,7 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 | `get_predictions_for_backtest(...)` | backtest.py real | Resolved predictions in time range |
 | `get_calibration_stats(config)` | compare_historical startup | Win rate by bucket (hist_p bin, direction+side) |
 | `get_unresolved_predictions(config)` | compare_historical | Predictions with outcome=NULL |
+| `get_ticker_entry_counts(config)` | compare_historical pre-execution | Non-cancelled entry counts per ticker for the per-ticker cap |
 | `get_last_snapshot_per_ticker(...)` | backtest synthetic | Last snapshot per ticker with rec filter |
 
 **Cache TTL:** 3600 seconds (1 hour) for yf_cache and yf_intraday_cache. Older entries return `None`; caller re-fetches.

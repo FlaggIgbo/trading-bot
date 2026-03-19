@@ -50,6 +50,8 @@ strategy:
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
   cancel_all_on_regime_shift: true # During momentum crash or vol-spike regime, cancel resting BUY limits before re-quoting
   limit_order_ttl_minutes: 30 # Cancel and refresh resting BUY limits older than this TTL
+  near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
+  max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   layered_order_levels: 3 # Used by layered mode to spread large intents across deeper quote levels
   limit_dip_pct_high_confidence: 0.15 # When P(win) >= 90%, use larger dip (15%) — prioritize aggressive limits on high-certainty contracts
   limit_dip_pct_price_decline: 0.10 # When model suggests contract price might decrease (vol model on, or dte >= 2), use this dip (10%) to prioritize limit orders

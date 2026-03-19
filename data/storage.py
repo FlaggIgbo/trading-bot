@@ -1398,6 +1398,41 @@ def record_prediction_from_fill(
         conn.close()
 
 
+def count_ticker_entries(ticker: str, config: dict | None = None) -> int:
+    """Count non-cancelled prediction entries for a ticker (all time)."""
+    conn = _get_conn(config)
+    if not conn:
+        return 0
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM predictions WHERE ticker = ? AND (outcome IS NULL OR outcome NOT IN ('cancelled'))",
+            (ticker,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def get_ticker_entry_counts(config: dict | None = None) -> dict[str, int]:
+    """Bulk-load non-cancelled entry counts per ticker for the cap check."""
+    conn = _get_conn(config)
+    if not conn:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT ticker, COUNT(*) as n FROM predictions "
+            "WHERE outcome IS NULL OR outcome NOT IN ('cancelled') "
+            "GROUP BY ticker"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
 def get_unresolved_predictions(config: dict | None = None) -> list[dict]:
     """Return predictions that don't have an outcome yet (market may still be open)."""
     conn = _get_conn(config)
