@@ -114,6 +114,7 @@ class DefaultThresholdStrategy(BaseStrategy):
         spread_bps: float | None,
         no_bid: float | None,
         macro_24h_ret: float = 0.0,
+        rsi_14: float | None = None,
     ) -> dict[str, float]:
         vol = self._clip01(vol_p if vol_p is not None else emp_p)
         mkt = self._clip01(market_yes)
@@ -128,6 +129,7 @@ class DefaultThresholdStrategy(BaseStrategy):
         consistency = 1.0
         if no_bid is not None:
             consistency = 1.0 - abs((mkt + self._clip01(float(no_bid))) - 1.0)
+        rsi_norm = self._clip01((float(rsi_14) / 100.0) if rsi_14 is not None else 0.5)
         return {
             "emp_p": self._clip01(emp_p),
             "vol_p": vol,
@@ -139,6 +141,7 @@ class DefaultThresholdStrategy(BaseStrategy):
             "spread_norm": spread_norm,
             "liquidity_consistency": self._clip01(consistency),
             "macro_24h_ret": max(-0.1, min(0.1, float(macro_24h_ret))),
+            "rsi_norm": rsi_norm,
         }
 
     def score_signal_probability(
@@ -159,6 +162,7 @@ class DefaultThresholdStrategy(BaseStrategy):
             "spread_norm": -0.5,
             "liquidity_consistency": 0.3,
             "macro_24h_ret": 0.2,
+            "rsi_norm": -0.3,
         }
         if signal_model_weights:
             w.update(signal_model_weights)

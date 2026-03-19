@@ -44,11 +44,11 @@ strategy:
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
   dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
-  limit_dip_pct: 0.05 # Place limit buys this much below bid to catch dips (0.05 = 5%). 0 = use bid directly.
+  limit_dip_pct: 0.07 # Raised from 5% to 7%; deeper default dip catches more wicks
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
-  min_stability_duration_seconds: 30 # Require recent mid-price stability before posting new BUY limits
+  min_stability_duration_seconds: 15 # Reduced from 30s; faster re-entry after short dips
   min_order_book_depth: 20 # Depth target; layered mode scales size instead of hard skipping when thinner
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
   cancel_all_on_regime_shift: true # During momentum crash or vol-spike regime, cancel resting BUY limits before re-quoting
@@ -133,12 +133,12 @@ strategy:
   stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
   weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
-  momentum_crash_threshold_pct: -0.035 # Less hair-trigger momentum lockout in high-vol regimes
+  momentum_crash_threshold_pct: -0.05 # Widened from -3.5% to -5%; dips are where passive limit value is
   max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
   max_daily_loss_pct: 0.10 # Circuit breaker: block new buys if last 24h realized loss exceeds this fraction of balance
   max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
   enable_vol_spike_safety: true # Safety mode on volatility regime break
-  vol_spike_threshold_mult: 2.0 # Trigger safety mode when short vol > 2x recent baseline
+  vol_spike_threshold_mult: 3.0 # Raised from 2.0; dips happen during vol spikes — don't cancel limits too early
   vol_spike_edge_multiplier: 2.0 # In safety mode, multiply min_edge by this factor
   enable_defensive_mode: true # Extreme-volatility circuit: switch to sells-only mode (no new buys)
   defensive_vol_ratio_threshold: 3.0 # Trigger defensive mode when short-vs-baseline realized vol ratio exceeds this
@@ -212,6 +212,7 @@ strategy:
     dte_norm: 0.1
     spread_norm: -0.5
     liquidity_consistency: 0.3
+    rsi_norm: -0.3 # Oversold (low RSI) slightly boosts P(YES) for mean-reversion; overbought dampens
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior

@@ -8,6 +8,8 @@ Two clients:
 """
 from __future__ import annotations
 
+from typing import Any
+
 import base64
 import hashlib
 import hmac
@@ -426,6 +428,32 @@ class GeminiTradingClient(GeminiPredictionClient):
             body["symbol"] = symbol
         return self._post_auth("/v1/prediction-markets/positions", body)
 
+    @staticmethod
+    def parse_fills_response(resp: Any) -> list[dict]:
+        """
+        Normalize Gemini fill/trade list from various JSON shapes.
+        Public API responses may use fills, trades, data, or a bare list.
+        """
+        if resp is None:
+            return []
+        if isinstance(resp, list):
+            return [x for x in resp if isinstance(x, dict)]
+        if not isinstance(resp, dict):
+            return []
+        for key in ("fills", "trades", "data", "executions", "results", "orders"):
+            v = resp.get(key)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+        inner = resp.get("result") or resp.get("response")
+        if isinstance(inner, list):
+            return [x for x in inner if isinstance(x, dict)]
+        if isinstance(inner, dict):
+            for key in ("fills", "trades", "data"):
+                v = inner.get(key)
+                if isinstance(v, list):
+                    return [x for x in v if isinstance(x, dict)]
+        return []
+
     def get_fills(self, limit: int = 200, offset: int = 0, symbol: str | None = None) -> dict:
         """
         Fetch confirmed fills/trades when available.
@@ -447,6 +475,52 @@ class GeminiTradingClient(GeminiPredictionClient):
                     continue
                 raise
         return {"fills": []}
+
+    def get_fills_paginated(
+        self,
+        *,
+        page_size: int = 200,
+        max_pages: int = 50,
+        symbol: str | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """
+        Fetch fills across multiple pages using the first working fills endpoint.
+
+        Returns (list of fill dicts, path_used or None if no endpoint worked).
+        Stops when a page is empty or shorter than page_size.
+        """
+        page_size = min(max(1, int(page_size)), 500)
+        max_pages = max(1, int(max_pages))
+        paths = [
+            "/v1/prediction-markets/fills",
+            "/v1/prediction-markets/trades",
+            "/v1/prediction-markets/orders/fills",
+        ]
+        for path in paths:
+            all_rows: list[dict] = []
+            try:
+                for page_idx in range(max_pages):
+                    offset = page_idx * page_size
+                    body = {"limit": page_size, "offset": offset}
+                    if symbol:
+                        body["symbol"] = symbol
+                    raw = self._post_auth(path, body)
+                    rows = self.parse_fills_response(raw)
+                    if not rows:
+                        break
+                    all_rows.extend(rows)
+                    if len(rows) < page_size:
+                        break
+                return all_rows, path
+            except requests.HTTPError as e:
+                if e.response is not None and 400 <= e.response.status_code < 500:
+                    continue
+                log.warning("get_fills_paginated: path %s failed: %s", path, e)
+                continue
+            except Exception as e:
+                log.warning("get_fills_paginated: path %s failed: %s", path, e)
+                continue
+        return [], None
 
     def place_order(
         self,

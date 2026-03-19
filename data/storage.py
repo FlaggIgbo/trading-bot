@@ -7,12 +7,15 @@ Used to: speed runs (cached closes), build history for backtesting, calibrate pr
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
 import math
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 _DEFAULT_DATA_DIR = Path.home() / ".trading-bot-data"
 _CACHE_TTL_SECONDS = 3600  # 1 hour for yf closes (daily data; refresh periodically)
@@ -1408,8 +1411,16 @@ def record_prediction_from_fill(
         )
         conn.commit()
         return {"status": "inserted", "id": int(cur.lastrowid)}
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        _log.warning(
+            "record_prediction_from_fill failed platform=%s fill_id=%s ticker=%s: %s",
+            platform,
+            fill_id,
+            ticker,
+            exc,
+            exc_info=True,
+        )
         return {"status": "error", "id": None}
     finally:
         conn.close()

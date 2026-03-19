@@ -511,6 +511,41 @@ def _adaptive_limit_dip(base_dip: float, closes: list[float], *, cap: float = 0.
     return min(max(0.0, cap), max(float(base_dip), 0.5 * arr))
 
 
+def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
+    """Wilder RSI on the underlying asset's close prices."""
+    if len(closes) < period + 1:
+        return None
+    gains = 0.0
+    losses = 0.0
+    for i in range(-period, 0):
+        delta = closes[i] - closes[i - 1]
+        if delta > 0:
+            gains += delta
+        else:
+            losses -= delta
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss < 1e-12:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _rsi_dip_adjustment(base_dip: float, rsi: float | None) -> float:
+    """
+    Modulate limit dip depth based on RSI.
+    Oversold (RSI<30): tighten dip to fill faster on the bounce.
+    Overbought (RSI>70): widen dip to wait for the correction.
+    """
+    if rsi is None:
+        return base_dip
+    if rsi < 30:
+        return base_dip * 0.6
+    if rsi > 70:
+        return min(0.25, base_dip * 1.4)
+    return base_dip
+
+
 def _dte_confidence_dip(
     base_dip: float,
     p_win: float,
@@ -657,21 +692,33 @@ def _compute_limit_price(
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
         mode_norm = "fixed_pct"
 
+    fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
+
     if mode_norm == "fixed_pct":
         dip = max(0.0, min(0.25, float(base_dip)))
         raw_price = bid * (1.0 - dip) if dip > 0 else bid
-    else:
+    elif mode_norm == "dynamic_tick":
         tick = max(1, int(tick_offset)) * 0.01
-        fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
         jump_price = bid + tick
         if ask is not None and ask > 0:
             jump_price = min(jump_price, max(0.01, float(ask) - 0.01))
         raw_price = min(jump_price, fair_cap)
         dip = 0.0
-        # For larger order intent, make layered mode less revealing / less aggressive.
-        if mode_norm == "layered" and order_count > 1:
-            depth_steps = min(max(1, int(layered_order_levels)) - 1, max(0, int(order_count // 100)))
-            raw_price = raw_price - (depth_steps * 0.01)
+    else:
+        # Layered: place passive limits BELOW bid using the dip to catch transient
+        # price drops instead of penny-jumping above bid.
+        dip = max(0.0, min(0.25, float(base_dip)))
+        base_price = bid * (1.0 - dip) if dip > 0 else bid
+
+        # Stagger deeper when we already hold same-side inventory (additional
+        # re-buys target even cheaper levels for better avg cost).
+        levels = max(1, int(layered_order_levels))
+        if levels > 1 and order_count > 1:
+            level_idx = min(order_count - 1, levels - 1)
+            depth_per_level = max(0.01, bid * dip * 0.5) if dip > 0 else 0.01
+            base_price -= level_idx * depth_per_level
+
+        raw_price = min(base_price, fair_cap)
 
     # Inventory-based quote skew: less aggressive on same-side inventory, slightly
     # more aggressive when holding opposite side (helps rebalance exposure).
@@ -3638,6 +3685,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             gemini_trading_recon = GeminiTradingClient()
         except ValueError:
             gemini_trading_recon = None
+            if getattr(args, "verbose", False) or getattr(args, "reconcile_diagnostics", False):
+                print("[Reconcile] Gemini client unavailable (missing GEMINI_API_KEY/SECRET); Kalshi-only fill sync.")
         recon_stats = reconcile_confirmed_fills(
             kalshi=kalshi,
             gemini_trading=gemini_trading_recon,
@@ -3662,10 +3711,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 f"  Gemini: seen={recon_stats.get('gemini_seen', 0)}, inserted={recon_stats.get('gemini_inserted', 0)}, "
                 f"dup={recon_stats.get('gemini_duplicate', 0)}, skipped={recon_stats.get('gemini_skipped', 0)}"
             )
+            gr = recon_stats.get("gemini_raw_rows")
+            gp = recon_stats.get("gemini_fills_endpoint")
+            if gr is not None:
+                print(f"  Gemini raw fill rows fetched: {gr} (endpoint={gp!r})")
             print("=" * 75)
             return 0
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[Reconcile] Fill reconciliation failed (continuing run): {exc}")
 
     pending_orders: list[dict] = []
     quote_candidates: list[dict] = []
@@ -4177,6 +4230,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if yes_ask_signal and yes_bid > 0 and yes_ask_signal >= yes_bid:
                 spread_bps_signal = ((yes_ask_signal - yes_bid) / max(0.01, yes_bid)) * 10_000.0
             if sp.enable_signal_model:
+                rsi_for_signal = _compute_rsi(closes)
                 feats = strategy_engine.build_signal_features(
                     emp_p=emp,
                     vol_p=vol_p,
@@ -4187,6 +4241,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     spread_bps=spread_bps_signal,
                     no_bid=no_bid_signal,
                     macro_24h_ret=macro_signal_24h,
+                    rsi_14=rsi_for_signal,
                 )
                 hist_p = strategy_engine.score_signal_probability(
                     features=feats,
@@ -4531,6 +4586,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
                 dip = _dte_confidence_dip(dip, p_win, dte, sp)
+                rsi_val = _compute_rsi(closes)
+                dip = _rsi_dip_adjustment(dip, rsi_val)
                 book = _extract_book_fields(m, yes_bid, no_bid)
                 bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
                 depth_mult = 1.0
@@ -4737,6 +4794,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if yes_ask_sig_g and impl > 0 and yes_ask_sig_g >= impl:
                     spread_bps_sig_g = ((yes_ask_sig_g - impl) / max(0.01, impl)) * 10_000.0
                 if sp.enable_signal_model:
+                    rsi_for_signal_g = _compute_rsi(closes)
                     feats_g = strategy_engine.build_signal_features(
                         emp_p=emp,
                         vol_p=vol_p_gem,
@@ -4747,6 +4805,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         spread_bps=spread_bps_sig_g,
                         no_bid=(1.0 - impl),
                         macro_24h_ret=macro_signal_24h,
+                        rsi_14=rsi_for_signal_g,
                     )
                     hist_p_gem = strategy_engine.score_signal_probability(
                         features=feats_g,
@@ -5053,6 +5112,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                         dip = max(dip, sp.limit_dip_pct_high_confidence)
                     dip = _dte_confidence_dip(dip, p_win, dte_g, sp)
+                    rsi_val_g = _compute_rsi(closes)
+                    dip = _rsi_dip_adjustment(dip, rsi_val_g)
                     market_for_book = contract if isinstance(contract, dict) else evt
                     book = _extract_book_fields(market_for_book or {}, impl, no_price)
                     bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")

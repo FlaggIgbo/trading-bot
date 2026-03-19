@@ -43,7 +43,9 @@
 - **Modular strategy engine:** `compare_historical.py` now routes recommendation decisions through `models/strategies/` (`strategy_engine` in config), with `vol_regime` as the production default.
 - **Anti-hallucination pipeline:** `models/anti_hallucination.py` applies five composable correction layers (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, EMA regime filter) between model P(YES) and the recommendation engine. Prevents the model from assigning 80%+ probability to contracts the market prices at 5%. Config: `strategy.anti_hallucination.*`.
 - **Regime-aware volatility safety:** EWMA/Student-t flow now supports optional GARCH(1,1) in `vol_model: auto`, continuous vol-ratio scaling (edge/dip/size), and volatility-spike safety.
-- **Adaptive limit pricing:** `limit_dip_pct` is now ARR-inspired (`max(base_dip, 0.5 * avg_relative_move)`) so entries tighten in calm markets and widen in volatile markets.
+- **Adaptive limit pricing:** `limit_dip_pct` is now ARR-inspired (`max(base_dip, 0.5 * avg_relative_move)`) so entries tighten in calm markets and widen in volatile markets. RSI-14 further modulates dip depth: oversold contracts tighten dip 40% (fill faster on bounce), overbought widen 40% (wait for correction).
+- **Layered mode passive dip pricing:** The `layered` limit order mode now places passive limits BELOW the bid using the full dip stack (`bid × (1 − dip)`) with staggered depth on re-buys, instead of penny-jumping above the bid. Fair-value cap prevents overpaying.
+- **RSI signal model feature:** `rsi_norm` (Wilder RSI-14 on underlying closes, normalized to [0,1]) added to `build_signal_features()` with default weight −0.3 — provides mean-reversion signal to the probability model.
 - **High-fidelity synthetic backtest:** Synthetic mode supports dwell-time fill checks, partial-fill scaling from persisted depth fields, and per-trade liquidity friction in addition to slippage/spread realism.
 - **Circuit breaker safety:** New BUYs are blocked when 24h realized losses breach configured limits (`max_daily_loss_pct` / `max_daily_loss_cents`).
 - **Defensive execution gates:** Dynamic stability windows, cross-exchange sanity gating, and sells-only defensive mode reduce fill risk during flash regimes.
@@ -317,10 +319,11 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 **Purpose:** Build trading-performance rows from confirmed exchange fills rather than from order placement responses. Root `fill_reconciliation.py` shim re-exports.
 
 **Key responsibility:** `reconcile_confirmed_fills(...)`
-- Pulls recent fills from Kalshi (`/portfolio/fills`) and Gemini fill/trade endpoints.
-- Normalizes fill ID/price/quantity/side across venue response formats.
+- Pulls recent fills from Kalshi (`/portfolio/fills`) and Gemini fill/trade endpoints (with `get_fills_paginated()` so more than the first page is ingested when needed).
+- Normalizes fill ID/price/quantity/side/timestamp across venue response formats (`GeminiTradingClient.parse_fills_response()` accepts `fills`, `trades`, `data`, etc.; timestamps support ISO-8601 and ms epochs). Gemini rows outside the lookback window are skipped client-side.
 - Creates prediction rows idempotently (`platform + fill_id`) through `record_prediction_from_fill(...)`.
 - Attaches model context (`hist_p`, `vol_p`, thresholds, etc.) by joining against `limit_orders` via `order_id`.
+- Logs Kalshi/Gemini reconciliation errors (Python logging + optional `print`) instead of swallowing them silently.
 
 ---
 
@@ -360,6 +363,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `_dte_adjusted_empirical_weight` | compare_historical | `(base_w, dte_days, reference_days=1.0) -> float` | Linearly decays empirical blend weight toward 0 when DTE < reference_days; short-dated contracts rely more on the volatility model. |
 | `expire_unfilled_orders` | storage | `(ticker, platform, config) -> int` | Mark still-placed limit orders as `expired_unfilled` when market resolves. |
 | `_fmt_price` | compare_historical | `(v: float) -> str` | Formats price/threshold with appropriate decimals: $81,250 for large values, $1.24 for small, $0.0034 for tiny. Used in strike display, distance, and reason strings. |
+| `_compute_rsi` | compare_historical | `(closes, period=14) -> float \| None` | Wilder RSI on underlying asset closes; returns 0–100 or None if insufficient data. |
+| `_rsi_dip_adjustment` | compare_historical | `(base_dip, rsi) -> float` | Modulates limit dip depth based on RSI: oversold (RSI<30) tightens 40%, overbought (RSI>70) widens 40%. |
 | `_build_signal_features` | compare_historical | `(emp_p, vol_p, market_yes, threshold, current_price, dte_days, spread_bps, no_bid) -> _SignalFeatures` | Builds normalized model features for signal scoring. |
 | `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
 | `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |

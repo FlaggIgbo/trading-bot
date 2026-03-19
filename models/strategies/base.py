@@ -58,6 +58,7 @@ class BaseStrategy(ABC):
         spread_bps: float | None,
         no_bid: float | None,
         macro_24h_ret: float = 0.0,
+        rsi_14: float | None = None,
     ) -> dict[str, float]:
         """Build normalized signal features for scoring."""
         raise NotImplementedError
