@@ -1960,6 +1960,7 @@ def _maybe_add_reentry_order(
         "yf_ticker": yf_ticker,
         "threshold": threshold,
         "direction": direction,
+        "dte": dte_days,
         "re_entry": True,
     }
     if extra:
@@ -2074,7 +2075,7 @@ def _format_recommendation_reason(
     """Human-readable explanation for BUY YES / BUY NO / SKIP."""
     if rec == REC_BUY_YES:
         if violates_no_above:
-            return f"Price ${current_price:,.0f} above strike → favor YES (edge {edge_pct:.1%} vs market {market_yes:.1%})"
+            return f"Price {_fmt_price(current_price)} above strike → favor YES (edge {edge_pct:.1%} vs market {market_yes:.1%})"
         return f"Model P(YES)={hist_p:.1%} > market {market_yes:.1%} + min_edge → underpriced by {edge_pct:.1%}"
     if rec == REC_BUY_NO:
         p_no = 1 - hist_p
@@ -2091,7 +2092,7 @@ def _format_recommendation_reason(
     if direction == "above" and max_buy_yes_strike_above_pct > 0:
         if threshold > current_price * (1 + max_buy_yes_strike_above_pct):
             vol_str = f"{vol_p:.1%}" if vol_p is not None else "n/a"
-            parts.append(f"strike ${threshold:,.0f} >{max_buy_yes_strike_above_pct:.0%} above ${current_price:,.0f} (vol {vol_str} < 95%)")
+            parts.append(f"strike {_fmt_price(threshold)} >{max_buy_yes_strike_above_pct:.0%} above {_fmt_price(current_price)} (vol {vol_str} < 95%)")
     no_price = 1 - market_yes
     if no_price < min_no_price:
         parts.append(f"market NO {no_price:.1%} < {min_no_price:.0%} min")
@@ -2143,27 +2144,37 @@ def _fmt_dte(dte_days: float | None) -> str:
     return f"{dte_days:.1f} days"
 
 
+def _fmt_price(v: float) -> str:
+    """Format a price/threshold with appropriate decimals: $81,250 vs $1.24."""
+    if v >= 100:
+        return f"${v:,.0f}"
+    if v >= 1:
+        return f"${v:,.2f}"
+    return f"${v:,.4f}"
+
+
 def _fmt_distance(current_price: float, threshold: float, direction: str) -> str:
     """Human-readable distance between current price and the threshold."""
     if current_price <= 0 or threshold <= 0:
         return ""
     diff = threshold - current_price
     pct = abs(diff / current_price) * 100
+    d = _fmt_price(abs(diff)) if abs(diff) >= 0.005 else "$0.00"
     if direction == "above":
         if diff > 0:
-            return f"${abs(diff):,.0f} below strike ({pct:.2f}% gap to cover)"
-        return f"${abs(diff):,.0f} above strike (already in-the-money)"
+            return f"{d} below strike ({pct:.2f}% gap to cover)"
+        return f"{d} above strike (already in-the-money)"
     else:
         if diff < 0:
-            return f"${abs(diff):,.0f} above strike ({pct:.2f}% gap to cover)"
-        return f"${abs(diff):,.0f} below strike (already in-the-money)"
+            return f"{d} above strike ({pct:.2f}% gap to cover)"
+        return f"{d} below strike (already in-the-money)"
 
 
 def _fmt_rec_plain(rec: str, side: str | None, direction: str, threshold: float,
                    current_price: float, dte_days: float | None) -> str:
     """One-line plain-English explanation of a recommendation."""
     dte_str = _fmt_dte(dte_days)
-    thresh = f"${threshold:,.0f}"
+    thresh = _fmt_price(threshold)
     if rec == REC_BUY_YES and direction == "above":
         return f"Betting the price WILL be above {thresh} (resolves in {dte_str})"
     if rec == REC_BUY_YES and direction == "below":
@@ -2194,7 +2205,7 @@ def _format_reason(
     """Build human-readable reasoning for the recommendation."""
     if rec == REC_BUY_YES:
         if violates_rule:
-            return f"Price ${current_price:,.0f} above strike ${threshold:,.0f} → favor YES (edge {hist_p - market_yes:.1%})"
+            return f"Price {_fmt_price(current_price)} above strike {_fmt_price(threshold)} → favor YES (edge {hist_p - market_yes:.1%})"
         return f"Model P(YES) {hist_p:.1%} > market {market_yes:.1%} by {hist_p - market_yes:.1%} (min {min_edge:.0%})"
     if rec == REC_BUY_NO:
         p_no = 1 - hist_p
@@ -2217,7 +2228,7 @@ def _format_reason(
     ):
         vol_conf = f"{vol_p:.1%}" if vol_p is not None else "N/A"
         parts.append(
-            f"strike ${threshold:,.0f} >{max_buy_yes_strike_above_pct:.0%} above current ${current_price:,.0f} "
+            f"strike {_fmt_price(threshold)} >{max_buy_yes_strike_above_pct:.0%} above current {_fmt_price(current_price)} "
             f"(vol model {vol_conf} < 95% required)"
         )
     if violates_rule and hist_p < market_yes + min_edge:
@@ -3078,6 +3089,7 @@ def _maybe_add_two_sided_quotes(
                 "yf_ticker": c["yf_ticker"],
                 "threshold": float(c["threshold"]),
                 "direction": c["direction"],
+                "dte": c.get("dte"),
                 "paired_quote": True,
             }
             if c.get("gemini_evt") is not None:
@@ -4079,7 +4091,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n    {'·' * 60}")
             print(f"    {ticker}  [Kalshi]")
             print(f"    {(m.get('title') or title)[:70]}")
-            print(f"    ├─ Strike:       ${threshold:,.0f} ({direction})")
+            print(f"    ├─ Strike:       {_fmt_price(threshold)} (pays if {direction})")
             print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str}")
             print(f"    ├─ Resolves in:  {_dte_str}")
             if vol_p is not None:
@@ -4120,7 +4132,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if getattr(args, "verbose", False):
                 mn, mx = min(closes), max(closes)
                 n = sum(1 for c in closes if (c > threshold if direction == "above" else c < threshold))
-                print(f"       (closes ${mn:,.0f}–${mx:,.0f}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
+                print(f"       (closes {_fmt_price(mn)}–{_fmt_price(mx)}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
             try:
                 from storage import record_market_snapshot
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -4529,7 +4541,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"\n    {'·' * 60}")
                 print(f"    {evt.get('ticker','?')}  [Gemini]")
                 print(f"    {title[:70]}")
-                print(f"    ├─ Strike:       ${threshold_g:,.0f} ({direction_g})")
+                print(f"    ├─ Strike:       {_fmt_price(threshold_g)} (pays if {direction_g})")
                 print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str_g}")
                 print(f"    ├─ Resolves in:  {_dte_str_g}")
                 if vol_p_gem is not None:
@@ -5500,10 +5512,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             _thresh = o.get("threshold")
             _dir = o.get("direction", "")
             _dte_o = o.get("dte")
+            _side = o.get("side", "")
+            _bet_dir = _dir if _side == "yes" else ("below" if _dir == "above" else "above") if _dir else ""
             print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['ticker']}")
             print(f"         {(o.get('title') or '')[:65]}")
-            if _thresh and _dir:
-                print(f"         Bet: price {'above' if _dir == 'above' else 'below'} ${_thresh:,.0f}  |  Resolves in: {_fmt_dte(_dte_o)}")
+            if _thresh and _bet_dir:
+                print(f"         Bet: price {_bet_dir} {_fmt_price(_thresh)}  |  Resolves in: {_fmt_dte(_dte_o)}")
             print(f"         Side: {o['rec'].replace('BUY_', '')}  |  Count: {_count}  |  Limit: ${o['price']:.2f}  |  Total cost: ${_cost:.2f}")
             print(f"         Edge: {o['edge']:.1%}  |  P(win): {_p_win:.1%}  |  EV/contract: {'+' if _ev >= 0 else ''}${_ev:.2f}")
             if use_llm:
@@ -5798,10 +5812,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             _thresh = o.get("threshold")
             _dir = o.get("direction", "")
             _dte_prev = o.get("dte")
+            _side_prev = o.get("side", "")
+            _bet_dir_prev = _dir if _side_prev == "yes" else ("below" if _dir == "above" else "above") if _dir else ""
             print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['ticker']}")
             print(f"         {(o.get('title') or '')[:65]}")
-            if _thresh and _dir:
-                print(f"         Bet: price {'above' if _dir == 'above' else 'below'} ${_thresh:,.0f}  |  Resolves in: {_fmt_dte(_dte_prev)}")
+            if _thresh and _bet_dir_prev:
+                print(f"         Bet: price {_bet_dir_prev} {_fmt_price(_thresh)}  |  Resolves in: {_fmt_dte(_dte_prev)}")
             print(f"         Side: {o['rec'].replace('BUY_', '')}  |  Count: {_count}  |  Limit: ${o['price']:.2f}  |  Total cost: ${_cost:.2f}")
             print(f"         Edge: {o['edge']:.1%}  |  P(win): {_p_win_prev:.1%}")
             if o["platform"] == PLATFORM_KALSHI:

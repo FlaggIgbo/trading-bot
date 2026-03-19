@@ -347,6 +347,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `_dte_adjusted_strike_pct` | compare_historical | `(base_pct, dte_days, reference_days=1.0) -> float` | Scales strike-distance percentage by `sqrt(DTE/reference)` so short-dated contracts get tighter limits. |
 | `_dte_adjusted_empirical_weight` | compare_historical | `(base_w, dte_days, reference_days=1.0) -> float` | Linearly decays empirical blend weight toward 0 when DTE < reference_days; short-dated contracts rely more on the volatility model. |
 | `expire_unfilled_orders` | storage | `(ticker, platform, config) -> int` | Mark still-placed limit orders as `expired_unfilled` when market resolves. |
+| `_fmt_price` | compare_historical | `(v: float) -> str` | Formats price/threshold with appropriate decimals: $81,250 for large values, $1.24 for small, $0.0034 for tiny. Used in strike display, distance, and reason strings. |
 | `_build_signal_features` | compare_historical | `(emp_p, vol_p, market_yes, threshold, current_price, dte_days, spread_bps, no_bid) -> _SignalFeatures` | Builds normalized model features for signal scoring. |
 | `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
 | `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |
