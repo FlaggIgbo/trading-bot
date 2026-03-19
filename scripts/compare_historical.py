@@ -5734,9 +5734,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  --- SELLS ({len(pending_sells)}) ---")
         for i, s in enumerate(pending_sells, 1):
             _sell_total = s['count'] * s['price']
+            _entry = latest_entry_by_key.get((s['platform'], s['ticker'], s['side']))
+            _pnl_str = ""
+            if _entry:
+                _pnl = (s['price'] - _entry) * s['count']
+                _pnl_str = f"  |  Est. P&L: {'+' if _pnl >= 0 else ''}${_pnl:.2f} (entry ${_entry:.2f})"
             print(f"\n  SELL {i}. [{s['platform'].upper()}] {s['ticker']}")
             print(f"         {s.get('title', '')[:65]}")
-            print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Proceeds: ~${_sell_total:.2f}")
+            print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Gross: ~${_sell_total:.2f}{_pnl_str}")
             print(f"         Trigger: {s.get('rec', 'unknown')}")
             if use_llm:
                 analysis = analyze_single_trade(s, "sell")
@@ -6028,9 +6033,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  --- SELLS ({len(pending_sells)}) — executed first so balance reflects proceeds ---")
         for i, s in enumerate(pending_sells, 1):
             _sell_total = s['count'] * s['price']
+            _entry = latest_entry_by_key.get((s['platform'], s['ticker'], s['side']))
+            _pnl_str = ""
+            if _entry:
+                _pnl = (s['price'] - _entry) * s['count']
+                _pnl_str = f"  |  Est. P&L: {'+' if _pnl >= 0 else ''}${_pnl:.2f} (entry ${_entry:.2f})"
             print(f"\n  SELL {i}. [{s['platform'].upper()}] {s['ticker']}")
             print(f"         {s['title']}")
-            print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Proceeds: ~${_sell_total:.2f}")
+            print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Gross: ~${_sell_total:.2f}{_pnl_str}")
             print(f"         Trigger: {s['rec']}")
             if s["platform"] == PLATFORM_KALSHI:
                 payload = {
