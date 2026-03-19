@@ -358,10 +358,10 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `_score_signal_model` | compare_historical | `(features, sp) -> float` | Weighted logistic scorer over signals (configurable in `signal_model_weights`). |
 | `_fit_probability_calibrator` | compare_historical | `(sp, cfg) -> callable \| None` | Fits isotonic/Platt calibration on resolved predictions, then maps raw model probabilities to calibrated values. |
 | `apply_anti_hallucination_pipeline` | anti_hallucination | `(model_p, market_p, closes, threshold, direction, current_price, momentum_ret, cfg) -> float` | Runs all probability correction layers: EWMA prob blend, vol Z-score dampening, Bayesian update. Returns corrected P(YES). |
-| `bayesian_update` | anti_hallucination | `(model_p, market_p, market_strength) -> float` | Bayesian update treating market as Beta prior. Strength=2 with model=86%/market=8% yields ~34%. |
-| `ewma_probability` | anti_hallucination | `(closes, threshold, direction, span, min_samples) -> float \| None` | Exponentially weighted probability (14-day span). Recent observations dominate. |
+| `bayesian_update` | anti_hallucination | `(model_p, market_p, market_strength) -> float` | Bayesian update treating market as Beta prior. Strength=1.5 with model=86%/market=8% yields ~40%. |
+| `ewma_probability` | anti_hallucination | `(closes, threshold, direction, span, min_samples) -> float \| None` | Exponentially weighted probability (14-day span). Blends with model at `ewma_prob_blend_weight` (default 0.30). |
 | `volatility_zscore` | anti_hallucination | `(closes, short_window, long_window) -> float \| None` | Z-score of short-window vol vs long-window baseline. Z>2 signals regime break. |
-| `adaptive_min_edge` | anti_hallucination | `(base_edge, market_yes, current_price, threshold, direction, momentum_ret, ...) -> float` | Dynamic edge: 2.5× for cheap contracts, scales with strike distance, 2× when trend opposes trade. |
+| `adaptive_min_edge` | anti_hallucination | `(base_edge, market_yes, current_price, threshold, direction, momentum_ret, ...) -> float` | Dynamic edge: 1.8× for cheap contracts, scales with strike distance (×1.2), 1.5× when trend opposes trade. |
 | `regime_filter` | anti_hallucination | `(closes, current_price, direction, rec, ema_period) -> bool` | True if BUY YES should be blocked (price below EMA on "above" contract or vice versa). |
 | `compute_obi` | alpha_engine | `(bid_size, ask_size, min_total_size) -> float \| None` | Order Book Imbalance: (V_bid − V_ask) / (V_bid + V_ask). Positive = buy pressure. |
 | `obi_edge_adjustment` | alpha_engine | `(obi, rec, strong_threshold, max_bonus) -> float` | Edge adjustment from OBI: negative = bonus (trade-aligned), positive = penalty. |

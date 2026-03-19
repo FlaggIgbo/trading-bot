@@ -30,6 +30,7 @@ class AntiHallucinationConfig:
     ewma_prob_enabled: bool = True
     ewma_prob_span: int = 14
     ewma_prob_min_samples: int = 10
+    ewma_prob_blend_weight: float = 0.30
 
     # --- Volatility Z-score gate ---
     vol_zscore_enabled: bool = True
@@ -42,8 +43,9 @@ class AntiHallucinationConfig:
     adaptive_edge_enabled: bool = True
     adaptive_edge_cheap_threshold: float = 0.15
     adaptive_edge_expensive_threshold: float = 0.85
-    adaptive_edge_otm_base_mult: float = 2.5
-    adaptive_edge_trend_opposed_mult: float = 2.0
+    adaptive_edge_otm_base_mult: float = 1.8
+    adaptive_edge_trend_opposed_mult: float = 1.5
+    adaptive_edge_strike_dist_mult: float = 1.2
 
     # --- Regime filter (EMA gate) ---
     regime_filter_enabled: bool = True
@@ -59,6 +61,7 @@ def load_anti_hallucination_config(strategy: dict) -> AntiHallucinationConfig:
         ewma_prob_enabled=bool(ah.get("ewma_prob_enabled", True)),
         ewma_prob_span=int(ah.get("ewma_prob_span", 14)),
         ewma_prob_min_samples=int(ah.get("ewma_prob_min_samples", 10)),
+        ewma_prob_blend_weight=float(ah.get("ewma_prob_blend_weight", 0.30)),
         vol_zscore_enabled=bool(ah.get("vol_zscore_enabled", True)),
         vol_zscore_short_window=int(ah.get("vol_zscore_short_window", 24)),
         vol_zscore_long_window=int(ah.get("vol_zscore_long_window", 168)),
@@ -67,8 +70,9 @@ def load_anti_hallucination_config(strategy: dict) -> AntiHallucinationConfig:
         adaptive_edge_enabled=bool(ah.get("adaptive_edge_enabled", True)),
         adaptive_edge_cheap_threshold=float(ah.get("adaptive_edge_cheap_threshold", 0.15)),
         adaptive_edge_expensive_threshold=float(ah.get("adaptive_edge_expensive_threshold", 0.85)),
-        adaptive_edge_otm_base_mult=float(ah.get("adaptive_edge_otm_base_mult", 2.5)),
-        adaptive_edge_trend_opposed_mult=float(ah.get("adaptive_edge_trend_opposed_mult", 2.0)),
+        adaptive_edge_otm_base_mult=float(ah.get("adaptive_edge_otm_base_mult", 1.8)),
+        adaptive_edge_trend_opposed_mult=float(ah.get("adaptive_edge_trend_opposed_mult", 1.5)),
+        adaptive_edge_strike_dist_mult=float(ah.get("adaptive_edge_strike_dist_mult", 1.2)),
         regime_filter_enabled=bool(ah.get("regime_filter_enabled", True)),
         regime_ema_period=int(ah.get("regime_ema_period", 20)),
         regime_require_alignment=bool(ah.get("regime_require_alignment", True)),
@@ -230,21 +234,22 @@ def adaptive_min_edge(
     momentum_ret: float = 0.0,
     cheap_threshold: float = 0.15,
     expensive_threshold: float = 0.85,
-    otm_base_mult: float = 2.5,
-    trend_opposed_mult: float = 2.0,
+    otm_base_mult: float = 1.8,
+    trend_opposed_mult: float = 1.5,
+    strike_dist_mult: float = 1.2,
 ) -> float:
     """
     Dynamic edge requirement that scales with contract price and trend.
 
-    For cheap contracts (< 15¢): require 2.5x base edge because the
-    tail risk of a vol-spike sweep is enormous.
+    For cheap contracts (< 15¢): require extra edge (scaled by
+    otm_base_mult) because tail risk of a vol-spike sweep is high.
 
     For expensive contracts (> 85¢): also require more edge because
     you risk the full price for a small payout.
 
     When the spot price is trending AWAY from your strike (buying YES
-    on "above" while price is falling), double the edge to prevent
-    catching falling knives.
+    on "above" while price is falling), increase edge by
+    trend_opposed_mult to avoid catching falling knives.
     """
     edge = float(base_edge)
     market_yes = max(0.01, min(0.99, float(market_yes)))
@@ -265,7 +270,7 @@ def adaptive_min_edge(
     if current_price > 0 and threshold > 0:
         strike_dist = abs(current_price - threshold) / current_price
         if strike_dist > 0.05:
-            edge *= 1.0 + strike_dist * 2.0
+            edge *= 1.0 + strike_dist * strike_dist_mult
 
     if trend_opposed:
         edge *= trend_opposed_mult
@@ -348,7 +353,8 @@ def apply_anti_hallucination_pipeline(
             min_samples=cfg.ewma_prob_min_samples,
         )
         if ewma_p is not None:
-            p = 0.5 * p + 0.5 * ewma_p
+            w = cfg.ewma_prob_blend_weight
+            p = (1 - w) * p + w * ewma_p
 
     if cfg.vol_zscore_enabled:
         z = volatility_zscore(

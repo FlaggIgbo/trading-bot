@@ -144,6 +144,15 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 
 ### Recent fixes (2026-03-19)
 
+- **Anti-hallucination pipeline tuning:** Reduced aggressive dampening that was causing the pipeline to SKIP most ITM contracts despite clear edge. Key changes:
+  - `min_edge` reduced from 0.20 to **0.15** — AH layers already provide overconfidence protection.
+  - EWMA blend weight made configurable (`ewma_prob_blend_weight`, default 0.30, was hardcoded at 0.50) — model now retains 70% of its estimate instead of 50%.
+  - `bayesian_market_strength` reduced from 2.0 to **1.5** — less aggressive pull toward market price for ITM contracts.
+  - `vol_zscore_tail_mult` reduced from 0.5 to **0.3** — less aggressive pull toward 0.5 during vol spikes.
+  - `adaptive_edge_otm_base_mult` reduced from 2.5 to **1.8** — less punishing for cheap/expensive contracts.
+  - `adaptive_edge_trend_opposed_mult` reduced from 2.0 to **1.5** — less punishing for trend-opposed trades.
+  - Strike distance multiplier made configurable (`adaptive_edge_strike_dist_mult`, default 1.2, was hardcoded at 2.0) — reduces compounding with OTM mult.
+  - `uncertainty_edge_mult` reduced from 0.8 to **0.5** — AH layers already dampen overconfidence.
 - **OBI edge adjustment (Gemini):** Fixed `UnboundLocalError` on `market_for_book_q` in the Gemini OBI (Order Book Imbalance) code path within `compare_historical.py`. The variable was referenced before assignment; now correctly resolved from the local contract/event context.
 - **yfinance FutureWarning:** Fixed deprecation warning (`Calling float on a single element Series`) in `yfinance_client.py` intraday aggregation by using `iloc[0]` when the row value is a Series.
 - **yfinance_client.py cleanup:** Consolidated 19 duplicate `get_aggs_as_of` function definitions into a single implementation that accepts `datetime | str | None` for `end_date`, with CoinGecko fallback for crypto tickers.
@@ -566,10 +575,10 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
 - **min_no_price** (current config 0.02): Skip BUY NO when the market prices NO below this floor (i.e., YES near certainty). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
 - **Anti-hallucination pipeline** (`models/anti_hallucination.py`): Five composable layers that run after model P(YES) is computed and before the recommendation engine, preventing the model from assigning 80%+ probability to contracts the market prices at 5%:
-  1. **Bayesian update**: treats the market price as a Beta prior and the model prediction as evidence. When model says 86% and market says 8%, the posterior lands at ~34% instead of blindly trusting 86%.
-  2. **EWMA probability**: exponentially weights recent price data (14-day span) so yesterday's observations dominate over stale history.
-  3. **Volatility Z-score gate**: when short-window vol exceeds 2σ above baseline, pulls probability toward 0.50 (fattens tails, drops overconfident 85% to ~60%).
-  4. **Adaptive edge**: requires 2.5× base edge for cheap contracts (<15¢), scales with strike distance, and doubles when the trend opposes the trade direction.
+  1. **Bayesian update**: treats the market price as a Beta prior and the model prediction as evidence (`bayesian_market_strength: 1.5`). When model says 86% and market says 8%, the posterior lands at ~40% instead of blindly trusting 86%.
+  2. **EWMA probability**: exponentially weights recent price data (14-day span) and blends with the model at a configurable weight (`ewma_prob_blend_weight: 0.30`, i.e. 30% EWMA / 70% model).
+  3. **Volatility Z-score gate**: when short-window vol exceeds 2σ above baseline, pulls probability toward 0.50 (`vol_zscore_tail_mult: 0.3`).
+  4. **Adaptive edge**: requires 1.8× base edge for cheap contracts (<15¢), scales with strike distance (`strike_dist_mult: 1.2`), and increases by 1.5× when the trend opposes the trade direction.
   5. **Regime filter (EMA gate)**: blocks BUY YES on "above" contracts when price is below the 20-period EMA (and vice versa for "below"). BUY NO is not blocked (it's trend-aligned).
   Config: `strategy.anti_hallucination.*` in `config.yaml`. Each layer can be independently toggled.
 - **Alpha engine** (`models/alpha_engine.py`): Four composable modules applied after anti-hallucination and before order placement:
@@ -578,7 +587,7 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
   3. **Volatility-adjusted Kelly**: scales the Kelly fraction inversely with realized volatility (`f_adjusted = base × baseline_vol / current_vol`). In high-vol regimes, position size automatically shrinks (floor at 25% of base) to preserve capital.
   4. **Lead-lag signal**: precomputes short-term momentum of correlated leader assets (e.g. `^GSPC`→`KXINXU`). When a leader moves sharply, edge is adjusted ±2% for follower contracts.
   Config: `strategy.alpha_engine.*` in `config.yaml`. Each module can be independently toggled.
-- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config keeps a conservative buffer while allowing more throughput (`min_edge: 0.20`).
+- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config uses `min_edge: 0.15` — the AH pipeline layers provide additional overconfidence protection.
 
 ### Quick snapshot: `compare_prices.py`
 

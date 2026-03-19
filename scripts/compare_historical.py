@@ -4006,6 +4006,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
                     otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
                     trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
+                    strike_dist_mult=sp.ah_cfg.adaptive_edge_strike_dist_mult,
                 )
             # --- Alpha engine: toxic flow penalty ---
             if sp.ae_cfg.markout_enabled and get_markout_history:
@@ -4548,6 +4549,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
                         otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
                         trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
+                        strike_dist_mult=sp.ah_cfg.adaptive_edge_strike_dist_mult,
                     )
                 # --- Alpha engine: toxic flow penalty (Gemini) ---
                 if sp.ae_cfg.markout_enabled and get_markout_history:

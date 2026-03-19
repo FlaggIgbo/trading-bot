@@ -27,7 +27,7 @@ yfinance_tickers:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
-  min_edge: 0.20 # More active than 0.22 while still preserving a conservative fee/slippage buffer
+  min_edge: 0.15 # Reduced from 0.20; AH pipeline corrections make stacking less aggressive
   # Easy win: when model and market both say ~90%+ (aligned), use relaxed edge — buy if profitable after fees
   enable_easy_win: true # Buy when both agree on high probability and we profit after fees
   min_edge_easy_win: 0.02 # Require at least 2¢ net edge for easy-win fills to better absorb slippage
@@ -124,7 +124,7 @@ strategy:
   empirical_recent_weight: 3.0 # Weight of recent samples relative to older data
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
-  uncertainty_edge_mult: 0.8 # Larger uncertainty penalty to reduce overconfident bets
+  uncertainty_edge_mult: 0.5 # Reduced from 0.8; AH pipeline layers already dampen overconfidence
   stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
   weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
@@ -190,20 +190,22 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 2.0 # Pseudo-sample count for market prior (higher = more trust in market)
+    bayesian_market_strength: 1.5 # Reduced from 2.0; less aggressive pull toward market price for ITM contracts
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
     ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
+    ewma_prob_blend_weight: 0.30 # EWMA blend weight (was hardcoded 0.50); lower = more trust in model vs EWMA
     vol_zscore_enabled: true # Vol Z-score gate: dampen confidence during vol spikes
     vol_zscore_short_window: 24 # Short vol window (bars) for current regime
     vol_zscore_long_window: 168 # Long vol window (bars) for baseline
     vol_zscore_threshold: 2.0 # Z-score above which tails are fattened
-    vol_zscore_tail_mult: 0.5 # How aggressively to pull toward 0.5 (higher = more dampening)
+    vol_zscore_tail_mult: 0.3 # Reduced from 0.5; less aggressive pull toward 0.5 during vol spikes
     adaptive_edge_enabled: true # Require larger edge for cheap/expensive contracts
     adaptive_edge_cheap_threshold: 0.15 # Contracts below this YES price need extra edge
     adaptive_edge_expensive_threshold: 0.85 # Contracts above this YES price need extra edge
-    adaptive_edge_otm_base_mult: 2.5 # Edge multiplier at extreme prices
-    adaptive_edge_trend_opposed_mult: 2.0 # Edge multiplier when trend opposes trade direction
+    adaptive_edge_otm_base_mult: 1.8 # Reduced from 2.5; less punishing for cheap/expensive contracts
+    adaptive_edge_trend_opposed_mult: 1.5 # Reduced from 2.0; less punishing for trend-opposed trades
+    adaptive_edge_strike_dist_mult: 1.2 # Strike distance scaling (was hardcoded 2.0); lower = less compounding with OTM mult
     regime_filter_enabled: true # EMA regime gate: block trend-opposed BUY YES
     regime_ema_period: 20 # EMA lookback period for trend detection
     regime_require_alignment: true # Require trend alignment for BUY YES
