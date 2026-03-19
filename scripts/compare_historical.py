@@ -66,6 +66,13 @@ from gemini_client import (
 from kalshi_client import KalshiClient
 from ollama_analysis import analyze_single_trade, capture_and_analyze
 from strategies import BaseStrategy, DefaultThresholdStrategy, VolRegimeStrategy
+from models.anti_hallucination import (
+    AntiHallucinationConfig,
+    adaptive_min_edge,
+    apply_anti_hallucination_pipeline,
+    load_anti_hallucination_config,
+    regime_filter,
+)
 
 try:
     from storage import (
@@ -269,6 +276,7 @@ class _StrategyParams:
     mc_enabled: bool
     mc_paths: int
     mc_blend_weight: float
+    ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -407,6 +415,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         mc_enabled=bool(strategy.get("mc_enabled", True)),
         mc_paths=max(100, int(strategy.get("mc_paths", 10000))),
         mc_blend_weight=max(0.0, min(1.0, float(strategy.get("mc_blend_weight", 0.3)))),
+        ah_cfg=load_anti_hallucination_config(strategy),
     )
 
 
@@ -3933,6 +3942,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     features=feats,
                     signal_model_weights=sp.signal_model_weights,
                 )
+            # --- Anti-hallucination pipeline: correct model P before recommendation ---
+            hist_p_raw = hist_p
+            hist_p = apply_anti_hallucination_pipeline(
+                model_p=hist_p,
+                market_p=yes_bid,
+                closes=closes,
+                threshold=threshold,
+                direction=direction,
+                current_price=current_price,
+                momentum_ret=momentum_ret,
+                cfg=sp.ah_cfg,
+            )
             effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
             emp_n = min(sp.empirical_recent_days, len(closes_for_emp)) if sp.empirical_use_rolling_window else len(closes_for_emp)
             ci_half = _empirical_ci_halfwidth(emp, emp_n)
@@ -3940,6 +3961,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             effective_min *= edge_regime_mult
             if vol_spike_active:
                 effective_min *= max(1.0, sp.vol_spike_edge_multiplier)
+            # --- Adaptive edge: scale required edge with contract price and trend ---
+            if sp.ah_cfg.adaptive_edge_enabled:
+                effective_min = adaptive_min_edge(
+                    effective_min,
+                    yes_bid,
+                    current_price=current_price,
+                    threshold=threshold,
+                    direction=direction,
+                    momentum_ret=momentum_ret,
+                    cheap_threshold=sp.ah_cfg.adaptive_edge_cheap_threshold,
+                    expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
+                    otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
+                    trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
+                )
             effective_min_yes = effective_min + yes_parity_penalty
             effective_min_no = effective_min + no_parity_penalty
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
@@ -4044,6 +4079,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 rec = REC_SKIP
             if rec == REC_BUY_YES and momentum_crash:
                 rec = REC_SKIP
+            # --- Regime filter: block BUY YES when EMA trend opposes trade direction ---
+            if sp.ah_cfg.regime_filter_enabled and regime_filter(
+                closes, current_price, direction, rec, ema_period=sp.ah_cfg.regime_ema_period,
+            ):
+                rec = REC_SKIP
             if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
                 rec = REC_SKIP
             if rec in (REC_BUY_YES, REC_BUY_NO):
@@ -4105,7 +4145,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 print(f"    ├─ Empirical P:  {emp_kalshi:.1%}  (historical frequency)")
                 print(f"    ├─ Volatility P: {vol_p:.1%}  (model based on current price + DTE)")
-                print(f"    ├─ Blended P:    {hist_p:.1%}  (final model probability)")
+                ah_delta = abs(hist_p - hist_p_raw)
+                ah_tag = f"  (AH: {hist_p_raw:.1%}→{hist_p:.1%})" if ah_delta >= 0.02 else ""
+                print(f"    ├─ Blended P:    {hist_p:.1%}  (final model probability){ah_tag}")
             else:
                 print(f"    ├─ Model P(YES): {hist_p:.1%}")
             print(f"    ├─ Market YES:   {yes_bid:.1%}  (what the market is pricing)")
@@ -4380,12 +4422,38 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         features=feats_g,
                         signal_model_weights=sp.signal_model_weights,
                     )
+                # --- Anti-hallucination pipeline (Gemini) ---
+                hist_p_gem_raw = hist_p_gem
+                hist_p_gem = apply_anti_hallucination_pipeline(
+                    model_p=hist_p_gem,
+                    market_p=impl,
+                    closes=closes,
+                    threshold=threshold_g,
+                    direction=direction_g,
+                    current_price=current_price,
+                    momentum_ret=momentum_ret,
+                    cfg=sp.ah_cfg,
+                )
                 effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                 emp_n_g = min(sp.empirical_recent_days, len(closes_for_emp_g)) if sp.empirical_use_rolling_window else len(closes_for_emp_g)
                 effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, emp_n_g)
                 effective_min_gem *= edge_regime_mult
                 if vol_spike_active:
                     effective_min_gem *= max(1.0, sp.vol_spike_edge_multiplier)
+                # --- Adaptive edge (Gemini) ---
+                if sp.ah_cfg.adaptive_edge_enabled:
+                    effective_min_gem = adaptive_min_edge(
+                        effective_min_gem,
+                        impl,
+                        current_price=current_price,
+                        threshold=threshold_g,
+                        direction=direction_g,
+                        momentum_ret=momentum_ret,
+                        cheap_threshold=sp.ah_cfg.adaptive_edge_cheap_threshold,
+                        expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
+                        otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
+                        trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
+                    )
                 effective_min_yes_g = effective_min_gem + yes_parity_penalty
                 effective_min_no_g = effective_min_gem + no_parity_penalty
                 # For non-standard intraday: use relaxed threshold when volatility model available
@@ -4491,6 +4559,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(rec, direction_g, hist_p_gem, impl, min_edge, calibration, sp, maker_fee_rate_gem):
                     rec = REC_SKIP
                 if rec == REC_BUY_YES and momentum_crash:
+                    rec = REC_SKIP
+                # --- Regime filter (Gemini): block BUY YES when EMA trend opposes direction ---
+                if sp.ah_cfg.regime_filter_enabled and regime_filter(
+                    closes, current_price, direction_g, rec, ema_period=sp.ah_cfg.regime_ema_period,
+                ):
                     rec = REC_SKIP
                 if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
                     rec = REC_SKIP
@@ -4853,6 +4926,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 hist_p = w_emp_pos * emp_pos + (1 - w_emp_pos) * vol_p
                                             else:
                                                 hist_p = max(emp_pos, vol_p)
+                                    momentum_ret_pos = ((current_price_pos - last_close_pos) / last_close_pos) if last_close_pos > 0 else 0.0
+                                    hist_p = apply_anti_hallucination_pipeline(
+                                        model_p=hist_p,
+                                        market_p=yes_bid,
+                                        closes=closes,
+                                        threshold=threshold,
+                                        direction=direction,
+                                        current_price=current_price_pos,
+                                        momentum_ret=momentum_ret_pos,
+                                        cfg=sp.ah_cfg,
+                                    )
                                     maker_fee_pos = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
                                     eff_pos_yes = eff_pos + yes_parity_penalty

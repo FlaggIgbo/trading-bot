@@ -187,6 +187,26 @@ strategy:
     dte_norm: 0.1
     spread_norm: -0.5
     liquidity_consistency: 0.3
+  # Anti-hallucination layers: reduce model overconfidence vs market reality
+  anti_hallucination:
+    bayesian_enabled: true # Bayesian update: blend model P with market price as prior
+    bayesian_market_strength: 2.0 # Pseudo-sample count for market prior (higher = more trust in market)
+    ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
+    ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
+    ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
+    vol_zscore_enabled: true # Vol Z-score gate: dampen confidence during vol spikes
+    vol_zscore_short_window: 24 # Short vol window (bars) for current regime
+    vol_zscore_long_window: 168 # Long vol window (bars) for baseline
+    vol_zscore_threshold: 2.0 # Z-score above which tails are fattened
+    vol_zscore_tail_mult: 0.5 # How aggressively to pull toward 0.5 (higher = more dampening)
+    adaptive_edge_enabled: true # Require larger edge for cheap/expensive contracts
+    adaptive_edge_cheap_threshold: 0.15 # Contracts below this YES price need extra edge
+    adaptive_edge_expensive_threshold: 0.85 # Contracts above this YES price need extra edge
+    adaptive_edge_otm_base_mult: 2.5 # Edge multiplier at extreme prices
+    adaptive_edge_trend_opposed_mult: 2.0 # Edge multiplier when trend opposes trade direction
+    regime_filter_enabled: true # EMA regime gate: block trend-opposed BUY YES
+    regime_ema_period: 20 # EMA lookback period for trend detection
+    regime_require_alignment: true # Require trend alignment for BUY YES
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # blacklist: ["KXINXU"]   # Exclude these series (optional)
   # strategy_engine options: vol_regime (default), default_threshold

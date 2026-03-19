@@ -93,6 +93,7 @@ trading-bot/
 │   └── ollama_analysis.py   #   LLM-powered trade analysis (optional)
 │
 ├── models/                  # COMPUTE LAYER — ML strategies & signal scoring
+│   ├── anti_hallucination.py #  Anti-hallucination pipeline (Bayesian, EWMA, vol Z-score, adaptive edge, regime filter)
 │   └── strategies/          #   Pluggable recommendation engines
 │       ├── base.py          #     Abstract strategy interface
 │       ├── default_threshold.py # Threshold + fee + signal model
@@ -122,7 +123,7 @@ trading-bot/
 └── .env                     # Credentials (from .env.example)
 ```
 
-**Pipeline flow:** `config.yaml` defines input signals (markets, tickers, strategy params) → `signals/` clients fetch market data → `models/strategies/` compute P(YES) and recommendations → `execution/` places orders on exchanges → `data/storage.py` persists outcomes for calibration.
+**Pipeline flow:** `config.yaml` defines input signals (markets, tickers, strategy params) → `signals/` clients fetch market data → `models/strategies/` compute P(YES) and recommendations → `models/anti_hallucination.py` corrects overconfident predictions via Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, and regime filter → `execution/` places orders on exchanges → `data/storage.py` persists outcomes for calibration.
 
 Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export from the new package locations for backward compatibility. All scripts in `scripts/` add the project root to `sys.path` so both old and new import paths work.
 
@@ -138,7 +139,7 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
 ## Contract evaluation workflow
 
@@ -556,6 +557,13 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **DTE-aware strike guard**: `max_buy_yes_strike_above_pct` and `max_buy_no_strike_above_pct` now scale with `sqrt(DTE)` via `_dte_adjusted_strike_pct()`. For a 1-day contract the full configured percentage applies; for a 45-minute contract (~0.03 days), the effective limit shrinks to ~18% of the base value. This prevents the bot from buying YES on strikes that require unrealistic short-term price moves.
 - **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
 - **min_no_price** (current config 0.02): Skip BUY NO when the market prices NO below this floor (i.e., YES near certainty). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
+- **Anti-hallucination pipeline** (`models/anti_hallucination.py`): Five composable layers that run after model P(YES) is computed and before the recommendation engine, preventing the model from assigning 80%+ probability to contracts the market prices at 5%:
+  1. **Bayesian update**: treats the market price as a Beta prior and the model prediction as evidence. When model says 86% and market says 8%, the posterior lands at ~34% instead of blindly trusting 86%.
+  2. **EWMA probability**: exponentially weights recent price data (14-day span) so yesterday's observations dominate over stale history.
+  3. **Volatility Z-score gate**: when short-window vol exceeds 2σ above baseline, pulls probability toward 0.50 (fattens tails, drops overconfident 85% to ~60%).
+  4. **Adaptive edge**: requires 2.5× base edge for cheap contracts (<15¢), scales with strike distance, and doubles when the trend opposes the trade direction.
+  5. **Regime filter (EMA gate)**: blocks BUY YES on "above" contracts when price is below the 20-period EMA (and vice versa for "below"). BUY NO is not blocked (it's trend-aligned).
+  Config: `strategy.anti_hallucination.*` in `config.yaml`. Each layer can be independently toggled.
 - **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config keeps a conservative buffer while allowing more throughput (`min_edge: 0.20`).
 
 ### Quick snapshot: `compare_prices.py`
