@@ -4563,7 +4563,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 obi_val_g = None
                 obi_adj_yes_g = obi_adj_no_g = 0.0
                 if sp.ae_cfg.obi_enabled:
-                    _book_obi_g = _extract_book_fields(market_for_book_q or {}, impl, no_price_gem_q)
+                    _market_for_obi_g = contract if isinstance(contract, dict) else evt
+                    _book_obi_g = _extract_book_fields(_market_for_obi_g or {}, impl, 1.0 - impl)
                     obi_val_g = compute_obi(
                         _book_obi_g.get("yes_bid_size"), _book_obi_g.get("yes_ask_size"),
                         min_total_size=sp.ae_cfg.obi_min_total_size,

@@ -142,6 +142,12 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), **alpha engine** (Order Book Imbalance signal, markout PnL / toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
+### Recent fixes (2026-03-19)
+
+- **OBI edge adjustment (Gemini):** Fixed `UnboundLocalError` on `market_for_book_q` in the Gemini OBI (Order Book Imbalance) code path within `compare_historical.py`. The variable was referenced before assignment; now correctly resolved from the local contract/event context.
+- **yfinance FutureWarning:** Fixed deprecation warning (`Calling float on a single element Series`) in `yfinance_client.py` intraday aggregation by using `iloc[0]` when the row value is a Series.
+- **yfinance_client.py cleanup:** Consolidated 19 duplicate `get_aggs_as_of` function definitions into a single implementation that accepts `datetime | str | None` for `end_date`, with CoinGecko fallback for crypto tickers.
+
 ## Contract evaluation workflow
 
 **Goal:** Use historical price data to estimate fair probability, then compare to Kalshi/Gemini market prices → recommend **BUY YES** / **BUY NO** / **SKIP**.

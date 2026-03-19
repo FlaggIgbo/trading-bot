@@ -43,6 +43,17 @@ Both jobs use your `.venv` Python so dependencies are available.
 | View report stdout | `tail -f /tmp/daily_performance_report.out.log` |
 | View report stderr | `tail -f /tmp/daily_performance_report.err.log` |
 
+## Picking up script changes
+
+launchd agents run the scripts from disk on each invocation, so code changes (e.g. bug fixes pushed to `origin/main`) take effect on the next scheduled run automatically — no reload needed.
+
+To force an immediate run after pulling updates:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
+launchctl kickstart -k gui/$(id -u)/com.user.daily_performance_report
+```
+
 ## Configuration
 
 - **Compare interval:** 300 seconds (5 minutes). Change `<integer>300</integer>` in `com.user.compare_historical.plist`.
