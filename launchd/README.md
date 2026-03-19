@@ -7,6 +7,8 @@ This setup includes:
 Both jobs use your `.venv` Python so dependencies are available.
 `compare_historical.py` now imports `execution/engine.py` (via backward-compat shim), runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), applies inter-arb preflight before BUY execution (`arb_inter_allow_single_leg_fallback`; repo default **false** = paired legs only), uses balance-aware inter-arb route selection, applies DTE-confidence dip scaling for far-dated contracts, runs the anti-hallucination pipeline (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, EMA regime filter), applies the alpha engine (Order Book Imbalance edge adjustment, markout/toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal) to correct model overconfidence and optimize position sizing before recommendations, uses EV-optimal dynamic sell thresholds (`_ev_sell_threshold`) for position evaluation, applies adaptive learning from recent trades (recency-weighted win rates, loss streak detection, per-series cooldowns), corrects structural YES bias via probability shrinkage and overconfidence edge penalties, places passive dip-based limit orders via the fixed `layered` mode (below bid with staggered depth on re-buys), and modulates limit dip depth and signal model scoring using RSI-14 (`_compute_rsi`, `_rsi_dip_adjustment`, `rsi_norm` feature).
 
+**Crypto underlying prices:** `signals/yfinance_client.py` prefers **Gemini Exchange** public REST (`api.gemini.com`, `v2/ticker` / `v2/candles`) for mapped USD pairs (BTC/ETH/SOL/XRP) when `YFINANCE_CRYPTO_GEMINI` is enabled (default **on**). S&P 500 still uses Yahoo/yfinance. Launchd runs the script from disk each tick—`git pull` on `main` picks this up on the **next** scheduled run (no plist edit). To force crypto back to Yahoo-only, add to the plist’s `EnvironmentVariables`: `YFINANCE_CRYPTO_GEMINI` = `0`. Optional: `GEMINI_SPOT_API_BASE` if you need a different API host.
+
 **Repo `config.yaml`:** Uses the **defensive profitability preset** (e.g. higher `min_edge`, `enable_easy_win: false`, smaller absolute-winner balance slice). Launchd loads this from `WorkingDirectory` on every run—pull `main` and you pick up strategy changes without editing the plist.
 
 ## One-time setup
@@ -47,7 +49,7 @@ Both jobs use your `.venv` Python so dependencies are available.
 
 ## Picking up script changes
 
-launchd agents run the scripts from disk on each invocation, so code changes (e.g. bug fixes pushed to `origin/main`) take effect on the next scheduled run automatically — no reload needed.
+launchd agents run the scripts from disk on each invocation, so code changes (e.g. bug fixes or `yfinance_client` data-source updates pushed to `origin/main`) take effect on the **next** scheduled run automatically — no reload needed. After `git pull`, you do **not** need to re-copy the plist unless `ProgramArguments` or `WorkingDirectory` changed.
 
 To force an immediate run after pulling updates:
 

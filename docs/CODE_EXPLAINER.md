@@ -31,7 +31,7 @@
 **In plain English:**
 
 1. **Load settings** — Reads which markets to watch (Bitcoin, Ethereum, etc.) and strategy rules from `config.yaml`.
-2. **Fetch data** — Gets market prices from Kalshi and Gemini, and historical prices from Yahoo Finance.
+2. **Fetch data** — Gets market prices from Kalshi and Gemini prediction markets, and underlying history from `yfinance_client` (Gemini Exchange spot for crypto when enabled, else Yahoo Finance).
 3. **Estimate fair probability** — Uses past daily closes to estimate how often the asset ends above/below the bet's target ("strike").
 4. **Compare to market** — If our estimate says 20% chance but the market charges 40¢, we see a bargain (BUY NO). If our estimate says 60% and the market charges 30¢, we see a bargain (BUY YES). Otherwise we SKIP.
 5. **Check for arbitrage** — Sometimes buying YES and NO together costs less than $1 (minus fees). That's risk-free profit, so we do that first.
@@ -93,7 +93,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 
 | Step                        | What happens                                                | Code pointer                                                  |
 | --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| Get historical closes       | Yahoo Finance (or CoinGecko) for last N days                | `signals/yfinance_client.py:137` → `get_aggs()`               |
+| Get historical closes       | Gemini Exchange 1day (crypto) + Yahoo; CoinGecko if needed    | `signals/yfinance_client.py` → `get_aggs()`               |
 | Get Kalshi open markets     | `kalshi.get_markets(series_ticker=series, status="open")`   | `signals/kalshi_client.py` → `get_markets()`                  |
 | Loop over each market       | For each market in the list                                 | `compare_historical.py:1290` → `for mkt in mkt_list`          |
 | Skip unsupported resolution | Non 5pm crypto / 4pm S&P intraday → skip                    | `compare_historical.py:1182` → `_should_skip_by_resolution()` |
@@ -195,7 +195,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | --------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`signals/kalshi_client.py`**    | Kalshi API with RSA-PSS auth       | `KalshiClient`: `get_balance()`, `get_markets()`, `get_positions()`, `get_market()`, `get_historical_market()`, `get_orderbook()`, `create_order_safe()`, `cancel_order_safe()`. Root `kalshi_client.py` shim re-exports.                                                                        |
 | **`signals/gemini_client.py`**    | Gemini Prediction Markets (crypto) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`; `hourly` category skipped if API returns 400); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. Root `gemini_client.py` shim re-exports. |
-| **`signals/yfinance_client.py`**  | Historical prices (no API key)     | `get_aggs()` L137 (daily closes), `get_intraday_aggs_at_hour()` (1h prices at 5pm/4pm ET for intraday empirical P), `get_aggs_as_of()` (point-in-time for backtest), `get_snapshot()` L52 (current price); CoinGecko fallback for crypto. Root `yfinance_client.py` shim re-exports. |
+| **`signals/yfinance_client.py`**  | Underlying spot history (no Yahoo key; Gemini REST is public) | `get_aggs()` (daily closes), `get_intraday_aggs_at_hour()` (Gemini 1hr or Yahoo 1h at resolution ET), `get_aggs_as_of()` (backtest; Gemini with UTC EOD cutoff), `get_snapshot()` (Gemini `v2/ticker` then Yahoo then CoinGecko for crypto). Env: `YFINANCE_CRYPTO_GEMINI`, `GEMINI_SPOT_API_BASE`, `YFINANCE_DEBUG`. Root `yfinance_client.py` shim re-exports. |
 
 ### Support Modules
 
@@ -329,9 +329,9 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 
 ### `scripts/compare_prices.py` — Live Price Snapshot
 
-**Purpose:** Quick view of Kalshi + Gemini market prices vs current yfinance price. No recommendations.
+**Purpose:** Quick view of Kalshi + Gemini market prices vs current underlying spot (`get_snapshot`: Gemini crypto + Yahoo). No recommendations.
 
-**Flow:** `_run()` → load config → create KalshiClient + GeminiPredictionClient → fetch Gemini events by asset → for each series: get yfinance snapshot → fetch Kalshi markets → print YES/NO bids for up to 5 markets; if crypto, print Gemini events too. Wrapped in `capture_and_analyze()` for optional Ollama analysis.
+**Flow:** `_run()` → load config → create KalshiClient + GeminiPredictionClient → fetch Gemini events by asset → for each series: get underlying snapshot → fetch Kalshi markets → print YES/NO bids for up to 5 markets; if crypto, print Gemini events too. Wrapped in `capture_and_analyze()` for optional Ollama analysis.
 
 ---
 
@@ -387,8 +387,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `_compute_p_lose` | compare_historical | `(hist_p, yes_bid, no_bid, side, dte, sp) -> float` | P(our position loses). Blends model prob with market odds; market weight increases as dte→0 (half-life decay). |
 | `_ev_sell_threshold` | compare_historical | `(sell_price, maker_fee_rate, min_fee_per_order) -> float` | EV-optimal sell threshold for binary contracts. Returns breakeven P(lose) where selling now equals EV of holding: `1 − (sell_price − exit_fee)`. High bids → low threshold (~11% at 90¢); low bids → high threshold (~81% at 20¢). Clamped to [0.01, 0.99]. |
 | `_filter_contradictory_buys` | compare_historical | `(pending_orders, existing_by_underlying) -> None` | Removes BUYs that would conflict with kept positions or other pending BUYs (same underlying+resolution). |
-| `get_aggs` | yfinance_client | `(ticker, days_back, config) -> list[float]` | Daily closes from yfinance (or CoinGecko for crypto). Uses storage cache. |
-| `get_intraday_aggs_at_hour` | yfinance_client | `(ticker, days_back, resolution_hour_et, config) -> list[float]` | 1h prices at that ET hour per day. Falls back to daily if intraday fails. |
+| `get_aggs` | yfinance_client | `(ticker, days_back, config) -> list[float]` | Daily closes: Gemini 1day (mapped crypto) → Yahoo → CoinGecko (BTC/ETH/SOL). Uses storage cache. |
+| `get_intraday_aggs_at_hour` | yfinance_client | `(ticker, days_back, resolution_hour_et, config) -> list[float]` | One price per day at `resolution_hour_et`: Gemini 1hr (crypto) or Yahoo 1h; falls back to daily. |
 | `get_config` | config | `() -> dict` | Load config.yaml; override markets, poll_interval from env. |
 | `record_position_evaluation` | storage | `(*, platform, ticker, side, action, hist_p, vol_p, p_lose, ...) -> int \| None` | Record KEEP or SELL decision for a held position; rate-limited to 1/hour per (platform, ticker, side). |
 | `resolve_position_evaluations` | storage | `(ticker, yes_settled, config) -> int` | Link unresolved position evaluations to outcomes when market settles. |
@@ -590,15 +590,15 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 
 ### `signals/yfinance_client.py` — Historical Prices
 
-**No API key.** Uses Yahoo Finance (or CoinGecko for crypto if yfinance fails). Root `yfinance_client.py` shim re-exports.
+**No Yahoo API key.** For **crypto** tickers mapped to Gemini pairs (BTC/ETH/SOL/XRP in `BTC-USD` form), uses **[Gemini Exchange public REST](https://docs.gemini.com/rest-api/market-data)** first (`v2/ticker`, `v2/candles/.../1day`, `1hr`) when `YFINANCE_CRYPTO_GEMINI` is enabled (default). **S&P** (`^GSPC` / `SPY`) uses Yahoo only. After Gemini: Yahoo Finance, then CoinGecko for BTC/ETH/SOL if still empty. Root `yfinance_client.py` shim re-exports.
 
 **Key methods:**
 - `get_aggs(ticker, days_back, config)` — Daily closes. Checks `storage.get_yf_closes()` first; if stale/missing, fetches and `storage.set_yf_closes()`.
-- `get_intraday_aggs_at_hour(ticker, days_back, hour_et, config)` — 1h prices at that ET hour per day. Falls back to daily closes if intraday unavailable.
-- `get_aggs_as_of(ticker, as_of_ts, days_back, config)` — Point-in-time for backtest (no future leakage).
-- `get_snapshot(ticker)` — Current price (single point).
+- `get_intraday_aggs_at_hour(ticker, days_back, hour_et, config)` — One close per calendar day at `hour_et` (ET): Gemini hourly for crypto when enabled, else Yahoo 1h. Falls back to daily closes if intraday unavailable.
+- `get_aggs_as_of(ticker, end_date, days_back)` — Point-in-time for backtest (no future leakage); Gemini path filters daily candles to `end_date` UTC end-of-day in one request.
+- `get_snapshot(ticker)` — Latest spot: Gemini `close` for mapped crypto (when enabled), else Yahoo, else CoinGecko (BTC/ETH/SOL).
 
-**Fallback:** CoinGecko used for crypto tickers when yfinance returns no data.
+**Env:** `YFINANCE_CRYPTO_GEMINI=0` disables Gemini spot; `GEMINI_SPOT_API_BASE` (default `https://api.gemini.com`); `YFINANCE_DEBUG=1` prints provider errors.
 
 ---
 
@@ -676,13 +676,13 @@ All recommendation and platform identifiers live in `constants.py`:
 
 ## Error Handling & Edge Cases
 
-**When yfinance returns no data:** `get_aggs()` returns `[]`. Empirical P becomes 0. Market is skipped or falls back to volatility-only when available.
+**When all underlying providers return no data:** `get_aggs()` returns `[]`. Empirical P becomes 0. Market is skipped or falls back to volatility-only when available.
 
 **When get_snapshot fails (proxy, API down):** Live price falls back to `closes[-1]` (last historical close). Model and safety rules still run; sharp recent moves are not reflected until the next successful snapshot.
 
 **When Kalshi/Gemini API fails (429, 500, auth):** Clients log and re-raise or return empty. Script continues with other markets. `create_order_safe` / `place_order_safe` cap by balance and retry on transient errors.
 
-**When storage is disabled:** `get_yf_closes` returns `None` always; yfinance fetches every run. No market_snapshots, predictions, or calibration.
+**When storage is disabled:** `get_yf_closes` returns `None` always; `yfinance_client` fetches every run. No market_snapshots, predictions, or calibration.
 
 **When strike cannot be extracted:** `_extract_strike()` returns `(None, None)`; market is skipped (no threshold to compare).
 
@@ -722,7 +722,7 @@ All recommendation and platform identifiers live in `constants.py`:
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────────────────────┐
 │ .env        │────▶│ signals/     │     │ compare_historical.py           │
 │ (API keys)  │     │ kalshi_      │────▶│ 1. Fetch Gemini + Kalshi       │
-└─────────────┘     │ gemini_      │     │ 2. Fetch yfinance closes (cache) │
+└─────────────┘     │ gemini_      │     │ 2. Fetch underlying closes (cache) │
                     │ client       │     │ 3. Evaluate each market        │
                     └──────────────┘     │ 4. Evaluate positions → sells   │
                           │              │ 5. Execute or preview            │
@@ -747,8 +747,8 @@ All data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurab
 
 | Table                | Purpose                                           | TTL      | Primary Key                                   |
 | -------------------- | ------------------------------------------------- | -------- | --------------------------------------------- |
-| **yf_cache**         | Daily closes from yfinance (fewer API calls)      | 1 hour   | `(ticker, days_back)`                          |
-| **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
+| **yf_cache**         | Daily closes (`get_aggs`: Gemini crypto + Yahoo)   | 1 hour   | `(ticker, days_back)`                          |
+| **yf_intraday_cache**| Hourly-at-resolution series (Gemini or Yahoo)      | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
 | **market_snapshots**  | Per-evaluation snapshot (yes/no bids+asks+sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**       | Placed orders + outcomes (backtest, calibration)  | None     | `id` (auto-increment)                          |
@@ -879,7 +879,7 @@ position_evaluations
 
 ### TTL Behavior
 
-- **yf_cache** and **yf_intraday_cache**: Entries older than 1 hour (`_CACHE_TTL_SECONDS = 3600`) are treated as stale. Callers receive `None` and re-fetch from yfinance.
+- **yf_cache** and **yf_intraday_cache**: Entries older than 1 hour (`_CACHE_TTL_SECONDS = 3600`) are treated as stale. Callers receive `None` and re-fetch via `yfinance_client` (Gemini + Yahoo per ticker).
 - **market_snapshots**, **resolved_outcomes**, **predictions**, **limit_orders**: Append-only; no TTL. Old data retained for backtesting, calibration, and limit-order analysis.
 
 ---
@@ -911,6 +911,6 @@ position_evaluations
 | Where is DTE-confidence dip?         | `_dte_confidence_dip()` in compare_historical — when DTE>3 days and P(win)≥80% |
 | Where are Kalshi orders placed?      | `signals/kalshi_client.py` → `create_order_safe()`                    |
 | Where are Gemini orders placed?      | `signals/gemini_client.py` → `place_order_safe()`                     |
-| Where is historical price data from? | `signals/yfinance_client.py` → `get_aggs()` (Yahoo Finance / CoinGecko) |
+| Where is historical price data from? | `signals/yfinance_client.py` → `get_aggs()` (Gemini spot + Yahoo; CoinGecko fallback for some crypto) |
 | Where is data cached?                | `data/storage.py` → SQLite in `~/.trading-bot-data/`                  |
 | How to run every 5 min?              | `launchd/` plist; see `launchd/README.md`                             |

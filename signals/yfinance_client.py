@@ -1,7 +1,16 @@
 """
 yfinance client for S&P 500 (primary) and backup for crypto/stocks.
 No API key required. Tickers: ^GSPC (S&P 500), BTC-USD, ETH-USD, SOL-USD, etc.
-Falls back to CoinGecko for crypto when Yahoo is blocked (proxy, PiHole, etc.).
+
+Crypto spot prices:
+- **Gemini Exchange** public REST (`v2/ticker`, `v2/candles`) is used first for BTC/ETH/SOL/XRP
+  USD pairs — fresher than delayed Yahoo aggregates for live `get_snapshot` and exchange-native OHLC.
+  Docs: https://docs.gemini.com/rest-api/market-data
+- Then **yfinance**, then **CoinGecko** (no key) if earlier sources fail or return too little data.
+
+**Why not Yahoo `interval=1m` for everything?** Intraday history is capped (on the order of ~7 days for
+1-minute bars). Daily empirical windows (e.g. 90–365 days) and hourly-resolution intraday series still
+need `1d` / `1h` (or Gemini `1day` / `1hr`), not 1m.
 """
 from __future__ import annotations
 
@@ -12,8 +21,23 @@ from zoneinfo import ZoneInfo
 import yfinance as yf
 
 ET = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
 
 _DEBUG = os.getenv("YFINANCE_DEBUG", "").lower() in ("1", "true", "yes")
+
+# Set YFINANCE_CRYPTO_GEMINI=0 to disable Gemini spot (yfinance/CoinGecko only).
+_USE_GEMINI_SPOT = os.getenv("YFINANCE_CRYPTO_GEMINI", "1").lower() not in ("0", "false", "no")
+
+# Public Gemini spot API (same host as prediction markets docs; no auth for ticker/candles).
+_GEMINI_SPOT_API = os.getenv("GEMINI_SPOT_API_BASE", "https://api.gemini.com").rstrip("/")
+
+# yfinance ticker -> Gemini pair slug (lowercase)
+_YF_TO_GEMINI_PAIR: dict[str, str] = {
+    "BTC-USD": "btcusd",
+    "ETH-USD": "ethusd",
+    "SOL-USD": "solusd",
+    "XRP-USD": "xrpusd",
+}
 
 # ---------------------------------------------------------------------------
 # CoinGecko fallback (when Yahoo is blocked)
@@ -24,6 +48,139 @@ _COINGECKO_IDS: dict[str, str] = {
     "ethereum": "ETH-USD",
     "solana": "SOL-USD",
 }
+
+
+def _gemini_pair_for_ticker(ticker: str) -> str | None:
+    return _YF_TO_GEMINI_PAIR.get(ticker)
+
+
+def _gemini_v2_ticker_close(pair: str) -> float | None:
+    """Latest trade close from Gemini v2 ticker (string decimals → float)."""
+    try:
+        import requests
+
+        r = requests.get(f"{_GEMINI_SPOT_API}/v2/ticker/{pair}", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            return None
+        close = data.get("close")
+        if close is None:
+            return None
+        return float(str(close).replace(",", ""))
+    except Exception as e:
+        if _DEBUG:
+            print(f"  [yfinance_client] Gemini v2/ticker failed for {pair}: {e}")
+        return None
+
+
+def _utc_end_of_calendar_day_ms(end: datetime) -> int:
+    """Last instant of the calendar day containing `end`, expressed in UTC (for candle cutoff)."""
+    if end.tzinfo is not None:
+        end = end.astimezone(UTC)
+        y, m, d = end.year, end.month, end.day
+    else:
+        y, m, d = end.year, end.month, end.day
+    eod = datetime(y, m, d, 23, 59, 59, 999999, tzinfo=UTC)
+    return int(eod.timestamp() * 1000)
+
+
+def _gemini_daily_closes(pair: str, days_back: int) -> list[float]:
+    """
+    Daily candles from Gemini (1day). Returns closes oldest→newest, trimmed to days_back.
+    Empty list on failure or if fewer than min(14, days_back) bars (fall back to other providers).
+    """
+    try:
+        import requests
+
+        r = requests.get(f"{_GEMINI_SPOT_API}/v2/candles/{pair}/1day", timeout=20)
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list) or not rows:
+            return []
+        # [time_ms, open, high, low, close, volume]
+        valid = [row for row in rows if isinstance(row, (list, tuple)) and len(row) > 4]
+        if not valid:
+            return []
+        valid.sort(key=lambda x: int(x[0]))
+        closes = [float(row[4]) for row in valid]
+        need = min(days_back, len(closes))
+        min_required = min(14, days_back)
+        if len(closes) < min_required:
+            return []
+        return closes[-need:]
+    except Exception as e:
+        if _DEBUG:
+            print(f"  [yfinance_client] Gemini 1day candles failed for {pair}: {e}")
+        return []
+
+
+def _gemini_daily_closes_as_of(pair: str, days_back: int, end: datetime) -> list[float]:
+    """
+    Same as _gemini_daily_closes but only candles with bar time <= end of `end` calendar day (UTC).
+    Single HTTP request; for backtest no-lookahead paths.
+    """
+    try:
+        import requests
+
+        r = requests.get(f"{_GEMINI_SPOT_API}/v2/candles/{pair}/1day", timeout=20)
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list) or not rows:
+            return []
+        valid = [row for row in rows if isinstance(row, (list, tuple)) and len(row) > 4]
+        if not valid:
+            return []
+        valid.sort(key=lambda x: int(x[0]))
+        end_ms = _utc_end_of_calendar_day_ms(end)
+        closes = [float(row[4]) for row in valid if int(row[0]) <= end_ms]
+        need = min(days_back, len(closes))
+        min_required = min(14, days_back)
+        if len(closes) < min_required:
+            return []
+        return closes[-need:]
+    except Exception as e:
+        if _DEBUG:
+            print(f"  [yfinance_client] Gemini 1day candles as-of failed for {pair}: {e}")
+        return []
+
+
+def _gemini_hourly_for_resolution(pair: str, resolution_hour_et: int, period_days: int) -> list[float]:
+    """
+    Build one price per calendar day at resolution_hour_et using Gemini 1hr candles.
+    Returns oldest→newest (by date key). Empty on failure.
+    """
+    try:
+        import requests
+
+        r = requests.get(f"{_GEMINI_SPOT_API}/v2/candles/{pair}/1hr", timeout=25)
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list) or not rows:
+            return []
+        by_date: dict[str, float] = {}
+        cutoff = datetime.now(UTC) - timedelta(days=period_days)
+        cutoff_ts = cutoff.timestamp()
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                continue
+            ts_ms = int(row[0])
+            if ts_ms / 1000.0 < cutoff_ts:
+                continue
+            close = float(row[4])
+            ts_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC)
+            ts_et = ts_utc.astimezone(ET)
+            if ts_et.hour == resolution_hour_et:
+                date_key = ts_et.strftime("%Y-%m-%d")
+                by_date[date_key] = close
+        if not by_date:
+            return []
+        dates_sorted = sorted(by_date.keys())
+        return [by_date[d] for d in dates_sorted]
+    except Exception as e:
+        if _DEBUG:
+            print(f"  [yfinance_client] Gemini 1hr candles failed for {pair}: {e}")
+        return []
 
 
 def _coingecko_snapshot(ticker: str) -> float | None:
@@ -54,13 +211,19 @@ def _coingecko_snapshot(ticker: str) -> float | None:
 def get_snapshot(ticker: str) -> float | None:
     """
     Get current/latest price. Returns None on failure.
-    Crypto: CoinGecko first (often works when Yahoo is blocked), else yfinance.
+    Crypto: Gemini v2/ticker (exchange spot) when enabled, else yfinance, else CoinGecko.
     S&P 500 (^GSPC): yfinance, fallback to SPY × 10.
     """
-    # ^GSPC: try yfinance, then SPY. S&P: yfinance.
+    pair = _gemini_pair_for_ticker(ticker)
+    if pair and _USE_GEMINI_SPOT:
+        g = _gemini_v2_ticker_close(pair)
+        if g is not None and g > 0:
+            return g
+
+    # ^GSPC: try yfinance, then SPY. Crypto without Gemini: yfinance then CoinGecko.
     to_try: list[tuple[str, bool]] = []
-    if ticker in _COINGECKO_IDS.values():
-        to_try = [(ticker, True), (ticker, False)]  # CoinGecko first for crypto
+    if ticker in _COINGECKO_IDS.values() or ticker in _YF_TO_GEMINI_PAIR:
+        to_try = [(ticker, False), (ticker, True)]
     elif ticker in ("^GSPC", "GSPC"):
         to_try = [(ticker, False), ("SPY", False)]
     else:
@@ -161,8 +324,11 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
         pass
 
     result: list[float] = []
-    # For crypto: try CoinGecko first (Yahoo often blocked)
-    if ticker in _COINGECKO_IDS.values():
+    pair = _gemini_pair_for_ticker(ticker)
+    if pair and _USE_GEMINI_SPOT:
+        result = _gemini_daily_closes(pair, days_back)
+    # For crypto: CoinGecko / Yahoo when Gemini insufficient or disabled
+    if not result and ticker in _COINGECKO_IDS.values():
         result = _coingecko_aggs(ticker, days_back)
     if not result:
         tickers_to_try: list[str] = [ticker]
@@ -199,9 +365,6 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
     return result
 
 
-UTC = ZoneInfo("UTC")
-
-
 def get_intraday_aggs_at_hour(
     ticker: str,
     days_back: int,
@@ -234,9 +397,15 @@ def get_intraday_aggs_at_hour(
     # yfinance 1h: period up to ~60d for most tickers (Yahoo limits intraday range)
     period_days = min(60, max(7, days_back))
     result: list[float] = []
+    pair = _gemini_pair_for_ticker(ticker)
+    if pair and _USE_GEMINI_SPOT:
+        result = _gemini_hourly_for_resolution(pair, resolution_hour_et, period_days)
+
     tickers_to_try = [ticker] + _TICKER_FALLBACKS.get(ticker, [])
 
     for t in tickers_to_try:
+        if result:
+            break
         try:
             end = datetime.now(UTC)
             start = end - timedelta(days=period_days)
@@ -318,7 +487,10 @@ def get_aggs_as_of(
         end = end_date
     start = end - timedelta(days=days_back)
     result: list[float] = []
-    if ticker in _COINGECKO_IDS.values():
+    pair = _gemini_pair_for_ticker(ticker)
+    if pair and _USE_GEMINI_SPOT:
+        result = _gemini_daily_closes_as_of(pair, days_back, end)
+    if not result and ticker in _COINGECKO_IDS.values():
         result = _coingecko_aggs(ticker, days_back)
     if not result:
         tickers_to_try: list[str] = [ticker]

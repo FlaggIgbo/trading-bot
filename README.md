@@ -89,7 +89,7 @@ trading-bot/
 ├── signals/                 # INPUT LAYER — market data source clients
 │   ├── kalshi_client.py     #   Kalshi exchange API (auth, orders, positions)
 │   ├── gemini_client.py     #   Gemini prediction markets API (public + trading)
-│   ├── yfinance_client.py   #   Yahoo Finance historical/live prices + CoinGecko fallback
+│   ├── yfinance_client.py   #   Underlying prices: Gemini Exchange spot (crypto) + Yahoo + CoinGecko fallback
 │   └── ollama_analysis.py   #   LLM-powered trade analysis (optional)
 │
 ├── models/                  # COMPUTE LAYER — ML strategies & signal scoring
@@ -141,6 +141,10 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 ## Improvement roadmap
 
 See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), **alpha engine** (Order Book Imbalance signal, markout PnL / toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
+
+### Recent changes (2026-03-17)
+
+- **Gemini Exchange spot for crypto underlying prices:** `signals/yfinance_client.py` calls [Gemini public market data](https://docs.gemini.com/rest-api/market-data) first for BTC/ETH/SOL/XRP (`v2/ticker` for live snapshot, `v2/candles` for daily/hourly history) when `YFINANCE_CRYPTO_GEMINI` is on (default). **S&P 500** (`^GSPC` / `SPY`) still uses Yahoo Finance only. Order after Gemini fails: yfinance, then CoinGecko (BTC/ETH/SOL only). `get_aggs_as_of()` uses one candle request with a UTC end-of-day cutoff (no double-fetch). Disable Gemini spot with `YFINANCE_CRYPTO_GEMINI=0`; override base URL with `GEMINI_SPOT_API_BASE`; debug logs via `YFINANCE_DEBUG=1`.
 
 ### Recent changes (2026-03-19)
 
@@ -204,7 +208,7 @@ Run `scripts/compare_historical.py` every **5 minutes** locally for continuous e
 flowchart TB
     subgraph init["1. Initialize"]
         A[Load config] --> B[Fetch Gemini events]
-        B --> C[Fetch yfinance closes — cache when storage on]
+        B --> C[Fetch underlying history — Gemini spot crypto + yfinance; cache when storage on]
     end
 
     subgraph eval["2. Evaluate Markets"]
@@ -267,9 +271,9 @@ flowchart TB
 └─────────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────┐     ┌─────────────────────┐     ┌──────────────────────────────────┐
-  │ Load config  │────▶│ Fetch yfinance       │────▶│ For each series (KXBTCD, KXETHD,  │
-  │ markets,     │     │ closes (cache 1h     │     │ KXSOLD, KXINXU, KXXRPD):         │
-  │ yf_tickers   │     │ when storage on)     │     │   • Get Kalshi open markets       │
+  │ Load config  │────▶│ Fetch underlying     │────▶│ For each series (KXBTCD, KXETHD,  │
+  │ markets,     │     │ closes (Gemini crypto│     │ KXSOLD, KXINXU, KXXRPD):         │
+  │ yf_tickers   │     │ + yfinance; cache 1h) │     │   • Get Kalshi open markets       │
   └──────────────┘     └─────────────────────┘     │   • Get Gemini events (crypto)    │
                                             └────────────────┬─────────────────┘
                                                              │
@@ -432,9 +436,9 @@ The bot evaluates **all** crypto and S&P 500 intraday markets (e.g. "Bitcoin tod
 
 For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empirical only) or ≥ 80% with `--use-volatility` (vol model accounts for time-to-expiry and uncertainty).
 
-**Intraday empirical:** For 5pm crypto and 4pm S&P 500, when `strategy.use_intraday_empirical: true` (default), the bot uses yfinance 1h data to compute empirical P from prices at the exact resolution hour—not daily closes. Falls back to daily closes if intraday fails (e.g. CoinGecko). Set `use_intraday_empirical: false` to use only the volatility model for intraday.
+**Intraday empirical:** For 5pm crypto and 4pm S&P 500, when `strategy.use_intraday_empirical: true` (default), the bot uses hourly bars at the resolution hour—not daily closes. **Crypto:** Gemini `1hr` candles when `YFINANCE_CRYPTO_GEMINI` is on, else Yahoo `1h`; falls back to daily closes if intraday fails. **S&P:** Yahoo `1h` (no Gemini). Set `use_intraday_empirical: false` to use only the volatility model for intraday.
 
-**Config:** `strategy.intraday_other_min_p_win: 0.90` (empirical only); `strategy.intraday_other_min_p_win_with_vol: 0.80` when `--use-volatility` (vol model accounts for uncertainty); `strategy.use_intraday_empirical: true` (use yfinance 1h for 5pm/4pm empirical P).
+**Config:** `strategy.intraday_other_min_p_win: 0.90` (empirical only); `strategy.intraday_other_min_p_win_with_vol: 0.80` when `--use-volatility` (vol model accounts for uncertainty); `strategy.use_intraday_empirical: true` (hourly path for 5pm/4pm empirical P).
 
 ### Systematic edges (arbitrage, cross-platform hedging)
 
@@ -545,8 +549,8 @@ Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable v
 
 | Table                | Purpose                                           | TTL      | Primary Key                                   |
 | -------------------- | ------------------------------------------------- | -------- | --------------------------------------------- |
-| **yf_cache**         | Daily closes from yfinance (fewer API calls)      | 1 hour   | `(ticker, days_back)`                          |
-| **yf_intraday_cache**| Intraday prices at resolution hour (5pm/4pm ET)    | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
+| **yf_cache**         | Daily closes (Gemini crypto + yfinance pipeline; fewer API calls) | 1 hour   | `(ticker, days_back)`                          |
+| **yf_intraday_cache**| Hourly-at-resolution prices (5pm/4pm ET); Gemini or Yahoo for crypto | 1 hour   | `(ticker, days_back, resolution_hour_et)`      |
 | **market_snapshots** | Per-evaluation snapshot (yes/no bids/asks/sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**      | Placed orders + outcomes + resolution prices (backtest, calibration, accuracy tracking) | None     | `id` (auto-increment)                          |
@@ -563,7 +567,7 @@ resolved_outcomes:  ticker, platform, title, resolution_ts, yes_settled, our_las
 predictions:        id, platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, outcome, pnl_cents, resolved_ts, resolution_price, ...
 ```
 
-**TTL behavior:** `yf_cache` and `yf_intraday_cache` entries older than 1 hour are treated as stale; callers re-fetch from yfinance. Other tables are append-only. Full schema details: [docs/CODE_EXPLAINER.md](docs/CODE_EXPLAINER.md#local-storage-schema).
+**TTL behavior:** `yf_cache` and `yf_intraday_cache` entries older than 1 hour are treated as stale; callers re-fetch via `yfinance_client` (Gemini + yfinance as implemented). Other tables are append-only. Full schema details: [docs/CODE_EXPLAINER.md](docs/CODE_EXPLAINER.md#local-storage-schema).
 
 **Config** (`config.yaml` → `storage`):
 
@@ -719,6 +723,8 @@ yfinance_tickers:
 ```
 
 Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `SPY`, etc. See [yfinance](https://github.com/ranaroussi/yfinance).
+
+**Gemini Exchange vs Yahoo (underlying spot, not prediction markets):** For the tickers above that map to Gemini USD pairs (`BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`), `get_snapshot` / `get_aggs` / `get_intraday_aggs_at_hour` try **[Gemini public REST](https://docs.gemini.com/rest-api/market-data)** first (no API key). Set `YFINANCE_CRYPTO_GEMINI=0` to use Yahoo (+ CoinGecko fallback for BTC/ETH/SOL) only. `GEMINI_SPOT_API_BASE` defaults to `https://api.gemini.com`. This is separate from **Gemini Prediction Markets** below (contracts/events API).
 
 ### Gemini Prediction Markets (crypto only)
 
