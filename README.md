@@ -94,6 +94,7 @@ trading-bot/
 │
 ├── models/                  # COMPUTE LAYER — ML strategies & signal scoring
 │   ├── anti_hallucination.py #  Anti-hallucination pipeline (Bayesian, EWMA, vol Z-score, adaptive edge, regime filter)
+│   ├── alpha_engine.py      #  Alpha + risk upgrades (OBI signal, markout/toxic flow, vol-adjusted Kelly, lead-lag)
 │   └── strategies/          #   Pluggable recommendation engines
 │       ├── base.py          #     Abstract strategy interface
 │       ├── default_threshold.py # Threshold + fee + signal model
@@ -123,7 +124,7 @@ trading-bot/
 └── .env                     # Credentials (from .env.example)
 ```
 
-**Pipeline flow:** `config.yaml` defines input signals (markets, tickers, strategy params) → `signals/` clients fetch market data → `models/strategies/` compute P(YES) and recommendations → `models/anti_hallucination.py` corrects overconfident predictions via Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, and regime filter → `execution/` places orders on exchanges → `data/storage.py` persists outcomes for calibration.
+**Pipeline flow:** `config.yaml` defines input signals (markets, tickers, strategy params) → `signals/` clients fetch market data → `models/strategies/` compute P(YES) and recommendations → `models/anti_hallucination.py` corrects overconfident predictions via Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, and regime filter → `models/alpha_engine.py` applies alpha signals (OBI edge adjustment, markout/toxic-flow detection, vol-adjusted Kelly sizing, lead-lag edge bonus) → `execution/` places orders on exchanges → `data/storage.py` persists outcomes for calibration.
 
 Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export from the new package locations for backward compatibility. All scripts in `scripts/` add the project root to `sys.path` so both old and new import paths work.
 
@@ -139,7 +140,7 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 ## Improvement roadmap
 
-See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
+See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), **alpha engine** (Order Book Imbalance signal, markout PnL / toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
 ## Contract evaluation workflow
 
@@ -517,6 +518,7 @@ Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable v
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**      | Placed orders + outcomes + resolution prices (backtest, calibration, accuracy tracking) | None     | `id` (auto-increment)                          |
 | **limit_orders**    | Limit orders placed + cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled` | None | `id` (auto-increment)                          |
+| **markout_snapshots** | Post-fill price tracking for toxic flow detection (1/5/15 min markout) | None | `id` (auto-increment) |
 
 #### Table structures (columns)
 
@@ -564,6 +566,12 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
   4. **Adaptive edge**: requires 2.5× base edge for cheap contracts (<15¢), scales with strike distance, and doubles when the trend opposes the trade direction.
   5. **Regime filter (EMA gate)**: blocks BUY YES on "above" contracts when price is below the 20-period EMA (and vice versa for "below"). BUY NO is not blocked (it's trend-aligned).
   Config: `strategy.anti_hallucination.*` in `config.yaml`. Each layer can be independently toggled.
+- **Alpha engine** (`models/alpha_engine.py`): Four composable modules applied after anti-hallucination and before order placement:
+  1. **Order Book Imbalance (OBI)**: computes `(V_bid − V_ask) / (V_bid + V_ask)` from top-of-book depth. When OBI strongly favors the trade direction, required edge is reduced (bonus up to 4%); when opposed, edge is increased.
+  2. **Markout PnL / Toxic flow detection**: tracks price movement 1/5/15 minutes after fills. If average markout for a ticker falls below −50 bps, the ticker is flagged as "toxic" and an extra 3% edge penalty is applied to avoid adverse selection.
+  3. **Volatility-adjusted Kelly**: scales the Kelly fraction inversely with realized volatility (`f_adjusted = base × baseline_vol / current_vol`). In high-vol regimes, position size automatically shrinks (floor at 25% of base) to preserve capital.
+  4. **Lead-lag signal**: precomputes short-term momentum of correlated leader assets (e.g. `^GSPC`→`KXINXU`). When a leader moves sharply, edge is adjusted ±2% for follower contracts.
+  Config: `strategy.alpha_engine.*` in `config.yaml`. Each module can be independently toggled.
 - **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config keeps a conservative buffer while allowing more throughput (`min_edge: 0.20`).
 
 ### Quick snapshot: `compare_prices.py`

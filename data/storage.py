@@ -199,6 +199,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_predictions_realized_pnl_column(conn)
     _migrate_market_snapshots_depth_columns(conn)
     _migrate_predictions_resolution_price(conn)
+    _migrate_markout_table(conn)
 
 
 def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
@@ -299,6 +300,94 @@ def _migrate_predictions_resolution_price(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass
+
+
+def _migrate_markout_table(conn: sqlite3.Connection) -> None:
+    """Create the markout_snapshots table for toxic flow detection."""
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS markout_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                fill_id TEXT,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                window_minutes INTEGER NOT NULL,
+                price_after REAL NOT NULL,
+                markout_bps REAL NOT NULL,
+                fill_ts REAL NOT NULL,
+                snapshot_ts REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_markout_ticker ON markout_snapshots(platform, ticker)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_markout_fill ON markout_snapshots(platform, fill_id)"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def record_markout_snapshot(
+    *,
+    platform: str,
+    ticker: str,
+    fill_id: str | None,
+    side: str,
+    entry_price: float,
+    window_minutes: int,
+    price_after: float,
+    markout_bps: float,
+    fill_ts: float,
+    config: dict | None = None,
+) -> None:
+    """Insert a markout observation. Called after each markout window elapses."""
+    conn = _get_conn(config)
+    if not conn:
+        return
+    try:
+        conn.execute(
+            """INSERT INTO markout_snapshots
+               (platform, ticker, fill_id, side, entry_price,
+                window_minutes, price_after, markout_bps, fill_ts, snapshot_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (platform, ticker, fill_id or "", side, entry_price,
+             window_minutes, price_after, markout_bps, fill_ts, time.time()),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def get_markout_history(
+    platform: str,
+    ticker: str,
+    window_minutes: int = 5,
+    lookback_hours: float = 48.0,
+    config: dict | None = None,
+) -> list[float]:
+    """Return recent markout_bps values for a ticker/window, newest first."""
+    conn = _get_conn(config)
+    if not conn:
+        return []
+    try:
+        cutoff = time.time() - lookback_hours * 3600
+        rows = conn.execute(
+            """SELECT markout_bps FROM markout_snapshots
+               WHERE platform=? AND ticker=? AND window_minutes=? AND snapshot_ts>=?
+               ORDER BY snapshot_ts DESC""",
+            (platform, ticker, window_minutes, cutoff),
+        ).fetchall()
+        return [float(r["markout_bps"]) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
 
 
 def get_price_after_buy_from_snapshots(

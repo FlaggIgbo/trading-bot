@@ -5,7 +5,7 @@ This setup includes:
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 
 Both jobs use your `.venv` Python so dependencies are available.
-`compare_historical.py` now imports `execution/engine.py` (via backward-compat shim), runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), applies inter-arb preflight before BUY execution (with optional single-leg fallback), uses balance-aware inter-arb route selection, applies DTE-confidence dip scaling for far-dated contracts, and runs the anti-hallucination pipeline (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, EMA regime filter) to correct model overconfidence before recommendations.
+`compare_historical.py` now imports `execution/engine.py` (via backward-compat shim), runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), applies inter-arb preflight before BUY execution (with optional single-leg fallback), uses balance-aware inter-arb route selection, applies DTE-confidence dip scaling for far-dated contracts, runs the anti-hallucination pipeline (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, EMA regime filter), and applies the alpha engine (Order Book Imbalance edge adjustment, markout/toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal) to correct model overconfidence and optimize position sizing before recommendations.
 
 ## One-time setup
 

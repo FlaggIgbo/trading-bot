@@ -73,6 +73,16 @@ from models.anti_hallucination import (
     load_anti_hallucination_config,
     regime_filter,
 )
+from models.alpha_engine import (
+    AlphaEngineConfig,
+    compute_obi,
+    lead_lag_edge_adjustment,
+    lead_lag_signal,
+    load_alpha_engine_config,
+    obi_edge_adjustment,
+    toxic_flow_edge_penalty,
+    vol_adjusted_kelly,
+)
 
 try:
     from storage import (
@@ -97,10 +107,11 @@ try:
         record_prediction_outcome,
         record_resolved,
         resolve_position_evaluations,
+        get_markout_history,
     )
 except ImportError:
     expire_unfilled_orders = get_calibration_stats = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_unresolved_predictions = None
-    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = None
+    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
@@ -277,6 +288,7 @@ class _StrategyParams:
     mc_paths: int
     mc_blend_weight: float
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
+    ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
 
 def _load_strategy_params(strategy: dict) -> _StrategyParams:
@@ -416,6 +428,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         mc_paths=max(100, int(strategy.get("mc_paths", 10000))),
         mc_blend_weight=max(0.0, min(1.0, float(strategy.get("mc_blend_weight", 0.3)))),
         ah_cfg=load_anti_hallucination_config(strategy),
+        ae_cfg=load_alpha_engine_config(strategy),
     )
 
 
@@ -3576,6 +3589,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     if sp.macro_signal_enabled:
         print(f"[Macro] 24h macro signal={macro_signal_24h:+.2%} from {', '.join(sp.macro_signal_tickers)}")
         print()
+    # --- Lead-lag signals: precompute momentum for leader assets ---
+    lead_lag_signals: dict[str, float] = {}
+    if sp.ae_cfg.lead_lag_enabled:
+        for leader_ticker, follower_prefix in sp.ae_cfg.lead_lag_pairs.items():
+            try:
+                leader_closes = yf_get_aggs(leader_ticker, days_back=5, config=cfg)
+                if leader_closes and len(leader_closes) >= sp.ae_cfg.lead_lag_lookback_bars + 1:
+                    sig = lead_lag_signal(
+                        leader_closes,
+                        lookback=sp.ae_cfg.lead_lag_lookback_bars,
+                        min_move_pct=sp.ae_cfg.lead_lag_min_move_pct,
+                    )
+                    if sig != 0.0:
+                        lead_lag_signals[follower_prefix] = sig
+                        print(f"[Lead-Lag] {leader_ticker}→{follower_prefix}: {sig:+.3%}")
+            except Exception:
+                continue
+        if lead_lag_signals:
+            print()
     emergency_stop = False
     if get_realized_pnl_stats and (sp.max_daily_loss_pct > 0 or sp.max_daily_loss_cents > 0):
         try:
@@ -3975,8 +4007,55 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
                     trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
                 )
-            effective_min_yes = effective_min + yes_parity_penalty
-            effective_min_no = effective_min + no_parity_penalty
+            # --- Alpha engine: toxic flow penalty ---
+            if sp.ae_cfg.markout_enabled and get_markout_history:
+                _markout_hist = get_markout_history(PLATFORM_KALSHI, ticker, window_minutes=5, config=cfg)
+                _toxic_penalty = toxic_flow_edge_penalty(
+                    _markout_hist,
+                    threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
+                    min_samples=sp.ae_cfg.markout_min_samples,
+                    penalty=sp.ae_cfg.markout_edge_penalty,
+                )
+                effective_min += _toxic_penalty
+            # --- Alpha engine: OBI edge adjustment ---
+            obi_val = None
+            if sp.ae_cfg.obi_enabled:
+                _book_obi = _extract_book_fields(m, yes_bid, float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
+                obi_val = compute_obi(
+                    _book_obi.get("yes_bid_size"), _book_obi.get("yes_ask_size"),
+                    min_total_size=sp.ae_cfg.obi_min_total_size,
+                )
+                if obi_val is not None:
+                    obi_adj_yes = obi_edge_adjustment(
+                        obi_val, "BUY YES",
+                        strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                        max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                    )
+                    obi_adj_no = obi_edge_adjustment(
+                        obi_val, "BUY NO",
+                        strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                        max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                    )
+                else:
+                    obi_adj_yes = obi_adj_no = 0.0
+            else:
+                obi_adj_yes = obi_adj_no = 0.0
+            # --- Alpha engine: lead-lag edge adjustment ---
+            ll_adj_yes = ll_adj_no = 0.0
+            if sp.ae_cfg.lead_lag_enabled:
+                for _ll_prefix, _ll_sig in lead_lag_signals.items():
+                    if ticker.startswith(_ll_prefix):
+                        ll_adj_yes = lead_lag_edge_adjustment(
+                            _ll_sig, direction, "BUY YES",
+                            edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
+                        )
+                        ll_adj_no = lead_lag_edge_adjustment(
+                            _ll_sig, direction, "BUY NO",
+                            edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
+                        )
+                        break
+            effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes
+            effective_min_no = effective_min + no_parity_penalty + obi_adj_no + ll_adj_no
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
@@ -4151,6 +4230,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             else:
                 print(f"    ├─ Model P(YES): {hist_p:.1%}")
             print(f"    ├─ Market YES:   {yes_bid:.1%}  (what the market is pricing)")
+            _alpha_tags = []
+            if obi_val is not None:
+                _alpha_tags.append(f"OBI={obi_val:+.2f}")
+            for _ll_prefix, _ll_sig in lead_lag_signals.items():
+                if ticker.startswith(_ll_prefix):
+                    _alpha_tags.append(f"LL={_ll_sig:+.3%}")
+            if _alpha_tags:
+                print(f"    ├─ Alpha:        {' | '.join(_alpha_tags)}")
             print(f"    ├─ Verdict:      {rec}")
             print(f"    │    → {_rec_plain}")
             reason = _format_reason(
@@ -4267,8 +4354,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     layered_order_levels=sp.layered_order_levels,
                     order_count=inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0) + 1,
                 )
+                _kelly_frac_ticker = kelly_fraction_live
+                if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
+                    _kelly_frac_ticker = vol_adjusted_kelly(
+                        kelly_fraction_live, closes,
+                        lookback=sp.ae_cfg.vol_kelly_lookback_bars,
+                        baseline_vol=sp.ae_cfg.vol_kelly_baseline_vol,
+                        max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
+                    )
                 count_base = _compute_buy_count(
-                    p_win, price, balance_cents, sp, use_kelly, kelly_fraction_live, min_contracts
+                    p_win, price, balance_cents, sp, use_kelly, _kelly_frac_ticker, min_contracts
                 )
                 liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                 liq_mult *= depth_mult
@@ -4454,8 +4549,38 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
                         trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
                     )
-                effective_min_yes_g = effective_min_gem + yes_parity_penalty
-                effective_min_no_g = effective_min_gem + no_parity_penalty
+                # --- Alpha engine: toxic flow penalty (Gemini) ---
+                if sp.ae_cfg.markout_enabled and get_markout_history:
+                    _markout_hist_g = get_markout_history(PLATFORM_GEMINI, evt.get("ticker", "?"), window_minutes=5, config=cfg)
+                    _toxic_penalty_g = toxic_flow_edge_penalty(
+                        _markout_hist_g,
+                        threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
+                        min_samples=sp.ae_cfg.markout_min_samples,
+                        penalty=sp.ae_cfg.markout_edge_penalty,
+                    )
+                    effective_min_gem += _toxic_penalty_g
+                # --- Alpha engine: OBI edge adjustment (Gemini) ---
+                obi_val_g = None
+                obi_adj_yes_g = obi_adj_no_g = 0.0
+                if sp.ae_cfg.obi_enabled:
+                    _book_obi_g = _extract_book_fields(market_for_book_q or {}, impl, no_price_gem_q)
+                    obi_val_g = compute_obi(
+                        _book_obi_g.get("yes_bid_size"), _book_obi_g.get("yes_ask_size"),
+                        min_total_size=sp.ae_cfg.obi_min_total_size,
+                    )
+                    if obi_val_g is not None:
+                        obi_adj_yes_g = obi_edge_adjustment(
+                            obi_val_g, "BUY YES",
+                            strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                            max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                        )
+                        obi_adj_no_g = obi_edge_adjustment(
+                            obi_val_g, "BUY NO",
+                            strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                            max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                        )
+                effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g
+                effective_min_no_g = effective_min_gem + no_parity_penalty + obi_adj_no_g
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
@@ -4735,8 +4860,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         layered_order_levels=sp.layered_order_levels,
                         order_count=inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0) + 1,
                     )
+                    _kelly_frac_gem = kelly_fraction_live
+                    if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
+                        _kelly_frac_gem = vol_adjusted_kelly(
+                            kelly_fraction_live, closes,
+                            lookback=sp.ae_cfg.vol_kelly_lookback_bars,
+                            baseline_vol=sp.ae_cfg.vol_kelly_baseline_vol,
+                            max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
+                        )
                     count_base = _compute_buy_count(
-                        p_win, price, balance_cents, sp, use_kelly, kelly_fraction_live, min_contracts
+                        p_win, price, balance_cents, sp, use_kelly, _kelly_frac_gem, min_contracts
                     )
                     liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                     liq_mult *= depth_mult

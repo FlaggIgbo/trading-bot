@@ -207,6 +207,28 @@ strategy:
     regime_filter_enabled: true # EMA regime gate: block trend-opposed BUY YES
     regime_ema_period: 20 # EMA lookback period for trend detection
     regime_require_alignment: true # Require trend alignment for BUY YES
+  # Alpha engine: OBI, markout PnL, vol-adjusted Kelly, lead-lag signal
+  alpha_engine:
+    obi_enabled: true # Order Book Imbalance: directional signal from bid/ask depth
+    obi_edge_bonus_max: 0.04 # Max edge reduction when OBI strongly favors our trade direction
+    obi_strong_threshold: 0.40 # OBI magnitude above which signal is actionable
+    obi_min_total_size: 5.0 # Minimum combined bid+ask size for OBI to be valid
+    markout_enabled: true # Toxic flow detection: track post-fill adverse selection
+    markout_windows_minutes: [1, 5, 15] # Time windows (minutes) for markout PnL measurement
+    markout_toxic_threshold_bps: -50.0 # Avg markout below this → ticker is toxic (adverse selection)
+    markout_edge_penalty: 0.03 # Extra edge required for tickers flagged as toxic
+    markout_min_samples: 5 # Min fills before toxic flow detection activates
+    vol_kelly_enabled: true # Volatility-adjusted Kelly: shrink position size in high-vol regimes
+    vol_kelly_baseline_vol: 0.02 # "Normal" vol level; Kelly unchanged at this level
+    vol_kelly_max_shrink: 0.25 # Floor: Kelly never shrinks below 25% of base in extreme vol
+    vol_kelly_lookback_bars: 24 # Bars of recent closes to compute current realized vol
+    lead_lag_enabled: true # Lead-lag signal: use correlated asset moves as leading indicator
+    lead_lag_pairs: # Leader→follower mapping (leader yf_ticker → follower series prefix)
+      "^GSPC": "KXINXU"
+      "^IXIC": "KXINXU"
+    lead_lag_min_move_pct: 0.003 # Min absolute move in leader to trigger signal
+    lead_lag_edge_bonus: 0.02 # Edge bonus/penalty when lead-lag signal is active
+    lead_lag_lookback_bars: 5 # Bars of leader data used to compute momentum
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # blacklist: ["KXINXU"]   # Exclude these series (optional)
   # strategy_engine options: vol_regime (default), default_threshold

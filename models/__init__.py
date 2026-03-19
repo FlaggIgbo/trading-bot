@@ -17,6 +17,18 @@ from models.anti_hallucination import (
     regime_filter,
     volatility_zscore,
 )
+from models.alpha_engine import (
+    AlphaEngineConfig,
+    compute_markout_bps,
+    compute_obi,
+    is_ticker_toxic,
+    lead_lag_edge_adjustment,
+    lead_lag_signal,
+    load_alpha_engine_config,
+    obi_edge_adjustment,
+    toxic_flow_edge_penalty,
+    vol_adjusted_kelly,
+)
 
 __all__ = [
     "BaseStrategy",
@@ -32,4 +44,14 @@ __all__ = [
     "load_anti_hallucination_config",
     "regime_filter",
     "volatility_zscore",
+    "AlphaEngineConfig",
+    "compute_markout_bps",
+    "compute_obi",
+    "is_ticker_toxic",
+    "lead_lag_edge_adjustment",
+    "lead_lag_signal",
+    "load_alpha_engine_config",
+    "obi_edge_adjustment",
+    "toxic_flow_edge_penalty",
+    "vol_adjusted_kelly",
 ]
