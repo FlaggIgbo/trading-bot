@@ -158,7 +158,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             cancel_ts REAL,
             yf_ticker TEXT,
             threshold REAL,
-            direction TEXT
+            direction TEXT,
+            theoretical_price REAL,
+            spread_bps_at_place REAL,
+            fill_slippage_bps REAL
         );
         CREATE INDEX IF NOT EXISTS idx_limit_orders_ticker ON limit_orders(ticker);
         CREATE INDEX IF NOT EXISTS idx_limit_orders_order_id ON limit_orders(platform, order_id);
@@ -199,6 +202,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_predictions_realized_pnl_column(conn)
     _migrate_market_snapshots_depth_columns(conn)
     _migrate_predictions_resolution_price(conn)
+    _migrate_limit_orders_fill_attribution(conn)
     _migrate_markout_table(conn)
 
 
@@ -300,6 +304,16 @@ def _migrate_predictions_resolution_price(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass
+
+
+def _migrate_limit_orders_fill_attribution(conn: sqlite3.Connection) -> None:
+    """Add fill-attribution columns to limit_orders (match predictions schema)."""
+    for col in ["theoretical_price", "spread_bps_at_place", "fill_slippage_bps"]:
+        try:
+            conn.execute(f"ALTER TABLE limit_orders ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 def _migrate_markout_table(conn: sqlite3.Connection) -> None:
@@ -1340,14 +1354,17 @@ def record_prediction_from_fill(
 
         ctx = None
         if order_id:
-            ctx = conn.execute(
-                """SELECT hist_p, vol_p, yf_ticker, threshold, direction, rec,
-                          theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps
-                   FROM limit_orders
-                   WHERE platform=? AND order_id=?
-                   ORDER BY ts DESC LIMIT 1""",
-                (platform, str(order_id)),
-            ).fetchone()
+            try:
+                ctx = conn.execute(
+                    """SELECT hist_p, vol_p, yf_ticker, threshold, direction, rec,
+                              theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps
+                       FROM limit_orders
+                       WHERE platform=? AND order_id=?
+                       ORDER BY ts DESC LIMIT 1""",
+                    (platform, str(order_id)),
+                ).fetchone()
+            except Exception:
+                ctx = None
 
         hist_p = float(ctx["hist_p"]) if ctx and ctx["hist_p"] is not None else 0.5
         vol_p = float(ctx["vol_p"]) if ctx and ctx["vol_p"] is not None else None

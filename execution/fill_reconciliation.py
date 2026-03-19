@@ -120,7 +120,7 @@ def reconcile_confirmed_fills(
                 if not ticker or side not in ("yes", "no"):
                     kalshi_skip += 1
                     continue
-                qty = _as_int(f.get("count") or f.get("quantity") or f.get("filled_count"), 0)
+                qty = _as_int(f.get("count") or f.get("count_fp") or f.get("quantity") or f.get("filled_count"), 0)
                 if qty <= 0:
                     kalshi_skip += 1
                     continue
