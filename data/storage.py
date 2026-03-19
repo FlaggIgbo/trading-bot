@@ -1457,7 +1457,7 @@ def get_unresolved_predictions(config: dict | None = None) -> list[dict]:
         return []
     try:
         rows = conn.execute(
-            "SELECT id, platform, ticker, order_id, side, hist_p, entry_price, count, ts, yf_ticker FROM predictions WHERE outcome IS NULL"
+            "SELECT id, platform, ticker, order_id, side, hist_p, vol_p, entry_price, count, ts, yf_ticker, threshold, direction FROM predictions WHERE outcome IS NULL"
         ).fetchall()
         return [dict(r) for r in rows]
     except Exception:
@@ -1677,7 +1677,7 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
         if has_pab_cols:
             select_cols += ", min_price_after_buy, max_price_after_buy"
         rows = conn.execute(
-            f"""SELECT {select_cols} FROM predictions WHERE outcome IN ('win','lose')"""
+            f"""SELECT {select_cols} FROM predictions WHERE outcome IN ('win','lose','sold')"""
         ).fetchall()
         if not rows:
             return {
@@ -1692,24 +1692,26 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
                 "price_after_buy": None,
             }
         wins = sum(1 for r in rows if r["outcome"] == "win")
-        loses = sum(1 for r in rows if r["outcome"] == "lose")
+        loses = sum(1 for r in rows if r["outcome"] in ("lose", "sold"))
         total_pnl = sum(r["pnl_cents"] or 0 for r in rows)
         loss_weight = float((config or {}).get("strategy", {}).get("calibration_loss_weight", 1.0))
         # Bucket by hist_p (0.5-0.6, 0.6-0.7, ...); weight losers higher for win_rate
+        # Treat "sold" outcomes as losses for calibration purposes
         buckets: dict[tuple[float, float], list[str]] = {}
         for r in rows:
             h = r["hist_p"] or 0.5
             bucket = (round(h * 10) / 10, round(h * 10) / 10 + 0.1)
             if bucket not in buckets:
                 buckets[bucket] = []
-            buckets[bucket].append(r["outcome"])
+            outcome = r["outcome"] if r["outcome"] != "sold" else "lose"
+            buckets[bucket].append(outcome)
         bucket_stats = []
         for (lo, hi), outcomes in sorted(buckets.items()):
             ww = sum(1 for o in outcomes if o == "win")
             wl = sum(loss_weight for o in outcomes if o == "lose")
             wr = ww / (ww + wl) if (ww + wl) > 0 else 0
             bucket_stats.append({"hist_p_range": f"{lo:.1f}-{hi:.1f}", "lo": lo, "hi": hi, "count": len(outcomes), "win_rate": wr})
-        # Win rate by (direction, side); weight losers higher
+        # Win rate by (direction, side); weight losers higher; "sold" counts as lose
         by_ds: dict[str, dict[str, Any]] = {}
         for r in rows:
             d = (r["direction"] or "").strip().lower() or "unknown"
@@ -2372,5 +2374,214 @@ def get_storage_stats(config: dict | None = None) -> dict[str, Any]:
         }
     except Exception:
         return {"enabled": False}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Adaptive learning: recency-weighted calibration, loss streak detection,
+# per-series recent performance.
+# ---------------------------------------------------------------------------
+
+
+def _extract_series_prefix(ticker: str) -> str:
+    """Extract series prefix from a ticker like KXBTCD-25MAR19-B81250 -> KXBTCD."""
+    if not ticker:
+        return ""
+    parts = ticker.split("-")
+    return parts[0] if parts else ticker
+
+
+def get_recent_performance(
+    *,
+    lookback_hours: float = 6.0,
+    platform: str | None = None,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Win rate and PnL for trades resolved in the last *lookback_hours*.
+    Includes win/lose/sold so early-exit losses aren't hidden.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"total": 0}
+    cutoff = time.time() - lookback_hours * 3600
+    try:
+        q = """
+            SELECT outcome, COALESCE(realized_pnl_cents, pnl_cents, 0) AS pnl
+            FROM predictions
+            WHERE outcome IN ('win', 'lose', 'sold')
+              AND COALESCE(resolved_ts, ts) >= ?
+        """
+        params: list[Any] = [cutoff]
+        if platform:
+            q += " AND platform = ?"
+            params.append(platform)
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            return {"total": 0, "win_rate": None, "wins": 0, "losses": 0, "sold": 0, "pnl_cents": 0}
+        wins = sum(1 for r in rows if r["outcome"] == "win")
+        losses = sum(1 for r in rows if r["outcome"] == "lose")
+        sold = sum(1 for r in rows if r["outcome"] == "sold")
+        pnl = sum(int(r["pnl"]) for r in rows)
+        total = len(rows)
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "sold": sold,
+            "win_rate": wins / total if total > 0 else None,
+            "pnl_cents": pnl,
+            "avg_pnl_cents": pnl / total if total > 0 else 0,
+        }
+    except Exception:
+        return {"total": 0}
+    finally:
+        conn.close()
+
+
+def get_recent_performance_by_series(
+    *,
+    lookback_hours: float = 12.0,
+    config: dict | None = None,
+) -> dict[str, dict[str, Any]]:
+    """
+    Per-series (ticker prefix like KXBTCD, KXETHD) recent performance.
+    Returns {series: {win_rate, wins, losses, total, pnl_cents, consecutive_losses}}.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {}
+    cutoff = time.time() - lookback_hours * 3600
+    try:
+        rows = conn.execute(
+            """SELECT ticker, outcome, COALESCE(realized_pnl_cents, pnl_cents, 0) AS pnl,
+                      COALESCE(resolved_ts, ts) AS rts
+               FROM predictions
+               WHERE outcome IN ('win', 'lose', 'sold')
+                 AND COALESCE(resolved_ts, ts) >= ?
+               ORDER BY rts DESC""",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return {}
+        from collections import defaultdict
+        by_series: dict[str, list[dict]] = defaultdict(list)
+        for r in rows:
+            ticker = r["ticker"] or ""
+            series = _extract_series_prefix(ticker)
+            by_series[series].append({"outcome": r["outcome"], "pnl": int(r["pnl"])})
+        result = {}
+        for series, trades in by_series.items():
+            wins = sum(1 for t in trades if t["outcome"] == "win")
+            losses = sum(1 for t in trades if t["outcome"] in ("lose", "sold"))
+            pnl = sum(t["pnl"] for t in trades)
+            consec_losses = 0
+            for t in trades:
+                if t["outcome"] in ("lose", "sold"):
+                    consec_losses += 1
+                else:
+                    break
+            result[series] = {
+                "total": len(trades),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": wins / len(trades) if trades else None,
+                "pnl_cents": pnl,
+                "consecutive_losses": consec_losses,
+            }
+        return result
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def get_loss_streak(
+    *,
+    platform: str | None = None,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Count the current consecutive loss streak (most recent resolved trades).
+    Includes 'sold' as a loss.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"streak": 0}
+    try:
+        q = """
+            SELECT outcome, COALESCE(realized_pnl_cents, pnl_cents, 0) AS pnl
+            FROM predictions
+            WHERE outcome IN ('win', 'lose', 'sold')
+        """
+        params: list[Any] = []
+        if platform:
+            q += " AND platform = ?"
+            params.append(platform)
+        q += " ORDER BY COALESCE(resolved_ts, ts) DESC LIMIT 50"
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            return {"streak": 0, "last_n_outcomes": [], "pnl_last_streak": 0}
+        streak = 0
+        pnl_streak = 0
+        outcomes = []
+        for r in rows:
+            outcomes.append(r["outcome"])
+            if r["outcome"] in ("lose", "sold"):
+                streak += 1
+                pnl_streak += int(r["pnl"])
+            else:
+                break
+        return {
+            "streak": streak,
+            "last_n_outcomes": outcomes[:20],
+            "pnl_last_streak": pnl_streak,
+        }
+    except Exception:
+        return {"streak": 0}
+    finally:
+        conn.close()
+
+
+def get_ewma_win_rate(
+    *,
+    halflife_trades: int = 30,
+    platform: str | None = None,
+    config: dict | None = None,
+) -> dict[str, Any]:
+    """
+    Exponentially-weighted moving average win rate. Recent trades weigh more.
+    halflife_trades: weight of a trade N positions ago is 0.5^(N/halflife).
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"ewma_win_rate": None, "n_trades": 0}
+    try:
+        q = """
+            SELECT outcome
+            FROM predictions
+            WHERE outcome IN ('win', 'lose', 'sold')
+        """
+        params: list[Any] = []
+        if platform:
+            q += " AND platform = ?"
+            params.append(platform)
+        q += " ORDER BY COALESCE(resolved_ts, ts) DESC LIMIT 200"
+        rows = conn.execute(q, params).fetchall()
+        if not rows:
+            return {"ewma_win_rate": None, "n_trades": 0}
+        alpha = 1.0 - 0.5 ** (1.0 / max(1, halflife_trades))
+        ewma = 0.5
+        for r in reversed(rows):
+            val = 1.0 if r["outcome"] == "win" else 0.0
+            ewma = alpha * val + (1.0 - alpha) * ewma
+        return {
+            "ewma_win_rate": ewma,
+            "n_trades": len(rows),
+            "effective_n": min(len(rows), halflife_trades * 3),
+        }
+    except Exception:
+        return {"ewma_win_rate": None, "n_trades": 0}
     finally:
         conn.close()

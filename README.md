@@ -159,6 +159,10 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 - **OBI edge adjustment (Gemini):** Fixed `UnboundLocalError` on `market_for_book_q` in the Gemini OBI (Order Book Imbalance) code path within `compare_historical.py`. The variable was referenced before assignment; now correctly resolved from the local contract/event context.
 - **yfinance FutureWarning:** Fixed deprecation warning (`Calling float on a single element Series`) in `yfinance_client.py` intraday aggregation by using `iloc[0]` when the row value is a Series.
 - **yfinance_client.py cleanup:** Consolidated 19 duplicate `get_aggs_as_of` function definitions into a single implementation that accepts `datetime | str | None` for `end_date`, with CoinGecko fallback for crypto tickers.
+- **Adaptive learning system:** The bot now learns from recent trades in real-time. Recency-weighted performance tracking (last 6h win rate, EWMA win rate), loss-streak detection with circuit breaker (extra edge required after consecutive losses), per-series cooldown when a market series has consecutive losses, and `sold` trades now count in calibration stats (previously excluded). Config: `adaptive_learning_enabled`, `adaptive_edge_lookback_hours`, `loss_streak_threshold`, `series_cooldown_threshold`, `ewma_halflife_trades`.
+- **YES bias correction:** The model was structurally biased toward YES (86% YES vs 14% NO). Five fixes: `yes_overconfidence_extra_edge: 0.04` (YES trades require 4% more edge than NO), `model_probability_shrinkage: 0.75` (pulls extreme probabilities toward 50%), removed vol-model override on `min_yes_price` (was allowing YES at 1–3¢ when model said 95%+ but actual win rate was 3.9%), `parity_max_penalty` doubled from 0.10 to 0.20 for stronger self-correction, and `easy_win_min_p_win`/`easy_win_min_market_p` raised to 0.93/0.88.
+- **Gemini settlement sync fix:** Gemini trades were not being resolved. Fixed API category filter (was causing 400 errors) and rewrote contract-to-prediction matching to use threshold-based matching instead of label matching.
+- **Intraday vol model corrections:** Reduced vol model overconfidence on intraday crypto. `vol_blend_weight` reduced from 0.75 to 0.45; added `vol_disagree_threshold`/`vol_disagree_dampen_blend` to dampen blending when empirical and vol models strongly disagree; added `intraday_vol_cap: 0.90` and `intraday_min_empirical_weight: 0.20`.
 
 ## Contract evaluation workflow
 
@@ -483,8 +487,8 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 ```yaml
 enable_easy_win: true # Buy when model+market aligned and we profit after fees
 min_edge_easy_win: 0.02 # Min 2¢ profit per contract when aligned (0 = any profit)
-easy_win_min_p_win: 0.90 # Model must say P(win) >= this for easy-win
-easy_win_min_market_p: 0.85 # Market must be in ballpark (yes_bid or no_bid >= this)
+easy_win_min_p_win: 0.93 # Model must say P(win) >= this for easy-win
+easy_win_min_market_p: 0.88 # Market must be in ballpark (yes_bid or no_bid >= this)
 ```
 
 ### Kelly criterion (position sizing)
@@ -577,7 +581,7 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
 - **Signal model layer**: when enabled (`enable_signal_model`), normalized signals are passed through a weighted logistic scorer (`signal_model_weights`) to produce final P(YES).
 - **Optional sklearn calibration**: when enough resolved predictions exist, isotonic or Platt calibration maps raw model probability to calibrated probability (`use_sklearn_calibration`).
 - **DTE-aware strike guard**: `max_buy_yes_strike_above_pct` and `max_buy_no_strike_above_pct` now scale with `sqrt(DTE)` via `_dte_adjusted_strike_pct()`. For a 1-day contract the full configured percentage applies; for a 45-minute contract (~0.03 days), the effective limit shrinks to ~18% of the base value. This prevents the bot from buying YES on strikes that require unrealistic short-term price moves.
-- **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes.
+- **min_yes_price** (default 0.05): Skip BUY YES when the market prices YES below 5¢. If the market thinks there's a &lt;5% chance, we avoid those contracts—they're often illiquid, or our model may overestimate probability for far out-of-the-money strikes. The 5¢ floor always applies (no vol-model override).
 - **min_no_price** (current config 0.02): Skip BUY NO when the market prices NO below this floor (i.e., YES near certainty). Same logic as `min_yes_price`: avoid unlikely bets unless the volatility model strongly disagrees (P(NO) ≥ 95%).
 - **Anti-hallucination pipeline** (`models/anti_hallucination.py`): Five composable layers that run after model P(YES) is computed and before the recommendation engine, preventing the model from assigning 80%+ probability to contracts the market prices at 5%:
   1. **Bayesian update**: treats the market price as a Beta prior and the model prediction as evidence (`bayesian_market_strength: 1.5`). When model says 86% and market says 8%, the posterior lands at ~40% instead of blindly trusting 86%.
