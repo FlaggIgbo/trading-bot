@@ -27,10 +27,11 @@ yfinance_tickers:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
-  min_edge: 0.15 # Reduced from 0.20; AH pipeline corrections make stacking less aggressive
-  # Easy win: when model and market both say ~90%+ (aligned), use relaxed edge — buy if profitable after fees
-  enable_easy_win: true # Buy when both agree on high probability and we profit after fees
-  min_edge_easy_win: 0.02 # Require at least 2¢ net edge for easy-win fills to better absorb slippage
+  # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
+  min_edge: 0.22 # Higher bar vs fees/slippage and fast Kalshi repricing; fewer but higher-quality entries
+  # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
+  enable_easy_win: false
+  min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
   easy_win_min_p_win: 0.93 # Raised from 0.90; model overconfidence means 90% is unreliable — require near-certainty
   easy_win_min_market_p: 0.88 # Raised from 0.85; tighter agreement required to avoid YES-biased easy wins
   min_yes_price: 0.05 # Skip BUY YES when market YES < 5¢ (market thinks <5% chance). NO vol override.
@@ -88,11 +89,11 @@ strategy:
   enable_inter_arb: true # Inter-exchange: buy YES on one platform + NO on other when sum < 1 (Kalshi/Gemini hedge)
   arb_inter_require_group_preflight: true # Require both inter-arb legs to pass shared balance preflight before BUY execution
   inter_arb_balance_aware_routing: true # Prefer inter-arb route that keeps cheaper leg on lower-balance account while preserving arb
-  arb_inter_allow_single_leg_fallback: true # If paired inter-arb cannot fund both legs, keep the funded highest-likelihood leg
+  arb_inter_allow_single_leg_fallback: false # Paired inter-arb only — avoids naked directional leg when one venue can't fund
   # Absolute winner: when buying very cheap (e.g. 1¢) on near-certainty (P≥95%), buy more contracts
   absolute_winner_min_p_win: 0.95 # P(win) must be at least this to treat as "absolute winner"
   absolute_winner_max_price: 0.05 # Price must be at or below this (e.g. 5¢)
-  absolute_winner_max_pct_of_balance: 0.20 # Safer cap; avoid bankroll-killer concentration
+  absolute_winner_max_pct_of_balance: 0.02 # Hard cap: 20% per "sure thing" was bankroll risk; 2% limits black-swan damage
   absolute_winner_max_contracts: 500 # Cap contracts per absolute-winner order (still respects balance)
   # Calibration: use historical prediction outcomes to improve recommendations (FreqAI-style)
   use_calibration: true # Consult resolved predictions; disable favor-YES when "above+YES" underperforms
@@ -107,7 +108,7 @@ strategy:
   min_bucket_samples: 5 # Min trades in bucket before applying bucket penalty
   min_vol_confidence_far_otm: 0.97 # Require vol model ≥97% (not 95%) for BUY YES when strike far above current; targets losing "above X"
   calibration_loss_weight: 1.5 # Weight losers 1.5x in calibration (learn more from mistakes; 1.0 = equal weight)
-  enable_sell_and_rebuy: true # When selling a loser, re-buy same contract at lower price if model sees edge (bypasses min 5¢)
+  enable_sell_and_rebuy: false # Off by default — reduces fee churn and re-entry into the same bad tick on fast markets
   # P(lose) blend: incorporate market odds; weight increases as we approach resolution (markets more accurate near expiry)
   p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
@@ -119,7 +120,7 @@ strategy:
   dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
   dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
   enable_two_sided_quotes: true # Infer fair level and allow symmetric YES/NO opportunities around it
-  two_sided_quote_min_edge: 0.02 # Minimum net edge for paired quote orders
+  two_sided_quote_min_edge: 0.03 # Aligned with higher min_edge; still must be <= min_edge
   macro_signal_enabled: true # Include macro cross-asset context in signal model
   macro_signal_tickers: ["SPY", "UUP"] # More reliable intraday proxy tickers for risk-on/risk-off macro signal
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)
@@ -216,7 +217,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 1.5 # Reduced from 2.0; less aggressive pull toward market price for ITM contracts
+    bayesian_market_strength: 2.75 # Stronger pull toward market — Kalshi is efficient; reduces fake "edge" vs crowd
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
     ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
@@ -268,9 +269,10 @@ storage:
   data_dir: ~/.trading-bot-data # Or TRADING_BOT_DATA_DIR env var
 
 # Order execution (Kalshi & Gemini) - balance-aware, 4xx-resilient
+# Underlying: yfinance + live snapshot — not exchange websocket latency; favor limit/maker fills (taker fees are higher).
 trading:
-  dry_run: false # false = place real orders when strategy triggers
-  max_pct_of_balance: 0.20 # use at most 20% of balance per order
+  dry_run: false # Set true for paper runs until forward performance recovers (preview: --preview --no-llm)
+  max_pct_of_balance: 0.15 # Tighter per-order cap vs 20%; pairs with smaller absolute_winner slice
   max_total_buy_pct: 0.50 # max % of balance for ALL buys combined (budget-aware diversification)
   min_contracts: 1 # skip if capped count < this
   # When balance is below this (cents), place a limit order instead of skipping

@@ -169,6 +169,7 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 - **YES bias correction:** The model was structurally biased toward YES (86% YES vs 14% NO). Five fixes: `yes_overconfidence_extra_edge: 0.04` (YES trades require 4% more edge than NO), `model_probability_shrinkage: 0.75` (pulls extreme probabilities toward 50%), removed vol-model override on `min_yes_price` (was allowing YES at 1–3¢ when model said 95%+ but actual win rate was 3.9%), `parity_max_penalty` doubled from 0.10 to 0.20 for stronger self-correction, and `easy_win_min_p_win`/`easy_win_min_market_p` raised to 0.93/0.88.
 - **Gemini settlement sync fix:** Gemini trades were not being resolved. Fixed API category filter (was causing 400 errors) and rewrote contract-to-prediction matching to use threshold-based matching instead of label matching.
 - **Intraday vol model corrections:** Reduced vol model overconfidence on intraday crypto. `vol_blend_weight` reduced from 0.75 to 0.45; added `vol_disagree_threshold`/`vol_disagree_dampen_blend` to dampen blending when empirical and vol models strongly disagree; added `intraday_vol_cap: 0.90` and `intraday_min_empirical_weight: 0.20`.
+- **Defensive profitability preset (forward PnL):** Tightened risk after analysis of concentration + Kalshi efficiency. Defaults now: `min_edge: 0.22`, `enable_easy_win: false`, `absolute_winner_max_pct_of_balance: 0.02` (was 20%), `bayesian_market_strength: 2.75` (trust crowd more), `arb_inter_allow_single_leg_fallback: false`, `enable_sell_and_rebuy: false`, `kelly_fraction: 0.18`, `trading.max_pct_of_balance: 0.15`. Underlying data remains yfinance + live snapshot—not sub-second websocket; limit/maker flow avoids taker fee drag. Use `trading.dry_run: true` or `--preview` until you validate forward results.
 
 ## Contract evaluation workflow
 
@@ -376,7 +377,7 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 **In plain English:** The bot looks at how often the asset (e.g. Bitcoin) closed above or below a target price in a recent rolling window (default 90 days). It compares that "historical chance" to what the market is charging. If the market is underpricing (e.g. we think 30% chance, market says 15¢), we **BUY YES**. If overpricing, we **BUY NO**. If there's not enough of a bargain, we **SKIP**.
 
 ```bash
-python3 scripts/compare_historical.py --days 365 --markets 0 --edge 0.15   # 0 = all markets
+python3 scripts/compare_historical.py --days 365 --markets 0 --edge 0.22   # 0 = all markets; edge flag overrides config min_edge for that run
 python3 scripts/compare_historical.py --preview              # Show planned orders without placing them
 python3 scripts/compare_historical.py --execute              # Place real buy/sell orders (one-shot live run)
 python3 scripts/compare_historical.py --execute --no-llm    # Live run, skip LLM analysis
@@ -488,26 +489,26 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 
 ### Easy win (model and market aligned)
 
-**In plain English:** When both our model and the market agree the outcome is likely (e.g. both say ~90%+), we can accept a smaller edge—as long as we still profit after fees. For example: model says 92%, market charges 88¢ → net edge ~2¢. Normally we'd skip (need 10% edge), but with easy win we buy (2¢ profit is enough).
+**In plain English:** When both our model and the market agree the outcome is likely (e.g. both say ~90%+), we can accept a smaller edge—as long as we still profit after fees. **Default is now `enable_easy_win: false`** (high-priced “aligned” YES was a major tail-risk on crypto). Turn on only if you accept steamroller risk.
 
 **Config** (`config.yaml` → `strategy`):
 
 ```yaml
-enable_easy_win: true # Buy when model+market aligned and we profit after fees
-min_edge_easy_win: 0.02 # Min 2¢ profit per contract when aligned (0 = any profit)
+enable_easy_win: false # Default off — set true only if you want relaxed edge when aligned
+min_edge_easy_win: 0.03 # If enabled, keep ≥ fee floor; must be <= min_edge
 easy_win_min_p_win: 0.93 # Model must say P(win) >= this for easy-win
 easy_win_min_market_p: 0.88 # Market must be in ballpark (yes_bid or no_bid >= this)
 ```
 
 ### Kelly criterion (position sizing)
 
-**In plain English:** The bot uses the Kelly criterion (when `use_kelly: true`, the default) to size positions: higher P(win) and better odds → more contracts; lower P(win) (e.g. farther out-of-the-money) → fewer contracts. This automatically reduces size for strikes farther from the current price. Uses fractional Kelly (`kelly_fraction: 0.25`) for a more conservative bet size.
+**In plain English:** The bot uses the Kelly criterion (when `use_kelly: true`, the default) to size positions: higher P(win) and better odds → more contracts; lower P(win) (e.g. farther out-of-the-money) → fewer contracts. This automatically reduces size for strikes farther from the current price. Uses fractional Kelly (`kelly_fraction`, default **0.18** in defensive preset) for a more conservative bet size.
 
 **Config** (`config.yaml` → `strategy`):
 
 ```yaml
 use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts
-kelly_fraction: 0.25 # Quarter-Kelly (safer; full Kelly can be aggressive)
+kelly_fraction: 0.18 # Fractional Kelly (defensive default; raise only after stable forward PnL)
 ```
 
 ### Absolute winner (slam-dunk buys)
@@ -519,7 +520,7 @@ kelly_fraction: 0.25 # Quarter-Kelly (safer; full Kelly can be aggressive)
 ```yaml
 absolute_winner_min_p_win: 0.95 # P(win) must be ≥ 95% to treat as slam-dunk
 absolute_winner_max_price: 0.05 # Price must be ≤ 5¢ (e.g. 1¢ on a near-certainty)
-absolute_winner_max_pct_of_balance: 0.50 # Willing to spend up to 50% of balance on one absolute winner
+absolute_winner_max_pct_of_balance: 0.02 # Hard cap: 2% of balance per slam-dunk (avoid bankroll concentration)
 absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enforced at execution)
 ```
 
@@ -528,7 +529,7 @@ absolute_winner_max_contracts: 500 # Cap contracts per order (balance still enfo
 - **`dynamic_sell_threshold`** (default true): EV-optimal sell threshold for binary contracts. Instead of a fixed `sell_losing_pct`, the sell trigger is computed dynamically via `_ev_sell_threshold(sell_price, maker_fee_rate, min_fee_per_order)`: sell when `P(lose) > 1 − (sell_price − exit_fee)`. At high bids (90¢), threshold ≈ 11% (sell unless very confident); at low bids (20¢), threshold ≈ 81% (only sell if almost certain to lose). Entry price is a sunk cost and does not factor into the EV-optimal decision. When disabled, falls back to the fixed `sell_losing_pct`.
 - **`sell_losing_pct`** (default 0.55): Fixed fallback sell threshold when `dynamic_sell_threshold` is false. Sell when P(lose) ≥ this.
 - **`calibration_loss_weight`** (default 1.5): Weight losers higher in calibration so the bot learns more from mistakes. Bucket and direction-side win rates use weighted loses; higher values make the system more conservative.
-- **`enable_sell_and_rebuy`** (default true): When selling a losing position (via dynamic or fixed threshold, or rec flip), optionally re-buy the same contract at the current price if the model still sees edge. Bypasses min 5¢ rule for re-entry when profitable.
+- **`enable_sell_and_rebuy`** (default **false** in defensive preset): When selling a losing position (via dynamic or fixed threshold, or rec flip), optionally re-buy the same contract at the current price if the model still sees edge. Off by default to reduce fee churn on fast markets.
 - **`p_lose_blend_market_max_weight`** (default 0.5): When computing P(lose) for sell decisions, blend our model with Kalshi/Gemini market odds. At expiry, up to this fraction comes from the market (0 = model only; 0.5 = 50/50).
 - **`p_lose_blend_market_half_life_days`** (default 0.5): Half-life for market-weight decay; closer to resolution → more weight on market odds (more accurate near expiry).
 - **`max_daily_loss_pct` / `max_daily_loss_cents`**: Circuit breaker for live trading. If realized prediction losses over the last 24h exceed thresholds, the bot blocks new BUY orders until performance recovers or limits are adjusted.
@@ -604,7 +605,7 @@ Disable with `storage.enabled: false` or `TRADING_BOT_STORAGE=false`.
   3. **Volatility-adjusted Kelly**: scales the Kelly fraction inversely with realized volatility (`f_adjusted = base × baseline_vol / current_vol`). In high-vol regimes, position size automatically shrinks (floor at 25% of base) to preserve capital.
   4. **Lead-lag signal**: precomputes short-term momentum of correlated leader assets (e.g. `^GSPC`→`KXINXU`). When a leader moves sharply, edge is adjusted ±2% for follower contracts.
   Config: `strategy.alpha_engine.*` in `config.yaml`. Each module can be independently toggled.
-- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current config uses `min_edge: 0.15` — the AH pipeline layers provide additional overconfidence protection.
+- **Kalshi & Gemini fees**: Maker fee = rate × P × (1−P) per contract (rounded up to 1¢). `kalshi_maker_fee_rate` and `gemini_maker_fee_rate` default to 0.0175 (1.75%). `min_edge` and displayed "Edge" are **net after fees**. Current defensive preset uses **`min_edge: 0.22`**; taker fills cost more—favor resting limits (maker) when possible.
 
 ### Quick snapshot: `compare_prices.py`
 

@@ -136,7 +136,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Use cached or fresh data | Market data from earlier loop or fresh fetch (Kalshi); Gemini uses events  | `compare_historical.py:1672`, `1887`                    |
 | Compute P(lose)          | Blends model (hist_p) with market odds (yes_bid/no_bid); market weight increases near resolution via `_compute_p_lose()` | `compare_historical.py` → `_compute_p_lose()`           |
 | SELL triggers            | LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` via `_ev_sell_threshold()` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip, RULE_VIOLATION, unsupported resolution | `compare_historical.py` → `pending_sells.append()`, `_ev_sell_threshold()` |
-| Re-entry (optional)      | If `enable_sell_and_rebuy`: when selling loser, add BUY at current price if edge ≥ min_edge; bypasses min 5¢ | `_maybe_add_reentry_order()`                      |
+| Re-entry (optional)      | If `enable_sell_and_rebuy` (default off in defensive preset): when selling loser, add BUY at current price if edge ≥ min_edge; bypasses min 5¢ | `_maybe_add_reentry_order()`                      |
 | Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `pending_sells.append()`                               |
 
 ---
@@ -380,7 +380,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `vol_adjusted_kelly` | alpha_engine | `(base_kelly, closes, lookback, baseline_vol, max_shrink) -> float` | Kelly fraction scaled inversely with realized vol; auto-shrinks in choppy markets. |
 | `lead_lag_signal` | alpha_engine | `(leader_closes, lookback, min_move_pct) -> float` | Short-term momentum of a leading asset; 0.0 if below min threshold. |
 | `lead_lag_edge_adjustment` | alpha_engine | `(signal, direction, rec, edge_bonus) -> float` | Edge bonus/penalty when leader asset has moved sharply. |
-| `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win: when model+market both ≥90%, uses min_edge_easy_win (current config 2¢) instead. Prefers larger edge when both qualify. |
+| `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win (if `enable_easy_win`): when model+market both high-confidence, uses `min_edge_easy_win` instead of `min_edge`. Defensive preset keeps easy-win off. |
 | `_recommend_strict` | compare_historical | `(hist_p, market_yes, min_p_win, min_edge, fee) -> str` | Same as _recommend but also requires hist_p ≥ min_p_win for YES (or 1-hist_p ≥ min_p_win for NO). For non-standard intraday. |
 | `_extract_strike` | compare_historical | `(market) -> (threshold, direction)` | Parse floor/cap from market API or title regex ("above $X", "below $Y"). |
 | `_get_closes_for_empirical` | compare_historical | `(yf_ticker, days_back, closes_daily, market, sp, cfg) -> list[float]` | For intraday + use_intraday_empirical: return intraday prices at resolution hour; else daily closes. |
@@ -444,10 +444,10 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `intraday_ewma_lambda` | `intraday_ewma_lambda` | 0.94 fallback | Intraday-specific EWMA decay override (current config 0.90) |
 | `intraday_other_min_p_win` | `intraday_other_min_p_win` | 0.90 | For non-5pm/4pm intraday: require P(win)≥90% |
 | `intraday_other_min_p_win_with_vol` | `intraday_other_min_p_win_with_vol` | 0.80 | Same but when --use-volatility |
-| `enable_easy_win` | `enable_easy_win` | true | Buy when model+market aligned (90%+) with relaxed min_edge |
-| `min_edge_easy_win` | `min_edge_easy_win` | 0.01 fallback | Min profit when easy-win; current config uses 0.02 (2¢) |
-| `easy_win_min_p_win` | `easy_win_min_p_win` | 0.90 | Model P(win) ≥ this for easy-win |
-| `easy_win_min_market_p` | `easy_win_min_market_p` | 0.85 | Market price ≥ this (same ballpark) for easy-win |
+| `enable_easy_win` | `enable_easy_win` | false (defensive) | When true: buy when model+market aligned with relaxed min_edge |
+| `min_edge_easy_win` | `min_edge_easy_win` | 0.03 if enabled | Min profit when easy-win; must be ≤ `min_edge` |
+| `easy_win_min_p_win` | `easy_win_min_p_win` | 0.93 | Model P(win) ≥ this for easy-win |
+| `easy_win_min_market_p` | `easy_win_min_market_p` | 0.88 | Market price ≥ this (same ballpark) for easy-win |
 | `min_arb_fee` | `min_arb_fee` | 0.02 | Min edge for arb (yes+no < 1−fee) |
 | `min_yes_price` | `min_yes_price` | 0.05 | Skip BUY YES when yes_bid < 5¢ |
 | `min_no_price` | `min_no_price` | 0.05 | Skip BUY NO when no_bid < 5¢ |
