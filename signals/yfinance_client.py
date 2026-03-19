@@ -27,6 +27,7 @@ _DEBUG = os.getenv("YFINANCE_DEBUG", "").lower() in ("1", "true", "yes")
 
 # Set YFINANCE_CRYPTO_GEMINI=0 to disable Gemini spot (yfinance/CoinGecko only).
 _USE_GEMINI_SPOT = os.getenv("YFINANCE_CRYPTO_GEMINI", "1").lower() not in ("0", "false", "no")
+_USE_SPY_FOR_SP500 = os.getenv("YFINANCE_SPY_AS_SP500", "1").lower() not in ("0", "false", "no")
 
 # Public Gemini spot API (same host as prediction markets docs; no auth for ticker/candles).
 _GEMINI_SPOT_API = os.getenv("GEMINI_SPOT_API_BASE", "https://api.gemini.com").rstrip("/")
@@ -183,6 +184,87 @@ def _gemini_hourly_for_resolution(pair: str, resolution_hour_et: int, period_day
         return []
 
 
+def _extract_closes_from_hist(hist) -> list[float]:
+    if hist is None or hist.empty:
+        return []
+    closes_raw = None
+    if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
+        closes = hist["Close"]
+        if hasattr(closes, "ndim") and closes.ndim > 1:
+            closes = closes.iloc[:, 0]
+        closes_raw = closes.dropna()
+    elif "Close" in hist.columns:
+        closes_raw = hist["Close"].dropna()
+    if closes_raw is None or len(closes_raw) == 0:
+        return []
+    return [float(x) for x in closes_raw.tolist()]
+
+
+def _yf_daily_closes(ticker: str, start: datetime, end: datetime) -> list[float]:
+    hist = yf.download(ticker, start=start, end=end, interval="1d", progress=False)
+    return _extract_closes_from_hist(hist)
+
+
+def _merge_sp500_closes(spy: list[float], gspc: list[float], days_back: int) -> list[float]:
+    spy = [x * 10.0 for x in spy] if spy else []
+    if not spy and not gspc:
+        return []
+    if not spy:
+        merged = gspc
+    elif not gspc:
+        merged = spy
+    else:
+        min_len = min(len(spy), len(gspc))
+        prefix: list[float] = []
+        if len(spy) > min_len:
+            prefix = spy[: len(spy) - min_len]
+        elif len(gspc) > min_len:
+            prefix = gspc[: len(gspc) - min_len]
+        tail = [(spy[-i] + gspc[-i]) / 2.0 for i in range(1, min_len + 1)]
+        merged = prefix + list(reversed(tail))
+    need = min(days_back, len(merged))
+    min_required = min(14, days_back)
+    if len(merged) < min_required:
+        return []
+    return merged[-need:]
+
+
+def _combined_sp500_closes(end: datetime, days_back: int) -> list[float]:
+    start = end - timedelta(days=days_back)
+    spy = _yf_daily_closes("SPY", start, end)
+    gspc = _yf_daily_closes("^GSPC", start, end)
+    return _merge_sp500_closes(spy, gspc, days_back)
+
+
+def _yfinance_snapshot(ticker: str) -> float | None:
+    try:
+        yf_t = yf.Ticker(ticker)
+        hist = yf_t.history(period="5d", interval="1d")
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            price = float(hist["Close"].iloc[-1])
+            return price
+        info = yf_t.info
+        if isinstance(info, dict):
+            for key in ("regularMarketPrice", "previousClose", "open"):
+                if info.get(key) is not None:
+                    return float(info[key])
+    except Exception as e:
+        if _DEBUG:
+            print(f"  [yfinance_client] yfinance failed for {ticker}: {e}")
+    return None
+
+
+def _combine_sp500_snapshot(spy_price: float | None, gspc_price: float | None) -> float | None:
+    values: list[float] = []
+    if spy_price is not None:
+        values.append(spy_price * 10.0)
+    if gspc_price is not None:
+        values.append(gspc_price)
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def _coingecko_snapshot(ticker: str) -> float | None:
     """Fallback: get crypto price from CoinGecko (no key, free tier)."""
     id_map = {v: k for k, v in _COINGECKO_IDS.items()}
@@ -219,6 +301,13 @@ def get_snapshot(ticker: str) -> float | None:
         g = _gemini_v2_ticker_close(pair)
         if g is not None and g > 0:
             return g
+
+    if ticker in ("^GSPC", "GSPC") and _USE_SPY_FOR_SP500:
+        combined_snapshot = _combine_sp500_snapshot(
+            _yfinance_snapshot("SPY"), _yfinance_snapshot(ticker)
+        )
+        if combined_snapshot is not None:
+            return combined_snapshot
 
     # ^GSPC: try yfinance, then SPY. Crypto without Gemini: yfinance then CoinGecko.
     to_try: list[tuple[str, bool]] = []
@@ -331,30 +420,35 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
     if not result and ticker in _COINGECKO_IDS.values():
         result = _coingecko_aggs(ticker, days_back)
     if not result:
-        tickers_to_try: list[str] = [ticker]
-        tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
-        for t in tickers_to_try:
-            try:
-                end = datetime.utcnow()
-                start = end - timedelta(days=days_back)
-                hist = yf.download(t, start=start, end=end, interval="1d", progress=False)
-                if hist is None or hist.empty:
+        end = datetime.utcnow()
+        start = end - timedelta(days=days_back)
+        if ticker in ("^GSPC", "GSPC") and _USE_SPY_FOR_SP500:
+            combined = _combined_sp500_closes(end, days_back)
+            if combined:
+                result = combined
+        if not result:
+            tickers_to_try: list[str] = [ticker]
+            tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
+            for t in tickers_to_try:
+                try:
+                    hist = yf.download(t, start=start, end=end, interval="1d", progress=False)
+                    if hist is None or hist.empty:
+                        continue
+                    closes_raw = None
+                    if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
+                        closes = hist["Close"]
+                        if hasattr(closes, "ndim") and closes.ndim > 1:
+                            closes = closes.iloc[:, 0]
+                        closes_raw = closes.dropna()
+                    elif "Close" in hist.columns:
+                        closes_raw = hist["Close"].dropna()
+                    if closes_raw is not None and len(closes_raw) > 0:
+                        result = [float(x) for x in closes_raw.tolist()]
+                        if t == "SPY" and ticker in ("^GSPC", "GSPC"):
+                            result = [x * 10.0 for x in result]
+                        break
+                except Exception:
                     continue
-                closes_raw = None
-                if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
-                    closes = hist["Close"]
-                    if hasattr(closes, "ndim") and closes.ndim > 1:
-                        closes = closes.iloc[:, 0]
-                    closes_raw = closes.dropna()
-                elif "Close" in hist.columns:
-                    closes_raw = hist["Close"].dropna()
-                if closes_raw is not None and len(closes_raw) > 0:
-                    result = [float(x) for x in closes_raw.tolist()]
-                    if t == "SPY" and ticker in ("^GSPC", "GSPC"):
-                        result = [x * 10.0 for x in result]
-                    break
-            except Exception:
-                continue
 
     if result:
         try:
@@ -401,7 +495,14 @@ def get_intraday_aggs_at_hour(
     if pair and _USE_GEMINI_SPOT:
         result = _gemini_hourly_for_resolution(pair, resolution_hour_et, period_days)
 
-    tickers_to_try = [ticker] + _TICKER_FALLBACKS.get(ticker, [])
+    tickers_to_try: list[str] = []
+    if ticker in ("^GSPC", "GSPC"):
+        if _USE_SPY_FOR_SP500:
+            tickers_to_try.append("SPY")
+        tickers_to_try.append(ticker)
+    else:
+        tickers_to_try.append(ticker)
+    tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
 
     for t in tickers_to_try:
         if result:

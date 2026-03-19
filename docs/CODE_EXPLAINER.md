@@ -93,7 +93,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 
 | Step                        | What happens                                                | Code pointer                                                  |
 | --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| Get historical closes       | Gemini Exchange 1day (crypto) + Yahoo; CoinGecko if needed    | `signals/yfinance_client.py` → `get_aggs()`               |
+| Get historical closes       | Gemini Exchange 1day (crypto) + SPY/`^GSPC` (S&P) + Yahoo; CoinGecko if needed    | `signals/yfinance_client.py` → `get_aggs()`               |
 | Get Kalshi open markets     | `kalshi.get_markets(series_ticker=series, status="open")`   | `signals/kalshi_client.py` → `get_markets()`                  |
 | Loop over each market       | For each market in the list                                 | `compare_historical.py:1290` → `for mkt in mkt_list`          |
 | Skip unsupported resolution | Non 5pm crypto / 4pm S&P intraday → skip                    | `compare_historical.py:1182` → `_should_skip_by_resolution()` |
@@ -590,15 +590,15 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 
 ### `signals/yfinance_client.py` — Historical Prices
 
-**No Yahoo API key.** For **crypto** tickers mapped to Gemini pairs (BTC/ETH/SOL/XRP in `BTC-USD` form), uses **[Gemini Exchange public REST](https://docs.gemini.com/rest-api/market-data)** first (`v2/ticker`, `v2/candles/.../1day`, `1hr`) when `YFINANCE_CRYPTO_GEMINI` is enabled (default). **S&P** (`^GSPC` / `SPY`) uses Yahoo only. After Gemini: Yahoo Finance, then CoinGecko for BTC/ETH/SOL if still empty. Root `yfinance_client.py` shim re-exports.
+**No Yahoo API key.** For **crypto** tickers mapped to Gemini pairs (BTC/ETH/SOL/XRP in `BTC-USD` form), uses **[Gemini Exchange public REST](https://docs.gemini.com/rest-api/market-data)** first (`v2/ticker`, `v2/candles/.../1day`, `1hr`) when `YFINANCE_CRYPTO_GEMINI` is enabled (default). **S&P** (`^GSPC` / `SPY`) uses the SPY ETF as a proxy (converted ×10) combined with the index when `YFINANCE_SPY_AS_SP500` is on (default). After Gemini/SPY: Yahoo Finance, then CoinGecko for BTC/ETH/SOL if still empty. Root `yfinance_client.py` shim re-exports.
 
 **Key methods:**
-- `get_aggs(ticker, days_back, config)` — Daily closes. Checks `storage.get_yf_closes()` first; if stale/missing, fetches and `storage.set_yf_closes()`.
-- `get_intraday_aggs_at_hour(ticker, days_back, hour_et, config)` — One close per calendar day at `hour_et` (ET): Gemini hourly for crypto when enabled, else Yahoo 1h. Falls back to daily closes if intraday unavailable.
+- `get_aggs(ticker, days_back, config)` — Daily closes. Checks `storage.get_yf_closes()` first; if stale/missing, fetches and `storage.set_yf_closes()`. S&P 500 fetches SPY/`^GSPC` and averages when the proxy flag is enabled.
+- `get_intraday_aggs_at_hour(ticker, days_back, hour_et, config)` — One close per calendar day at `hour_et` (ET): Gemini hourly for crypto when enabled, else Yahoo 1h; S&P uses SPY 1h (converted) then `^GSPC` if needed. Falls back to daily closes if intraday unavailable.
 - `get_aggs_as_of(ticker, end_date, days_back)` — Point-in-time for backtest (no future leakage); Gemini path filters daily candles to `end_date` UTC end-of-day in one request.
-- `get_snapshot(ticker)` — Latest spot: Gemini `close` for mapped crypto (when enabled), else Yahoo, else CoinGecko (BTC/ETH/SOL).
+- `get_snapshot(ticker)` — Latest spot: Gemini `close` for mapped crypto (when enabled), else Yahoo or SPY/`^GSPC` per the proxy flag, then CoinGecko (BTC/ETH/SOL).
 
-**Env:** `YFINANCE_CRYPTO_GEMINI=0` disables Gemini spot; `GEMINI_SPOT_API_BASE` (default `https://api.gemini.com`); `YFINANCE_DEBUG=1` prints provider errors.
+**Env:** `YFINANCE_CRYPTO_GEMINI=0` disables Gemini spot; `YFINANCE_SPY_AS_SP500=0` disables the SPY proxy (use `^GSPC` only); `GEMINI_SPOT_API_BASE` (default `https://api.gemini.com`); `YFINANCE_DEBUG=1` prints provider errors.
 
 ---
 
@@ -911,6 +911,6 @@ position_evaluations
 | Where is DTE-confidence dip?         | `_dte_confidence_dip()` in compare_historical — when DTE>3 days and P(win)≥80% |
 | Where are Kalshi orders placed?      | `signals/kalshi_client.py` → `create_order_safe()`                    |
 | Where are Gemini orders placed?      | `signals/gemini_client.py` → `place_order_safe()`                     |
-| Where is historical price data from? | `signals/yfinance_client.py` → `get_aggs()` (Gemini spot + Yahoo; CoinGecko fallback for some crypto) |
+| Where is historical price data from? | `signals/yfinance_client.py` → `get_aggs()` (Gemini spot + SPY/`^GSPC` + Yahoo; CoinGecko fallback for some crypto) |
 | Where is data cached?                | `data/storage.py` → SQLite in `~/.trading-bot-data/`                  |
 | How to run every 5 min?              | `launchd/` plist; see `launchd/README.md`                             |

@@ -144,7 +144,7 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 
 ### Recent changes (2026-03-17)
 
-- **Gemini Exchange spot for crypto underlying prices:** `signals/yfinance_client.py` calls [Gemini public market data](https://docs.gemini.com/rest-api/market-data) first for BTC/ETH/SOL/XRP (`v2/ticker` for live snapshot, `v2/candles` for daily/hourly history) when `YFINANCE_CRYPTO_GEMINI` is on (default). **S&P 500** (`^GSPC` / `SPY`) still uses Yahoo Finance only. Order after Gemini fails: yfinance, then CoinGecko (BTC/ETH/SOL only). `get_aggs_as_of()` uses one candle request with a UTC end-of-day cutoff (no double-fetch). Disable Gemini spot with `YFINANCE_CRYPTO_GEMINI=0`; override base URL with `GEMINI_SPOT_API_BASE`; debug logs via `YFINANCE_DEBUG=1`.
+- **Gemini Exchange spot for crypto underlying prices:** `signals/yfinance_client.py` calls [Gemini public market data](https://docs.gemini.com/rest-api/market-data) first for BTC/ETH/SOL/XRP (`v2/ticker` for live snapshot, `v2/candles` for daily/hourly history) when `YFINANCE_CRYPTO_GEMINI` is on (default). **S&P 500** (`^GSPC` / `SPY`) now uses the SPY ETF as a proxy (converted ×10) and averages it with the index when `YFINANCE_SPY_AS_SP500` is enabled (default **on**). Disable the SPY proxy by setting `YFINANCE_SPY_AS_SP500=0` — the bot then relies on Yahoo’s `^GSPC` only. Order after Gemini fails: yfinance, then CoinGecko (BTC/ETH/SOL only). `get_aggs_as_of()` uses one candle request with a UTC end-of-day cutoff (no double-fetch). Disable Gemini spot with `YFINANCE_CRYPTO_GEMINI=0`; override base URL with `GEMINI_SPOT_API_BASE`; debug logs via `YFINANCE_DEBUG=1`.
 
 ### Recent changes (2026-03-19)
 
@@ -436,7 +436,7 @@ The bot evaluates **all** crypto and S&P 500 intraday markets (e.g. "Bitcoin tod
 
 For "Bitcoin today at 8pm ET", we only recommend BUY when P(win) ≥ 90% (empirical only) or ≥ 80% with `--use-volatility` (vol model accounts for time-to-expiry and uncertainty).
 
-**Intraday empirical:** For 5pm crypto and 4pm S&P 500, when `strategy.use_intraday_empirical: true` (default), the bot uses hourly bars at the resolution hour—not daily closes. **Crypto:** Gemini `1hr` candles when `YFINANCE_CRYPTO_GEMINI` is on, else Yahoo `1h`; falls back to daily closes if intraday fails. **S&P:** Yahoo `1h` (no Gemini). Set `use_intraday_empirical: false` to use only the volatility model for intraday.
+**Intraday empirical:** For 5pm crypto and 4pm S&P 500, when `strategy.use_intraday_empirical: true` (default), the bot uses hourly bars at the resolution hour—not daily closes. **Crypto:** Gemini `1hr` candles when `YFINANCE_CRYPTO_GEMINI` is on, else Yahoo `1h`; falls back to daily closes if intraday fails. **S&P:** SPY `1h` (converted ×10) when `YFINANCE_SPY_AS_SP500` is on with `^GSPC` as a fallback; falls back to daily closes if intraday fails. Set `use_intraday_empirical: false` to use only the volatility model for intraday.
 
 **Config:** `strategy.intraday_other_min_p_win: 0.90` (empirical only); `strategy.intraday_other_min_p_win_with_vol: 0.80` when `--use-volatility` (vol model accounts for uncertainty); `strategy.use_intraday_empirical: true` (hourly path for 5pm/4pm empirical P).
 
@@ -724,7 +724,7 @@ yfinance_tickers:
 
 Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `SPY`, etc. See [yfinance](https://github.com/ranaroussi/yfinance).
 
-**Gemini Exchange vs Yahoo (underlying spot, not prediction markets):** For the tickers above that map to Gemini USD pairs (`BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`), `get_snapshot` / `get_aggs` / `get_intraday_aggs_at_hour` try **[Gemini public REST](https://docs.gemini.com/rest-api/market-data)** first (no API key). Set `YFINANCE_CRYPTO_GEMINI=0` to use Yahoo (+ CoinGecko fallback for BTC/ETH/SOL) only. `GEMINI_SPOT_API_BASE` defaults to `https://api.gemini.com`. This is separate from **Gemini Prediction Markets** below (contracts/events API).
+**Gemini Exchange vs Yahoo (underlying spot, not prediction markets):** For the tickers above that map to Gemini USD pairs (`BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`), `get_snapshot` / `get_aggs` / `get_intraday_aggs_at_hour` try **[Gemini public REST](https://docs.gemini.com/rest-api/market-data)** first (no API key). S&P 500 data uses SPY `1h`/`1d` (converted ×10) combined with `^GSPC` when `YFINANCE_SPY_AS_SP500` is enabled (default on); set it to 0/false/no to rely on `^GSPC` only. Set `YFINANCE_CRYPTO_GEMINI=0` to use Yahoo (+ CoinGecko fallback for BTC/ETH/SOL) only. `GEMINI_SPOT_API_BASE` defaults to `https://api.gemini.com`. This is separate from **Gemini Prediction Markets** below (contracts/events API).
 
 ### Gemini Prediction Markets (crypto only)
 
