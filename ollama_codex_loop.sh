@@ -35,7 +35,8 @@ fi
 tail -n 200 "$LOG_FILE" > "$TMP_TAIL" 2>/dev/null || touch "$TMP_TAIL"
 # Win rate: position-eval (KEEP/SELL), calibration (overall), or adaptive (Recent Xh)
 WIN_RATE=$(grep -iE 'win rate [0-9.]+%|overall win rate [0-9.]+%|trades, [0-9.]+% win rate' "$LOG_FILE" 2>/dev/null | tail -n 1 | grep -oE '[0-9.]+%' | head -1 | tr -d '%' || echo "0")
-PNL=$(grep -E 'PnL|P&L' "$LOG_FILE" 2>/dev/null | grep -E 'KEEP|SELL' | tail -n 1 | grep -oE 'PnL [+-]?[0-9]+' | awk '{print $2}' || echo "0")
+PNL_CENTS=$(grep -E 'PnL|P&L' "$LOG_FILE" 2>/dev/null | grep -E 'KEEP|SELL' | tail -n 1 | grep -oE '[+-]?[0-9]+¢' | tr -d '¢' | tail -1 || echo "0")
+PNL=$(awk "BEGIN {printf \"%.2f\", $PNL_CENTS/100}")
 
 echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
 
@@ -70,12 +71,12 @@ if [[ -n "$PATCH" ]]; then
   echo "$PATCH" > /tmp/ollama_codex_patch.diff
 
   cd "$REPO"
-    if git apply --verbose --recount --whitespace=fix /tmp/ollama_codex_patch.diff; then
-      echo "✅ Patch applied."
-      python3 -m py_compile signals/yfinance_client.py || true
-      git add docs/ollama_runs.html
-      git add .
-      git commit -m "${MSG:-chore: auto-optimization}"
+  if git apply --verbose --recount --whitespace=fix /tmp/ollama_codex_patch.diff; then
+    echo "✅ Patch applied."
+    python3 -m py_compile signals/yfinance_client.py || true
+    git add docs/ollama_runs.html
+    git add .
+    git commit -m "${MSG:-chore: auto-optimization}"
   else
     echo "❌ Patch failed. Model output was malformed."
   fi
