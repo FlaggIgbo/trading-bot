@@ -18,6 +18,29 @@ Both jobs use your `.venv` Python so dependencies are available.
 
 **Repo `config.yaml`:** Uses the **defensive profitability preset** (e.g. higher `min_edge`, `enable_easy_win: false`, smaller absolute-winner balance slice). Launchd loads this from `WorkingDirectory` on every run—pull `main` and you pick up strategy changes without editing the plist.
 
+## Pick up latest code and run compare now (after `git pull`)
+
+launchd already points at your repo’s `scripts/compare_historical.py` and passes **`--execute`** (see `com.user.compare_historical.plist`). Each scheduled run loads **current** Python + `config.yaml` from disk—no plist edit needed for code/config-only changes.
+
+On the Mac (Terminal.app, not plain SSH if you hit bootstrap EIO before):
+
+```bash
+cd ~/git/trading-bot   # or your clone path
+git pull origin main
+launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
+```
+
+Optional: `tail -f /tmp/compare_historical.out.log` and confirm the banner says **`LIVE — will place orders`** and `CLI flags: --execute=True`.
+
+Re-copy the plist **only** when `ProgramArguments` or `WorkingDirectory` in the repo file changed:
+
+```bash
+cp launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
+launchctl bootout gui/$(id -u)/com.user.compare_historical 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist
+launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
+```
+
 ## One-time setup
 
 1. **Copy the plists to LaunchAgents** (paths must match your machine):

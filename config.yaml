@@ -52,7 +52,9 @@ strategy:
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
-  min_stability_duration_seconds: 15 # Reduced from 30s; faster re-entry after short dips
+  # 0 = skip mid-price stability guard (more live limit / lottery / dip orders; relies on other risk gates).
+  # Set back to 10–15 if you see churn or want anti-sniping from DB snapshots again.
+  min_stability_duration_seconds: 0
   min_order_book_depth: 20 # Depth target; layered mode scales size instead of hard skipping when thinner
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
   cancel_all_on_regime_shift: true # During momentum crash or vol-spike regime, cancel resting BUY limits before re-quoting
