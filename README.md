@@ -375,7 +375,12 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 | `python3 scripts/test_connection.py`        | Test Kalshi & Gemini connections                       |
 | `python3 scripts/compare_prices.py`        | Quick live snapshot (prices only)                       |
 | **`python3 scripts/compare_historical.py`** | **Evaluate contracts → BUY YES / BUY NO / SKIP** |
+| `python3 scripts/compare_historical.py --show-config` | Print resolved config (Freqtrade-style) |
+| `python3 scripts/compare_historical.py --ticker TICKER` | Evaluate only this ticker (Gnosis pick-one) |
 | `python3 scripts/backtest.py`              | Backtest on historical data (`--mode real` or `synthetic`) |
+| `python3 scripts/lookahead_analysis.py`   | Audit backtest for lookahead bias |
+| `python3 scripts/hyperopt.py`             | Tune backtest params via grid search |
+| `streamlit run scripts/streamlit_research_app.py` | Research UI: preview + multi-strategy compare |
 
 ### Main evaluation: `scripts/compare_historical.py`
 
@@ -384,6 +389,8 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 ```bash
 python3 scripts/compare_historical.py --days 365 --markets 0 --edge 0.22   # 0 = all markets; edge flag overrides config min_edge for that run
 python3 scripts/compare_historical.py --preview              # Show planned orders without placing them
+python3 scripts/compare_historical.py --ticker KXBTC-25MAR2017  # Evaluate only this ticker (Gnosis pick-one)
+python3 scripts/compare_historical.py --preview --compare-strategies vol_regime,default_threshold,strict_threshold  # Same model P, alternate recommend()
 python3 scripts/compare_historical.py --execute              # Place real buy/sell orders (one-shot live run)
 python3 scripts/compare_historical.py --execute --no-llm    # Live run, skip LLM analysis
 python3 scripts/compare_historical.py --use-volatility      # Add option-style probability (log-normal model)

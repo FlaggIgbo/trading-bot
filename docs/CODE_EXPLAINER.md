@@ -57,6 +57,9 @@
 - **YES bias correction:** Structural model overconfidence on YES trades corrected via `yes_overconfidence_extra_edge` (+4% extra edge for BUY YES), `model_probability_shrinkage` (compresses hist_p toward 0.5), removal of vol model override on `min_yes_price`, tighter easy-win thresholds, and doubled `parity_max_penalty`. Applied at all recommendation sites (Kalshi, Gemini, position evaluation).
 - **Gemini settlement sync rewrite:** `_sync_gemini_settlements` in `compare_historical.py` now uses threshold-based contract matching (`_extract_threshold_from_title`) and iterates API categories separately to avoid 400 errors.
 - **Dynamic EV-optimal sell threshold:** `_ev_sell_threshold()` replaces the fixed `sell_losing_pct` (55%) with an EV-optimal threshold derived from the current bid and exit fee: `P(lose) > 1 − (sell_price − exit_fee)`. High bids (~90¢) → sell readily (threshold ~11%); low bids (~20¢) → only sell if nearly certain to lose (threshold ~81%). Config: `strategy.dynamic_sell_threshold` (default true).
+- **Disagreement dip + lottery limits:** When `rec == SKIP`, optional **disagreement dip** places a low limit when `|model P − market YES|` is large (`enable_disagreement_dip`, `disagreement_dip_*`). **Lottery limits** (`enable_lottery_limits`, `lottery_limit_min_p_win`, `lottery_limit_price`, `lottery_limit_contracts`) add small limit orders on very high–P(win) skips (cheap convexity; unfilled = no fee). Both paths respect `_is_midprice_stable()` on live runs; **`--preview` passes `skip_in_preview=True`** so proposed orders show even without enough DB snapshots.
+- **Strategy registry + multi-strategy compare:** `models/strategy_registry.py` maps `strategy_engine` names to classes (`vol_regime`, `default_threshold`, `strict_threshold`). `models/trader_agent.py` defines **DeployableTraderAgent** and **RUNNABLE_AGENTS** (Gnosis-style). CLI **`--compare-strategies vol_regime,default_threshold,strict_threshold`** prints alternate `recommend()` outputs for the same final model P (strict uses 1.25× min edge). `_build_strategy_engine()` uses the registry with fallback to `VolRegimeStrategy`.
+- **Research CLI / tools:** `--show-config` (resolved YAML + env), `--ticker` (single-market filter), `scripts/lookahead_analysis.py` (backtest lookahead audit), `scripts/hyperopt.py` (grid search on synthetic backtest friction params), `scripts/streamlit_research_app.py` (Streamlit UI → subprocess `compare_historical --preview`).
 
 ---
 
@@ -69,7 +72,7 @@ The main entry point is **`compare_historical.py`**. Here is the exact flow when
 | Step                    | What happens                                                                                    | Code pointer                                 |
 | ----------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | You run the script      | `python scripts/compare_historical.py [options]`                                                | —                                            |
-| Parse command-line args | `--days`, `--markets`, `--edge`, `--preview`, `--execute`, `--use-volatility`, `--no-llm`, etc. | `compare_historical.py:1107` → `main()`       |
+| Parse command-line args | `--days`, `--markets`, `--edge`, `--preview`, `--execute`, `--use-volatility`, `--no-llm`, `--show-config`, `--ticker`, `--compare-strategies`, etc. | `compare_historical.py` → `main()` |
 | Load config             | Reads `config.yaml` via `config.get_config()`                                                   | `compare_historical.py:1108`                  |
 | Invoke core logic       | Calls `_run_impl()` with args, cfg, markets, strategy                                           | `compare_historical.py:1188` → `_run_impl()` |
 
@@ -107,7 +110,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Alpha engine signals | OBI edge adjustment from bid/ask depth, toxic flow penalty from markout history, lead-lag edge bonus from correlated assets, vol-adjusted Kelly for position sizing | `models/alpha_engine.py` → `compute_obi()`, `obi_edge_adjustment()`, `toxic_flow_edge_penalty()`, `lead_lag_signal()`, `vol_adjusted_kelly()` |
 | Recommend                   | Compare hist_p vs market price → BUY YES / BUY NO / SKIP    | `compare_historical.py:535` → `_recommend()`                  |
 | Apply safety rules          | Skip BUY NO when price above strike; skip BUY YES when < 5¢; DTE-aware strike guard scales `max_buy_yes_strike_above_pct` with `sqrt(DTE)` | `compare_historical.py:1232-1258`                             |
-| Add limit order             | Price = bid × (1−dip) for "dip catching"; DTE-confidence dip scales when resolution far out (>3 days) and P(win)≥80% | `compare_historical.py:1286-1316` → `pending_orders.append()`, `_dte_confidence_dip()` |
+| Add limit order             | Price = bid × (1−dip) for "dip catching"; DTE-confidence dip; **disagreement dip** and **lottery limits** on SKIPs when enabled; `_is_midprice_stable()` (skipped in `--preview` via `skip_in_preview`) | `compare_historical.py` → `pending_orders.append()`, `_dte_confidence_dip()`, `_is_midprice_stable()` |
 
 ---
 
@@ -171,8 +174,11 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 
 | File                                | Purpose                                             | Key code pointers                                                                                                                                                                    |
 | ----------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()` L1107, `_run_impl()` L1195, `_load_strategy_params()` L115, `_empirical_probability()` L434, `_volatility_probability()` L463, `_recommend()` L535, `_extract_strike()` L388, `_dte_confidence_dip()` (DTE-confidence dip scaling), `_filter_contradictory_buys()` L951, `_compute_p_lose()` L652, `_maybe_add_reentry_order()` L674 |
+| **`scripts/compare_historical.py`** | Main evaluation and execution                       | `main()`, `_run_impl()`, `_load_strategy_params()`, `_empirical_probability()`, `_volatility_probability()`, `_recommend()`, `_extract_strike()`, `_dte_confidence_dip()`, `_is_midprice_stable()`, `_print_multi_strategy_compare_line()`, `_build_strategy_engine()` / registry, lottery + disagreement dip paths |
 | **`scripts/backtest.py`**           | Backtest on historical data                         | `--mode real` (resolved predictions) or `synthetic` (market_snapshots + resolved_outcomes); includes slippage/spread realism, winner slippage tax, dwell-time fill modeling, and liquidity friction                                                                                                 |
+| **`scripts/lookahead_analysis.py`** | Lookahead bias audit (Freqtrade-style)              | Documents `get_aggs` vs `get_aggs_as_of`, snapshot-based backtest flow |
+| **`scripts/hyperopt.py`**            | Grid search on synthetic backtest friction params   | Invokes `backtest._run_synthetic` with copied config |
+| **`scripts/streamlit_research_app.py`** | Streamlit research UI (Gnosis-style)           | Subprocess `compare_historical --preview --no-llm`; ticker + compare-strategies |
 | **`scripts/daily_performance_report.py`** | Daily P&L text report + PNG performance charts + bet accuracy | Generates green bars (wins), red bars (losses), blue cumulative P&L line; includes bet-vs-resolution accuracy metrics (distance from threshold); outputs alongside text report |
 | **`scripts/validate_config.py`**    | Config sanity validator                              | Runs pre-push checks for edge/fee consistency, Kelly bounds, EWMA ranges, exposure/loss caps, and macro/two-sided settings before backtest guard                                                                                                                         |
 | **`scripts/compare_prices.py`**     | Live price snapshot (Kalshi, Gemini, yfinance)      | `_run()` L40, `main()` L119                                                                                                                                                          |
@@ -180,7 +186,9 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | **`scripts/debug_ollama.py`**       | Debug Ollama server, models, chat                   | `main()` L16                                                                                                                                                                         |
 | **`models/anti_hallucination.py`**  | Anti-hallucination correction pipeline               | `apply_anti_hallucination_pipeline()`, `bayesian_update()`, `ewma_probability()`, `volatility_zscore()`, `apply_vol_zscore_dampening()`, `adaptive_min_edge()`, `regime_filter()`, `compute_ema()`. Config: `AntiHallucinationConfig`. |
 | **`models/alpha_engine.py`**        | Alpha generation + risk management upgrades           | `compute_obi()`, `obi_edge_adjustment()`, `compute_markout_bps()`, `is_ticker_toxic()`, `toxic_flow_edge_penalty()`, `vol_adjusted_kelly()`, `lead_lag_signal()`, `lead_lag_edge_adjustment()`. Config: `AlphaEngineConfig`. |
-| **`models/strategies/`**            | Pluggable recommendation engines                     | `base.py` interface, `default_threshold.py`, `vol_regime.py`. Root `strategies/` shim re-exports for backward compat.                                                                                                                        |
+| **`models/strategies/`**            | Pluggable recommendation engines                     | `base.py`, `default_threshold.py`, `vol_regime.py`, `strict_threshold.py` (1.25× edge for A/B). Root `strategies/` shim re-exports. |
+| **`models/strategy_registry.py`**   | `strategy_engine` name → class                      | `build_strategy_engine_by_name()`, `list_strategies()`, `parse_strategy_list()` |
+| **`models/trader_agent.py`**        | DeployableTraderAgent + RUNNABLE_AGENTS               | Gnosis-style agent registry for Streamlit / future run_agent entrypoints |
 
 ### Configuration
 
@@ -212,7 +220,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | File                                            | Purpose                                                   |
 | ----------------------------------------------- | --------------------------------------------------------- |
 | **`launchd/com.user.compare_historical.plist`** | Run `compare_historical` every 5 min on macOS (configurable) |
-| **`launchd/README.md`**                         | Setup: copy plist, `launchctl bootstrap`, caffeinate           |
+| **`launchd/README.md`**                         | Setup: copy plist, `launchctl bootstrap`, `kickstart -k`, **bootout+bootstrap** when plist edits; lottery/disagreement settings live in `config.yaml` (loaded each run from `WorkingDirectory`) |
 | **`package.json`**                              | Prettier dev dependency for YAML/JSON/MD formatting       |
 | **`.pre-commit-config.yaml`**                   | Ruff (Python linter/formatter) + Prettier on git push     |
 | **`docs/IMPROVEMENTS.md`**                      | Ideas and backlog for future work                         |
@@ -236,7 +244,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 
 **`_run_impl()` flow (L1195) — the heart of the bot:**
 1. **Setup:** Create KalshiClient, fetch balance, load `_StrategyParams` from config. Sync Kalshi settlements into storage (updates resolved predictions).
-2. **Parallel fetch:** ThreadPoolExecutor fetches (a) Gemini crypto events and (b) Kalshi open markets per series. Results: `gemini_events_by_asset`, `kalshi_markets_by_series`.
+2. **Parallel fetch:** ThreadPoolExecutor fetches (a) Gemini crypto events and (b) Kalshi open markets per series. Results: `gemini_events_by_asset`, `kalshi_markets_by_series`. Optional **`--ticker`** filters both dicts to a single contract before the main loop.
 3. **Calibration:** If storage enabled, call `get_calibration_stats()` — win rate by bucket, by direction+side (e.g. "above+yes" underperforming). Used to adjust min_edge and favor_yes logic.
 4. **Main loop — for each series (KXBTCD, KXETHD, etc.):**
    - Resolve yf_ticker from config (e.g. KXBTCD → BTC-USD).
@@ -485,7 +493,9 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `use_volatility_by_default` | `use_volatility_by_default` | true | Apply volatility model even without `--use-volatility` |
 | `vol_dynamic_n0` | `vol_dynamic_n0` | 90 | Sample-size pivot for dynamic empirical/vol blend |
 | `uncertainty_edge_mult` | `uncertainty_edge_mult` | 0.5 | Adds CI-based uncertainty buffer to min edge; CI sample size matches rolling-window length (not full history) |
-| `strategy_engine` | `strategy_engine` | `vol_regime` | Select recommendation engine (`vol_regime` default, `default_threshold` optional) |
+| `strategy_engine` | `strategy_engine` | `vol_regime` | `vol_regime`, `default_threshold`, or `strict_threshold` (stricter min edge ×1.25 for research) |
+| `enable_lottery_limits` | `enable_lottery_limits` | true | High–P(win) SKIP → small limit order (`lottery_limit_*`) |
+| `enable_disagreement_dip` | `enable_disagreement_dip` | true | Large model–market gap → low limit (`disagreement_dip_*`) |
 | `stop_loss_pct` | `stop_loss_pct` | 0.50 fallback | Stop-loss threshold from recorded entry price (current config 0.20) |
 | `enable_strike_validation` | `enable_strike_validation` | true | Validate extracted strike against current price and market odds |
 | `strike_validation_tolerance_pct` | `strike_validation_tolerance_pct` | 0.05 | Tolerance band used for strike sanity checks |
@@ -521,8 +531,15 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `--limit-analysis` | flag | — | Print analysis of unfilled limit orders (why they didn't hit; informs limit_dip_pct tuning) |
 | `--position-eval-analysis` | flag | — | Print KEEP vs SELL outcome stats from position evaluations (win rate by hist_p bucket) |
 | `--log` [DIR] | optional | — | Log output to `~/Desktop/trading-bot-logs/` or specified dir (eval_YYYYMMDDHH.log per hour) |
+| `--show-config` | flag | — | Print resolved config (markets, key strategy + trading keys); exit without API |
+| `--ticker` | str | — | Evaluate only this Kalshi or Gemini ticker |
+| `--compare-strategies` | str | — | Comma-separated engines; print `Multi-strategy:` line (same model P, alternate `recommend()`) |
+| `--reconcile-diagnostics` | flag | — | Log fill reconciliation counters |
+| `--reconcile-only` | flag | — | Reconciliation pass only, then exit |
 
 **Example:** `python scripts/compare_historical.py --days 365 --preview` → evaluate all markets, no orders, 365 days of history.
+
+**Example:** `python scripts/compare_historical.py --preview --ticker KXBTC-26MAR2717-T82899.99 --compare-strategies vol_regime,strict_threshold` → one market, strategy comparison.
 
 ### `scripts/backtest.py`
 

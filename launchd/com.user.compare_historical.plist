@@ -24,6 +24,8 @@
         <string>/Users/ogechukwuflagg-igbo</string>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONDONTWRITEBYTECODE</key>
+        <string>1</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>/Users/ogechukwuflagg-igbo/git/trading-bot</string>

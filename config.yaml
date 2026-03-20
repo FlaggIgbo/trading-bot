@@ -28,24 +28,27 @@ yfinance_tickers:
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
-  min_edge: 0.35 # Raised from 0.30 to demand stronger edge during drawdowns
+  min_edge: 0.18 # Lowered from 0.28 for capital-starved recovery; avoid 50% effective hurdle (28% + 22% adaptive = death spiral)
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
   easy_win_min_p_win: 0.93 # Raised from 0.90; model overconfidence means 90% is unreliable — require near-certainty
   easy_win_min_market_p: 0.88 # Raised from 0.85; tighter agreement required to avoid YES-biased easy wins
-  min_yes_price: 0.05 # Skip BUY YES when market YES < 5¢ (market thinks <5% chance). NO vol override.
+  min_yes_price: 0.01 # Skip BUY YES when market YES < 1¢; allow high-probability trades with low balance
+  max_yes_price_for_buy: 0.85 # Skip BUY YES when market YES > 85¢; worst risk-reward for small balance (steamroller)
   yes_overconfidence_extra_edge: 0.04 # Extra edge required for BUY YES to offset structural model bullish bias
-  model_probability_shrinkage: 0.65 # Pull hist_p toward 0.5: stronger compression after overconfident hist_p
+  model_probability_shrinkage: 0.40 # Aggressive pull toward 0.5; 4% win rate = model wildly overconfident (was 0.65; stop steamrolling)
   max_buy_yes_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
   max_buy_no_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
-  min_no_price: 0.05 # Raised from 0.02; 1-2¢ NO contracts have near-zero EV after fees
+  min_no_price: 0.01 # Allow NO side on 97¢ contracts (NO=3¢); capital-starved recovery mode
   days_back: 365 # Days of historical data for P(above/below). Longer = more stable empirical P
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
   dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
-  limit_dip_pct: 0.08 # Raised from 5% to 8%; deeper limits to capture better entry prices during volatility
+  aggressive_limit_orders: true # Place deep limit orders on all buys; worst case = no fill = no fee (platform cancels unfilled)
+  max_dip_cap: 0.35 # Cap limit price discount (35% below bid when aggressive; 25% default). Deeper = more fill opportunities.
+  limit_dip_pct: 0.12 # Deeper base dip (12%) when aggressive — prioritize limit orders to catch dips
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
@@ -57,18 +60,31 @@ strategy:
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   layered_order_levels: 3 # Used by layered mode to spread large intents across deeper quote levels
-  limit_dip_pct_high_confidence: 0.15 # When P(win) >= 90%, use larger dip (15%) — prioritize aggressive limits on high-certainty contracts
-  limit_dip_pct_price_decline: 0.10 # When model suggests contract price might decrease (vol model on, or dte >= 2), use this dip (10%) to prioritize limit orders
+  limit_dip_pct_high_confidence: 0.22 # When P(win) >= 90%, use larger dip (22%) — aggressive limits on high-certainty
+  limit_dip_pct_price_decline: 0.15 # When price might decline (vol/dte), use 15% dip — prioritize limit orders
   # DTE-confidence dip scaling: when resolution is far out AND model is confident,
   # place deeper limit orders to catch uncertainty-driven price dips.
   # Markets with distant resolution are prone to mean-reverting dips even when
   # the eventual outcome is near-certain; deeper limits capture these.
   far_dte_dip_scaling_enabled: true # Enable DTE-proportional limit dip scaling
-  far_dte_threshold_days: 0.042 # Consider resolution "far" when DTE > ~1 hour (crypto can be hourly)
+  far_dte_threshold_days: 0.028 # ~40 min; lower to allow dip scaling on intraday (was 0.042=1h; XRP 47min was blocked)
   far_dte_dip_scale_per_day: 0.015 # Add 1.5% more dip per day of DTE beyond threshold
-  far_dte_max_extra_dip: 0.12 # Cap additional DTE-based dip at 12%
+  far_dte_max_extra_dip: 0.18 # Cap additional DTE-based dip at 18% (aggressive limit abuse)
   far_dte_min_confidence: 0.80 # Only apply DTE dip scaling when P(win) >= 80%
   far_dte_confidence_boost: 1.5 # When P(win) >= 90%, multiply the DTE extra dip by this
+  # Disagreement dip: when model and market strongly disagree (e.g. market 95%, we 45%), place low limit order to catch dips
+  enable_disagreement_dip: true # Place limit orders below bid when |hist_p - market_yes| >= min_gap
+  disagreement_dip_min_gap: 0.25 # Need 25% disagreement to place dip order (lower = more speculative dip-fishing)
+  disagreement_dip_min_p_win: 0.25 # Require model P(win) >= 25% for dip orders — avoid lottery-ticket limit orders
+  disagreement_dip_pct_of_bid: 0.50 # Place limit at 50% of current bid (aggressive dip)
+  disagreement_dip_min_price: 0.02 # Floor 2¢ (min valid price)
+  disagreement_dip_max_price: 0.15 # Cap 15¢ so we don't overpay on dips
+  disagreement_dip_contracts: 2 # Small size for speculative dip-fishing
+  # Lottery limits: 1¢ (or close) limit orders on high-probability SKIPs — free lottery tickets (no fill = no fee)
+  enable_lottery_limits: true # Place 1¢ limits when rec==SKIP but model P(win) >= 95% (ITM YES or OTM NO)
+  lottery_limit_min_p_win: 0.95 # Require 95%+ model probability for lottery ticket
+  lottery_limit_price: 0.05 # 5¢ limit (min valid)
+  lottery_limit_contracts: 1 # Small size
   vol_blend_weight: 0.35 # Reduced from 0.45; further reduce vol model weight due to continued overconfidence
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
@@ -106,7 +122,7 @@ strategy:
   min_calibration_samples_overall: 20 # Min resolved trades before applying overall min_edge bump
   use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
   min_bucket_samples: 5 # Min trades in bucket before applying bucket penalty
-  min_vol_confidence_far_otm: 0.97 # Require vol model ≥97% (not 95%) for BUY YES when strike far above current; targets losing "above X"
+  min_vol_confidence_far_otm: 0.90 # Require vol model ≥90% for BUY YES when strike far above current (was 97%; allows more OTM)
   calibration_loss_weight: 1.5 # Weight losers 1.5x in calibration (learn more from mistakes; 1.0 = equal weight)
   enable_sell_and_rebuy: false # Off by default — reduces fee churn and re-entry into the same bad tick on fast markets
   # P(lose) blend: incorporate market odds; weight increases as we approach resolution (markets more accurate near expiry)
@@ -119,7 +135,7 @@ strategy:
   dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
   dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
   dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
-  adaptive_loss_block_win_rate: 0.35 # Block new buys if recent win rate dips below this
+  adaptive_loss_block_win_rate: 0.25 # Block new buys if recent win rate dips below this (was 0.35; allows trading through moderate drawdowns)
   adaptive_loss_block_lookback_hours: 6.0 # Lookback window for the circuit-breaker win rate
   enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
   two_sided_quote_min_edge: 0.03 # Aligned with higher min_edge; still must be <= min_edge
@@ -138,7 +154,7 @@ strategy:
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
   momentum_crash_threshold_pct: -0.05 # Widened from -3.5% to -5%; dips are where passive limit value is
   max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
-  max_daily_loss_pct: 0.10 # Circuit breaker: block new buys if last 24h realized loss exceeds this fraction of balance
+  max_daily_loss_pct: 0 # Disabled: was blocking all buys with low balance ($3.40 loss = 155% of ~$2). Re-enable when balance recovers (e.g. 0.25)
   max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
   enable_vol_spike_safety: true # Safety mode on volatility regime break
   vol_spike_threshold_mult: 3.0 # Raised from 2.0; dips happen during vol spikes — don't cancel limits too early
@@ -176,18 +192,18 @@ strategy:
   intraday_min_empirical_weight: 0.20 # Floor for empirical weight in intraday blending; prevents DTE decay from zeroing out the empirical signal
 
   # --- Adaptive learning: the bot learns from its own recent trades ---
-  adaptive_learning_enabled: true # Master switch for all adaptive learning features
+  adaptive_learning_enabled: false # DISABLED for capital-starved recovery; was compounding losses into 50% effective min_edge (death spiral)
   adaptive_edge_lookback_hours: 6.0 # Look back this many hours for recent win rate
   adaptive_edge_min_trades: 8 # Need at least this many recent trades before adjusting
   adaptive_edge_scale_per_pct: 0.003 # Per 1% below 50% win rate, add this to min_edge (e.g. 30% WR → 20 * 0.003 = +0.06)
-  adaptive_edge_max_extra: 0.15 # Cap on adaptive edge from recent performance
+  adaptive_edge_max_extra: 0.10 # Cap on adaptive edge from recent performance (was 0.15; prevents effective edge from exceeding ~0.38)
   loss_streak_threshold: 5 # After this many consecutive losses, activate circuit breaker
   loss_streak_extra_edge: 0.04 # Base extra edge per consecutive loss beyond threshold
-  loss_streak_max_extra: 0.20 # Maximum total extra edge from loss streak
+  loss_streak_max_extra: 0.05 # Max extra edge from loss streak; was 0.12 compounding to death spiral (if re-enabled)
   series_cooldown_threshold: 4 # After N consecutive losses on same series (e.g. KXBTCD), add extra edge
   series_cooldown_extra_edge: 0.06 # Extra edge for series that are on a cold streak
   ewma_halflife_trades: 30 # EWMA halflife in trades (recent trades weighted exponentially more)
-  ewma_edge_scale_per_pct: 0.004 # Per 1% below 50% EWMA win rate, add this to min_edge
+  ewma_edge_scale_per_pct: 0.001 # Per 1% below 50% EWMA win rate; was 0.004 (if adaptive re-enabled)
 
   mc_enabled: true # Monte Carlo simulation: blend simulated paths with analytical CDF for tail-aware probability
   mc_paths: 10000 # Number of GBM paths to simulate (higher = more accurate, slower; 10k ≈ 50ms with numpy)
@@ -262,7 +278,7 @@ strategy:
     lead_lag_lookback_bars: 5 # Bars of leader data used to compute momentum
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # blacklist: ["KXINXU"]   # Exclude these series (optional)
-  # strategy_engine options: vol_regime (default), default_threshold
+  # strategy_engine options: vol_regime (default), default_threshold, strict_threshold (1.25× min edge — research / A/B)
 
 # Local historical storage (SQLite). Data in ~/.trading-bot-data/ — not committed to git.
 # Speeds runs (yf cache), builds history for backtesting and calibration.
@@ -279,7 +295,7 @@ trading:
   min_contracts: 1 # skip if capped count < this
   # When balance is below this (cents), place a limit order instead of skipping
   # E.g. 500 = $5: with $3 balance, place 1-contract limit at price we can afford (e.g. 60¢)
-  min_balance_for_limit_fallback_cents: 300 # $3 minimum; avoids ultra-small fallback orders in thin books
+  min_balance_for_limit_fallback_cents: 250 # Use fallback when balance < $2.50; with $2 balance triggers 1-contract limit (was 300; 100 would block $2)
 
 # Backtest realism settings
 backtest:

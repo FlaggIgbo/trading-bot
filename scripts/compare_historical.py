@@ -165,6 +165,7 @@ class _StrategyParams:
     limit_dip_pct: float
     limit_dip_pct_high_confidence: float
     limit_dip_pct_price_decline: float
+    max_dip_cap: float
     limit_order_mode: str
     tick_offset: int
     max_inventory_skew_pct: float
@@ -184,6 +185,7 @@ class _StrategyParams:
     min_fee_per_order: float
     min_yes_price: float
     min_no_price: float
+    max_yes_price_for_buy: float
     max_buy_yes_strike_above_pct: float
     max_buy_no_strike_above_pct: float
     enable_intra_arb: bool
@@ -291,6 +293,17 @@ class _StrategyParams:
     far_dte_max_extra_dip: float
     far_dte_min_confidence: float
     far_dte_confidence_boost: float
+    enable_disagreement_dip: bool
+    disagreement_dip_min_gap: float
+    disagreement_dip_min_p_win: float
+    disagreement_dip_pct_of_bid: float
+    disagreement_dip_min_price: float
+    disagreement_dip_max_price: float
+    disagreement_dip_contracts: int
+    enable_lottery_limits: bool
+    lottery_limit_min_p_win: float
+    lottery_limit_price: float
+    lottery_limit_contracts: int
     mc_enabled: bool
     mc_paths: int
     mc_blend_weight: float
@@ -327,6 +340,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_dip_pct=float(strategy.get("limit_dip_pct", 0)),
         limit_dip_pct_high_confidence=float(strategy.get("limit_dip_pct_high_confidence", 0)),
         limit_dip_pct_price_decline=float(strategy.get("limit_dip_pct_price_decline", 0)),
+        max_dip_cap=float(strategy.get("max_dip_cap", 0.25)),
         limit_order_mode=str(strategy.get("limit_order_mode", "fixed_pct")).strip().lower(),
         tick_offset=max(1, int(strategy.get("tick_offset", 1))),
         max_inventory_skew_pct=max(0.0, float(strategy.get("max_inventory_skew_pct", 0.10))),
@@ -346,6 +360,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_fee_per_order=float(strategy.get("min_fee_per_order", 0.01)),
         min_yes_price=float(strategy.get("min_yes_price", 0.05)),
         min_no_price=float(strategy.get("min_no_price", 0.05)),
+        max_yes_price_for_buy=float(strategy.get("max_yes_price_for_buy", 0)),
         max_buy_yes_strike_above_pct=float(strategy.get("max_buy_yes_strike_above_pct", 0.05)),
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
@@ -453,6 +468,17 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         far_dte_max_extra_dip=float(strategy.get("far_dte_max_extra_dip", 0.12)),
         far_dte_min_confidence=float(strategy.get("far_dte_min_confidence", 0.80)),
         far_dte_confidence_boost=float(strategy.get("far_dte_confidence_boost", 1.5)),
+        enable_disagreement_dip=bool(strategy.get("enable_disagreement_dip", False)),
+        disagreement_dip_min_gap=float(strategy.get("disagreement_dip_min_gap", 0.35)),
+        disagreement_dip_min_p_win=float(strategy.get("disagreement_dip_min_p_win", 0.25)),
+        disagreement_dip_pct_of_bid=float(strategy.get("disagreement_dip_pct_of_bid", 0.50)),
+        disagreement_dip_min_price=float(strategy.get("disagreement_dip_min_price", 0.02)),
+        disagreement_dip_max_price=float(strategy.get("disagreement_dip_max_price", 0.15)),
+        disagreement_dip_contracts=int(strategy.get("disagreement_dip_contracts", 2)),
+        enable_lottery_limits=bool(strategy.get("enable_lottery_limits", False)),
+        lottery_limit_min_p_win=float(strategy.get("lottery_limit_min_p_win", 0.95)),
+        lottery_limit_price=max(0.01, min(0.99, float(strategy.get("lottery_limit_price", 0.05)))),
+        lottery_limit_contracts=int(strategy.get("lottery_limit_contracts", 1)),
         mc_enabled=bool(strategy.get("mc_enabled", True)),
         mc_paths=max(100, int(strategy.get("mc_paths", 10000))),
         mc_blend_weight=max(0.0, min(1.0, float(strategy.get("mc_blend_weight", 0.3)))),
@@ -489,10 +515,69 @@ def _build_strategy_engine(strategy_cfg: dict) -> BaseStrategy:
     Default remains the production path ("vol_regime"), so callers do not need
     to switch strategies unless explicitly testing alternatives.
     """
+    from models.strategy_registry import build_strategy_engine_by_name
+
     name = str(strategy_cfg.get("strategy_engine", "vol_regime")).strip().lower()
-    if name in {"default", "default_threshold", "threshold"}:
-        return DefaultThresholdStrategy()
-    return VolRegimeStrategy()
+    try:
+        return build_strategy_engine_by_name(name)
+    except ValueError:
+        return VolRegimeStrategy()
+
+
+def _print_multi_strategy_compare_line(
+    *,
+    compare_strategies_arg: str,
+    hist_p: float,
+    market_yes: float,
+    min_p_win: float,
+    effective_min: float,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+    effective_min_yes: float,
+    effective_min_no: float,
+    is_strict_intraday: bool,
+    sp: _StrategyParams,
+) -> None:
+    """Same model P(hist_p); alternate strategy engines only change recommend() thresholds."""
+    raw = (compare_strategies_arg or "").strip()
+    if not raw:
+        return
+    from models.strategy_registry import build_strategy_engine_by_name, parse_strategy_list
+
+    parts: list[str] = []
+    for sn in parse_strategy_list(raw):
+        try:
+            eng = build_strategy_engine_by_name(sn)
+        except ValueError:
+            parts.append(f"{sn}:?")
+            continue
+        if is_strict_intraday:
+            mr = eng.recommend_strict(
+                p_yes=hist_p,
+                market_yes=market_yes,
+                min_p_win=min_p_win,
+                min_edge=effective_min,
+                maker_fee_rate=maker_fee_rate,
+                min_fee_per_order=min_fee_per_order,
+                min_edge_yes=effective_min_yes,
+                min_edge_no=effective_min_no,
+            )
+        else:
+            mr = eng.recommend(
+                p_yes=hist_p,
+                market_yes=market_yes,
+                min_edge=effective_min,
+                maker_fee_rate=maker_fee_rate,
+                min_fee_per_order=min_fee_per_order,
+                min_edge_yes=effective_min_yes,
+                min_edge_no=effective_min_no,
+                min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                easy_win_min_p_win=sp.easy_win_min_p_win,
+                easy_win_min_market_p=sp.easy_win_min_market_p,
+            )
+        parts.append(f"{sn}:{mr}")
+    if parts:
+        print(f"    ├─ Multi-strategy:  {' | '.join(parts)}")
 
 
 def _adaptive_limit_dip(base_dip: float, closes: list[float], *, cap: float = 0.25) -> float:
@@ -535,7 +620,7 @@ def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def _rsi_dip_adjustment(base_dip: float, rsi: float | None) -> float:
+def _rsi_dip_adjustment(base_dip: float, rsi: float | None, max_dip_cap: float = 0.25) -> float:
     """
     Modulate limit dip depth based on RSI.
     Oversold (RSI<30): tighten dip to fill faster on the bounce.
@@ -546,7 +631,7 @@ def _rsi_dip_adjustment(base_dip: float, rsi: float | None) -> float:
     if rsi < 30:
         return base_dip * 0.6
     if rsi > 70:
-        return min(0.25, base_dip * 1.4)
+        return min(max_dip_cap, base_dip * 1.4)
     return base_dip
 
 
@@ -563,7 +648,7 @@ def _dte_confidence_dip(
     even when the eventual outcome is near-certain. High-confidence, far-DTE trades
     benefit from deeper limits that catch these transient price drops.
 
-    Returns the combined dip (base + DTE extra), capped at 25%.
+    Returns the combined dip (base + DTE extra), capped at max_dip_cap.
     """
     if not sp.far_dte_dip_scaling_enabled:
         return base_dip
@@ -578,7 +663,7 @@ def _dte_confidence_dip(
     if p_win >= 0.90:
         extra_dip *= sp.far_dte_confidence_boost
 
-    return min(0.25, base_dip + extra_dip)
+    return min(sp.max_dip_cap, base_dip + extra_dip)
 
 
 def _extract_book_fields(market: dict, yes_bid: float, no_bid: float) -> dict[str, float | None]:
@@ -632,12 +717,14 @@ def _is_midprice_stable(
     cfg: dict,
     min_stability_seconds: int,
     max_mid_move_pct: float = 0.03,
+    skip_in_preview: bool = False,
 ) -> bool:
     """
     Anti-sniping guard: require recent mid-price to remain within a tight range
     for at least min_stability_seconds.
+    In --preview mode, skip this check so proposed orders are shown.
     """
-    if min_stability_seconds <= 0 or not get_market_snapshots_for_backtest:
+    if skip_in_preview or min_stability_seconds <= 0 or not get_market_snapshots_for_backtest:
         return True
     end_ts = time.time()
     start_ts = end_ts - max(float(min_stability_seconds + 60), 300.0)
@@ -687,6 +774,7 @@ def _compute_limit_price(
     max_inventory_skew_pct: float,
     layered_order_levels: int,
     order_count: int,
+    max_dip_cap: float = 0.25,
 ) -> tuple[float, float]:
     """
     Returns (limit_price, dip_used_proxy).
@@ -699,7 +787,7 @@ def _compute_limit_price(
     fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
 
     if mode_norm == "fixed_pct":
-        dip = max(0.0, min(0.25, float(base_dip)))
+        dip = max(0.0, min(max_dip_cap, float(base_dip)))
         raw_price = bid * (1.0 - dip) if dip > 0 else bid
     elif mode_norm == "dynamic_tick":
         tick = max(1, int(tick_offset)) * 0.01
@@ -711,7 +799,7 @@ def _compute_limit_price(
     else:
         # Layered: place passive limits BELOW bid using the dip to catch transient
         # price drops instead of penny-jumping above bid.
-        dip = max(0.0, min(0.25, float(base_dip)))
+        dip = max(0.0, min(max_dip_cap, float(base_dip)))
         base_price = bid * (1.0 - dip) if dip > 0 else bid
 
         # Stagger deeper when we already hold same-side inventory (additional
@@ -904,6 +992,14 @@ _DATE_PATTERN = re.compile(
     r"(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?)?",
     re.I,
 )
+# "Mar 23, 2026 at 4pm" — explicit date + year + time (try before _AT_TIME_ONLY to avoid "today")
+_DATE_WITH_YEAR_PATTERN = re.compile(
+    r"(?:on\s+)?"
+    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+"
+    r"(\d{1,2})\s*,\s*(\d{4})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?",
+    re.I,
+)
 
 
 def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetime | None:
@@ -936,7 +1032,30 @@ def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetim
         except (ValueError, TypeError):
             return None
 
-    # 2. "at 5pm" (no today/tomorrow) - assume today
+    # 2. "on Mar 23, 2026 at 4pm" — explicit date + year (must run before _AT_TIME_ONLY)
+    m2a = _DATE_WITH_YEAR_PATTERN.search(title)
+    if m2a:
+        mon_str, day_str, year_str, h_str, min_str, am_pm = (
+            m2a.group(1), m2a.group(2), m2a.group(3),
+            m2a.group(4), m2a.group(5), m2a.group(6),
+        )
+        month = _MONTHS.get(mon_str[:3].lower())
+        if month is not None:
+            day = int(day_str)
+            year = int(year_str)
+            hour = int(h_str)
+            minute = int(min_str) if min_str else 0
+            if "pm" in (am_pm or "").lower() and hour < 12:
+                hour += 12
+            elif "am" in (am_pm or "").lower() and hour == 12:
+                hour = 0
+            try:
+                dt_et = datetime(year, month, day, hour, minute, 0, tzinfo=ET)
+                return dt_et.astimezone(UTC)
+            except (ValueError, TypeError):
+                pass
+
+    # 3. "at 5pm" (no today/tomorrow/explicit date) - assume today
     m2 = _AT_TIME_ONLY.search(title)
     if m2:
         h_str, min_str, am_pm = m2.group(1), m2.group(2), m2.group(3)
@@ -952,7 +1071,7 @@ def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetim
         except (ValueError, TypeError):
             return None
 
-    # 3. "on March 16" / "March 16 at 5pm" - explicit date
+    # 4. "on March 16" / "March 16 at 5pm" - explicit date (no year)
     m3 = _DATE_PATTERN.search(title)
     if m3:
         mon_str, day_str = m3.group(1), m3.group(2)
@@ -3228,7 +3347,7 @@ def _maybe_add_two_sided_quotes(
             if bid <= 0:
                 continue
             p_win = float(c["hist_p"] if side == "yes" else (1.0 - c["hist_p"]))
-            dip = max(0.0, min(0.25, float(c.get("arr_dip", sp.limit_dip_pct))))
+            dip = max(0.0, min(sp.max_dip_cap, float(c.get("arr_dip", sp.limit_dip_pct))))
             if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                 dip = max(dip, sp.limit_dip_pct_high_confidence)
             dip = _dte_confidence_dip(dip, p_win, c.get("dte"), sp)
@@ -3495,6 +3614,36 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
             )
 
 
+def _show_config(args) -> int:
+    """Print resolved config (Freqtrade show-config style). No API calls."""
+    cfg = get_config()
+    strategy = cfg.get("strategy", {})
+    trading = cfg.get("trading", {})
+    markets = cfg.get("markets", [])
+    yf = cfg.get("yfinance_tickers", {})
+    # Effective min_edge: config or --edge
+    min_edge = float(strategy.get("min_edge", args.edge))
+    print("=" * 60)
+    print("  RESOLVED CONFIG (config.yaml + env overrides)")
+    print("=" * 60)
+    print(f"\nmarkets: {markets}")
+    print(f"yfinance_tickers: {list(yf.keys()) if isinstance(yf, dict) else yf}")
+    print(f"\nstrategy (key params):")
+    for k in ("strategy_engine", "min_edge", "kelly_fraction", "limit_order_mode", "vol_model",
+              "enable_disagreement_dip", "enable_lottery_limits", "max_dip_cap", "limit_dip_pct"):
+        v = strategy.get(k)
+        if v is not None:
+            print(f"  {k}: {v}")
+    print(f"\n  (effective min_edge: {min_edge})")
+    print(f"\ntrading:")
+    for k in ("dry_run", "max_pct_of_balance", "max_total_buy_pct", "min_contracts"):
+        v = trading.get(k)
+        if v is not None:
+            print(f"  {k}: {v}")
+    print("\n" + "=" * 60)
+    return 0
+
+
 def main():
     cfg = get_config()
     strategy = cfg.get("strategy", {})
@@ -3516,7 +3665,18 @@ def main():
     parser.add_argument("--position-eval-analysis", action="store_true", help="Print position evaluation stats (KEEP vs SELL outcomes, win rate by hist_p bucket)")
     parser.add_argument("--reconcile-diagnostics", action="store_true", help="Print fill reconciliation counters (seen/inserted/duplicate/skipped) per platform")
     parser.add_argument("--reconcile-only", action="store_true", help="Run fill reconciliation pass only, print diagnostics, then exit")
+    parser.add_argument("--show-config", action="store_true", help="Print resolved config (with env overrides) and exit (Freqtrade-style)")
+    parser.add_argument("--ticker", type=str, default="", help="Evaluate only this ticker (Kalshi or Gemini); skip all others (Gnosis pick-one pattern)")
+    parser.add_argument(
+        "--compare-strategies",
+        type=str,
+        default="",
+        help="Comma-separated strategy_engine names; print alternate recommendations vs same model P (e.g. vol_regime,default_threshold,strict_threshold)",
+    )
     args = parser.parse_args()
+
+    if args.show_config:
+        return _show_config(args)
     args.use_llm = not args.no_llm
 
     return capture_and_analyze(
@@ -3670,6 +3830,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         fut_kalshi = executor.submit(_fetch_kalshi_markets)
         gemini_events_by_asset = fut_gemini.result()
         kalshi_markets_by_series = fut_kalshi.result()
+
+    # --ticker: evaluate only this ticker (Gnosis pick-one pattern)
+    filter_ticker = (getattr(args, "ticker", "") or "").strip().upper()
+    if filter_ticker:
+        for series in list(kalshi_markets_by_series.keys()):
+            kalshi_markets_by_series[series] = [
+                m for m in kalshi_markets_by_series[series]
+                if str(m.get("ticker") or "").upper() == filter_ticker
+            ]
+        for asset in list(gemini_events_by_asset.keys()):
+            gemini_events_by_asset[asset] = [
+                e for e in gemini_events_by_asset[asset]
+                if str(e.get("ticker") or "").upper() == filter_ticker
+            ]
+        total_filt = sum(len(v) for v in kalshi_markets_by_series.values()) + sum(len(v) for v in gemini_events_by_asset.values())
+        if total_filt == 0:
+            print(f"[--ticker {filter_ticker}] No market found matching this ticker. Exiting.")
+            return 0
+        print(f"[--ticker] Filtering to ticker {filter_ticker} ({total_filt} market(s))")
+        print()
 
     # Diagnostic: how many Gemini events per asset
     total_gem = sum(len(v) for v in gemini_events_by_asset.values())
@@ -3877,7 +4057,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             pnl_stats = get_realized_pnl_stats(since_ts=since_ts, config=cfg) or {}
             pnl_24h = int(pnl_stats.get("total_pnl_cents", 0) or 0)
             loss_24h = max(0, -pnl_24h)
-            loss_pct = (loss_24h / max(1, balance_cents))
+            # Use min balance floor ($25) so low-balance accounts don't get permanently locked out
+            balance_for_pct = max(balance_cents, 2500)
+            loss_pct = (loss_24h / max(1, balance_for_pct))
             breach_pct = sp.max_daily_loss_pct > 0 and loss_pct >= sp.max_daily_loss_pct
             breach_abs = sp.max_daily_loss_cents > 0 and loss_24h >= sp.max_daily_loss_cents
             if breach_pct or breach_abs:
@@ -4417,6 +4599,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance
             if rec == REC_BUY_YES and yes_bid < sp.min_yes_price:
                 rec = REC_SKIP
+            # Skip BUY YES when market prices it very high (>85¢): worst risk-reward for small balance (steamroller)
+            if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and yes_bid > sp.max_yes_price_for_buy:
+                rec = REC_SKIP
             # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
             # DTE-aware: tighten allowed gap for short-dated contracts (price can't move far in minutes)
             # When DTE < 0.1 days (~2.4h), vol override is blocked — not enough time for large moves
@@ -4486,7 +4671,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "no_ask": book_q.get("no_ask"),
                     "edge_yes_net": hist_p - yes_bid - fee_yes_q,
                     "edge_no_net": (1.0 - hist_p) - no_bid_for_quote - fee_no_q,
-                    "arr_dip": min(0.25, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp) * dip_regime_mult),
+                    "arr_dip": min(sp.max_dip_cap, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp, cap=sp.max_dip_cap) * dip_regime_mult),
                     "dte": dte,
                 }
             )
@@ -4527,6 +4712,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"    ├─ Alpha:        {' | '.join(_alpha_tags)}")
             print(f"    ├─ Verdict:      {rec}")
             print(f"    │    → {_rec_plain}")
+            _print_multi_strategy_compare_line(
+                compare_strategies_arg=getattr(args, "compare_strategies", "") or "",
+                hist_p=hist_p,
+                market_yes=yes_bid,
+                min_p_win=min_p_win,
+                effective_min=effective_min,
+                maker_fee_rate=maker_fee_rate,
+                min_fee_per_order=sp.min_fee_per_order,
+                effective_min_yes=effective_min_yes,
+                effective_min_no=effective_min_no,
+                is_strict_intraday=bool(_is_other_intraday(m, yf_ticker)),
+                sp=sp,
+            )
             reason = _format_reason(
                 rec, hist_p, yes_bid, threshold, current_price, direction,
                 violates_rule, vol_p, sp.min_yes_price, sp.min_no_price,
@@ -4576,14 +4774,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             except ImportError:
                 pass
+            added_dip = False
             if rec != REC_SKIP:
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 bid = yes_bid if rec == REC_BUY_YES else no_bid
                 side = "yes" if rec == REC_BUY_YES else "no"
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
                 print(f"       Edge: {abs(diff):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
-                dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp)
-                dip = min(0.25, dip * dip_regime_mult)
+                dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp, cap=sp.max_dip_cap)
+                dip = min(sp.max_dip_cap, dip * dip_regime_mult)
                 price_might_decline = (use_vol and vol_p is not None) or (dte is not None and dte >= 2)
                 if price_might_decline and sp.limit_dip_pct_price_decline > 0:
                     dip = max(dip, sp.limit_dip_pct_price_decline)
@@ -4591,7 +4790,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     dip = max(dip, sp.limit_dip_pct_high_confidence)
                 dip = _dte_confidence_dip(dip, p_win, dte, sp)
                 rsi_val = _compute_rsi(closes)
-                dip = _rsi_dip_adjustment(dip, rsi_val)
+                dip = _rsi_dip_adjustment(dip, rsi_val, sp.max_dip_cap)
                 book = _extract_book_fields(m, yes_bid, no_bid)
                 bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
                 depth_mult = 1.0
@@ -4618,6 +4817,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     platform=PLATFORM_KALSHI,
                     cfg=cfg,
                     min_stability_seconds=dynamic_stability_seconds,
+                    skip_in_preview=getattr(args, "preview", False),
                 ):
                     print(
                         f"    Why: mid-price stability guard failed "
@@ -4642,6 +4842,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     max_inventory_skew_pct=sp.max_inventory_skew_pct,
                     layered_order_levels=sp.layered_order_levels,
                     order_count=inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0) + 1,
+                    max_dip_cap=sp.max_dip_cap,
                 )
                 _kelly_frac_ticker = kelly_fraction_live
                 if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
@@ -4680,11 +4881,98 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "limit_order_mode": sp.limit_order_mode,
                     "dte": dte,
                 })
+            elif sp.enable_disagreement_dip and rec == REC_SKIP:
+                # Strong disagreement: market 95% vs we 45% → place low limit to catch dips
+                gap = abs(hist_p - yes_bid)
+                if gap >= sp.disagreement_dip_min_gap:
+                    no_bid_dip = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
+                    if yes_bid - hist_p >= sp.disagreement_dip_min_gap:
+                        rec_dip = REC_BUY_NO
+                        bid_dip = no_bid_dip
+                        side_dip = "no"
+                        p_win_dip = 1.0 - hist_p
+                    elif hist_p - yes_bid >= sp.disagreement_dip_min_gap:
+                        rec_dip = REC_BUY_YES
+                        bid_dip = yes_bid
+                        side_dip = "yes"
+                        p_win_dip = hist_p
+                    else:
+                        rec_dip = None
+                        bid_dip = 0
+                        p_win_dip = 0.0
+                    if rec_dip is not None and bid_dip > 0 and p_win_dip >= sp.disagreement_dip_min_p_win:
+                        price_dip = max(
+                            sp.disagreement_dip_min_price,
+                            min(sp.disagreement_dip_max_price, bid_dip * sp.disagreement_dip_pct_of_bid),
+                        )
+                        price_dip = round(price_dip, 2)
+                        if price_dip >= 0.01 and _is_midprice_stable(
+                            ticker=ticker, platform=PLATFORM_KALSHI, cfg=cfg, min_stability_seconds=dynamic_stability_seconds,
+                            skip_in_preview=getattr(args, "preview", False),
+                        ):
+                            pending_orders.append({
+                                "platform": PLATFORM_KALSHI,
+                                "ticker": ticker,
+                                "title": title,
+                                "rec": rec_dip,
+                                "side": side_dip,
+                                "price": price_dip,
+                                "bid_at_place": bid_dip,
+                                "theoretical_price": bid_dip,
+                                "spread_bps_at_place": 0,
+                                "dip_pct_used": sp.disagreement_dip_pct_of_bid,
+                                "edge": gap,
+                                "count": sp.disagreement_dip_contracts,
+                                "hist_p": hist_p,
+                                "vol_p": vol_p,
+                                "yf_ticker": yf_ticker,
+                                "threshold": threshold,
+                                "direction": direction,
+                                "limit_order_mode": "fixed_pct",
+                                "dte": dte,
+                                "disagreement_dip": True,
+                            })
+                            print(f"       [Disagreement Dip] {side_dip.upper()} | gap={gap:.1%} | limit ${price_dip:.2f} (below ${bid_dip:.2f}) x {sp.disagreement_dip_contracts}")
+                            added_dip = True
+            # Lottery limits: 1¢ on high-P(win) SKIPs when no disagreement dip — free lottery tickets
+            if not added_dip and rec == REC_SKIP and sp.enable_lottery_limits:
+                p_win_yes, p_win_no = hist_p, 1.0 - hist_p
+                if p_win_yes >= sp.lottery_limit_min_p_win or p_win_no >= sp.lottery_limit_min_p_win:
+                    side_lot = "yes" if p_win_yes >= p_win_no else "no"
+                    p_win_lot = p_win_yes if side_lot == "yes" else p_win_no
+                    if p_win_lot >= sp.lottery_limit_min_p_win and _is_midprice_stable(
+                        ticker=ticker, platform=PLATFORM_KALSHI, cfg=cfg, min_stability_seconds=dynamic_stability_seconds,
+                        skip_in_preview=getattr(args, "preview", False),
+                    ):
+                        bid_lot = yes_bid if side_lot == "yes" else (float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
+                        pending_orders.append({
+                            "platform": PLATFORM_KALSHI,
+                            "ticker": ticker,
+                            "title": title,
+                            "rec": REC_BUY_YES if side_lot == "yes" else REC_BUY_NO,
+                            "side": side_lot,
+                            "price": sp.lottery_limit_price,
+                            "bid_at_place": bid_lot,
+                            "theoretical_price": bid_lot,
+                            "spread_bps_at_place": 0,
+                            "edge": p_win_lot,
+                            "count": sp.lottery_limit_contracts,
+                            "hist_p": hist_p,
+                            "vol_p": vol_p,
+                            "yf_ticker": yf_ticker,
+                            "threshold": threshold,
+                            "direction": direction,
+                            "limit_order_mode": "fixed_pct",
+                            "dte": dte,
+                            "lottery_limit": True,
+                        })
+                        print(f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | limit ${sp.lottery_limit_price:.2f} x {sp.lottery_limit_contracts}")
+                        added_dip = True
             _eval_count_total += 1
-            if rec == REC_SKIP:
-                _eval_count_skip += 1
-            else:
+            if rec != REC_SKIP or added_dip:
                 _eval_count_buy += 1
+            else:
+                _eval_count_skip += 1
             print()
 
         # Gemini crypto — expand to individual markets (binary: 1 per event; categorical: 1 per strike contract)
@@ -4968,6 +5256,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance
                 if rec == REC_BUY_YES and impl < sp.min_yes_price:
                     rec = REC_SKIP
+                # Skip BUY YES when market prices it very high (>85¢): steamroller profile
+                if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and impl > sp.max_yes_price_for_buy:
+                    rec = REC_SKIP
                 # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
                 # DTE-aware: tighten allowed gap for short-dated contracts
                 # When DTE < 0.1 days (~2.4h), vol override is blocked
@@ -5036,7 +5327,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "no_ask": book_gq.get("no_ask"),
                         "edge_yes_net": hist_p_gem - impl - fee_yes_gq,
                         "edge_no_net": (1.0 - hist_p_gem) - no_price_gem_q - fee_no_gq,
-                        "arr_dip": min(0.25, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g) * dip_regime_mult),
+                        "arr_dip": min(sp.max_dip_cap, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g, cap=sp.max_dip_cap) * dip_regime_mult),
                         "dte": dte_g,
                         "gemini_evt": evt,
                         "instrument_symbol": instrument_symbol,
@@ -5060,6 +5351,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"    ├─ Market YES:   {impl:.1%}  (what the market is pricing)")
                 print(f"    ├─ Verdict:      {rec}")
                 print(f"    │    → {_rec_plain_g}")
+                _print_multi_strategy_compare_line(
+                    compare_strategies_arg=getattr(args, "compare_strategies", "") or "",
+                    hist_p=hist_p_gem,
+                    market_yes=impl,
+                    min_p_win=min_p_win_gem,
+                    effective_min=effective_min_gem,
+                    maker_fee_rate=maker_fee_rate_gem,
+                    min_fee_per_order=sp.min_fee_per_order,
+                    effective_min_yes=effective_min_yes_g,
+                    effective_min_no=effective_min_no_g,
+                    is_strict_intraday=bool(_is_other_intraday(evt, yf_ticker)),
+                    sp=sp,
+                )
                 _reason_g = ""
                 if rec == REC_SKIP and defensive_mode_active:
                     _reason_g = (
@@ -5102,14 +5406,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 except ImportError:
                     pass
+                added_dip = False
                 if rec != REC_SKIP:
                     no_price = 1.0 - impl
                     bid = impl if rec == REC_BUY_YES else no_price
                     side = "yes" if rec == REC_BUY_YES else "no"
                     p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
                     print(f"       Edge: {abs(diff_gem):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
-                    dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g)
-                    dip = min(0.25, dip * dip_regime_mult)
+                    dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g, cap=sp.max_dip_cap)
+                    dip = min(sp.max_dip_cap, dip * dip_regime_mult)
                     price_might_decline = (use_vol and vol_p_gem is not None) or (dte_g is not None and dte_g >= 2)
                     if price_might_decline and sp.limit_dip_pct_price_decline > 0:
                         dip = max(dip, sp.limit_dip_pct_price_decline)
@@ -5117,7 +5422,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         dip = max(dip, sp.limit_dip_pct_high_confidence)
                     dip = _dte_confidence_dip(dip, p_win, dte_g, sp)
                     rsi_val_g = _compute_rsi(closes)
-                    dip = _rsi_dip_adjustment(dip, rsi_val_g)
+                    dip = _rsi_dip_adjustment(dip, rsi_val_g, sp.max_dip_cap)
                     market_for_book = contract if isinstance(contract, dict) else evt
                     book = _extract_book_fields(market_for_book or {}, impl, no_price)
                     bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
@@ -5144,6 +5449,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         platform=PLATFORM_GEMINI,
                         cfg=cfg,
                         min_stability_seconds=dynamic_stability_seconds,
+                        skip_in_preview=getattr(args, "preview", False),
                     ):
                         print(
                             f"    Why: mid-price stability guard failed "
@@ -5170,6 +5476,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         max_inventory_skew_pct=sp.max_inventory_skew_pct,
                         layered_order_levels=sp.layered_order_levels,
                         order_count=inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0) + 1,
+                        max_dip_cap=sp.max_dip_cap,
                     )
                     _kelly_frac_gem = kelly_fraction_live
                     if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
@@ -5212,11 +5519,112 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if instrument_symbol:
                         order_entry["instrument_symbol"] = instrument_symbol
                     pending_orders.append(order_entry)
+                elif sp.enable_disagreement_dip and rec == REC_SKIP:
+                    # Strong disagreement: market 95% vs we 45% → place low limit to catch dips
+                    gap = abs(hist_p_gem - impl)
+                    if gap >= sp.disagreement_dip_min_gap:
+                        no_price_dip = 1.0 - impl
+                        if impl - hist_p_gem >= sp.disagreement_dip_min_gap:
+                            rec_dip = REC_BUY_NO
+                            bid_dip = no_price_dip
+                            side_dip = "no"
+                            p_win_dip = 1.0 - hist_p_gem
+                        elif hist_p_gem - impl >= sp.disagreement_dip_min_gap:
+                            rec_dip = REC_BUY_YES
+                            bid_dip = impl
+                            side_dip = "yes"
+                            p_win_dip = hist_p_gem
+                        else:
+                            rec_dip = None
+                            bid_dip = 0
+                            p_win_dip = 0.0
+                        if rec_dip is not None and bid_dip > 0 and p_win_dip >= sp.disagreement_dip_min_p_win:
+                            price_dip = max(
+                                sp.disagreement_dip_min_price,
+                                min(sp.disagreement_dip_max_price, bid_dip * sp.disagreement_dip_pct_of_bid),
+                            )
+                            price_dip = round(price_dip, 2)
+                            if price_dip >= 0.01 and _is_midprice_stable(
+                                ticker=evt.get("ticker", "?"),
+                                platform=PLATFORM_GEMINI,
+                                cfg=cfg,
+                                min_stability_seconds=dynamic_stability_seconds,
+                                skip_in_preview=getattr(args, "preview", False),
+                            ):
+                                dip_entry = {
+                                    "platform": PLATFORM_GEMINI,
+                                    "ticker": evt.get("ticker", "?"),
+                                    "title": title,
+                                    "rec": rec_dip,
+                                    "side": side_dip,
+                                    "price": price_dip,
+                                    "bid_at_place": bid_dip,
+                                    "theoretical_price": bid_dip,
+                                    "spread_bps_at_place": 0,
+                                    "dip_pct_used": sp.disagreement_dip_pct_of_bid,
+                                    "edge": gap,
+                                    "count": sp.disagreement_dip_contracts,
+                                    "hist_p": hist_p_gem,
+                                    "vol_p": vol_p_gem,
+                                    "yf_ticker": yf_ticker,
+                                    "threshold": threshold_g,
+                                    "direction": direction_g,
+                                    "limit_order_mode": "fixed_pct",
+                                    "dte": dte_g,
+                                    "gemini_evt": evt,
+                                    "disagreement_dip": True,
+                                }
+                                if instrument_symbol:
+                                    dip_entry["instrument_symbol"] = get_instrument_symbol(evt, side_dip) or instrument_symbol
+                                pending_orders.append(dip_entry)
+                                print(f"       [Disagreement Dip] {side_dip.upper()} | gap={gap:.1%} | limit ${price_dip:.2f} (below ${bid_dip:.2f}) x {sp.disagreement_dip_contracts}")
+                                added_dip = True
+                # Lottery limits: 1¢ on high-P(win) SKIPs when no disagreement dip
+                if not added_dip and rec == REC_SKIP and sp.enable_lottery_limits:
+                    p_win_yes_g, p_win_no_g = hist_p_gem, 1.0 - hist_p_gem
+                    if p_win_yes_g >= sp.lottery_limit_min_p_win or p_win_no_g >= sp.lottery_limit_min_p_win:
+                        side_lot = "yes" if p_win_yes_g >= p_win_no_g else "no"
+                        p_win_lot = p_win_yes_g if side_lot == "yes" else p_win_no_g
+                        if p_win_lot >= sp.lottery_limit_min_p_win and _is_midprice_stable(
+                            ticker=evt.get("ticker", "?"),
+                            platform=PLATFORM_GEMINI,
+                            cfg=cfg,
+                            min_stability_seconds=dynamic_stability_seconds,
+                            skip_in_preview=getattr(args, "preview", False),
+                        ):
+                            bid_lot = impl if side_lot == "yes" else (1.0 - impl)
+                            lot_entry = {
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": evt.get("ticker", "?"),
+                                "title": title,
+                                "rec": REC_BUY_YES if side_lot == "yes" else REC_BUY_NO,
+                                "side": side_lot,
+                                "price": sp.lottery_limit_price,
+                                "bid_at_place": bid_lot,
+                                "theoretical_price": bid_lot,
+                                "spread_bps_at_place": 0,
+                                "edge": p_win_lot,
+                                "count": sp.lottery_limit_contracts,
+                                "hist_p": hist_p_gem,
+                                "vol_p": vol_p_gem,
+                                "yf_ticker": yf_ticker,
+                                "threshold": threshold_g,
+                                "direction": direction_g,
+                                "limit_order_mode": "fixed_pct",
+                                "dte": dte_g,
+                                "gemini_evt": evt,
+                                "lottery_limit": True,
+                            }
+                            if instrument_symbol:
+                                lot_entry["instrument_symbol"] = get_instrument_symbol(evt, side_lot) or instrument_symbol
+                            pending_orders.append(lot_entry)
+                            print(f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | limit ${sp.lottery_limit_price:.2f} x {sp.lottery_limit_contracts}")
+                            added_dip = True
                 _eval_count_total += 1
-                if rec == REC_SKIP:
-                    _eval_count_skip += 1
-                else:
+                if rec != REC_SKIP or added_dip:
                     _eval_count_buy += 1
+                else:
+                    _eval_count_skip += 1
                 print()
 
     # Latest unresolved entries for dynamic stop-loss checks: (platform, ticker, side) -> entry_price

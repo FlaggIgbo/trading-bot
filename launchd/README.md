@@ -60,6 +60,16 @@ launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
 launchctl kickstart -k gui/$(id -u)/com.user.daily_performance_report
 ```
 
+**After changing `ProgramArguments` or `WorkingDirectory` in a plist**, reload the job so launchd picks up the file:
+
+```bash
+launchctl bootout gui/$(id -u)/com.user.compare_historical 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist
+launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
+```
+
+Code-only changes (no plist edit) still take effect on the next scheduled run; `kickstart -k` runs the current on-disk script immediately.
+
 ## Configuration
 
 - **Compare interval:** 300 seconds (5 minutes). Change `<integer>300</integer>` in `com.user.compare_historical.plist`.

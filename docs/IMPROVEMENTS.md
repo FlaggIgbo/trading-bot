@@ -95,6 +95,13 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | **Intraday vol overconfidence dampening**        | —                             | ✓ `vol_blend_weight` 0.75→0.45; added `vol_disagree_threshold`/`vol_disagree_dampen_blend`; `intraday_vol_cap: 0.90` and `intraday_min_empirical_weight: 0.20` so empirical data isn't drowned out on sub-day contracts. |
 | **Layered limit order fix (passive dip pricing)** | Execution reality             | ✓ `layered` mode was penny-jumping above bid (`bid + tick`), ignoring all dip logic. Rewritten to place passive limits below bid using full dip stack (`bid × (1 − dip)`) with staggered depth on re-buys. Fair-value cap prevents overpaying. Largest single fix for losing trades — entries now fill at better prices. |
 | **RSI signal integration**                        | Technical analysis            | ✓ `_compute_rsi()` (Wilder RSI-14) with two uses: **(1)** `_rsi_dip_adjustment()` modulates limit dip depth (oversold tightens 40%, overbought widens 40%). **(2)** `rsi_norm` added to signal model features with weight −0.3 (mean-reversion bias). Applied at Kalshi + Gemini paths. |
+| **show-config**                                   | Freqtrade                     | ✓ `--show-config` prints resolved config (markets, strategy key params, trading) with env overrides applied. Useful for debugging and CI. |
+| **Lookahead bias audit**                          | Freqtrade                     | ✓ `scripts/lookahead_analysis.py` audits data flow for backtest credibility; verifies get_aggs vs get_aggs_as_of, documents snapshot-based replay. |
+| **Hyperopt scaffold**                             | Freqtrade                     | ✓ `scripts/hyperopt.py` tunes backtest realism params (slippage, dwell, friction) via grid search; reports best by Sharpe/PnL/win_rate. Strategy param tuning (min_edge, limit_dip_pct) would require re-evaluating snapshots. |
+| **Pick-one ticker filter**                         | Gnosis prediction-market-agent | ✓ `--ticker KXBTC-25MAR2017` evaluates only that Kalshi or Gemini ticker; useful for quick research and debugging. |
+| **DeployableTraderAgent + registry**               | Gnosis prediction-market-agent | ✓ `models/trader_agent.py`: `RUNNABLE_AGENTS`, `DeployableVolRegimeAgent`, etc. |
+| **Multi-strategy compare**                         | Gnosis prediction-market-agent | ✓ `--compare-strategies vol_regime,default_threshold,strict_threshold` prints alternate `recommend()` vs same model P; `strict_threshold` is 1.25× edge for demos. |
+| **Streamlit research app**                         | Gnosis prediction-market-agent | ✓ `scripts/streamlit_research_app.py` — preview runner + strategy registry sidebar. |
 
 ---
 
@@ -285,12 +292,13 @@ Reference: [NUS PDF](https://cpb-us-w2.wpmucdn.com/blog.nus.edu.sg/dist/0/6796/f
 
 | Repo                        | Key Takeaways                                                                         |
 | --------------------------- | ------------------------------------------------------------------------------------- |
-| **freqtrade**               | Dry-run, backtest, hyperopt, SQLite, WebUI, Telegram, strategy interface              |
+| **freqtrade**               | Dry-run, backtest, hyperopt, SQLite, WebUI, Telegram, strategy interface, show-config, lookahead-analysis |
 | **ccxt**                    | Unified API, normalized data; we use custom Kalshi/Gemini clients (different product) |
 | **hummingbot**              | Modular connectors (CEX/DEX), Gateway middleware                                      |
 | **gekko**                   | TA + backtesting; archived but concepts still valid                                   |
 | **Stock-Prediction-Models** | LSTM/GRU, RL agents, Monte Carlo, sentiment, portfolio optimization                   |
 | **polymarket-agent**        | Multi-model consensus, web dashboard, structured AI prompts, Kelly sizing; see below  |
+| **gnosis/prediction-market-agent** | DeployableTraderAgent, Streamlit app, pick-one market, RUNNABLE_AGENTS registry | ✓ Pick-one `--ticker`; see Gnosis section below |
 
 ---
 ## Polymarket-Agent Inspired ([manuelbarbas/polymarket-agent](https://github.com/manuelbarbas/polymarket-agent))
@@ -313,3 +321,22 @@ From the [BlockRunAI polymarket-agent](https://github.com/manuelbarbas/polymarke
 
 - **x402 / wallet-based AI payments**: polymarket-agent pays for AI via USDC micropayments (BlockRun). We use API keys; different architecture.
 - **Polymarket CLOB / proxy wallet**: Platform-specific; we use Kalshi and Gemini.
+
+---
+## Gnosis Prediction-Market-Agent Inspired ([gnosis/prediction-market-agent](https://github.com/gnosis/prediction-market-agent))
+
+From the Gnosis prediction-market-agent—AI agent frameworks for Omen, Manifold, Polymarket. Ideas we can adapt for Kalshi/Gemini:
+
+| Improvement | Description | Effort | Notes |
+| ----------- | ----------- | ------ | ----- |
+| **Pick-one market filter** | Evaluate a single market/question for quick research | Low | ✓ `--ticker KXBTC-25MAR2017` filters to that ticker only (Kalshi or Gemini) |
+| **DeployableTraderAgent interface** | Base class + `process_market()` → trades; add to registry | Medium | We have `strategy_engine`; could formalize `TraderAgent` protocol |
+| **Streamlit research app** | Interactive: pick market, run agents, compare outputs | Medium | Gnosis `agent_app.py` lets users select question, run multiple agents side-by-side |
+| **place_trades=False pattern** | Dry-run / research mode for all agents | Low | ✓ Our `--preview` is equivalent |
+| **Custom question input** | Test on arbitrary question without full market fetch | Medium | Gnosis allows custom text; we'd need market simulation or mock |
+| **Multi-strategy comparison** | Run vol_regime vs default_threshold on same market | ✓ | `--compare-strategies` + `strict_threshold` engine |
+
+### Not directly applicable
+
+- **On-chain (Omen)**: Gnosis agents use blockchain; we use centralized Kalshi/Gemini APIs.
+- **prediction-market-agent-tooling**: External library for market types; we have custom clients.
