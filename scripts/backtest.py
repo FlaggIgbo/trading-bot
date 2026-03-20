@@ -15,6 +15,7 @@ Run: python3 scripts/backtest.py [--mode real|synthetic] [--days 90]
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from datetime import datetime, timedelta
@@ -529,6 +530,11 @@ def main() -> int:
         default=0,
         help="Limit to last N days (0=all)",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print a single JSON object (machine-readable) to stdout; suppress human summary",
+    )
     args = parser.parse_args()
 
     start_ts = None
@@ -545,6 +551,11 @@ def main() -> int:
     if "error" in out:
         print(out["error"])
         return 1
+
+    if args.json:
+        export = {k: v for k, v in out.items() if k != "trade_details"}
+        print(json.dumps(export, default=str))
+        return 0
 
     print("\n" + "=" * 60)
     print("BACKTEST RESULT")
