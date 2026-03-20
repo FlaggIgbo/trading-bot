@@ -368,6 +368,33 @@ If you see this message at the end of a run, either Ollama isn't running or the 
 
 If Ollama isn't running or the model is missing, scripts still run and finish without the LLM analysis.
 
+### `ollama_codex_loop.sh` (metrics gate + leaderboard)
+
+The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metrics.csv`, refreshes `docs/series_leaderboard.html`, and runs Ollama → `git apply` → `ollama_patch_validate.py`.
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `OLLAMA_METRICS_GATE` | `1` | If `1`, **skip** the Ollama/backtest block when `metrics.csv` shows **no** net PnL drop ≥ `OLLAMA_METRICS_GATE_DROP` over the last `OLLAMA_METRICS_GATE_HOURS` (avoids over-tweaking). Set to `0` to always run. |
+| `OLLAMA_METRICS_GATE_HOURS` | `4` | Lookback window (hours) for first-vs-last PnL in `metrics.csv`. |
+| `OLLAMA_METRICS_GATE_DROP` | `0.20` | Trigger Ollama when `(last_pnl - first_pnl) ≤ -0.20` in that window. |
+| `OLLAMA_LEADERBOARD_HOURS` | `336` | Lookback for `export_series_leaderboard.py` / `suggest_series_blacklist.py` (14 days). |
+| `OLLAMA_BLACKLIST_MIN_TRADES` | `50` | Min resolved trades before a series is suggested for blacklist (win rate under 30%). |
+| `OLLAMA_PROMPT_LB_HOURS` | `72` | Leaderboard lookback **embedded in the Ollama prompt** (HTML stripped to text). |
+| `OLLAMA_AUTO_BLACKLIST` | `1` | If `1`, runs `apply_series_blacklist.py --merge` → `BLACKLIST_EXTRA_FILE`. Set `0` to disable. |
+| `BLACKLIST_EXTRA_FILE` | `~/…/series_blacklist_auto.txt` | Output path; must match `strategy.blacklist_extra_file` in config. |
+| `OLLAMA_AUTO_BLACKLIST_HOURS` / `MIN_TRADES` / `MAX_WR` | `168` / `20` / `0.25` | Thresholds for the auto-blacklist writer. |
+
+Stronger coding models (if your machine can handle them): `ollama pull phi4` or `ollama pull mistral-small`, then `OLLAMA_MODEL=phi4 ./ollama_codex_loop.sh`.
+
+### Micro-balance / robustness (`config.yaml` → `strategy`)
+
+- **`passive_limit_quote`**: `mid` or `bid_plus_tick` reduces spread tax vs deep dip; unfilled = move on.
+- **`empirical_weighting`**: `exponential` + **`empirical_exponential_halflife_bars`** weights recent bars more than a flat year of history.
+- **`enable_model_prob_hard_cap`** / **`model_prob_hard_lo`** / **`model_prob_hard_hi`**: clip blended P (e.g. **0.02–0.98**) before edge/Kelly and early in the vol/emp blend path.
+- **`execution.price_strategy`** / **`limit_offset_cents`**: optional spread squeeze (`passive` + `0` → **mid**; `1` → **bid+1¢**), merged into effective `passive_limit_quote`.
+- **`blacklist_extra_file`**: newline-separated series merged into the runtime blacklist; `ollama_codex_loop.sh` can refresh it via **`apply_series_blacklist.py`** (avoids corrupting `config.yaml`).
+- **Adaptive penalty reset:** there is no `calibration_data.json`; see **`docs/RESET_ADAPTIVE_STATE.md`** (SQLite + `adaptive_learning_enabled`).
+
 ## Scripts
 
 | Script                                      | Purpose                                                |
@@ -380,6 +407,9 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 | `python3 scripts/backtest.py`              | Backtest on historical data (`--mode real` or `synthetic`) |
 | `python3 scripts/lookahead_analysis.py`   | Audit backtest for lookahead bias |
 | `python3 scripts/hyperopt.py`             | Tune backtest params via grid search |
+| `python3 scripts/export_series_leaderboard.py` | HTML per-series PnL / win rate from SQLite |
+| `python3 scripts/suggest_series_blacklist.py` | Print commented `strategy.blacklist` hints (does not edit YAML) |
+| `python3 scripts/apply_series_blacklist.py` | Write weak series to `strategy.blacklist_extra_file` (safe merge; no YAML append) |
 | `streamlit run scripts/streamlit_research_app.py` | Research UI: preview + multi-strategy compare |
 
 ### Main evaluation: `scripts/compare_historical.py`

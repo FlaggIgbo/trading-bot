@@ -25,6 +25,20 @@ OLLAMA_BT_DAYS="${OLLAMA_BT_DAYS:-30}"
 OLLAMA_BT_MODE="${OLLAMA_BT_MODE:-synthetic}"
 OLLAMA_AUTO_PUSH="${OLLAMA_AUTO_PUSH:-0}"
 MAX_STRATEGY_CHARS="${OLLAMA_MAX_STRATEGY_CHARS:-28000}"
+# Only invoke Ollama when metrics show stress (avoids over-tweaking when flat/up). Set OLLAMA_METRICS_GATE=0 to always run.
+OLLAMA_METRICS_GATE="${OLLAMA_METRICS_GATE:-1}"
+OLLAMA_METRICS_GATE_HOURS="${OLLAMA_METRICS_GATE_HOURS:-4}"
+OLLAMA_METRICS_GATE_DROP="${OLLAMA_METRICS_GATE_DROP:-0.20}"
+OLLAMA_LEADERBOARD_HOURS="${OLLAMA_LEADERBOARD_HOURS:-336}"
+OLLAMA_BLACKLIST_MIN_TRADES="${OLLAMA_BLACKLIST_MIN_TRADES:-50}"
+# Shorter window for the Ollama prompt (so the model sees recent bleeding assets)
+OLLAMA_PROMPT_LB_HOURS="${OLLAMA_PROMPT_LB_HOURS:-72}"
+SERIES_SUMMARY_HTML="${SERIES_SUMMARY_HTML:-/tmp/series_summary.html}"
+# Auto-blacklist: writes newline series file; compare_historical merges via strategy.blacklist_extra_file (no YAML corruption)
+OLLAMA_AUTO_BLACKLIST="${OLLAMA_AUTO_BLACKLIST:-1}"
+BLACKLIST_EXTRA_FILE="${BLACKLIST_EXTRA_FILE:-$HOME/.trading-bot-data/series_blacklist_auto.txt}"
+LB_HTML="$REPO/docs/series_leaderboard.html"
+SUGGEST_TMP="/tmp/ollama_blacklist_suggest.txt"
 
 if [[ -x "$REPO/.venv/bin/python" ]]; then
   PYTHON="$REPO/.venv/bin/python"
@@ -54,17 +68,72 @@ PNL=$(awk "BEGIN {printf \"%.2f\", ${PNL_CENTS:-0}/100}")
 
 echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
 
-# --- 2) HTML metrics table ---
+# --- 2) Per-series leaderboard + blacklist hints (SQLite; does not edit config) ---
+"$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --out "$LB_HTML" 2>/dev/null || true
+"$PYTHON" "$REPO/scripts/suggest_series_blacklist.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --min-trades "$OLLAMA_BLACKLIST_MIN_TRADES" >"$SUGGEST_TMP" 2>/dev/null || true
+"$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_PROMPT_LB_HOURS" --out "$SERIES_SUMMARY_HTML" 2>/dev/null || true
+if [[ "$OLLAMA_AUTO_BLACKLIST" == "1" ]]; then
+  mkdir -p "$(dirname "$BLACKLIST_EXTRA_FILE")"
+  "$PYTHON" "$REPO/scripts/apply_series_blacklist.py" --hours "${OLLAMA_AUTO_BLACKLIST_HOURS:-168}" \
+    --min-trades "${OLLAMA_AUTO_BLACKLIST_MIN_TRADES:-20}" --max-win-rate "${OLLAMA_AUTO_BLACKLIST_MAX_WR:-0.25}" \
+    --out "$BLACKLIST_EXTRA_FILE" --merge 2>/dev/null || true
+fi
+
+# --- 3) HTML metrics table + embedded leaderboard ---
 {
   echo "<html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>"
-  echo "<h1>Ollama optimization runs</h1><p>Validated loop: backtest baseline + smoke compare_historical before commit.</p><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>"
+  echo "<h1>Ollama optimization runs</h1><p>Validated loop: backtest baseline + smoke compare_historical before commit. Per-series stats come from SQLite, not log grep.</p><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>"
   grep -E '^[0-9]+,[0-9.]+,' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
     echo "<tr><td>$(date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")</td><td>${wr}%</td><td>$pnl</td></tr>"
   done
-  echo "</table></body></html>"
+  echo "</table>"
+  echo "<h2>Series leaderboard (${OLLAMA_LEADERBOARD_HOURS}h lookback)</h2>"
+  echo "<p>Open <a href=\"series_leaderboard.html\">series_leaderboard.html</a> or see embedded view below.</p>"
+  echo "<iframe src=\"series_leaderboard.html\" title=\"Series leaderboard\" width=\"100%\" height=\"360\" style=\"border:1px solid #ccc\"></iframe>"
+  echo "<h2>Blacklist suggestions (WR &lt;30%, n≥${OLLAMA_BLACKLIST_MIN_TRADES} — manual review only)</h2>"
+  echo -n "<pre style=\"white-space:pre-wrap\">"
+  sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$SUGGEST_TMP" 2>/dev/null || true
+  echo "</pre>"
+  echo "</body></html>"
 } > "$HTML"
 
-# --- 3) Backtest baseline (same DB before model patch; used for optional PnL gate) ---
+# --- 4) Metrics gate: skip Ollama when recent PnL is not stressed (reduces over-tweaking) ---
+# Python exit 0 = proceed (insufficient samples in window OR drop ≥ threshold). Exit 1 = skip run.
+if [[ "$OLLAMA_METRICS_GATE" == "1" ]] && [[ -f "$METRICS" ]]; then
+  if ! METRICS="$METRICS" OLLAMA_METRICS_GATE_HOURS="$OLLAMA_METRICS_GATE_HOURS" OLLAMA_METRICS_GATE_DROP="$OLLAMA_METRICS_GATE_DROP" \
+    "$PYTHON" -c "
+import os, sys, time
+from pathlib import Path
+m = Path(os.environ['METRICS'])
+h = float(os.environ.get('OLLAMA_METRICS_GATE_HOURS', '4'))
+drop = float(os.environ.get('OLLAMA_METRICS_GATE_DROP', '0.2'))
+now = time.time()
+cutoff = now - h * 3600
+rows = []
+for line in m.read_text(encoding='utf-8', errors='replace').splitlines():
+    parts = [p.strip() for p in line.split(',')]
+    if len(parts) < 3:
+        continue
+    try:
+        ts = float(parts[0])
+        pnl = float(parts[2])
+    except ValueError:
+        continue
+    if ts >= cutoff:
+        rows.append((ts, pnl))
+rows.sort(key=lambda x: x[0])
+if len(rows) < 2:
+    sys.exit(0)
+first, last = rows[0][1], rows[-1][1]
+sys.exit(0 if (last - first) <= -drop else 1)
+"; then
+    echo "⏭️  Skipping Ollama/backtest: no PnL drop ≥ \$${OLLAMA_METRICS_GATE_DROP} in last ${OLLAMA_METRICS_GATE_HOURS}h (set OLLAMA_METRICS_GATE=0 to always run)."
+    echo "{\"ts\":$(date +%s),\"event\":\"metrics_gate_skip\",\"model\":\"$OLLAMA_MODEL\",\"drop\":${OLLAMA_METRICS_GATE_DROP},\"hours\":${OLLAMA_METRICS_GATE_HOURS}}" >>"$JOURNAL"
+    exit 0
+  fi
+fi
+
+# --- 5) Backtest baseline (same DB before model patch; used for optional PnL gate) ---
 set +e
 "$PYTHON" "$REPO/scripts/backtest.py" --mode "$OLLAMA_BT_MODE" --days "$OLLAMA_BT_DAYS" --json > "$BASELINE_JSON" 2>/tmp/ollama_backtest_err.txt
 BT_EC=$?
@@ -75,7 +144,7 @@ if [[ $BT_EC -ne 0 ]]; then
   BASELINE_JSON=""
 fi
 
-# --- 4) Prompt: template + strategy context + logs + metrics + journal ---
+# --- 6) Prompt: template + strategy context + logs + metrics + journal ---
 _strategy_slice() {
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -104,6 +173,12 @@ _strategy_slice() {
   _strategy_slice "$REPO/models/strategies/vol_regime.py"
   printf "\n# models/strategies/base.py (interface)\n"
   _strategy_slice "$REPO/models/strategies/base.py"
+  printf "\n### PERFORMANCE BY ASSET (last %sh, SQLite → leaderboard HTML as plain text)\n" "$OLLAMA_PROMPT_LB_HOURS"
+  if [[ -f "$SERIES_SUMMARY_HTML" ]]; then
+    sed -e 's/<[^>]*>//g' "$SERIES_SUMMARY_HTML" | grep -v '^[[:space:]]*$' || true
+  else
+    echo "(no leaderboard file; export_series_leaderboard may have failed)"
+  fi
   printf "\n### RECENT LOG TAIL\n"
   cat "$TMP_TAIL"
   printf "\n### METRICS CSV (last 10 rows)\n"
@@ -112,7 +187,7 @@ _strategy_slice() {
   tail -n 8 "$JOURNAL" 2>/dev/null || true
 } > "$TMP_PROMPT"
 
-# --- 5) Ollama (override model: phi4, mistral, etc. if installed) ---
+# --- 7) Ollama (override model: phi4, mistral-small, qwen2.5-coder, etc. if installed) ---
 OLLAMA_HOST="$OLLMAPATH" ollama run "$OLLAMA_MODEL" "$(cat "$TMP_PROMPT")" > "$TMP_OUTPUT" || {
   echo "❌ ollama run failed (host=$OLLMAPATH model=$OLLAMA_MODEL)" >&2
   exit 1
@@ -122,7 +197,7 @@ PATCH=$(awk '/^```diff$/ {flag=1; next} /^```$/ && flag {flag=0} flag' "$TMP_OUT
 MSG=$(grep -i '^Commit message:' "$TMP_OUTPUT" | head -n 1 | cut -d: -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
 if [[ -z "$PATCH" ]]; then
-  echo "ℹ️  No ```diff block in model output; nothing to apply."
+  echo "ℹ️  No fenced diff block (markdown \`\`\`diff) in model output; nothing to apply."
   echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":$WIN_RATE}" >>"$JOURNAL"
   exit 0
 fi
@@ -144,7 +219,7 @@ VALID_ARGS=(--repo "$REPO" --smoke-markets "${OLLAMA_SMOKE_MARKETS:-2}" --backte
 if "$PYTHON" "$REPO/scripts/ollama_patch_validate.py" "${VALID_ARGS[@]}"; then
   echo "✅ Validation passed."
   "$PYTHON" -m py_compile signals/yfinance_client.py 2>/dev/null || true
-  git add "$HTML" "$JOURNAL" 2>/dev/null || true
+  git add "$HTML" "$LB_HTML" "$JOURNAL" 2>/dev/null || true
   git add -A
   git commit -m "${MSG:-chore: ollama-optimized bot}" || {
     echo "ℹ️  Nothing to commit (empty diff vs HEAD?)."

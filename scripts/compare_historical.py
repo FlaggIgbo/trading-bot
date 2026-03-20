@@ -328,6 +328,12 @@ class _StrategyParams:
     adaptive_loss_block_lookback_hours: float
     yes_overconfidence_extra_edge: float
     model_probability_shrinkage: float
+    passive_limit_quote: str
+    empirical_weighting: str
+    empirical_exponential_halflife_bars: int
+    enable_model_prob_hard_cap: bool
+    model_prob_hard_lo: float
+    model_prob_hard_hi: float
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
@@ -503,6 +509,12 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 0.0)),
         yes_overconfidence_extra_edge=float(strategy.get("yes_overconfidence_extra_edge", 0.0)),
         model_probability_shrinkage=float(strategy.get("model_probability_shrinkage", 1.0)),
+        passive_limit_quote=str(strategy.get("passive_limit_quote", "dip")).strip().lower(),
+        empirical_weighting=str(strategy.get("empirical_weighting", "step_recent")).strip().lower(),
+        empirical_exponential_halflife_bars=max(1, int(strategy.get("empirical_exponential_halflife_bars", 14))),
+        enable_model_prob_hard_cap=bool(strategy.get("enable_model_prob_hard_cap", True)),
+        model_prob_hard_lo=max(1e-6, float(strategy.get("model_prob_hard_lo", 0.02))),
+        model_prob_hard_hi=min(0.999, float(strategy.get("model_prob_hard_hi", 0.98))),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
     )
@@ -701,6 +713,99 @@ def _clip_price(v: float) -> float:
     return max(0.01, min(0.99, float(v)))
 
 
+def _resolve_passive_quote_price(
+    *,
+    passive_quote: str,
+    bid: float,
+    ask: float | None,
+    dip_based_price: float,
+    fair_cap: float,
+) -> float:
+    """
+    Micro-balance / maker-friendly quotes: default keeps dip-based passive limits;
+    'mid' uses (bid+ask)/2 capped by fair edge; 'bid_plus_tick' is bid+1¢ (tighter than deep dip).
+    """
+    pq = (passive_quote or "dip").strip().lower()
+    if pq in ("", "dip", "default", "below_bid", "layered"):
+        return _clip_price(min(float(dip_based_price), float(fair_cap)))
+    fc = max(0.01, min(0.99, float(fair_cap)))
+    if pq == "mid":
+        if ask is not None and float(ask) > 0 and float(bid) > 0:
+            mid = (float(bid) + float(ask)) / 2.0
+            return _clip_price(min(mid, fc))
+        return _clip_price(min(float(bid), fc))
+    if pq in ("bid_plus_tick", "bid_plus_one_tick"):
+        tick = 0.01
+        j = float(bid) + tick
+        if ask is not None and float(ask) > 0:
+            j = min(j, max(float(bid), float(ask) - tick))
+        return _clip_price(min(j, fc))
+    return _clip_price(min(float(dip_based_price), fc))
+
+
+def _sanitize_model_probability(p: float, *, lo: float, hi: float, enabled: bool) -> float:
+    """Hard cap model P so Kelly / edge never assume certainty (e.g. vol model at 100%)."""
+    if not enabled:
+        return p
+    x = float(p)
+    lo_f = max(1e-6, min(0.99, float(lo)))
+    hi_f = max(0.01, min(0.999, float(hi)))
+    if lo_f >= hi_f:
+        return x
+    return max(lo_f, min(hi_f, x))
+
+
+def _display_model_probability(p: float | None, sp: _StrategyParams) -> float | None:
+    """Log-friendly P: same hard cap as sizing so logs don't show misleading '100%'."""
+    if p is None:
+        return None
+    return _sanitize_model_probability(float(p), lo=sp.model_prob_hard_lo, hi=sp.model_prob_hard_hi, enabled=sp.enable_model_prob_hard_cap)
+
+
+def _merge_execution_into_strategy(cfg: dict) -> dict:
+    """
+    Apply optional top-level `execution:` overrides into a copy of `strategy:`.
+    - price_strategy: passive → mid or bid+1¢ from limit_offset_cents (spread-aware maker quotes)
+    - aggressive → restore deep dip style (passive_limit_quote=dip)
+    """
+    strategy = dict(cfg.get("strategy") or {})
+    ex = cfg.get("execution") or {}
+    if not ex:
+        return strategy
+    ps = str(ex.get("price_strategy") or "").strip().lower()
+    if ps == "passive":
+        try:
+            off = int(ex.get("limit_offset_cents", 0))
+        except (TypeError, ValueError):
+            off = 0
+        if off >= 1:
+            strategy["passive_limit_quote"] = "bid_plus_tick"
+        else:
+            strategy.setdefault("passive_limit_quote", "mid")
+    elif ps in ("aggressive", "market", "cross"):
+        strategy["passive_limit_quote"] = "dip"
+    return strategy
+
+
+def _load_blacklist_extra_file(path: str | None) -> set[str]:
+    """Series tickers (one per line) merged into strategy blacklist; # starts comment."""
+    out: set[str] = set()
+    if not path or not str(path).strip():
+        return out
+    p = Path(str(path).strip()).expanduser()
+    if not p.is_file():
+        return out
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in raw.splitlines():
+        s = line.split("#", 1)[0].strip().upper()
+        if s:
+            out.add(s)
+    return out
+
+
 def _inventory_skew_factor(held_count: int, max_skew_pct: float) -> float:
     """
     Linear risk-aversion skew: every 100 held contracts adds skew up to max_skew_pct.
@@ -775,6 +880,7 @@ def _compute_limit_price(
     layered_order_levels: int,
     order_count: int,
     max_dip_cap: float = 0.25,
+    passive_quote: str = "dip",
 ) -> tuple[float, float]:
     """
     Returns (limit_price, dip_used_proxy).
@@ -817,7 +923,14 @@ def _compute_limit_price(
     same_skew = _inventory_skew_factor(int(held_same_side), max_inventory_skew_pct)
     opp_skew = _inventory_skew_factor(int(held_opp_side), max_inventory_skew_pct) * 0.5
     skewed = raw_price * (1.0 - same_skew + opp_skew)
-    return _clip_price(skewed), float(dip)
+    merged = _resolve_passive_quote_price(
+        passive_quote=passive_quote,
+        bid=bid,
+        ask=ask,
+        dip_based_price=skewed,
+        fair_cap=fair_cap,
+    )
+    return merged, float(dip)
 
 
 def _adaptive_kelly_fraction(base_kelly: float, calibration: dict[str, Any], sp: _StrategyParams) -> float:
@@ -1199,11 +1312,14 @@ def _empirical_probability(
     recent_days: int = 90,
     recent_weight: float = 3.0,
     use_rolling_window: bool = True,
+    weighting: str = "step_recent",
+    exponential_halflife_bars: int = 14,
 ) -> float:
     """P(close above/below threshold) from historical closes with recency weighting.
 
     - If use_rolling_window, keep only the most recent `recent_days`.
-    - Apply extra weight to the most recent `recent_days` samples.
+    - weighting ``step_recent``: extra weight on the most recent `recent_days` slice (legacy).
+    - weighting ``exponential``: exponentially decay weights toward older bars (halflife in bars).
     """
     if not closes:
         return 0.0
@@ -1211,6 +1327,32 @@ def _empirical_probability(
     n = len(data)
     if n == 0:
         return 0.0
+    wmode = (weighting or "step_recent").strip().lower()
+    if wmode == "exponential":
+        hl = max(1.0, float(exponential_halflife_bars))
+        lam = math.log(2) / hl
+        if np is not None:
+            arr = np.asarray(data, dtype=float)
+            # Newest observation gets highest weight: index n-1 has age 0
+            ages = np.arange(n - 1, -1, -1, dtype=float)
+            w = np.exp(-lam * ages)
+            w = w / max(1e-12, float(w.sum()))
+            if direction == "above":
+                hits = (arr > threshold).astype(float)
+            else:
+                hits = (arr < threshold).astype(float)
+            return float(np.dot(hits, w))
+        tw = 0.0
+        wins = 0.0
+        for i, c in enumerate(data):
+            age = n - 1 - i
+            wi = math.exp(-lam * age)
+            tw += wi
+            if direction == "above":
+                wins += wi if c > threshold else 0.0
+            else:
+                wins += wi if c < threshold else 0.0
+        return float(wins / tw) if tw > 0 else 0.0
     if np is not None:
         arr = np.asarray(data, dtype=float)
         if recent_days <= 0 or recent_weight <= 1.0:
@@ -3361,11 +3503,27 @@ def _maybe_add_two_sided_quotes(
             if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                 dip = max(dip, sp.limit_dip_pct_high_confidence)
             dip = _dte_confidence_dip(dip, p_win, c.get("dte"), sp)
-            price = max(0.01, min(0.99, bid * (1.0 - dip))) if dip else bid
+            ask_side = c.get("yes_ask") if side == "yes" else c.get("no_ask")
+            dip_price = max(0.01, min(0.99, bid * (1.0 - dip))) if dip else bid
+            mf_q = _maker_fee_rate_for_market(sp, str(c.get("platform") or ""), str(c.get("yf_ticker") or ""))
+            fair_cap_q = _clip_price(float(p_win) - _fee_per_contract(float(p_win), mf_q, sp.min_fee_per_order))
+            ask_f: float | None = None
+            if ask_side is not None:
+                try:
+                    af = float(ask_side)
+                    ask_f = af if af > 0 else None
+                except (TypeError, ValueError):
+                    pass
+            price = _resolve_passive_quote_price(
+                passive_quote=sp.passive_limit_quote,
+                bid=bid,
+                ask=ask_f,
+                dip_based_price=dip_price,
+                fair_cap=fair_cap_q,
+            )
             count_base = _compute_buy_count(
                 p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
             )
-            ask_side = c.get("yes_ask") if side == "yes" else c.get("no_ask")
             liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
             count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
             if count <= 0:
@@ -3423,7 +3581,7 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
                 break
     except Exception:
         return
-    sp_sync = _load_strategy_params((cfg or {}).get("strategy", {}))
+    sp_sync = _load_strategy_params(_merge_execution_into_strategy(cfg or {}))
     min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
     for p in kalshi_preds:
         t = p.get("ticker")
@@ -3551,7 +3709,7 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
     if not events_contracts:
         return
     resolved_count = 0
-    sp_sync = _load_strategy_params((cfg or {}).get("strategy", {}))
+    sp_sync = _load_strategy_params(_merge_execution_into_strategy(cfg or {}))
     min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
     for p in gemini_preds:
         t = p.get("ticker")
@@ -3627,7 +3785,7 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
 def _show_config(args) -> int:
     """Print resolved config (Freqtrade show-config style). No API calls."""
     cfg = get_config()
-    strategy = cfg.get("strategy", {})
+    strategy = _merge_execution_into_strategy(cfg)
     trading = cfg.get("trading", {})
     markets = cfg.get("markets", [])
     yf = cfg.get("yfinance_tickers", {})
@@ -3638,9 +3796,16 @@ def _show_config(args) -> int:
     print("=" * 60)
     print(f"\nmarkets: {markets}")
     print(f"yfinance_tickers: {list(yf.keys()) if isinstance(yf, dict) else yf}")
+    ex = cfg.get("execution") or {}
+    if ex:
+        print(f"\nexecution (merged into strategy for pricing):")
+        for k, v in ex.items():
+            print(f"  {k}: {v}")
     print(f"\nstrategy (key params):")
     for k in ("strategy_engine", "min_edge", "kelly_fraction", "limit_order_mode", "vol_model",
-              "enable_disagreement_dip", "enable_lottery_limits", "max_dip_cap", "limit_dip_pct"):
+              "enable_disagreement_dip", "enable_lottery_limits", "max_dip_cap", "limit_dip_pct",
+              "passive_limit_quote", "blacklist_extra_file", "empirical_weighting", "empirical_exponential_halflife_bars",
+              "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi"):
         v = strategy.get(k)
         if v is not None:
             print(f"  {k}: {v}")
@@ -3701,13 +3866,14 @@ def _run(args) -> int:
     cfg = get_config()
     markets_list = cfg.get("markets", [])
     yf_mapping = cfg.get("yfinance_tickers", {})
-    strategy = cfg.get("strategy", {})
+    strategy = _merge_execution_into_strategy(cfg)
     trading = cfg.get("trading", {})
     min_edge = float(strategy.get("min_edge", args.edge))
     use_kelly = strategy.get("use_kelly", False)
     kelly_fraction = float(strategy.get("kelly_fraction", 0.25))
     whitelist = strategy.get("whitelist")  # if set, only these series
     blacklist = set((strategy.get("blacklist") or []))  # exclude these
+    blacklist |= _load_blacklist_extra_file(strategy.get("blacklist_extra_file"))
     min_contracts = int(trading.get("min_contracts", 1))
 
     # Filter markets by whitelist/blacklist (Freqtrade-style)
@@ -4376,6 +4542,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 recent_days=sp.empirical_recent_days,
                 recent_weight=recent_w,
                 use_rolling_window=sp.empirical_use_rolling_window,
+                weighting=sp.empirical_weighting,
+                exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
             )
             hist_p = emp
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
@@ -4420,6 +4588,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hist_p = _vol_disagree_dampened_blend(emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
                 else:
                     hist_p = max(emp, vol_p)
+            # Anti-gambler sanity buffer on vol/emp blend (before bucket & signal layers)
+            if sp.enable_model_prob_hard_cap:
+                hist_p = max(sp.model_prob_hard_lo, min(sp.model_prob_hard_hi, float(hist_p)))
             # Bucket penalty + optional sklearn probability calibration.
             hist_p = strategy_engine.apply_bucket_penalty(
                 hist_p=hist_p,
@@ -4466,6 +4637,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 current_price=current_price,
                 momentum_ret=momentum_ret,
                 cfg=sp.ah_cfg,
+            )
+            hist_p = _sanitize_model_probability(
+                hist_p,
+                lo=sp.model_prob_hard_lo,
+                hi=sp.model_prob_hard_hi,
+                enabled=sp.enable_model_prob_hard_cap,
             )
             effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
             emp_n = min(sp.empirical_recent_days, len(closes_for_emp)) if sp.empirical_use_rolling_window else len(closes_for_emp)
@@ -4715,9 +4892,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     recent_days=sp.empirical_recent_days,
                     recent_weight=sp.empirical_recent_weight,
                     use_rolling_window=sp.empirical_use_rolling_window,
+                    weighting=sp.empirical_weighting,
+                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                 )
                 print(f"    ├─ Empirical P:  {emp_kalshi:.1%}  (historical frequency)")
-                print(f"    ├─ Volatility P: {vol_p:.1%}  (model based on current price + DTE)")
+                _vp_k = _display_model_probability(vol_p, sp)
+                _vp_note = "" if _vp_k is None or abs(float(_vp_k) - float(vol_p)) < 1e-9 else " (display capped)"
+                print(f"    ├─ Volatility P: {_vp_k:.1%}{_vp_note}  (model based on current price + DTE)")
                 ah_delta = abs(hist_p - hist_p_raw)
                 ah_tag = f"  (AH: {hist_p_raw:.1%}→{hist_p:.1%})" if ah_delta >= 0.02 else ""
                 print(f"    ├─ Blended P:    {hist_p:.1%}  (final model probability){ah_tag}")
@@ -4865,6 +5046,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     layered_order_levels=sp.layered_order_levels,
                     order_count=inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0) + 1,
                     max_dip_cap=sp.max_dip_cap,
+                    passive_quote=sp.passive_limit_quote,
                 )
                 _kelly_frac_ticker = kelly_fraction_live
                 if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
@@ -5052,6 +5234,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     recent_days=sp.empirical_recent_days,
                     recent_weight=recent_w_g,
                     use_rolling_window=sp.empirical_use_rolling_window,
+                    weighting=sp.empirical_weighting,
+                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                 )
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
                 ewma_lambda_used_g = _ewma_lambda_for_market(sp, evt, yf_ticker)
@@ -5092,6 +5276,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         hist_p_gem = max(emp, vol_p_gem)
                 else:
                     hist_p_gem = emp
+                if sp.enable_model_prob_hard_cap:
+                    hist_p_gem = max(sp.model_prob_hard_lo, min(sp.model_prob_hard_hi, float(hist_p_gem)))
                 hist_p_gem = strategy_engine.apply_bucket_penalty(
                     hist_p=hist_p_gem,
                     calibration=calibration,
@@ -5136,6 +5322,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     current_price=current_price,
                     momentum_ret=momentum_ret,
                     cfg=sp.ah_cfg,
+                )
+                hist_p_gem = _sanitize_model_probability(
+                    hist_p_gem,
+                    lo=sp.model_prob_hard_lo,
+                    hi=sp.model_prob_hard_hi,
+                    enabled=sp.enable_model_prob_hard_cap,
                 )
                 effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                 emp_n_g = min(sp.empirical_recent_days, len(closes_for_emp_g)) if sp.empirical_use_rolling_window else len(closes_for_emp_g)
@@ -5366,7 +5558,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"    ├─ Resolves in:  {_dte_str_g}")
                 if vol_p_gem is not None:
                     print(f"    ├─ Empirical P:  {emp:.1%}  (historical frequency)")
-                    print(f"    ├─ Volatility P: {vol_p_gem:.1%}  (model based on current price + DTE)")
+                    _vp_g = _display_model_probability(vol_p_gem, sp)
+                    _vp_g_note = "" if _vp_g is None or abs(float(_vp_g) - float(vol_p_gem)) < 1e-9 else " (display capped)"
+                    print(f"    ├─ Volatility P: {_vp_g:.1%}{_vp_g_note}  (model based on current price + DTE)")
                     print(f"    ├─ Blended P:    {hist_p_gem:.1%}  (final model probability)")
                 else:
                     print(f"    ├─ Model P(YES): {hist_p_gem:.1%}")
@@ -5499,6 +5693,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         layered_order_levels=sp.layered_order_levels,
                         order_count=inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0) + 1,
                         max_dip_cap=sp.max_dip_cap,
+                        passive_quote=sp.passive_limit_quote,
                     )
                     _kelly_frac_gem = kelly_fraction_live
                     if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
@@ -5760,6 +5955,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             recent_days=sp.empirical_recent_days,
                                             recent_weight=recent_w_pos,
                                             use_rolling_window=sp.empirical_use_rolling_window,
+                                            weighting=sp.empirical_weighting,
+                                            exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                                         )
                                         hist_p = emp_pos
                                         dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
@@ -5805,6 +6002,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 hist_p = _vol_disagree_dampened_blend(emp_pos, vol_p, w_emp_pos, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
                                             else:
                                                 hist_p = max(emp_pos, vol_p)
+                                        if sp.enable_model_prob_hard_cap:
+                                            hist_p = max(sp.model_prob_hard_lo, min(sp.model_prob_hard_hi, float(hist_p)))
                                     momentum_ret_pos = ((current_price_pos - last_close_pos) / last_close_pos) if last_close_pos > 0 else 0.0
                                     hist_p = apply_anti_hallucination_pipeline(
                                         model_p=hist_p,
@@ -5815,6 +6014,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         current_price=current_price_pos,
                                         momentum_ret=momentum_ret_pos,
                                         cfg=sp.ah_cfg,
+                                    )
+                                    hist_p = _sanitize_model_probability(
+                                        hist_p,
+                                        lo=sp.model_prob_hard_lo,
+                                        hi=sp.model_prob_hard_hi,
+                                        enabled=sp.enable_model_prob_hard_cap,
                                     )
                                     maker_fee_pos = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
@@ -5964,6 +6169,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     recent_days=sp.empirical_recent_days,
                     recent_weight=recent_w_cached,
                     use_rolling_window=sp.empirical_use_rolling_window,
+                    weighting=sp.empirical_weighting,
+                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                 )
                 hist_p = emp_cached
                 dte_cached = _get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
@@ -6213,6 +6420,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             recent_days=sp.empirical_recent_days,
                             recent_weight=recent_w_gp,
                             use_rolling_window=sp.empirical_use_rolling_window,
+                            weighting=sp.empirical_weighting,
+                            exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                         )
                         dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
                         ewma_lambda_g = _ewma_lambda_for_market(sp, evt, pos_yf)
