@@ -31,19 +31,20 @@ else
 fi
 
 # 2. Extract Metrics safely
-# Added '|| true' and default values to prevent script exit on empty logs
+# compare_historical prints "win rate" (lowercase) and "PnL" in position-eval; calibration has "overall win rate"
 tail -n 200 "$LOG_FILE" > "$TMP_TAIL" 2>/dev/null || touch "$TMP_TAIL"
-WIN_RATE=$(grep 'Win rate' "$LOG_FILE" | tail -n 1 | awk '{print $NF}' | tr -d '%' || echo "0")
-PNL=$(grep -E 'P&L|PnL' "$LOG_FILE" | tail -n 1 | awk '{print $NF}' | tr -d '¢' || echo "0")
+# Win rate: position-eval (KEEP/SELL), calibration (overall), or adaptive (Recent Xh)
+WIN_RATE=$(grep -iE 'win rate [0-9.]+%|overall win rate [0-9.]+%|trades, [0-9.]+% win rate' "$LOG_FILE" 2>/dev/null | tail -n 1 | grep -oE '[0-9.]+%' | head -1 | tr -d '%' || echo "0")
+PNL=$(grep -E 'PnL|P&L' "$LOG_FILE" 2>/dev/null | grep -E 'KEEP|SELL' | tail -n 1 | grep -oE 'PnL [+-]?[0-9]+' | awk '{print $2}' || echo "0")
 
 echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
 
-# 3. Generate HTML Summary (Replacing 'tac' with a portable awk reverse)
+# 3. Generate HTML Summary (only metric rows: timestamp,win_rate,pnl)
 {
   echo "<html><head><style>body{font-family:sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>"
   echo "<h1>Ollama Runs</h1><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>"
-  # Portable way to reverse lines without 'tac'
-  tail -n 10 "$METRICS" | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
+  # Only lines matching timestamp,win_rate,pnl (timestamp = numeric Unix)
+  grep -E '^[0-9]+,[0-9.]+,' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
     echo "<tr><td>$(date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")</td><td>$wr%</td><td>$pnl</td></tr>"
   done
   echo "</table></body></html>"
@@ -55,7 +56,7 @@ cat "$PROMPT_TPL" > "$TMP_PROMPT"
   printf "\n### RECENT LOG DATA (Tail):\n"
   cat "$TMP_TAIL"
   printf "\n### PERFORMANCE METRICS (CSV):\n"
-  tail -n 10 "$METRICS"
+  grep -E '^[0-9]+,[0-9.]+,' "$METRICS" 2>/dev/null | tail -n 10
 } >> "$TMP_PROMPT"
 
 # Run Ollama (using llama3.2 since llama3.3 was failing your install)
@@ -69,11 +70,12 @@ if [[ -n "$PATCH" ]]; then
   echo "$PATCH" > /tmp/ollama_codex_patch.diff
 
   cd "$REPO"
-  if git apply --verbose --recount --whitespace=fix /tmp/ollama_codex_patch.diff; then
-    echo "✅ Patch applied."
-    python3 -m py_compile signals/yfinance_client.py || true
-    git add .
-    git commit -m "${MSG:-chore: auto-optimization}"
+    if git apply --verbose --recount --whitespace=fix /tmp/ollama_codex_patch.diff; then
+      echo "✅ Patch applied."
+      python3 -m py_compile signals/yfinance_client.py || true
+      git add docs/ollama_runs.html
+      git add .
+      git commit -m "${MSG:-chore: auto-optimization}"
   else
     echo "❌ Patch failed. Model output was malformed."
   fi
