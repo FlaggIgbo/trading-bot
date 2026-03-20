@@ -28,7 +28,7 @@ yfinance_tickers:
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
-  min_edge: 0.25 # Raised from 0.22 due to 29.4% win rate and 8-loss streak; higher bar for quality entries
+  min_edge: 0.30 # Raised from 0.25 due to 25.7% win rate (7-day); higher bar for quality entries during losing streak
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
@@ -45,7 +45,7 @@ strategy:
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
   dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
-  limit_dip_pct: 0.05 # Lowered from 7% to 5%; tighter stop-loss given loss streak
+  limit_dip_pct: 0.08 # Raised from 5% to 8%; deeper limits to capture better entry prices during volatility
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
