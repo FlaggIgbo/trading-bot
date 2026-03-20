@@ -3,6 +3,7 @@
 This setup includes:
 - `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes.
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
+- `com.user.ollama_codex_loop.plist`: runs `ollama_codex_loop.sh` every 30 minutes to update `docs/ollama_runs.html` from metrics and optionally apply Ollama-suggested patches.
 
 Both jobs use your `.venv` Python so dependencies are available.
 `compare_historical.py` now imports `execution/engine.py` (via backward-compat shim), runs fill reconciliation diagnostics (`--reconcile-diagnostics`) in launchd mode, includes the volatility hardening stack (defensive mode, vol-ratio scaling, cross-exchange sanity gate), applies inter-arb preflight before BUY execution (`arb_inter_allow_single_leg_fallback`; repo default **false** = paired legs only), uses balance-aware inter-arb route selection, applies DTE-confidence dip scaling for far-dated contracts, runs the anti-hallucination pipeline (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge, EMA regime filter), applies the alpha engine (Order Book Imbalance edge adjustment, markout/toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal) to correct model overconfidence and optimize position sizing before recommendations, uses EV-optimal dynamic sell thresholds (`_ev_sell_threshold`) for position evaluation, applies adaptive learning from recent trades (recency-weighted win rates, loss streak detection, per-series cooldowns), corrects structural YES bias via probability shrinkage and overconfidence edge penalties, places passive dip-based limit orders via the fixed `layered` mode (below bid with staggered depth on re-buys), and modulates limit dip depth and signal model scoring using RSI-14 (`_compute_rsi`, `_rsi_dip_adjustment`, `rsi_norm` feature).
@@ -16,8 +17,7 @@ Both jobs use your `.venv` Python so dependencies are available.
 1. **Copy the plists to LaunchAgents** (paths must match your machine):
 
    ```bash
-   cp launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
-   cp launchd/com.user.daily_performance_report.plist ~/Library/LaunchAgents/
+   cp launchd/com.user.compare_historical.plist launchd/com.user.daily_performance_report.plist launchd/com.user.ollama_codex_loop.plist ~/Library/LaunchAgents/
    ```
 
    If your project or username is different, edit the plist first: update `ProgramArguments` and `WorkingDirectory` to your absolute paths.
@@ -27,6 +27,7 @@ Both jobs use your `.venv` Python so dependencies are available.
    ```bash
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performance_report.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.ollama_codex_loop.plist
    ```
 
 3. **Optional: Keep Mac awake** (otherwise macOS may sleep and pause the timer):
@@ -39,9 +40,10 @@ Both jobs use your `.venv` Python so dependencies are available.
 | ------------- | --------------------------------------------------------------------------- |
 | Start compare_historical | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.compare_historical.plist` |
 | Start daily_report | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.daily_performance_report.plist` |
-| Reload latest scripts | `launchctl kickstart -k gui/$(id -u)/com.user.compare_historical && launchctl kickstart -k gui/$(id -u)/com.user.daily_performance_report` |
+| Reload latest scripts | `launchctl kickstart -k gui/$(id -u)/com.user.compare_historical && launchctl kickstart -k gui/$(id -u)/com.user.daily_performance_report && launchctl kickstart -k gui/$(id -u)/com.user.ollama_codex_loop` |
 | Stop compare_historical | `launchctl unload ~/Library/LaunchAgents/com.user.compare_historical.plist` |
 | Stop daily_report | `launchctl unload ~/Library/LaunchAgents/com.user.daily_performance_report.plist` |
+| Stop ollama_codex_loop | `launchctl unload ~/Library/LaunchAgents/com.user.ollama_codex_loop.plist` |
 | View compare stdout | `tail -f /tmp/compare_historical.out.log` |
 | View compare stderr | `tail -f /tmp/compare_historical.err.log` |
 | View report stdout | `tail -f /tmp/daily_performance_report.out.log` |

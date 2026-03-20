@@ -18,21 +18,20 @@ mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$METRICS")"
 
 # 1. Fix Log Logic: Find the latest actual log file
-# compare_historical writes eval_YYYYMMDDHH.log; prefer that over last_run.log
+# compare_historical writes eval_YYYYMMDDHH.log to LOG_DIR (or LOG_DIR/last_run.log/ when legacy)
 if [[ -f "$LOG_FILE" ]]; then
-  # If last_run.log exists, use it (legacy)
+  # If last_run.log exists as file, use it (legacy)
   :
-elif [[ -d "$LOG_FILE" ]]; then
-  latest=$(ls -1t "$LOG_DIR"/*.log 2>/dev/null | grep -v "metrics.csv" | head -n1)
-  LOG_FILE="${latest:-$LOG_FILE}"
 else
-  latest=$(ls -1t "$LOG_DIR"/*.log 2>/dev/null | grep -v metrics | head -n1)
-  [[ -n "$latest" ]] && LOG_FILE="$latest"
+  # Find most recent .log: LOG_DIR/*.log and LOG_DIR/last_run.log/*.log (eval_*.log)
+  latest=$(ls -1t "$LOG_DIR"/*.log "$LOG_DIR"/last_run.log/*.log 2>/dev/null | grep -v "metrics" | head -n1)
+  [[ -n "$latest" && -f "$latest" ]] && LOG_FILE="$latest"
 fi
 
 # 2. Extract Metrics safely
 # compare_historical prints "win rate" (lowercase) and "PnL" in position-eval; calibration has "overall win rate"
 tail -n 200 "$LOG_FILE" > "$TMP_TAIL" 2>/dev/null || touch "$TMP_TAIL"
+[[ ! -f "$LOG_FILE" ]] && LOG_FILE="$TMP_TAIL"  # fallback when no log found
 # Win rate: position-eval (KEEP/SELL), calibration (overall), or adaptive (Recent Xh)
 WIN_RATE=$(grep -iE 'win rate [0-9.]+%|overall win rate [0-9.]+%|trades, [0-9.]+% win rate' "$LOG_FILE" 2>/dev/null | tail -n 1 | grep -oE '[0-9.]+%' | head -1 | tr -d '%' || echo "0")
 PNL_CENTS=$(grep -E 'PnL|P&L' "$LOG_FILE" 2>/dev/null | grep -E 'KEEP|SELL' | tail -n 1 | grep -oE '[+-]?[0-9]+¢' | tr -d '¢' | tail -1 || echo "0")

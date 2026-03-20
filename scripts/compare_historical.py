@@ -6250,6 +6250,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
         # Re-allocate Gemini budget after cancels+sells — freed balance may now allow buys
         gemini_orders_in_pending = [o for o in pending_orders if o.get("platform") == PLATFORM_GEMINI]
+        gemini_balance_after = 0  # Used by _apply_inter_arb_group_preflight; 0 when no Gemini
         if gemini_trading and gemini_orders_in_pending:
             try:
                 gemini_balance_after = int(gemini_trading.get_balance().get("balance", 0) or 0)
