@@ -111,6 +111,93 @@ OUTPUT:
         return None
 
 
+def _format_single_trade_llm_context(trade: dict, action: str) -> str:
+    """
+    Unambiguous fields for small LLMs: limit/order price is NOT the strike/barrier.
+    Mirrors the human-readable lines in compare_historical PROPOSED TRADES.
+    """
+    lines: list[str] = [
+        "TERMINOLOGY (do not confuse these):",
+        "- LIMIT_PRICE_PER_SHARE_USD = bid/limit in dollars for one contract share (e.g. 0.05 = 5¢ per share).",
+        "  This is NOT the underlying asset spot, NOT the barrier/strike for settlement, unless no barrier is given.",
+        "- OUTCOME_LEG = YES or NO — which contract you are trading.",
+        "- BARRIER / STRIKE = the price level (if any) the market uses vs the underlying to settle the YES contract.",
+        "",
+    ]
+    platform = str(trade.get("platform") or "?").upper()
+    ticker = str(trade.get("ticker") or "?")
+    title = str(trade.get("title") or "")[:220]
+    side_raw = str(trade.get("side") or "").strip().lower()
+    outcome = "YES" if side_raw == "yes" else "NO" if side_raw == "no" else side_raw.upper() or "?"
+
+    if action == "sell":
+        limit = float(trade.get("price") or 0)
+        count = int(trade.get("count") or 0)
+        rec = str(trade.get("rec") or "N/A")
+        lines.extend(
+            [
+                f"ACTION: SELL",
+                f"TRIGGER_OR_REC: {rec}",
+                f"PLATFORM: {platform}",
+                f"TICKER: {ticker}",
+                f"CONTRACT_TITLE: {title}",
+                f"OUTCOME_LEG: {outcome}",
+                f"LIMIT_PRICE_PER_SHARE_USD: ${limit:.2f}",
+                f"CONTRACTS_TO_SELL: {count}",
+            ]
+        )
+    else:
+        limit = float(trade.get("price") or 0)
+        count = int(trade.get("count") or 10)
+        edge = float(trade.get("edge") or 0)
+        rec = str(trade.get("rec") or "N/A")
+        th = trade.get("threshold")
+        direction = str(trade.get("direction") or "").strip().lower()
+        bet_dir = ""
+        if direction:
+            bet_dir = (
+                direction
+                if side_raw == "yes"
+                else ("below" if direction == "above" else "above")
+            )
+        lines.extend(
+            [
+                f"ACTION: BUY",
+                f"RECOMMENDATION: {rec}",
+                f"PLATFORM: {platform}",
+                f"TICKER: {ticker}",
+                f"CONTRACT_TITLE: {title}",
+                f"OUTCOME_LEG: {outcome}",
+                f"LIMIT_PRICE_PER_SHARE_USD: ${limit:.2f}   <-- order limit (not the barrier strike)",
+                f"CONTRACTS: {count}",
+                f"EDGE_VS_MODEL: {edge:.1%}",
+            ]
+        )
+        if th is not None:
+            try:
+                th_f = float(th)
+                if bet_dir:
+                    lines.append(
+                        f"BARRIER_CONDITION: YES side typically pays if underlying finishes {bet_dir} {th_f} "
+                        f"(verify against CONTRACT_TITLE)."
+                    )
+                else:
+                    lines.append(f"BARRIER_STRIKE_LEVEL: {th_f}")
+            except (TypeError, ValueError):
+                lines.append(f"BARRIER_STRIKE_LEVEL: {th}")
+        dte = trade.get("dte")
+        if dte is not None:
+            lines.append(f"DTE_OR_TIME_TO_RESOLUTION: {dte}")
+        hist_p = trade.get("hist_p")
+        if hist_p is not None:
+            try:
+                lines.append(f"MODEL IMPLIED P(YES): {float(hist_p):.1%}")
+            except (TypeError, ValueError):
+                pass
+
+    return "\n".join(lines)
+
+
 def analyze_single_trade(trade: dict, action: str, model: str | None = None) -> str | None:
     """
     Analyze a single proposed buy or sell trade. Returns Ollama's interpretation or None.
@@ -127,31 +214,22 @@ def analyze_single_trade(trade: dict, action: str, model: str | None = None) -> 
     if available:
         models_to_try = available + [m for m in models_to_try if m not in available]
 
-    if action == "sell":
-        desc = (
-            f"SELL {trade.get('side', '?').upper()} {trade.get('ticker', '?')} | "
-            f"{trade.get('title', '')[:50]} | Count: {trade.get('count', 0)} @ "
-            f"${trade.get('price', 0):.2f} | Reason: {trade.get('rec', 'N/A')}"
-        )
-    else:
-        desc = (
-            f"BUY {trade.get('side', '?').upper()} {trade.get('ticker', '?')} | "
-            f"{trade.get('title', '')[:50]} | Edge: {trade.get('edge', 0):.1%} | "
-            f"Price: ${trade.get('price', 0):.2f} | Count: {trade.get('count', 10)} | "
-            f"Recommendation: {trade.get('rec', 'N/A')}"
-        )
+    desc = _format_single_trade_llm_context(trade, action)
 
     try:
         from ollama import chat
     except ImportError:
         return None
 
-    prompt = f"""You are a prediction market analyst. Below is ONE proposed trade.
+    prompt = f"""You are a prediction market analyst. Below is ONE proposed trade with explicit fields.
 
-TRADE:
 {desc}
 
-In 1-3 sentences, interpret this trade for the user: what does it mean, is it reasonable, any risks or caveats? Be concise."""
+Rules for your answer:
+- Treat LIMIT_PRICE_PER_SHARE_USD only as the order price per share (0–1 USD). Do not call it the strike, spot, or barrier unless that field is absent and the title clearly states otherwise.
+- If BARRIER_STRIKE_LEVEL or BARRIER_CONDITION is present, that is the settlement threshold language, not the limit price.
+
+In 1-3 sentences, interpret this trade: what it means, whether it is plausible, main risks. Be concise."""
 
     for m in models_to_try:
         try:
@@ -170,8 +248,8 @@ In 1-3 sentences, interpret this trade for the user: what does it mean, is it re
     return None
 
 
-def check_ollama_ready() -> tuple[bool, str | None]:
-    """Send data to Ollama and print the LLM's analysis. Returns True if printed."""
+def run_analysis(data_text: str, script_name: str, model: str | None = None) -> bool:
+    """Send captured script output to Ollama and print the LLM's analysis. Returns True if printed."""
     if not data_text or not data_text.strip():
         return False
 
@@ -185,7 +263,6 @@ def check_ollama_ready() -> tuple[bool, str | None]:
     available = _get_available_models()  # Full names from /api/tags, e.g. ["llama3.2:1b"]
     preferred = model or os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
     models_to_try = [preferred] + [m for m in FALLBACK_MODELS if m != preferred]
-    # Use available models first (exact names that Ollama knows)
     if available:
         models_to_try = available + [m for m in models_to_try if m not in available]
 

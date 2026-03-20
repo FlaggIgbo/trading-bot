@@ -3011,23 +3011,33 @@ def _format_trades_for_ollama(
     pending_orders: list[dict],
     pending_sells: list[dict],
 ) -> str:
-    """Format proposed trades for Ollama — concise, focused on tickers, edges, prices."""
-    lines: list[str] = []
+    """Format proposed trades for Ollama — limit price per share vs barrier/strike spelled out."""
+    lines: list[str] = [
+        "Note: LIMIT = dollars/share for the contract (0–1). BARRIER = settlement threshold if listed.",
+        "",
+    ]
     if pending_sells:
         lines.append(f"PROPOSED SELLs ({len(pending_sells)}):")
         for i, s in enumerate(pending_sells, 1):
+            th = s.get("threshold")
+            bar = f" | barrier {th}" if th is not None else ""
             lines.append(
                 f"  {i}. [{s['platform'].upper()}] SELL {s['side'].upper()} {s['ticker']} | "
-                f"{s.get('title', '')[:60]} | Count: {s['count']} @ ${s['price']:.2f}"
+                f"{s.get('title', '')[:60]} | Count: {s['count']} | LIMIT ${s['price']:.2f}/share{bar}"
             )
         lines.append("")
     if pending_orders:
         lines.append(f"PROPOSED BUYs ({len(pending_orders)}):")
         for i, o in enumerate(pending_orders, 1):
             title = (o.get("title") or "")[:60]
+            th = o.get("threshold")
+            d = str(o.get("direction") or "")
+            bar = ""
+            if th is not None:
+                bar = f" | BARRIER {d + ' ' if d else ''}{th}"
             lines.append(
                 f"  {i}. [{o['platform'].upper()}] {o['rec']} {o['ticker']} | "
-                f"{title} | Edge: {o['edge']:.1%} | Price: ${o['price']:.2f} | Count: {o.get('count', 10)}"
+                f"{title} | Edge: {o['edge']:.1%} | LIMIT ${o['price']:.2f}/share | Count: {o.get('count', 10)}{bar}"
             )
     if not lines:
         return "No proposed trades."

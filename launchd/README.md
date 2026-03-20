@@ -53,6 +53,10 @@ Both jobs use your `.venv` Python so dependencies are available.
 
 launchd agents run the scripts from disk on each invocation, so code changes (e.g. bug fixes or `yfinance_client` data-source updates pushed to `origin/main`) take effect on the **next** scheduled run automatically — no reload needed. After `git pull`, you do **not** need to re-copy the plist unless `ProgramArguments` or `WorkingDirectory` changed.
 
+**Per-trade Ollama blurbs** are built in `signals/ollama_analysis.py` (`analyze_single_trade`). Each launchd run starts a **new** Python process, so after you pull, the **next** timer fire loads the updated module. To verify immediately (without waiting for the interval), run:
+
+`launchctl kickstart -k gui/$(id -u)/com.user.compare_historical`
+
 To force an immediate run after pulling updates:
 
 ```bash
@@ -69,6 +73,25 @@ launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
 ```
 
 Code-only changes (no plist edit) still take effect on the next scheduled run; `kickstart -k` runs the current on-disk script immediately.
+
+### `Bootstrap failed: 5: Input/output error`
+
+That usually means launchd **refused to load the job into your GUI domain** — often **not** a broken plist.
+
+| Cause | What to do |
+| ----- | ---------- |
+| **SSH / remote session** | `gui/$(id -u)` is tied to a logged-in graphical session. Run `bootout` / `bootstrap` from **Terminal on the Mac itself** (or Screen Sharing), not plain SSH. |
+| **Job already loaded** | `bootout` first, then `bootstrap`. If `bootout` was skipped or failed silently, bootstrap can EIO. Run: `launchctl print gui/$(id -u)/com.user.compare_historical` — if it prints a job, `launchctl bootout gui/$(id -u)/com.user.compare_historical` then bootstrap again **in Terminal.app**. |
+| **Plist not readable** | `plutil -lint ~/Library/LaunchAgents/com.user.compare_historical.plist` — must say OK. Fix permissions: `chmod 644` on the plist. |
+
+**If the agent was already working** and you only changed **code or `config.yaml`**, you do **not** need `bootstrap` at all:
+
+```bash
+cp /path/to/trading-bot/launchd/com.user.compare_historical.plist ~/Library/LaunchAgents/
+launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
+```
+
+The next timer fire still uses the plist on disk; copying updates LaunchAgents for the **next** login/bootstrap.
 
 ## Configuration
 
