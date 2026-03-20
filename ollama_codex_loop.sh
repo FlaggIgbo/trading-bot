@@ -19,7 +19,8 @@ PATCH_FILE="/tmp/ollama_codex_patch.diff"
 # Backward compat typo
 OLLAMA_PORT="${OLLAMA_PORT:-${OLLMAPORT:-11434}}"
 OLLMAPATH="${OLLAMA_HOST:-http://127.0.0.1:${OLLAMA_PORT}}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-llama3.2}"
+# Default: coding-specialized model (run once: ollama pull qwen2.5-coder:7b). Override: OLLAMA_MODEL=mistral, llama3.2, etc.
+OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:7b}"
 OLLAMA_BT_DAYS="${OLLAMA_BT_DAYS:-30}"
 OLLAMA_BT_MODE="${OLLAMA_BT_MODE:-synthetic}"
 OLLAMA_AUTO_PUSH="${OLLAMA_AUTO_PUSH:-0}"
