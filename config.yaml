@@ -28,7 +28,7 @@ yfinance_tickers:
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
-  min_edge: 0.22 # Higher bar vs fees/slippage and fast Kalshi repricing; fewer but higher-quality entries
+  min_edge: 0.25 # Raised from 0.22 due to 29.4% win rate and 8-loss streak; higher bar for quality entries
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
@@ -45,7 +45,7 @@ strategy:
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
   dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
-  limit_dip_pct: 0.07 # Raised from 5% to 7%; deeper default dip catches more wicks
+  limit_dip_pct: 0.05 # Lowered from 7% to 5%; tighter stop-loss given loss streak
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
@@ -69,7 +69,7 @@ strategy:
   far_dte_max_extra_dip: 0.12 # Cap additional DTE-based dip at 12%
   far_dte_min_confidence: 0.80 # Only apply DTE dip scaling when P(win) >= 80%
   far_dte_confidence_boost: 1.5 # When P(win) >= 90%, multiply the DTE extra dip by this
-  vol_blend_weight: 0.45 # Reduced from 0.75; vol model was systematically overconfident on intraday crypto
+  vol_blend_weight: 0.35 # Reduced from 0.45; further reduce vol model weight due to continued overconfidence
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
   ewma_lambda: 0.94 # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
