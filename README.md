@@ -406,6 +406,10 @@ python3 scripts/compare_historical.py --execute --no-llm
 
 Requires `trading.dry_run: false` in config.yaml.
 
+**Run banner:** Every run prints **Mode** plus explicit `CLI flags: --execute=… --preview=… trading.dry_run=…`. If you expected live orders but see `PREVIEW` or `EVALUATE ONLY`, you are not calling the order APIs—use `--execute` (and `dry_run: false`). The macOS plist in `launchd/com.user.compare_historical.plist` includes `--execute` by default; a hand-typed command without it will not trade.
+
+**Optional preview-then-execute gate:** `COMPARE_TWO_PHASE=1 ./scripts/compare_live_guarded.sh …your normal args…` runs a fast `--preview --no-llm` pass first and only then your full command if the log shows proposed trades / lottery lines. See `launchd/README.md` § *Live orders vs preview*.
+
 **Strategy engine note:** You do not need to manually switch strategies during normal usage. Keep `strategy.strategy_engine: vol_regime` and treat `default_threshold` as a testing baseline only.
 
 **Flags**

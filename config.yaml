@@ -83,7 +83,7 @@ strategy:
   # Lottery limits: 1¢ (or close) limit orders on high-probability SKIPs — free lottery tickets (no fill = no fee)
   enable_lottery_limits: true # Place 1¢ limits when rec==SKIP but model P(win) >= 95% (ITM YES or OTM NO)
   lottery_limit_min_p_win: 0.95 # Require 95%+ model probability for lottery ticket
-  lottery_limit_price: 0.05 # 5¢ limit (min valid)
+  lottery_limit_price: 0.01 # 1¢ limit (min valid)
   lottery_limit_contracts: 1 # Small size
   vol_blend_weight: 0.35 # Reduced from 0.45; further reduce vol model weight due to continued overconfidence
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
@@ -293,9 +293,11 @@ trading:
   max_pct_of_balance: 0.15 # Tighter per-order cap vs 20%; pairs with smaller absolute_winner slice
   max_total_buy_pct: 0.50 # max % of balance for ALL buys combined (budget-aware diversification)
   min_contracts: 1 # skip if capped count < this
-  # When balance is below this (cents), place a limit order instead of skipping
-  # E.g. 500 = $5: with $3 balance, place 1-contract limit at price we can afford (e.g. 60¢)
-  min_balance_for_limit_fallback_cents: 250 # Use fallback when balance < $2.50; with $2 balance triggers 1-contract limit (was 300; 100 would block $2)
+  # Kalshi low-balance fallback (create_order_safe): only when a buy would skip (count<=0 after
+  # sizing) AND balance_cents < this threshold, place 1 contract at max affordable price.
+  # Lottery-sized buys (e.g. 1×5¢) usually use the normal path; this helps when default sizing fails.
+  # Higher threshold = fallback applies for more balances (e.g. 250¢ means <$2.50); 0 disables.
+  min_balance_for_limit_fallback_cents: 100
 
 # Backtest realism settings
 backtest:

@@ -57,6 +57,21 @@ Both jobs use your `.venv` Python so dependencies are available.
 | View ollama loop stdout | `tail -f /tmp/ollama_codex_loop.out.log` |
 | View ollama loop stderr | `tail -f /tmp/ollama_codex_loop.err.log` |
 
+## Live orders vs preview (troubleshooting “silent” bot)
+
+Each run prints an explicit **Mode** and **CLI flags** line:
+
+| Log says | Meaning |
+| -------- | ------- |
+| `LIVE — will place orders` | `--execute` is set and `trading.dry_run` is **false** — Kalshi/Gemini order APIs are used. |
+| `PREVIEW — shows proposed orders only` | You passed **`--preview`** — no live order placement. Remove `--preview` from cron/launchd to trade. |
+| `EVALUATE ONLY` | Neither `--preview` nor `--execute` — evaluation only. Add **`--execute`** for live trading. |
+| `EXECUTE requested but trading.dry_run is true` | You passed `--execute` but **`config.yaml` → `trading.dry_run: true`** blocks placement. Set `dry_run: false` when you intend to trade. |
+
+The repo’s `launchd/com.user.compare_historical.plist` includes **`--execute`** by default. If your **installed** plist omits it, or you run `python3 scripts/compare_historical.py` by hand without flags, you will see PREVIEW or EVALUATE ONLY.
+
+**Optional two-phase gate:** `scripts/compare_live_guarded.sh` with `COMPARE_TWO_PHASE=1` runs a fast `--preview --no-llm` pass first; only if the log shows proposed trades / lottery lines does it run your full command (e.g. with `--execute`). Without that env var, the script forwards all arguments unchanged.
+
 ## Picking up script changes
 
 launchd agents run the scripts from disk on each invocation, so code changes (e.g. bug fixes or `yfinance_client` data-source updates pushed to `origin/main`) take effect on the **next** scheduled run automatically — no reload needed. After `git pull`, you do **not** need to re-copy the plist unless `ProgramArguments` or `WorkingDirectory` changed.

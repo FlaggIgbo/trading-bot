@@ -477,7 +477,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         disagreement_dip_contracts=int(strategy.get("disagreement_dip_contracts", 2)),
         enable_lottery_limits=bool(strategy.get("enable_lottery_limits", False)),
         lottery_limit_min_p_win=float(strategy.get("lottery_limit_min_p_win", 0.95)),
-        lottery_limit_price=max(0.01, min(0.99, float(strategy.get("lottery_limit_price", 0.05)))),
+        lottery_limit_price=max(0.01, min(0.99, float(strategy.get("lottery_limit_price", 0.01)))),
         lottery_limit_contracts=int(strategy.get("lottery_limit_contracts", 1)),
         mc_enabled=bool(strategy.get("mc_enabled", True)),
         mc_paths=max(100, int(strategy.get("mc_paths", 10000))),
@@ -3786,7 +3786,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     print(f"  History:     {from_ts} → {to_ts} ({args.days} days)")
     print(f"  Min edge:    {min_edge:.0%}")
     print(f"  Volatility:  {'enabled' if bool(getattr(args, 'use_volatility', False) or strategy.get('use_volatility_by_default')) else 'disabled'}")
-    print(f"  Mode:        {'EXECUTE (live orders)' if getattr(args, 'execute', False) else 'PREVIEW' if getattr(args, 'preview', False) else 'evaluate only (use --execute to trade)'}")
+    _dry_banner = bool(trading_cfg.get("dry_run", True))
+    _ex = bool(getattr(args, "execute", False))
+    _pv = bool(getattr(args, "preview", False))
+    if _ex and not _dry_banner:
+        _mode = "LIVE — will place orders (Kalshi/Gemini)"
+    elif _ex and _dry_banner:
+        _mode = "EXECUTE requested but trading.dry_run is true — fix config to place orders"
+    elif _pv:
+        _mode = "PREVIEW — shows proposed orders only (no API order placement)"
+    else:
+        _mode = "EVALUATE ONLY — no order placement (use --preview to see API-style plan, --execute to trade)"
+    print(f"  Mode:        {_mode}")
+    print(f"  CLI flags:   --execute={_ex}  --preview={_pv}  config trading.dry_run={_dry_banner}")
     print("=" * 75)
     print()
 

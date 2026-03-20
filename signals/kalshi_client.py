@@ -318,8 +318,10 @@ class KalshiClient:
         """
         Create order, capping size by balance (buy) or position (sell).
         Never raises on 4xx (e.g. insufficient funds); logs and returns None so scripts continue.
-        When balance is below min_balance_for_limit_fallback_cents and we'd skip a buy,
-        place a 1-contract limit order at a price we can afford instead.
+        When balance_cents **is below** min_balance_for_limit_fallback_cents and a buy would
+        otherwise be skipped (count<=0 after balance cap), place a 1-contract limit at the
+        highest price still affordable (up to 99¢). Higher threshold = fallback applies for
+        more balance levels (e.g. $2 with threshold 250 still triggers 200<250).
         """
         # Validate ticker (Ollama-suggested: ensure we have a valid market identifier)
         if not ticker or not str(ticker).strip():
