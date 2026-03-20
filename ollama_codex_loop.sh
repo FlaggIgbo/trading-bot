@@ -18,17 +18,23 @@ mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$METRICS")"
 
 # 1. Fix Log Logic: Find the latest actual log file
-if [[ -d "$LOG_FILE" ]]; then
-  # If last_run.log accidentally became a directory, find the newest .log inside or near it
+# compare_historical writes eval_YYYYMMDDHH.log; prefer that over last_run.log
+if [[ -f "$LOG_FILE" ]]; then
+  # If last_run.log exists, use it (legacy)
+  :
+elif [[ -d "$LOG_FILE" ]]; then
   latest=$(ls -1t "$LOG_DIR"/*.log 2>/dev/null | grep -v "metrics.csv" | head -n1)
   LOG_FILE="${latest:-$LOG_FILE}"
+else
+  latest=$(ls -1t "$LOG_DIR"/*.log 2>/dev/null | grep -v metrics | head -n1)
+  [[ -n "$latest" ]] && LOG_FILE="$latest"
 fi
 
 # 2. Extract Metrics safely
 # Added '|| true' and default values to prevent script exit on empty logs
 tail -n 200 "$LOG_FILE" > "$TMP_TAIL" 2>/dev/null || touch "$TMP_TAIL"
 WIN_RATE=$(grep 'Win rate' "$LOG_FILE" | tail -n 1 | awk '{print $NF}' | tr -d '%' || echo "0")
-PNL=$(grep 'P&L' "$LOG_FILE" | tail -n 1 | awk '{print $NF}' || echo "0")
+PNL=$(grep -E 'P&L|PnL' "$LOG_FILE" | tail -n 1 | awk '{print $NF}' | tr -d '¢' || echo "0")
 
 echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
 

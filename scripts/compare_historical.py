@@ -311,6 +311,8 @@ class _StrategyParams:
     series_cooldown_extra_edge: float
     ewma_halflife_trades: int
     ewma_edge_scale_per_pct: float
+    adaptive_loss_block_win_rate: float
+    adaptive_loss_block_lookback_hours: float
     yes_overconfidence_extra_edge: float
     model_probability_shrinkage: float
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
@@ -471,6 +473,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         series_cooldown_extra_edge=float(strategy.get("series_cooldown_extra_edge", 0.06)),
         ewma_halflife_trades=int(strategy.get("ewma_halflife_trades", 30)),
         ewma_edge_scale_per_pct=float(strategy.get("ewma_edge_scale_per_pct", 0.004)),
+        adaptive_loss_block_win_rate=float(strategy.get("adaptive_loss_block_win_rate", 0.0)),
+        adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 0.0)),
         yes_overconfidence_extra_edge=float(strategy.get("yes_overconfidence_extra_edge", 0.0)),
         model_probability_shrinkage=float(strategy.get("model_probability_shrinkage", 1.0)),
         ah_cfg=load_anti_hallucination_config(strategy),
@@ -6061,6 +6065,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             for t in sorted(unique_capped):
                 print(f"         {t} ({ticker_counts.get(t, 0)} existing entries)")
             print()
+
+    block_wr = sp.adaptive_loss_block_win_rate
+    block_hours = sp.adaptive_loss_block_lookback_hours
+    if block_wr > 0 and block_hours > 0 and get_recent_performance and pending_orders:
+        perf = get_recent_performance(lookback_hours=block_hours, config=cfg) or {}
+        total = int(perf.get("total", 0))
+        wr_val = perf.get("win_rate")
+        min_trades_for_block = max(5, int(sp.adaptive_edge_min_trades))
+        if wr_val is not None and total >= min_trades_for_block and wr_val < block_wr:
+            print(f"[Risk] Circuit breaker: recent {block_hours:.1f}h win rate {wr_val:.1%} below {block_wr:.1%}; blocking {len(pending_orders)} new buys.")
+            pending_orders.clear()
 
     # Proposed trades + per-trade Ollama: print each trade and Ollama's interpretation
     if pending_orders or pending_sells:

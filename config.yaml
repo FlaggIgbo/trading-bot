@@ -28,7 +28,7 @@ yfinance_tickers:
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
-  min_edge: 0.30 # Raised from 0.25 due to 25.7% win rate (7-day); higher bar for quality entries during losing streak
+  min_edge: 0.35 # Raised from 0.30 to demand stronger edge during drawdowns
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
@@ -36,7 +36,7 @@ strategy:
   easy_win_min_market_p: 0.88 # Raised from 0.85; tighter agreement required to avoid YES-biased easy wins
   min_yes_price: 0.05 # Skip BUY YES when market YES < 5¢ (market thinks <5% chance). NO vol override.
   yes_overconfidence_extra_edge: 0.04 # Extra edge required for BUY YES to offset structural model bullish bias
-  model_probability_shrinkage: 0.75 # Pull hist_p toward 0.5: adjusted = 0.5 + shrinkage*(hist_p - 0.5). Lower = more compression.
+  model_probability_shrinkage: 0.65 # Pull hist_p toward 0.5: stronger compression after overconfident hist_p
   max_buy_yes_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
   max_buy_no_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
   min_no_price: 0.05 # Raised from 0.02; 1-2¢ NO contracts have near-zero EV after fees
@@ -113,13 +113,15 @@ strategy:
   p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
-  kelly_fraction: 0.25 # Fractional Kelly, e.g. 0.25 = quarter-Kelly (safer; full Kelly can be aggressive)
+  kelly_fraction: 0.15 # Fractional Kelly: smaller bets while we recover
   dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
   dynamic_kelly_floor: 0.10 # Min Kelly fraction floor under stress
   dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
   dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
   dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
-  enable_two_sided_quotes: true # Infer fair level and allow symmetric YES/NO opportunities around it
+  adaptive_loss_block_win_rate: 0.35 # Block new buys if recent win rate dips below this
+  adaptive_loss_block_lookback_hours: 6.0 # Lookback window for the circuit-breaker win rate
+  enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
   two_sided_quote_min_edge: 0.03 # Aligned with higher min_edge; still must be <= min_edge
   macro_signal_enabled: true # Include macro cross-asset context in signal model
   macro_signal_tickers: ["SPY", "UUP"] # More reliable intraday proxy tickers for risk-on/risk-off macro signal
@@ -170,7 +172,7 @@ strategy:
   vol_disagree_threshold: 0.30 # When |emp_p - vol_p| exceeds this, vol model is suspect — dampen blend and require extra edge
   vol_disagree_extra_edge: 0.08 # Extra min_edge added when models disagree beyond threshold
   vol_disagree_dampen_blend: 0.50 # Halve vol weight contribution when models strongly disagree
-  intraday_vol_cap: 0.90 # Cap vol-model probability for intraday/hourly contracts (prevent 99%+ overconfidence)
+  intraday_vol_cap: 0.85 # Cap vol-model probability for intraday/hourly contracts (prevent 99%+ overconfidence)
   intraday_min_empirical_weight: 0.20 # Floor for empirical weight in intraday blending; prevents DTE decay from zeroing out the empirical signal
 
   # --- Adaptive learning: the bot learns from its own recent trades ---

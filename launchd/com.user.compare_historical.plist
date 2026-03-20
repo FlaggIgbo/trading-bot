@@ -12,10 +12,11 @@
         <string>365</string>
         <string>--use-volatility</string>
         <string>--execute</string>
-        <string>--no-llm</string>
         <string>--verbose</string>
         <string>--reconcile-diagnostics</string>
         <string>--log</string>
+        <string>/Users/ogechukwuflagg-igbo/comparisons</string>
+        <string>--position-eval-analysis</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
