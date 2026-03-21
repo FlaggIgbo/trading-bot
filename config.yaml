@@ -29,25 +29,26 @@ yfinance_tickers:
 # Optional execution overrides (merged into strategy in compare_historical.py)
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢
 execution:
-  price_strategy: passive # passive | aggressive | market — maps to passive_limit_quote
+  price_strategy: aggressive # passive | aggressive | market — cross spread when edge clears (PnL / fills on fast crypto books)
   # Penny-jump: bid+1¢ (or min with ask−1¢) for queue priority vs stink bids
   limit_offset_cents: 1 # 0 = mid; >=1 = bid_plus_tick (better fills on tight DTE)
 
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
 # Short test window: recovery.min_edge overrides strategy.min_edge — lower hurdle to surface fills (tighten again after review).
 recovery:
-  min_edge: 0.035 # Bit looser than 3.8%; circuit breaker (adaptive_loss_*) still halts buys on bad streaks
+  # Merged into strategy.min_edge — keep aligned with base 4% hurdle unless you intentionally want a looser recovery window
+  min_edge: 0.04
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
   # Without these, low min_edge is negated: calibration adds +edge when WR<50%; parity adds up to ~20% on the dominant side.
   calibration_extra_edge_overall: 0 # Suppress “bad history” min_edge bump while testing (strategy default is 0.05)
-  # PnL: weak historical above+YES should still pay extra hurdle (aligns with strategy 0.07)
-  calibration_extra_edge_above_yes: 0.07
+  # Looser than 0.07: allow momentum-style “price already above strike” YES without choking fills
+  calibration_extra_edge_above_yes: 0.03
   parity_penalty_enabled: false # Suppress YES/NO parity add-on during recovery (re-enable after WR improves)
-  # Empirical CI + vol-disagree stack on min_edge (often pushes “required” to ~7% while raw gap looks ~6%).
-  uncertainty_edge_mult: 0 # Recovery: surface trades; restore 0.12–0.18 when WR stabilizes
-  vol_disagree_extra_edge: 0
+  # Empirical CI + vol-disagree: re-enabled so required edge scales with data confidence and thin disagreements can trade.
+  uncertainty_edge_mult: 0.15
+  vol_disagree_extra_edge: 0.02
   yes_overconfidence_extra_edge: 0 # BUY YES only add-on; fees already eat edge vs “gap” in logs
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
   enable_vol_regime_scaling: false
@@ -62,8 +63,9 @@ recovery:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
-  # Base min_edge (overridden by recovery.min_edge when set). See IMPROVEMENTS.md — micro-compounder / launchd picks up YAML each run.
-  min_edge: 0.060 # Base when recovery removed; slightly looser with circuit breaker on blended recent WR
+  # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
+  # Was 6–8% effective in logs; lowered to 4% as requested. launchd loads this from WorkingDirectory each compare_historical run.
+  min_edge: 0.040
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   barbell_enabled: true
   barbell_base_min_market_yes: 0.70 # Market bid on the side we buy must be ≥ this (YES bid for BUY YES, NO bid for BUY NO)
@@ -80,7 +82,7 @@ strategy:
   enable_easy_win: true
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
   easy_win_min_p_win: 0.91 # Slightly below 0.93 so rare “aligned very high” lines can clear; consensus sniper handles barbell-base tape agreement
-  easy_win_min_market_p: 0.86 # Paired with easy_win_min_p_win; still selective vs old 0.85/0.90 defaults
+  easy_win_min_market_p: 0.75 # Easier easy-win gate → more high-confidence tape clears min_edge_easy_win path
   # Consensus sniper: when barbell is on, trades matching barbell_base_* use this net-edge hurdle (can be slightly negative to absorb maker fee when p≈bid)
   consensus_sniper_enabled: true
   consensus_sniper_min_edge: -0.010 # e.g. -1¢ net vs full min_edge; barbell base + downstream gates still apply

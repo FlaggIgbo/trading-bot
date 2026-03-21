@@ -966,7 +966,7 @@ def _strategy_with_recovery_overrides(cfg: dict) -> dict:
     adds calibration_extra_edge_overall and parity adds large YES/NO penalties — override those here
     for short preview/live trials, then remove when performance recovers.
     uncertainty_edge_mult / vol_disagree_extra_edge stack on top of min_edge (empirical CI width,
-    emp-vs-vol disagreement) and often explain “min 10%” in SKIP reasons when min_edge is ~6%.
+    emp-vs-vol disagreement) and often explain high effective hurdles in SKIP reasons even when base min_edge is ~4–6%.
     yes_overconfidence_extra_edge: extra required edge on BUY YES only (merged so recovery can set 0).
     """
     s = dict(cfg.get("strategy") or {})
