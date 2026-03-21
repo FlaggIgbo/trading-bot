@@ -369,6 +369,18 @@ class _StrategyParams:
     adaptive_edge_idle_decay_halflife_hours: float
     adaptive_stress_size_edge_threshold: float
     adaptive_stress_size_min_mult: float
+    # Barbell: base = high-P consensus; alpha = cheap + large net edge; middle zone skipped when enabled.
+    barbell_enabled: bool
+    barbell_base_min_market_yes: float
+    barbell_base_min_model_p: float
+    barbell_base_max_model_vs_market_gap: float
+    barbell_base_max_yes_price: float
+    barbell_base_max_no_price: float
+    barbell_alpha_max_cheap_price: float
+    barbell_alpha_min_model_p: float
+    barbell_alpha_min_net_edge: float
+    barbell_base_kelly_mult: float
+    barbell_alpha_kelly_mult: float
     yes_overconfidence_extra_edge: float
     model_probability_shrinkage: float
     passive_limit_quote: str
@@ -593,6 +605,17 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
         adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
         adaptive_stress_size_min_mult=max(0.05, min(1.0, float(strategy.get("adaptive_stress_size_min_mult", 0.60)))),
+        barbell_enabled=bool(strategy.get("barbell_enabled", False)),
+        barbell_base_min_market_yes=max(0.0, min(1.0, float(strategy.get("barbell_base_min_market_yes", 0.82)))),
+        barbell_base_min_model_p=max(0.0, min(1.0, float(strategy.get("barbell_base_min_model_p", 0.78)))),
+        barbell_base_max_model_vs_market_gap=max(0.0, min(1.0, float(strategy.get("barbell_base_max_model_vs_market_gap", 0.10)))),
+        barbell_base_max_yes_price=max(0.01, min(0.99, float(strategy.get("barbell_base_max_yes_price", 0.92)))),
+        barbell_base_max_no_price=max(0.01, min(0.99, float(strategy.get("barbell_base_max_no_price", 0.92)))),
+        barbell_alpha_max_cheap_price=max(0.01, min(0.99, float(strategy.get("barbell_alpha_max_cheap_price", 0.20)))),
+        barbell_alpha_min_model_p=max(0.0, min(1.0, float(strategy.get("barbell_alpha_min_model_p", 0.28)))),
+        barbell_alpha_min_net_edge=max(0.0, min(1.0, float(strategy.get("barbell_alpha_min_net_edge", 0.18)))),
+        barbell_base_kelly_mult=max(0.05, min(3.0, float(strategy.get("barbell_base_kelly_mult", 1.0)))),
+        barbell_alpha_kelly_mult=max(0.05, min(3.0, float(strategy.get("barbell_alpha_kelly_mult", 0.12)))),
         yes_overconfidence_extra_edge=float(strategy.get("yes_overconfidence_extra_edge", 0.0)),
         model_probability_shrinkage=float(strategy.get("model_probability_shrinkage", 1.0)),
         passive_limit_quote=str(strategy.get("passive_limit_quote", "dip")).strip().lower(),
@@ -2659,6 +2682,66 @@ def _fee_per_contract(price: float, maker_rate: float, min_fee_per_order: float 
         return 0.0
     rounded = math.ceil(fee * 100) / 100
     return max(rounded, max(0.0, float(min_fee_per_order)))
+
+
+def _barbell_yes_bucket(
+    hist_p: float,
+    yes_bid: float,
+    maker_fee_rate: float,
+    sp: _StrategyParams,
+) -> str | None:
+    """Classify a potential BUY YES leg: base (high-P consensus) | alpha (cheap + edge) | None."""
+    if not sp.barbell_enabled:
+        return None
+    yb = max(0.0, min(0.99, float(yes_bid)))
+    hp = max(0.0, min(1.0, float(hist_p)))
+    gap = float(sp.barbell_base_max_model_vs_market_gap)
+    if (
+        yb >= sp.barbell_base_min_market_yes
+        and hp >= sp.barbell_base_min_model_p
+        and hp + gap >= yb
+        and yb <= sp.barbell_base_max_yes_price
+    ):
+        return "base"
+    fee_y = _fee_per_contract(yb, maker_fee_rate, sp.min_fee_per_order)
+    net = hp - yb - fee_y
+    if (
+        yb <= sp.barbell_alpha_max_cheap_price
+        and hp >= sp.barbell_alpha_min_model_p
+        and net >= sp.barbell_alpha_min_net_edge
+    ):
+        return "alpha"
+    return None
+
+
+def _barbell_no_bucket(
+    hist_p: float,
+    no_bid: float,
+    maker_fee_rate: float,
+    sp: _StrategyParams,
+) -> str | None:
+    """Classify a potential BUY NO leg: base | alpha | None."""
+    if not sp.barbell_enabled:
+        return None
+    nb = max(0.0, min(0.99, float(no_bid)))
+    p_no = max(0.0, min(1.0, 1.0 - float(hist_p)))
+    gap = float(sp.barbell_base_max_model_vs_market_gap)
+    if (
+        nb >= sp.barbell_base_min_market_yes
+        and p_no >= sp.barbell_base_min_model_p
+        and p_no + gap >= nb
+        and nb <= sp.barbell_base_max_no_price
+    ):
+        return "base"
+    fee_n = _fee_per_contract(nb, maker_fee_rate, sp.min_fee_per_order)
+    net = p_no - nb - fee_n
+    if (
+        nb <= sp.barbell_alpha_max_cheap_price
+        and p_no >= sp.barbell_alpha_min_model_p
+        and net >= sp.barbell_alpha_min_net_edge
+    ):
+        return "alpha"
+    return None
 
 
 def _maker_fee_rate_for_market(sp: _StrategyParams, platform: str, yf_ticker: str | None) -> float:
@@ -5177,6 +5260,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
         gemini_used_in_arb: set[str] = set()
         for mkt in mkt_list or []:
+            barbell_bucket = ""
+            barbell_blocked = False
             ticker = mkt.get("ticker", "?")
             title = (mkt.get("title") or "")[:55]
             try:
@@ -5466,6 +5551,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 min_p_win = max(min_p_win, _up)
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
+            no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             cross_sanity_block_side = None
             cross_sanity_reason = ""
             if sp.enable_cross_exchange_sanity_gate and yf_ticker in GEMINI_CRYPTO_YF:
@@ -5538,9 +5624,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance
             if rec == REC_BUY_YES and yes_bid < sp.min_yes_price:
                 rec = REC_SKIP
-            # Skip BUY YES when market prices it very high (>85¢): worst risk-reward for small balance (steamroller)
+            # Steamroller: skip expensive YES unless barbell base layer (high-P consensus up to barbell_base_max_yes_price)
             if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and yes_bid > sp.max_yes_price_for_buy:
-                rec = REC_SKIP
+                if sp.barbell_enabled:
+                    if _barbell_yes_bucket(hist_p, yes_bid, maker_fee_rate, sp) != "base":
+                        rec = REC_SKIP
+                else:
+                    rec = REC_SKIP
             # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
             # DTE-aware: tighten allowed gap for short-dated contracts (price can't move far in minutes)
             # When DTE < 0.1 days (~2.4h), vol override is blocked — not enough time for large moves
@@ -5552,7 +5642,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if not vol_override:
                         rec = REC_SKIP
             # Skip BUY NO when market prices NO very low (market thinks our side unlikely); same override when vol shows high P(NO)
-            no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             if rec == REC_BUY_NO and no_bid_early < sp.min_no_price:
                 if not (use_vol and vol_p is not None and (1 - hist_p) >= 0.95):
                     rec = REC_SKIP
@@ -5581,6 +5670,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rec = REC_SKIP
                 elif rec == REC_BUY_NO and cross_sanity_block_side == "no":
                     rec = REC_SKIP
+            if sp.barbell_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                _bb = (
+                    _barbell_yes_bucket(hist_p, yes_bid, maker_fee_rate, sp)
+                    if rec == REC_BUY_YES
+                    else _barbell_no_bucket(hist_p, no_bid_early, maker_fee_rate, sp)
+                )
+                if _bb is None:
+                    rec = REC_SKIP
+                    barbell_blocked = True
+                else:
+                    barbell_bucket = _bb
             diff = _compute_edge_diff(
                 yes_bid,
                 hist_p,
@@ -5612,6 +5712,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "edge_no_net": (1.0 - hist_p) - no_bid_for_quote - fee_no_q,
                     "arr_dip": min(sp.max_dip_cap, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp, cap=sp.max_dip_cap) * dip_regime_mult),
                     "dte": dte,
+                    "barbell": barbell_bucket,
                 }
             )
 
@@ -5654,6 +5755,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if _alpha_tags:
                 print(f"    ├─ Alpha:        {' | '.join(_alpha_tags)}")
             print(f"    ├─ Verdict:      {rec}")
+            if sp.barbell_enabled:
+                print(
+                    f"    ├─ Barbell:      "
+                    f"{barbell_bucket or ('—' if not barbell_blocked else 'blocked (not base/alpha)')}"
+                )
             print(f"    │    → {_rec_plain}")
             _print_multi_strategy_compare_line(
                 compare_strategies_arg=getattr(args, "compare_strategies", "") or "",
@@ -5693,6 +5799,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             elif rec == REC_SKIP and cross_sanity_reason:
                 reason = cross_sanity_reason
+            elif rec == REC_SKIP and barbell_blocked:
+                reason = (
+                    "barbell: directional trade not in base (high-P consensus) or alpha "
+                    "(cheap leg + large net edge) bucket"
+                )
             print(f"    └─ Reason:       {reason}")
             if getattr(args, "verbose", False):
                 mn, mx = min(closes), max(closes)
@@ -5796,10 +5907,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     max_dip_cap=sp.max_dip_cap,
                     passive_quote=sp.passive_limit_quote,
                 )
-                _kelly_frac_ticker = kelly_fraction_live
+                _bb_k = 1.0
+                if sp.barbell_enabled and barbell_bucket == "base":
+                    _bb_k = sp.barbell_base_kelly_mult
+                elif sp.barbell_enabled and barbell_bucket == "alpha":
+                    _bb_k = sp.barbell_alpha_kelly_mult
+                _k0 = kelly_fraction_live * _bb_k
+                _kelly_frac_ticker = _k0
                 if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
                     _kelly_frac_ticker = vol_adjusted_kelly(
-                        kelly_fraction_live, closes,
+                        _k0,
+                        closes,
                         lookback=sp.ae_cfg.vol_kelly_lookback_bars,
                         baseline_vol=sp.ae_cfg.vol_kelly_baseline_vol,
                         max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
@@ -5832,6 +5950,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "direction": direction,
                     "limit_order_mode": sp.limit_order_mode,
                     "dte": dte,
+                    "barbell": barbell_bucket,
                 })
             elif sp.enable_disagreement_dip and rec == REC_SKIP:
                 # Strong disagreement: market 95% vs we 45% → place low limit to catch dips
@@ -5952,6 +6071,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 gemini_markets = gemini_markets[: args.markets]
             use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
             for mkt in gemini_markets:
+                barbell_bucket_g = ""
+                barbell_blocked_g = False
                 evt = mkt["event"]
                 contract = mkt.get("contract")
                 g_ticker = mkt["ticker"]
@@ -6172,6 +6293,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                     min_p_win_gem = max(min_p_win_gem, _ug)
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
+                no_bid_gem_early = max(1e-6, min(0.99, 1.0 - float(impl)))
                 cross_sanity_block_side_g = None
                 cross_sanity_reason_g = ""
                 if sp.enable_cross_exchange_sanity_gate:
@@ -6248,9 +6370,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance
                 if rec == REC_BUY_YES and impl < sp.min_yes_price:
                     rec = REC_SKIP
-                # Skip BUY YES when market prices it very high (>85¢): steamroller profile
                 if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and impl > sp.max_yes_price_for_buy:
-                    rec = REC_SKIP
+                    if sp.barbell_enabled:
+                        if _barbell_yes_bucket(hist_p_gem, impl, maker_fee_rate_gem, sp) != "base":
+                            rec = REC_SKIP
+                    else:
+                        rec = REC_SKIP
                 # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
                 # DTE-aware: tighten allowed gap for short-dated contracts
                 # When DTE < 0.1 days (~2.4h), vol override is blocked
@@ -6262,7 +6387,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if not vol_override_g:
                             rec = REC_SKIP
                 # Skip BUY NO when market prices NO very low; override when vol model shows P(NO) ≥ 95%
-                no_price_gem = 1.0 - impl
+                no_price_gem = no_bid_gem_early
                 if rec == REC_BUY_NO and no_price_gem < sp.min_no_price:
                     if not (use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95):
                         rec = REC_SKIP
@@ -6289,6 +6414,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         rec = REC_SKIP
                     elif rec == REC_BUY_NO and cross_sanity_block_side_g == "no":
                         rec = REC_SKIP
+                if sp.barbell_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                    _bbg = (
+                        _barbell_yes_bucket(hist_p_gem, impl, maker_fee_rate_gem, sp)
+                        if rec == REC_BUY_YES
+                        else _barbell_no_bucket(hist_p_gem, no_price_gem, maker_fee_rate_gem, sp)
+                    )
+                    if _bbg is None:
+                        rec = REC_SKIP
+                        barbell_blocked_g = True
+                    else:
+                        barbell_bucket_g = _bbg
                 diff_gem = _compute_edge_diff(
                     impl,
                     hist_p_gem,
@@ -6297,7 +6433,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     maker_fee_rate_gem,
                     min_fee_per_order=sp.min_fee_per_order,
                 )
-                no_price_gem_q = 1.0 - impl
+                no_price_gem_q = no_bid_gem_early
                 fee_yes_gq = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
                 fee_no_gq = _fee_per_contract(no_price_gem_q, maker_fee_rate_gem, sp.min_fee_per_order)
                 market_for_book_q = contract if isinstance(contract, dict) else evt
@@ -6323,6 +6459,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "dte": dte_g,
                         "gemini_evt": evt,
                         "instrument_symbol": instrument_symbol,
+                        "barbell": barbell_bucket_g,
                     }
                 )
                 _dist_str_g = _fmt_distance(current_price, threshold_g, direction_g)
@@ -6344,6 +6481,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"    ├─ Model P(YES): {hist_p_gem:.1%}")
                 print(f"    ├─ Market YES:   {impl:.1%}  (what the market is pricing)")
                 print(f"    ├─ Verdict:      {rec}")
+                if sp.barbell_enabled:
+                    print(
+                        f"    ├─ Barbell:      "
+                        f"{barbell_bucket_g or ('—' if not barbell_blocked_g else 'blocked (not base/alpha)')}"
+                    )
                 print(f"    │    → {_rec_plain_g}")
                 _print_multi_strategy_compare_line(
                     compare_strategies_arg=getattr(args, "compare_strategies", "") or "",
@@ -6370,6 +6512,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _reason_g = (
                         f"momentum protection "
                         f"({momentum_ret:.2%} <= {sp.momentum_crash_threshold_pct:.2%})"
+                    )
+                elif rec == REC_SKIP and barbell_blocked_g:
+                    _reason_g = (
+                        "barbell: directional trade not in base (high-P consensus) or alpha "
+                        "(cheap leg + large net edge) bucket"
                     )
                 elif rec == REC_SKIP:
                     _fq_r = 1.0 - impl
@@ -6497,10 +6644,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         max_dip_cap=sp.max_dip_cap,
                         passive_quote=sp.passive_limit_quote,
                     )
-                    _kelly_frac_gem = kelly_fraction_live
+                    _bb_kg = 1.0
+                    if sp.barbell_enabled and barbell_bucket_g == "base":
+                        _bb_kg = sp.barbell_base_kelly_mult
+                    elif sp.barbell_enabled and barbell_bucket_g == "alpha":
+                        _bb_kg = sp.barbell_alpha_kelly_mult
+                    _k0g = kelly_fraction_live * _bb_kg
+                    _kelly_frac_gem = _k0g
                     if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
                         _kelly_frac_gem = vol_adjusted_kelly(
-                            kelly_fraction_live, closes,
+                            _k0g,
+                            closes,
                             lookback=sp.ae_cfg.vol_kelly_lookback_bars,
                             baseline_vol=sp.ae_cfg.vol_kelly_baseline_vol,
                             max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
@@ -6534,6 +6688,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "dte": dte_g,
                         "gemini_evt": evt,
                         "limit_order_mode": sp.limit_order_mode,
+                        "barbell": barbell_bucket_g,
                     }
                     if instrument_symbol:
                         order_entry["instrument_symbol"] = instrument_symbol

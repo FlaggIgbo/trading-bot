@@ -64,8 +64,20 @@ strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Base min_edge (overridden by recovery.min_edge when set). See IMPROVEMENTS.md — micro-compounder / launchd picks up YAML each run.
   min_edge: 0.060 # Base when recovery removed; slightly looser with circuit breaker on blended recent WR
-  # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
-  enable_easy_win: false
+  # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
+  barbell_enabled: true
+  barbell_base_min_market_yes: 0.82 # Market bid on the side we buy must be ≥ this (YES bid for BUY YES, NO bid for BUY NO)
+  barbell_base_min_model_p: 0.78 # Model P(win) on that side must be ≥ this
+  barbell_base_max_model_vs_market_gap: 0.10 # Require model P ≥ market bid − gap (consensus / not fighting tape)
+  barbell_base_max_yes_price: 0.92 # Allow steamroller bypass for base BUY YES up to this (still capped by min_payout_ratio)
+  barbell_base_max_no_price: 0.92 # Same for BUY NO (NO bid cap)
+  barbell_alpha_max_cheap_price: 0.20 # Alpha leg: market bid ≤ this
+  barbell_alpha_min_model_p: 0.28 # Alpha: model P(win) floor on bought side
+  barbell_alpha_min_net_edge: 0.18 # Alpha: net edge after maker fee floor must clear this hurdle
+  barbell_base_kelly_mult: 1.0 # Scale fractional Kelly for base layer (1.0 = unchanged)
+  barbell_alpha_kelly_mult: 0.12 # Much smaller sizing for lottery / mispricing tail
+  # Easy win: helps base-layer high-P trades clear edge after fees (paired with barbell base)
+  enable_easy_win: true
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
   easy_win_min_p_win: 0.93 # Raised from 0.90; model overconfidence means 90% is unreliable — require near-certainty
   easy_win_min_market_p: 0.88 # Raised from 0.85; tighter agreement required to avoid YES-biased easy wins
