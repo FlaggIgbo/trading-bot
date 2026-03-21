@@ -186,6 +186,7 @@ class _StrategyParams:
     min_yes_price: float
     min_no_price: float
     max_yes_price_for_buy: float
+    max_buy_limit_price: float
     max_buy_yes_strike_above_pct: float
     max_buy_no_strike_above_pct: float
     enable_intra_arb: bool
@@ -373,6 +374,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_yes_price=float(strategy.get("min_yes_price", 0.05)),
         min_no_price=float(strategy.get("min_no_price", 0.05)),
         max_yes_price_for_buy=float(strategy.get("max_yes_price_for_buy", 0)),
+        max_buy_limit_price=max(0.0, min(1.0, float(strategy.get("max_buy_limit_price", 0) or 0))),
         max_buy_yes_strike_above_pct=float(strategy.get("max_buy_yes_strike_above_pct", 0.05)),
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
@@ -3297,6 +3299,47 @@ def _allocate_budget_to_orders(
         pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
 
 
+def _filter_pending_buys_by_max_limit_price(
+    pending_orders: list[dict],
+    *,
+    cap: float,
+    logger=print,
+) -> None:
+    """
+    Drop proposed BUYs whose limit price exceeds cap (e.g. block 99¢ NO "steamrollers" on micro balance).
+    cap <= 0 disables. Applies to all pending buy-shaped orders (main recs, arb, lottery, dips).
+    """
+    if cap <= 0 or not pending_orders:
+        return
+    cap_f = float(cap)
+    if cap_f >= 0.999:
+        return
+    kept: list[dict] = []
+    dropped = 0
+    for o in pending_orders:
+        try:
+            px = float(o.get("price") or 0)
+        except (TypeError, ValueError):
+            kept.append(o)
+            continue
+        if px > cap_f + 1e-9:
+            dropped += 1
+            t = str(o.get("ticker") or "?")
+            plat = str(o.get("platform") or "?")
+            rc = str(o.get("rec") or "")
+            logger(
+                f"[Risk] max_buy_limit_price ${cap_f:.2f}: skip {plat} {t} {rc} @ ${px:.2f} "
+                f"(lottery-style / tail-risk cap; raise cap or lower passive quote if intentional)"
+            )
+            continue
+        kept.append(o)
+    if dropped:
+        pending_orders[:] = kept
+        logger(f"[Risk] Dropped {dropped} BUY(s) above max limit price ${cap_f:.2f}.")
+    else:
+        pending_orders[:] = kept
+
+
 def _cap_cross_platform_exposure(
     pending_orders: list[dict],
     total_balance_cents: int,
@@ -3855,7 +3898,8 @@ def _show_config(args) -> int:
               "lottery_limit_max_price", "lottery_penny_jump_apply_cap_bid_below",
               "lottery_market_yes_band_enabled", "lottery_market_yes_band_lo", "lottery_market_yes_band_hi",
               "max_dip_cap", "limit_dip_pct",
-              "passive_limit_quote", "blacklist_extra_file", "empirical_weighting", "empirical_exponential_halflife_bars",
+              "passive_limit_quote", "blacklist_extra_file", "max_buy_limit_price",
+              "empirical_weighting", "empirical_exponential_halflife_bars",
               "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi"):
         v = strategy.get(k)
         if v is not None:
@@ -6751,6 +6795,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     # Per-platform only: cross-platform bets are allowed (e.g. NO Kalshi + YES Gemini on same underlying).
     _filter_contradictory_buys(pending_orders, existing_by_underlying)
 
+    # Micro-balance: never place 99¢-style limits; wait for cheaper tail bids (set max_buy_limit_price: 0 in config to disable)
+    _filter_pending_buys_by_max_limit_price(
+        pending_orders, cap=sp.max_buy_limit_price, logger=print,
+    )
+
     # Budget-aware allocation per platform (Kalshi and Gemini have separate balances)
     kalshi_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI]
     gemini_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_GEMINI]
@@ -6827,9 +6876,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if analysis:
                     print(f"         [Ollama] {analysis}")
         if pending_orders:
-            print(f"\n  --- BUYS ({len(pending_orders)}) ---")
-        for i, o in enumerate(pending_orders, 1):
-            _count = o.get("count", 10)
+            print(f"\n  --- BUYS ({len(pending_orders)} proposed; {sum(1 for o in pending_orders if int(o.get('count', 0) or 0) > 0)} with count > 0) ---")
+        buys_printable = [o for o in pending_orders if int(o.get("count", 0) or 0) > 0]
+        buys_zero = [o for o in pending_orders if int(o.get("count", 0) or 0) <= 0]
+        for i, o in enumerate(buys_printable, 1):
+            _count = int(o.get("count", 0) or 0)
             _cost = _count * o["price"]
             _total_buy_cost += _cost
             _p_win = o.get("hist_p", 0) if o.get("rec") == REC_BUY_YES else (1 - o.get("hist_p", 1))
@@ -6849,9 +6900,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 analysis = analyze_single_trade(o, "buy")
                 if analysis:
                     print(f"         [Ollama] {analysis}")
+        if buys_zero:
+            for o in buys_zero:
+                print(
+                    f"\n  BUY (deferred) [{str(o.get('platform') or '').upper()}] {o.get('ticker')} "
+                    f"@ ${float(o.get('price', 0)):.2f} — Count: 0 after budget cap (insufficient balance for ≥1 contract; "
+                    f"may re-size after --execute sync/cancels)"
+                )
         print()
-        if pending_orders:
-            print(f"  Total buy cost: ${_total_buy_cost:.2f} across {len(pending_orders)} order(s)")
+        if buys_printable:
+            print(f"  Total buy cost: ${_total_buy_cost:.2f} across {len(buys_printable)} funded order(s)")
             print()
 
     if getattr(args, "execute", False):
@@ -7010,7 +7068,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 cached = market_data_cache.get(o["ticker"])
                 price_ranges = cached[3].get("price_ranges") if cached and len(cached) > 3 else None
                 price_str = f"{o['price']:.4f}"  # round_price_to_tick in create_order_safe
-                count = o.get("count", 10)
+                count = int(o.get("count", 10) or 0)
+                if count <= 0:
+                    continue
                 try:
                     result = kalshi.create_order_safe(
                         ticker=o["ticker"],

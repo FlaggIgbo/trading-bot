@@ -85,6 +85,9 @@ def main() -> int:
         errors.append("`strategy.min_yes_price` must be in [0, 1].")
     if not (0.0 <= min_no_price <= 1.0):
         errors.append("`strategy.min_no_price` must be in [0, 1].")
+    max_buy_limit_price = _as_float(strategy.get("max_buy_limit_price"), 0)
+    if max_buy_limit_price < 0 or max_buy_limit_price > 1.0:
+        errors.append("`strategy.max_buy_limit_price` must be in [0, 1] (0 disables cap).")
     if min_edge <= 0:
         errors.append("`strategy.min_edge` must be > 0.")
     if min_edge_easy_win < 0:

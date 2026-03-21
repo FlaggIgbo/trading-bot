@@ -43,10 +43,13 @@ strategy:
   easy_win_min_market_p: 0.88 # Raised from 0.85; tighter agreement required to avoid YES-biased easy wins
   min_yes_price: 0.01 # Skip BUY YES when market YES < 1¢; allow high-probability trades with low balance
   max_yes_price_for_buy: 0.85 # Skip BUY YES when market YES > 85¢; worst risk-reward for small balance (steamroller)
+  # Hard cap on limit price for any proposed BUY (YES or NO). Blocks 99¢ NO "nickels in front of steamroller" on micro balance. 0 = off
+  max_buy_limit_price: 0.20
   yes_overconfidence_extra_edge: 0.04 # Extra edge required for BUY YES to offset structural model bullish bias
   model_probability_shrinkage: 0.40 # Aggressive pull toward 0.5; 4% win rate = model wildly overconfident (was 0.65; stop steamrolling)
-  max_buy_yes_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
-  max_buy_no_strike_above_pct: 0.10 # More symmetric strike filter to avoid one-sided YES/NO suppression
+  # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
+  max_buy_yes_strike_above_pct: 0.08
+  max_buy_no_strike_above_pct: 0.08
   min_no_price: 0.01 # Allow NO side on 97¢ contracts (NO=3¢); capital-starved recovery mode
   days_back: 365 # Days of historical data for P(above/below). Longer = more stable empirical P
   days_to_expiry: 30 # For volatility model (log-normal)
@@ -107,7 +110,7 @@ strategy:
   lottery_penny_jump_apply_cap_bid_below: 0.22 # only cap when bid on traded side is under ~22¢ (expensive YES legs uncapped)
   lottery_limit_contracts: 1
   # Optional: only place lottery when market YES is in ATM band (more churn / fills; turns off “sure thing” penny NO lotteries)
-  lottery_market_yes_band_enabled: false
+  lottery_market_yes_band_enabled: true
   lottery_market_yes_band_lo: 0.40
   lottery_market_yes_band_hi: 0.60
   vol_blend_weight: 0.35 # Reduced from 0.45; further reduce vol model weight due to continued overconfidence
