@@ -162,7 +162,19 @@ GEMINI_CRYPTO_YF = {
     "BNB-USD",
     "ZEC-USD",
     "HYPE-USD",
+    "HYPE32196-USD",  # Yahoo symbol for Hyperliquid; Gemini buckets still use HYPE-USD from _event_to_asset
 }
+# When Yahoo ticker ≠ Gemini _event_to_asset key, map here for inter-arb / sanity / Gemini loop lookups.
+GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
+    "HYPE32196-USD": "HYPE-USD",
+}
+
+
+def _gemini_events_list_for_yf_ticker(events_by_asset: dict[str, list], yf_ticker: str) -> list:
+    key = GEMINI_ASSET_KEY_FOR_YFIN_TICKER.get(yf_ticker, yf_ticker)
+    return events_by_asset.get(key, [])
+
+
 _GARCH_VAR_CACHE: dict[tuple[int, int, int], float] = {}
 
 
@@ -5488,7 +5500,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
             # Inter-exchange arb (Kalshi + Gemini): buy YES on one, NO on other when sum < 1 - fee
             if not arb_used and sp.enable_inter_arb and yf_ticker in GEMINI_CRYPTO_YF:
-                gemini_match = _find_matching_gemini_event(gemini_events_by_asset.get(yf_ticker, []), threshold, direction)
+                gemini_match = _find_matching_gemini_event(
+                    _gemini_events_list_for_yf_ticker(gemini_events_by_asset, yf_ticker),
+                    threshold,
+                    direction,
+                )
                 if gemini_match:
                     inter = _check_inter_arb(
                         m,
@@ -5740,7 +5756,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if sp.enable_cross_exchange_sanity_gate and yf_ticker in GEMINI_CRYPTO_YF:
                 try:
                     gem_ref = _find_matching_gemini_event(
-                        gemini_events_by_asset.get(yf_ticker, []),
+                        _gemini_events_list_for_yf_ticker(gemini_events_by_asset, yf_ticker),
                         threshold,
                         direction,
                     )
@@ -6268,7 +6284,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
         # Gemini crypto — expand to individual markets (binary: 1 per event; categorical: 1 per strike contract)
         if yf_ticker in GEMINI_CRYPTO_YF:
-            gemini_evts = gemini_events_by_asset.get(yf_ticker, [])
+            gemini_evts = _gemini_events_list_for_yf_ticker(gemini_events_by_asset, yf_ticker)
             gemini_markets = expand_gemini_events_to_markets(gemini_evts)
             if args.markets > 0:
                 gemini_markets = gemini_markets[: args.markets]

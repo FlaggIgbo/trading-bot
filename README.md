@@ -47,7 +47,7 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) and the [Gemin
      - KXXRPD # XRP daily
    ```
 
-   Or: `MARKETS=KXBTCD,KXETHD,KXSOLD,KXINXU,KXXRPD` (repo `config.yaml` also lists `KXBTC15M`, `KXDOGE15M`, `KXDOGED`, `KXBNB15M`, `KXHYPE15M` and maps them to Yahoo tickers)
+   Or: `MARKETS=KXBTCD,KXETHD,KXSOLD,KXINXU,KXXRPD` (repo `config.yaml` also lists `KXBTC15M`, `KXDOGE15M`, `KXDOGED`, `KXBNB15M`, `KXHYPE15M`; Hyperliquid uses Yahoo `HYPE32196-USD`)
 
 Run scripts from the project root (e.g. `python scripts/compare_historical.py`). Scripts add the project root to `sys.path` so imports work correctly.
 

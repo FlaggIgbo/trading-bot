@@ -39,6 +39,7 @@ GEMINI_CRYPTO_YF = {
     "BNB-USD",
     "ZEC-USD",
     "HYPE-USD",
+    "HYPE32196-USD",
 }
 
 

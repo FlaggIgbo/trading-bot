@@ -33,8 +33,8 @@ yfinance_tickers:
   KXDOGE15M: "DOGE-USD"
   KXDOGED: "DOGE-USD"
   KXBNB15M: "BNB-USD"
-  # Hyperliquid (Yahoo); if data missing, rely on yfinance/CoinGecko fallbacks in yfinance_client
-  KXHYPE15M: "HYPE-USD"
+  # Hyperliquid — Yahoo listing (see https://finance.yahoo.com/quote/HYPE32196-USD/)
+  KXHYPE15M: "HYPE32196-USD"
 
 # Optional execution overrides (merged into strategy in compare_historical.py)
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢

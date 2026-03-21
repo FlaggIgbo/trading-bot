@@ -54,7 +54,7 @@ _COINGECKO_IDS: dict[str, str] = {
     "dogecoin": "DOGE-USD",
     "zcash": "ZEC-USD",
     "binancecoin": "BNB-USD",
-    "hyperliquid": "HYPE-USD",
+    "hyperliquid": "HYPE32196-USD",
 }
 
 
