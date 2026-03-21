@@ -383,6 +383,8 @@ class _StrategyParams:
     barbell_alpha_kelly_mult: float
     consensus_sniper_enabled: bool
     consensus_sniper_min_edge: float
+    barbell_soften_strict_intraday: bool
+    barbell_strict_relaxed_min_p_win: float
     yes_overconfidence_extra_edge: float
     model_probability_shrinkage: float
     passive_limit_quote: str
@@ -620,6 +622,10 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         barbell_alpha_kelly_mult=max(0.05, min(3.0, float(strategy.get("barbell_alpha_kelly_mult", 0.12)))),
         consensus_sniper_enabled=bool(strategy.get("consensus_sniper_enabled", False)),
         consensus_sniper_min_edge=max(-0.05, min(1.0, float(strategy.get("consensus_sniper_min_edge", -0.01)))),
+        barbell_soften_strict_intraday=bool(strategy.get("barbell_soften_strict_intraday", True)),
+        barbell_strict_relaxed_min_p_win=max(
+            0.01, min(0.99, float(strategy.get("barbell_strict_relaxed_min_p_win", 0.72)))
+        ),
         yes_overconfidence_extra_edge=float(strategy.get("yes_overconfidence_extra_edge", 0.0)),
         model_probability_shrinkage=float(strategy.get("model_probability_shrinkage", 1.0)),
         passive_limit_quote=str(strategy.get("passive_limit_quote", "dip")).strip().lower(),
@@ -645,6 +651,23 @@ def _strategy_recommend_extras(sp: _StrategyParams) -> dict[str, Any]:
         "barbell_base_max_yes_price": sp.barbell_base_max_yes_price,
         "barbell_base_max_no_price": sp.barbell_base_max_no_price,
     }
+
+
+def _strategy_recommend_strict_extras(sp: _StrategyParams) -> dict[str, Any]:
+    """
+    When barbell_soften_strict_intraday: apply easy-win + consensus sniper edge floors and
+    relaxed min P(win) for barbell-base-shaped lines on strict intraday / ultra-short path.
+    """
+    if not sp.barbell_soften_strict_intraday or not sp.barbell_enabled:
+        return {}
+    out: dict[str, Any] = {
+        "min_edge_easy_win": sp.min_edge_easy_win if sp.enable_easy_win else None,
+        "easy_win_min_p_win": sp.easy_win_min_p_win,
+        "easy_win_min_market_p": sp.easy_win_min_market_p,
+        "barbell_strict_relaxed_min_p_win": float(sp.barbell_strict_relaxed_min_p_win),
+    }
+    out.update(_strategy_recommend_extras(sp))
+    return out
 
 
 def _build_strategy_engine(strategy_cfg: dict) -> BaseStrategy:
@@ -700,6 +723,7 @@ def _print_multi_strategy_compare_line(
                 min_fee_per_order=min_fee_per_order,
                 min_edge_yes=effective_min_yes,
                 min_edge_no=effective_min_no,
+                **_strategy_recommend_strict_extras(sp),
             )
         else:
             mr = eng.recommend(
@@ -1358,7 +1382,12 @@ def _is_ultra_short_horizon(
 def _strict_intraday_evaluation(
     market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
 ) -> bool:
-    """Use recommend_strict (min P(win) + edge) for non-5pm/4pm intraday or ultra-short horizons."""
+    """
+    Use recommend_strict for non-5pm/4pm intraday or ultra-short horizons.
+
+    When barbell_soften_strict_intraday and barbell_enabled, strict calls also apply
+    easy-win / consensus-sniper edge floors and barbell_strict_relaxed_min_p_win for base-shaped lines.
+    """
     if _is_other_intraday(market_or_title, yf_ticker):
         return True
     return _is_ultra_short_horizon(market_or_title, yf_ticker, sp)
@@ -5617,6 +5646,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     min_fee_per_order=sp.min_fee_per_order,
                     min_edge_yes=effective_min_yes,
                     min_edge_no=effective_min_no,
+                    **_strategy_recommend_strict_extras(sp),
                 )
                 if _strict_intraday_evaluation(m, yf_ticker, sp)
                 else strategy_engine.recommend(
@@ -6365,6 +6395,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         min_fee_per_order=sp.min_fee_per_order,
                         min_edge_yes=effective_min_yes_g,
                         min_edge_no=effective_min_no_g,
+                        **_strategy_recommend_strict_extras(sp),
                     )
                     if _strict_intraday_evaluation(evt, yf_ticker, sp)
                     else strategy_engine.recommend(
@@ -7067,6 +7098,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             min_fee_per_order=sp.min_fee_per_order,
                                             min_edge_yes=eff_pos_yes,
                                             min_edge_no=eff_pos_no,
+                                            **_strategy_recommend_strict_extras(sp),
                                         )
                                         if _strict_intraday_evaluation(m, pos_yf, sp)
                                         else strategy_engine.recommend(
@@ -7309,6 +7341,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         min_fee_per_order=sp.min_fee_per_order,
                         min_edge_yes=eff_cached_yes,
                         min_edge_no=eff_cached_no,
+                        **_strategy_recommend_strict_extras(sp),
                     )
                     if _strict_intraday_evaluation(m, _yf, sp)
                     else strategy_engine.recommend(
@@ -7603,6 +7636,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 min_fee_per_order=sp.min_fee_per_order,
                                 min_edge_yes=pos_min_edge_g + yes_parity_penalty + sp.yes_overconfidence_extra_edge,
                                 min_edge_no=pos_min_edge_g + no_parity_penalty,
+                                **_strategy_recommend_strict_extras(sp),
                             )
                             if _strict_intraday_evaluation(evt, pos_yf, sp)
                             else strategy_engine.recommend(

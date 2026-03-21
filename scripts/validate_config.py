@@ -108,6 +108,15 @@ def main() -> int:
         errors.append("`strategy.consensus_sniper_min_edge` must be >= -0.05 (cap on fee-drag tolerance).")
     if consensus_sniper_min_edge > min_edge:
         errors.append("`strategy.consensus_sniper_min_edge` should be <= `strategy.min_edge`.")
+    barbell_soften_strict = bool(strategy.get("barbell_soften_strict_intraday", True))
+    barbell_relaxed_p = _as_float(strategy.get("barbell_strict_relaxed_min_p_win"), 0.72)
+    if not (0.01 <= barbell_relaxed_p <= 0.99):
+        errors.append("`strategy.barbell_strict_relaxed_min_p_win` must be in [0.01, 0.99].")
+    if barbell_soften_strict and not barbell_enabled:
+        warnings.append(
+            "`strategy.barbell_soften_strict_intraday` is true but `strategy.barbell_enabled` is false; "
+            "strict-path softening is skipped until barbell is enabled."
+        )
     if limit_order_mode not in {"fixed_pct", "dynamic_tick", "layered"}:
         errors.append("`strategy.limit_order_mode` must be one of: fixed_pct, dynamic_tick, layered.")
     if tick_offset < 1:

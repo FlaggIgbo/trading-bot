@@ -77,8 +77,25 @@ class StrictThresholdStrategy(DefaultThresholdStrategy):
         min_fee_per_order: float,
         min_edge_yes: float | None = None,
         min_edge_no: float | None = None,
+        min_edge_easy_win: float | None = None,
+        easy_win_min_p_win: float = 0.90,
+        easy_win_min_market_p: float = 0.85,
+        consensus_sniper_enabled: bool = False,
+        consensus_sniper_min_edge: float | None = None,
+        barbell_base_min_market_yes: float = 0.82,
+        barbell_base_min_model_p: float = 0.78,
+        barbell_base_max_model_vs_market_gap: float = 0.10,
+        barbell_base_max_yes_price: float = 0.92,
+        barbell_base_max_no_price: float = 0.92,
+        barbell_strict_relaxed_min_p_win: float | None = None,
     ) -> str:
         s = max(1.0, float(self.edge_scale))
+        if consensus_sniper_min_edge is None:
+            cs = None
+        elif consensus_sniper_min_edge < 0:
+            cs = consensus_sniper_min_edge / s
+        else:
+            cs = consensus_sniper_min_edge * s
         return super().recommend_strict(
             p_yes=p_yes,
             market_yes=market_yes,
@@ -88,4 +105,15 @@ class StrictThresholdStrategy(DefaultThresholdStrategy):
             min_fee_per_order=min_fee_per_order,
             min_edge_yes=(min_edge_yes * s) if min_edge_yes is not None else None,
             min_edge_no=(min_edge_no * s) if min_edge_no is not None else None,
+            min_edge_easy_win=(min_edge_easy_win * s) if min_edge_easy_win is not None else None,
+            easy_win_min_p_win=easy_win_min_p_win,
+            easy_win_min_market_p=easy_win_min_market_p,
+            consensus_sniper_enabled=consensus_sniper_enabled,
+            consensus_sniper_min_edge=cs,
+            barbell_base_min_market_yes=barbell_base_min_market_yes,
+            barbell_base_min_model_p=barbell_base_min_model_p,
+            barbell_base_max_model_vs_market_gap=barbell_base_max_model_vs_market_gap,
+            barbell_base_max_yes_price=barbell_base_max_yes_price,
+            barbell_base_max_no_price=barbell_base_max_no_price,
+            barbell_strict_relaxed_min_p_win=barbell_strict_relaxed_min_p_win,
         )

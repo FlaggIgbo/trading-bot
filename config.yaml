@@ -69,8 +69,8 @@ strategy:
   barbell_base_min_market_yes: 0.82 # Market bid on the side we buy must be ≥ this (YES bid for BUY YES, NO bid for BUY NO)
   barbell_base_min_model_p: 0.78 # Model P(win) on that side must be ≥ this
   barbell_base_max_model_vs_market_gap: 0.10 # Require model P ≥ market bid − gap (consensus / not fighting tape)
-  barbell_base_max_yes_price: 0.92 # Allow steamroller bypass for base BUY YES up to this (still capped by min_payout_ratio)
-  barbell_base_max_no_price: 0.92 # Same for BUY NO (NO bid cap)
+  barbell_base_max_yes_price: 0.96 # Include high-90s tape as base (was 0.92 — excluded 94¢ consensus from sniper / strict soften)
+  barbell_base_max_no_price: 0.96 # Same for BUY NO (NO bid cap)
   barbell_alpha_max_cheap_price: 0.20 # Alpha leg: market bid ≤ this
   barbell_alpha_min_model_p: 0.28 # Alpha: model P(win) floor on bought side
   barbell_alpha_min_net_edge: 0.18 # Alpha: net edge after maker fee floor must clear this hurdle
@@ -84,6 +84,9 @@ strategy:
   # Consensus sniper: when barbell is on, trades matching barbell_base_* use this net-edge hurdle (can be slightly negative to absorb maker fee when p≈bid)
   consensus_sniper_enabled: true
   consensus_sniper_min_edge: -0.010 # e.g. -1¢ net vs full min_edge; barbell base + downstream gates still apply
+  # Strict intraday / ultra-short used recommend_strict without easy-win or sniper — barbell “base” could never clear.
+  barbell_soften_strict_intraday: true # false = legacy strict path (full intraday min_p_win + edge only)
+  barbell_strict_relaxed_min_p_win: 0.72 # When barbell-base-shaped, min() with strict min_p_win (e.g. 0.85 → 0.72)
   min_yes_price: 0.01 # Skip BUY YES when market YES < 1¢; allow high-probability trades with low balance
   max_yes_price_for_buy: 0.85 # Skip BUY YES when market YES > 85¢; worst risk-reward for small balance (steamroller)
   # Hard cap on limit price for any proposed BUY (YES or NO). Blocks 99¢ NO "nickels in front of steamroller" on micro balance. 0 = off

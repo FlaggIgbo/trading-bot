@@ -48,6 +48,17 @@ class BaseStrategy(ABC):
         min_fee_per_order: float,
         min_edge_yes: float | None = None,
         min_edge_no: float | None = None,
+        min_edge_easy_win: float | None = None,
+        easy_win_min_p_win: float = 0.90,
+        easy_win_min_market_p: float = 0.85,
+        consensus_sniper_enabled: bool = False,
+        consensus_sniper_min_edge: float | None = None,
+        barbell_base_min_market_yes: float = 0.82,
+        barbell_base_min_model_p: float = 0.78,
+        barbell_base_max_model_vs_market_gap: float = 0.10,
+        barbell_base_max_yes_price: float = 0.92,
+        barbell_base_max_no_price: float = 0.92,
+        barbell_strict_relaxed_min_p_win: float | None = None,
     ) -> str:
         """Return one of: BUY YES, BUY NO, SKIP for strict intraday markets."""
         raise NotImplementedError
