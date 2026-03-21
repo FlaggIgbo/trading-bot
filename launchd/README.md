@@ -11,6 +11,8 @@ This setup includes:
 
 **Default LLM:** `qwen2.5-coder:7b` (better unified diffs / config edits than general chat models). One-time on each Mac: `ollama pull qwen2.5-coder:7b`. To use another tag, set `OLLAMA_MODEL` in the environment or add `<key>OLLAMA_MODEL</key><string>mistral</string>` under `EnvironmentVariables` in `com.user.ollama_codex_loop.plist`.
 
+**Ollama loop plist:** `OLLAMA_METRICS_GATE=0` (always run the Ollama/backtest block unless you override) and `PATH` includes **`/opt/homebrew/bin`** so `ollama` resolves under Homebrew. If you change **EnvironmentVariables** in the plist, **re-copy** it to `~/Library/LaunchAgents/` and **reload** the agent (`launchctl bootout` + `launchctl bootstrap`, or `unload` + `load`) — `kickstart` alone does not always refresh env vars.
+
 Launchd **always** invokes the on-disk `ollama_codex_loop.sh` path from the plist (`ProgramArguments`). After `git pull`, the **next** timer fire uses the new script and new default model name; use `launchctl kickstart -k gui/$(id -u)/com.user.ollama_codex_loop` to run it immediately (no plist copy needed unless you change `ProgramArguments` / `WorkingDirectory`).
 
 The loop also exports a **72h** leaderboard snippet into the Ollama prompt (`OLLAMA_PROMPT_LB_HOURS`), and when `OLLAMA_AUTO_BLACKLIST=1` (default) runs **`scripts/apply_series_blacklist.py`** to update **`~/.trading-bot-data/series_blacklist_auto.txt`** — ensure `config.yaml` → **`strategy.blacklist_extra_file`** points at that path so `compare_historical` merges bans without editing YAML.

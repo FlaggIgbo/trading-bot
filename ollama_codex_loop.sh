@@ -25,8 +25,8 @@ OLLAMA_BT_DAYS="${OLLAMA_BT_DAYS:-30}"
 OLLAMA_BT_MODE="${OLLAMA_BT_MODE:-synthetic}"
 OLLAMA_AUTO_PUSH="${OLLAMA_AUTO_PUSH:-0}"
 MAX_STRATEGY_CHARS="${OLLAMA_MAX_STRATEGY_CHARS:-28000}"
-# Only invoke Ollama when metrics show stress (avoids over-tweaking when flat/up). Set OLLAMA_METRICS_GATE=0 to always run.
-OLLAMA_METRICS_GATE="${OLLAMA_METRICS_GATE:-1}"
+# Default off: flat / misparsed PnL in metrics.csv used to skip Ollama forever (see docs/PNL_INVESTIGATION.md). Set OLLAMA_METRICS_GATE=1 to only run when PnL drops ≥ OLLAMA_METRICS_GATE_DROP in the window.
+OLLAMA_METRICS_GATE="${OLLAMA_METRICS_GATE:-0}"
 OLLAMA_METRICS_GATE_HOURS="${OLLAMA_METRICS_GATE_HOURS:-4}"
 OLLAMA_METRICS_GATE_DROP="${OLLAMA_METRICS_GATE_DROP:-0.20}"
 OLLAMA_LEADERBOARD_HOURS="${OLLAMA_LEADERBOARD_HOURS:-336}"
@@ -51,13 +51,22 @@ mkdir -p "$(dirname "$METRICS")"
 mkdir -p "$(dirname "$JOURNAL")"
 touch "$JOURNAL"
 
-# --- 1) Resolve latest compare_historical log ---
-if [[ -f "$LOG_FILE" ]]; then
-  :
-else
-  latest=$(ls -1t "$LOG_DIR"/*.log "$LOG_DIR"/last_run.log/*.log 2>/dev/null | grep -v "metrics" | head -n1 || true)
+# --- 1) Resolve latest compare_historical log (prefer newest mtime among last_run.log + eval_*.log) ---
+LOG_CANDIDATES=()
+[[ -f "$LOG_DIR/last_run.log" ]] && LOG_CANDIDATES+=("$LOG_DIR/last_run.log")
+shopt -s nullglob
+for f in "$LOG_DIR"/eval_*.log; do
+  LOG_CANDIDATES+=("$f")
+done
+shopt -u nullglob
+if ((${#LOG_CANDIDATES[@]} > 0)); then
+  LOG_FILE=$(ls -1t "${LOG_CANDIDATES[@]}" 2>/dev/null | head -n1)
+fi
+if [[ -z "${LOG_FILE:-}" || ! -f "$LOG_FILE" ]]; then
+  latest=$(ls -1t "$LOG_DIR"/*.log "$LOG_DIR"/last_run.log/*.log 2>/dev/null | grep -vE 'metrics|ollama' | head -n1 || true)
   [[ -n "${latest:-}" && -f "$latest" ]] && LOG_FILE="$latest"
 fi
+[[ -z "${LOG_FILE:-}" ]] && LOG_FILE="$LOG_DIR/last_run.log"
 
 tail -n 200 "$LOG_FILE" > "$TMP_TAIL" 2>/dev/null || touch "$TMP_TAIL"
 [[ ! -f "$LOG_FILE" ]] && LOG_FILE="$TMP_TAIL"
@@ -123,6 +132,10 @@ for line in m.read_text(encoding='utf-8', errors='replace').splitlines():
         rows.append((ts, pnl))
 rows.sort(key=lambda x: x[0])
 if len(rows) < 2:
+    sys.exit(0)
+pnls = [r[1] for r in rows]
+# Identical PnL every sample (e.g. grep miss → all 0.0): do not block Ollama indefinitely
+if len({round(p, 6) for p in pnls}) == 1:
     sys.exit(0)
 first, last = rows[0][1], rows[-1][1]
 sys.exit(0 if (last - first) <= -drop else 1)

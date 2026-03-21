@@ -375,7 +375,7 @@ The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metr
 
 | Env | Default | Meaning |
 | --- | --- | --- |
-| `OLLAMA_METRICS_GATE` | `1` | If `1`, **skip** the Ollama/backtest block when `metrics.csv` shows **no** net PnL drop ≥ `OLLAMA_METRICS_GATE_DROP` over the last `OLLAMA_METRICS_GATE_HOURS` (avoids over-tweaking). Set to `0` to always run. |
+| `OLLAMA_METRICS_GATE` | `0` | If `1`, **skip** the Ollama/backtest block when `metrics.csv` shows **no** net PnL drop ≥ `OLLAMA_METRICS_GATE_DROP` over the last `OLLAMA_METRICS_GATE_HOURS`. **Default `0`** so flat/misparsed PnL does not block the loop; set `1` for stress-only runs. If gate is on, **identical PnL** across samples in the window is treated as “no signal” and Ollama still runs. |
 | `OLLAMA_METRICS_GATE_HOURS` | `4` | Lookback window (hours) for first-vs-last PnL in `metrics.csv`. |
 | `OLLAMA_METRICS_GATE_DROP` | `0.20` | Trigger Ollama when `(last_pnl - first_pnl) ≤ -0.20` in that window. |
 | `OLLAMA_LEADERBOARD_HOURS` | `336` | Lookback for `export_series_leaderboard.py` / `suggest_series_blacklist.py` (14 days). |

@@ -125,4 +125,5 @@ The ollama_codex_loop expects "Win rate" and "P&L" in the log; those come from p
 
 - ✅ Circuit breaker added (`adaptive_loss_block_*` + `pending_orders.clear()`) to hold buys when recent win rate < 35% over 6h.
 - ✅ Config tuned: higher `min_edge`, lower `kelly_fraction`, stronger `model_probability_shrinkage`, tighter `intraday_vol_cap`, and two-sided quotes disabled.
-- ✅ `ollama_codex_loop.sh` now reads the same `~/comparisons/eval_*.log` output and the plist passes `--position-eval-analysis` so metrics are logged reliably.
+- ✅ `ollama_codex_loop.sh` picks the **newest** of `~/comparisons/last_run.log` and `~/comparisons/eval_*.log` for win-rate / PnL greps; the compare_historical plist logs to `~/comparisons` with `--position-eval-analysis` so metrics are logged reliably.
+- ✅ Metrics gate default is **off** (`OLLAMA_METRICS_GATE=0`); with gate **on**, **flat identical PnL** in the window no longer blocks Ollama forever (treated as insufficient signal).
