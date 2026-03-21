@@ -37,8 +37,8 @@ execution:
 # Short test window: recovery.min_edge overrides strategy.min_edge — lower hurdle to surface fills (tighten again after review).
 recovery:
   min_edge: 0.035 # Bit looser than 3.8%; circuit breaker (adaptive_loss_*) still halts buys on bad streaks
-  adaptive_edge_max_extra: 0.0 # Caps recent-performance bump (0 = no extra from this path)
-  loss_streak_max_extra: 0.0 # Caps loss-streak bump when adaptive_learning re-enabled
+  adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
+  loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
   # Without these, low min_edge is negated: calibration adds +edge when WR<50%; parity adds up to ~20% on the dominant side.
   calibration_extra_edge_overall: 0 # Suppress “bad history” min_edge bump while testing (strategy default is 0.05)
@@ -311,18 +311,19 @@ strategy:
   intraday_min_empirical_weight: 0.20 # Floor for empirical weight in intraday blending; prevents DTE decay from zeroing out the empirical signal
 
   # --- Adaptive learning: the bot learns from its own recent trades ---
-  adaptive_learning_enabled: false # DISABLED for capital-starved recovery; was compounding losses into 50% effective min_edge (death spiral)
+  # When re-enabled, softer caps than legacy defaults avoid a ~25–35% stacked hurdle (recent WR + streak + EWMA).
+  adaptive_learning_enabled: false # DISABLED for capital-starved recovery; re-enable after tuning below caps
   adaptive_edge_lookback_hours: 6.0 # Look back this many hours for recent win rate
   adaptive_edge_min_trades: 8 # Need at least this many recent trades before adjusting
-  adaptive_edge_scale_per_pct: 0.003 # Per 1% below 50% win rate, add this to min_edge (e.g. 30% WR → 20 * 0.003 = +0.06)
-  adaptive_edge_max_extra: 0.10 # Cap on adaptive edge from recent performance (was 0.15; prevents effective edge from exceeding ~0.38)
+  adaptive_edge_scale_per_pct: 0.002 # Per 1% below 50% WR — gentler than 0.003 so bad patches don’t freeze the book
+  adaptive_edge_max_extra: 0.06 # Cap recent-performance bump (combined with loss_streak_max_extra below → max ~10% add before series extras)
   loss_streak_threshold: 5 # After this many consecutive losses, activate circuit breaker
-  loss_streak_extra_edge: 0.04 # Base extra edge per consecutive loss beyond threshold
-  # Trust-the-model: was hardcoded 0.5 in engine (steep compounding on long streaks). Lower = milder bump per extra loss.
-  adaptive_loss_streak_step: 0.12
-  loss_streak_max_extra: 0.05 # Max extra edge from loss streak; was 0.12 compounding to death spiral (if re-enabled)
+  loss_streak_extra_edge: 0.03 # Base extra edge per consecutive loss beyond threshold (was 0.04)
+  # Trust-the-model: lower = milder compounding on long streaks
+  adaptive_loss_streak_step: 0.08 # Was 0.12 — long streaks no longer explode required edge as fast
+  loss_streak_max_extra: 0.04 # Max extra edge from loss streak (was 0.05)
   series_cooldown_threshold: 4 # After N consecutive losses on same series (e.g. KXBTCD), add extra edge
-  series_cooldown_extra_edge: 0.06 # Extra edge for series that are on a cold streak
+  series_cooldown_extra_edge: 0.04 # Per-series cold streak add-on (was 0.06)
   ewma_halflife_trades: 30 # EWMA halflife in trades (recent trades weighted exponentially more)
   ewma_edge_scale_per_pct: 0.001 # Per 1% below 50% EWMA win rate; was 0.004 (if adaptive re-enabled)
   # Decay adaptive edge bump when no resolutions for a while; shrink Kelly when bump is large (if adaptive re-enabled)
@@ -435,7 +436,8 @@ trading:
 # Backtest realism settings
 backtest:
   synthetic_slippage_bps: 100 # +1% entry slippage in synthetic mode
-  synthetic_win_slippage_tax_bps: 4000 # Extra realism tax on winners (default mirrors hard spread regime)
+  # Winner haircut in synthetic backtest only (live ignores this). 4000 bps = 40% — too harsh vs tight Kalshi/Gemini books.
+  synthetic_win_slippage_tax_bps: 1800 # ~18% gross win tax: still conservative exit/slippage stress without killing EV in reports
   synthetic_fill_min_dwell_minutes: 10 # Require price to remain favorable this long before counting synthetic fill
   synthetic_liquidity_friction_cents: 0.75 # Flat friction cost per synthetic trade (spread/rounding drag)
   synthetic_assumed_order_size: 10 # Used for partial-fill backtest when depth is available

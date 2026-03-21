@@ -1,11 +1,14 @@
 <html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>
 <h1>Ollama optimization runs</h1>
 <p>Validated loop: backtest baseline + smoke compare_historical before commit. 
-The table below appends one row per loop from the <strong>latest compare log</strong> 
-(win rate + position-eval KEEP/SELL PnL ¢ via <code>parse_compare_log_metrics.py</code>). 
-Per-series table/iframe come from SQLite (<code>export_series_leaderboard.py</code>), not log grep.</p>
-<p><small>Latest metrics log: /Users/ogechukwuflagg-igbo/comparisons/eval_2026032121.log · Generated 2026-03-21 21:49:09 UTC · metrics CSV: /Users/ogechukwuflagg-igbo/comparisons/metrics.csv</small></p>
+Each table row is one Ollama loop tick. <strong>Win rate</strong> and <strong>PnL ($)</strong> are for 
+<strong>position evaluations</strong> (KEEP/SELL) <em>resolved in SQLite</em> during 
+(previous row timestamp, this row timestamp], via <code>metrics_interval_position_eval.py</code>. 
+If the script fails, the loop falls back to a snapshot from the latest eval log 
+(<code>parse_compare_log_metrics.py</code>). Per-series iframe: <code>export_series_leaderboard.py</code>.</p>
+<p><small>Latest metrics log: /Users/ogechukwuflagg-igbo/comparisons/eval_2026032121.log · Generated 2026-03-21 22:00:03 UTC · metrics CSV: /Users/ogechukwuflagg-igbo/comparisons/metrics.csv</small></p>
 <table><tr><th>Timestamp (local)</th><th>Win rate</th><th>PnL ($)</th></tr>
+<tr><td>2026-03-21 18:00:01</td><td>0%</td><td>0.00</td></tr>
 <tr><td>2026-03-21 17:49:08</td><td>29.4%</td><td>0.50</td></tr>
 <tr><td>2026-03-21 17:30:01</td><td>29.4%</td><td>0.14</td></tr>
 <tr><td>2026-03-21 17:21:07</td><td>29.4%</td><td>0.14</td></tr>
@@ -15,7 +18,6 @@ Per-series table/iframe come from SQLite (<code>export_series_leaderboard.py</co
 <tr><td>2026-03-21 16:16:55</td><td>29.4%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 16:15:13</td><td>29.4%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 16:00:01</td><td>29.4%</td><td>0.36</td></tr>
-<tr><td>2026-03-21 15:39:55</td><td>100%</td><td>0.36</td></tr>
 </table>
 <h2>Series leaderboard (336h lookback)</h2>
 <p>Open <a href="series_leaderboard.html">series_leaderboard.html</a> (same folder). Sorted by PnL, then win rate; iframe below.</p>
