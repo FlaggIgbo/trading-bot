@@ -100,6 +100,7 @@ try:
         get_realized_pnl_stats,
         get_recent_performance,
         get_recent_performance_by_series,
+        get_seconds_since_last_resolved_trade,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
         get_ticker_entry_counts,
@@ -116,7 +117,7 @@ try:
         get_markout_history,
     )
 except ImportError:
-    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_unresolved_predictions = get_ticker_entry_counts = None
+    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
     get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
@@ -218,6 +219,9 @@ class _StrategyParams:
     min_calibration_samples: int
     calibration_min_win_rate_above_yes: float
     calibration_extra_edge_above_yes: float
+    calibration_hard_block_above_yes_win_rate: float
+    calibration_hard_block_above_yes_min_samples: int
+    calibration_hard_block_above_yes_min_avg_entry: float
     calibration_extra_edge_overall: float
     min_calibration_samples_overall: int
     use_bucket_penalty: bool
@@ -255,6 +259,9 @@ class _StrategyParams:
     use_live_price: bool
     live_price_weight: float
     empirical_recent_days: int
+    empirical_stress_recent_days: int
+    empirical_stress_calibration_max_wr: float
+    empirical_stress_min_samples: int
     empirical_recent_weight: float
     empirical_use_rolling_window: bool
     use_volatility_by_default: bool
@@ -339,6 +346,9 @@ class _StrategyParams:
     vol_disagree_threshold: float
     vol_disagree_extra_edge: float
     vol_disagree_dampen_blend: float
+    joint_high_confidence_enabled: bool
+    joint_high_emp_vol_threshold: float
+    joint_high_pull_to_half: float
     intraday_vol_cap: float
     intraday_min_empirical_weight: float
     adaptive_learning_enabled: bool
@@ -355,6 +365,10 @@ class _StrategyParams:
     ewma_edge_scale_per_pct: float
     adaptive_loss_block_win_rate: float
     adaptive_loss_block_lookback_hours: float
+    adaptive_edge_idle_decay_start_hours: float
+    adaptive_edge_idle_decay_halflife_hours: float
+    adaptive_stress_size_edge_threshold: float
+    adaptive_stress_size_min_mult: float
     yes_overconfidence_extra_edge: float
     model_probability_shrinkage: float
     passive_limit_quote: str
@@ -427,6 +441,13 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_calibration_samples=int(strategy.get("min_calibration_samples", 5)),
         calibration_min_win_rate_above_yes=float(strategy.get("calibration_min_win_rate_above_yes", 0.45)),
         calibration_extra_edge_above_yes=float(strategy.get("calibration_extra_edge_above_yes", 0.05)),
+        calibration_hard_block_above_yes_win_rate=float(strategy.get("calibration_hard_block_above_yes_win_rate", 0.0)),
+        calibration_hard_block_above_yes_min_samples=max(
+            1, int(strategy.get("calibration_hard_block_above_yes_min_samples", 30))
+        ),
+        calibration_hard_block_above_yes_min_avg_entry=max(
+            0.0, min(1.0, float(strategy.get("calibration_hard_block_above_yes_min_avg_entry", 0.0)))
+        ),
         calibration_extra_edge_overall=float(strategy.get("calibration_extra_edge_overall", 0.02)),
         min_calibration_samples_overall=int(strategy.get("min_calibration_samples_overall", 20)),
         use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
@@ -462,6 +483,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         use_live_price=bool(strategy.get("use_live_price", True)),
         live_price_weight=float(strategy.get("live_price_weight", 0.6)),
         empirical_recent_days=int(strategy.get("empirical_recent_days", 90)),
+        empirical_stress_recent_days=max(0, int(strategy.get("empirical_stress_recent_days", 0))),
+        empirical_stress_calibration_max_wr=float(strategy.get("empirical_stress_calibration_max_wr", 0.0)),
+        empirical_stress_min_samples=max(1, int(strategy.get("empirical_stress_min_samples", 25))),
         empirical_recent_weight=float(strategy.get("empirical_recent_weight", 3.0)),
         empirical_use_rolling_window=bool(strategy.get("empirical_use_rolling_window", True)),
         use_volatility_by_default=bool(strategy.get("use_volatility_by_default", True)),
@@ -546,6 +570,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         vol_disagree_threshold=float(strategy.get("vol_disagree_threshold", 0.30)),
         vol_disagree_extra_edge=float(strategy.get("vol_disagree_extra_edge", 0.08)),
         vol_disagree_dampen_blend=float(strategy.get("vol_disagree_dampen_blend", 0.50)),
+        joint_high_confidence_enabled=bool(strategy.get("joint_high_confidence_enabled", True)),
+        joint_high_emp_vol_threshold=max(0.0, min(1.0, float(strategy.get("joint_high_emp_vol_threshold", 0.88)))),
+        joint_high_pull_to_half=max(0.0, min(1.0, float(strategy.get("joint_high_pull_to_half", 0.20)))),
         intraday_vol_cap=float(strategy.get("intraday_vol_cap", 0.92)),
         intraday_min_empirical_weight=float(strategy.get("intraday_min_empirical_weight", 0.20)),
         adaptive_learning_enabled=bool(strategy.get("adaptive_learning_enabled", True)),
@@ -562,6 +589,10 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         ewma_edge_scale_per_pct=float(strategy.get("ewma_edge_scale_per_pct", 0.004)),
         adaptive_loss_block_win_rate=float(strategy.get("adaptive_loss_block_win_rate", 0.0)),
         adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 0.0)),
+        adaptive_edge_idle_decay_start_hours=max(0.0, float(strategy.get("adaptive_edge_idle_decay_start_hours", 2.5))),
+        adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
+        adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
+        adaptive_stress_size_min_mult=max(0.05, min(1.0, float(strategy.get("adaptive_stress_size_min_mult", 0.60)))),
         yes_overconfidence_extra_edge=float(strategy.get("yes_overconfidence_extra_edge", 0.0)),
         model_probability_shrinkage=float(strategy.get("model_probability_shrinkage", 1.0)),
         passive_limit_quote=str(strategy.get("passive_limit_quote", "dip")).strip().lower(),
@@ -858,6 +889,8 @@ def _strategy_with_recovery_overrides(cfg: dict) -> dict:
     Merge optional top-level `recovery:` into a copy of strategy (recovery injector / micro-balance).
     Keys: min_edge, adaptive_edge_max_extra, loss_streak_max_extra, force_min_buy_contracts_one,
     calibration_extra_edge_overall, calibration_extra_edge_above_yes (BUY YES above-X downgrade gate),
+    joint_high_pull_to_half / joint_high_confidence_enabled,
+    calibration_hard_block_above_yes_win_rate / calibration_hard_block_above_yes_min_avg_entry,
     parity_penalty_enabled, uncertainty_edge_mult,
     vol_disagree_extra_edge, max_buy_limit_price (0 = disable cap on bought-leg limit),
     enable_vol_regime_scaling, dte_edge_scaling_enabled, ultra_short_min_edge_mult (1.0 = no extra on 15m).
@@ -891,6 +924,16 @@ def _strategy_with_recovery_overrides(cfg: dict) -> dict:
         s["uncertainty_edge_mult"] = float(r["uncertainty_edge_mult"])
     if r.get("vol_disagree_extra_edge") is not None:
         s["vol_disagree_extra_edge"] = float(r["vol_disagree_extra_edge"])
+    if r.get("joint_high_pull_to_half") is not None:
+        s["joint_high_pull_to_half"] = max(0.0, min(1.0, float(r["joint_high_pull_to_half"])))
+    if r.get("joint_high_confidence_enabled") is not None:
+        s["joint_high_confidence_enabled"] = bool(r["joint_high_confidence_enabled"])
+    if r.get("calibration_hard_block_above_yes_min_avg_entry") is not None:
+        s["calibration_hard_block_above_yes_min_avg_entry"] = max(
+            0.0, min(1.0, float(r["calibration_hard_block_above_yes_min_avg_entry"]))
+        )
+    if r.get("calibration_hard_block_above_yes_win_rate") is not None:
+        s["calibration_hard_block_above_yes_win_rate"] = max(0.0, float(r["calibration_hard_block_above_yes_win_rate"]))
     if r.get("yes_overconfidence_extra_edge") is not None:
         s["yes_overconfidence_extra_edge"] = float(r["yes_overconfidence_extra_edge"])
     # Non–5pm/4pm intraday uses recommend_strict: needs P(win) ≥ these AND edge — often the real “all SKIP” cause.
@@ -2297,6 +2340,55 @@ def _vol_disagree_dampened_blend(
     return (w_emp * emp + w_vol * vol_p) / total
 
 
+def _joint_dual_high_pessimism(
+    blended: float,
+    emp: float,
+    vol_p: float,
+    sp: _StrategyParams,
+) -> float:
+    """
+    When empirical and vol paths *both* sit at extreme high P, disagreement dampening
+    never fires; pull the blend toward 50% to reduce joint overconfidence (PnL).
+    """
+    if not sp.joint_high_confidence_enabled or sp.joint_high_pull_to_half <= 0:
+        return blended
+    t = float(sp.joint_high_emp_vol_threshold)
+    if min(float(emp), float(vol_p)) < t:
+        return blended
+    lam = float(sp.joint_high_pull_to_half)
+    b = float(blended)
+    return b * (1.0 - lam) + 0.5 * lam
+
+
+def _vol_emp_blend_hist_p(
+    emp: float,
+    vol_p: float | None,
+    w_emp: float,
+    sp: _StrategyParams,
+) -> float:
+    """Empirical–vol blend + vol-disagreement dampening + joint high-P pessimism."""
+    if vol_p is None:
+        return float(emp)
+    blended = _vol_disagree_dampened_blend(
+        emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend
+    )
+    return _joint_dual_high_pessimism(blended, emp, vol_p, sp)
+
+
+def _adaptive_stress_size_multiplier(bump: float, sp: _StrategyParams) -> float:
+    """Shrink Kelly sizing when adaptive edge bump is large (edge strictness + smaller risk)."""
+    if not sp.adaptive_learning_enabled or bump <= 0:
+        return 1.0
+    thresh = float(sp.adaptive_stress_size_edge_threshold)
+    if bump < thresh:
+        return 1.0
+    cap = max(1e-6, float(sp.adaptive_edge_max_extra) + float(sp.loss_streak_max_extra))
+    floor_m = float(sp.adaptive_stress_size_min_mult)
+    span = max(1e-6, cap - thresh)
+    t = min(1.0, max(0.0, (float(bump) - thresh) / span))
+    return 1.0 - t * (1.0 - floor_m)
+
+
 def _violates_no_above_rule(
     current_price: float, threshold: float, direction: str, cushion: float
 ) -> bool:
@@ -2534,9 +2626,20 @@ def _should_downgrade_buy_yes_above(
     if not sp.use_calibration or not calibration:
         return False
     above_yes = calibration.get("by_direction_side", {}).get("above+yes", {})
-    if above_yes.get("count", 0) < sp.min_calibration_samples:
+    n_ay = int(above_yes.get("count", 0) or 0)
+    wr_ay = float(above_yes.get("win_rate", 1.0) or 1.0)
+    hard_thr = float(sp.calibration_hard_block_above_yes_win_rate)
+    hard_n = int(sp.calibration_hard_block_above_yes_min_samples)
+    min_avg_e = float(sp.calibration_hard_block_above_yes_min_avg_entry)
+    avg_e = above_yes.get("avg_entry_price")
+    if hard_thr > 0 and n_ay >= hard_n and wr_ay < hard_thr:
+        if min_avg_e <= 0:
+            return True
+        if avg_e is not None and float(avg_e) >= min_avg_e:
+            return True
+    if n_ay < sp.min_calibration_samples:
         return False
-    if above_yes.get("win_rate", 1.0) >= 0.5:
+    if wr_ay >= 0.5:
         return False
     fee = _fee_per_contract(yes_bid, maker_fee_rate, sp.min_fee_per_order)
     required = min_edge + sp.calibration_extra_edge_above_yes
@@ -4708,7 +4811,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 above_yes = by_ds.get("above+yes", {})
                 above_yes_str = ""
                 if above_yes:
-                    above_yes_str = f" | above+YES: {above_yes.get('count',0)} trades, {above_yes.get('win_rate',0):.1%} win rate"
+                    ae = above_yes.get("avg_entry_price")
+                    ae_s = f", avg entry {float(ae):.1%}" if ae is not None else ""
+                    above_yes_str = (
+                        f" | above+YES: {above_yes.get('count',0)} trades, "
+                        f"{above_yes.get('win_rate',0):.1%} win rate{ae_s}"
+                    )
                 print(f"[Calibration] {calibration.get('resolved_count')} resolved | overall win rate {wr_str}{above_yes_str}")
                 pab = calibration.get("price_after_buy")
                 if pab and pab.get("count", 0) > 0:
@@ -4718,6 +4826,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
         except Exception:
             pass
+
+    if (
+        sp.empirical_stress_recent_days > 0
+        and sp.empirical_stress_calibration_max_wr > 0
+        and calibration
+        and int(calibration.get("resolved_count", 0) or 0) >= sp.empirical_stress_min_samples
+    ):
+        wr_c = calibration.get("win_rate")
+        if wr_c is not None and float(wr_c) < float(sp.empirical_stress_calibration_max_wr):
+            new_days = min(int(sp.empirical_recent_days), int(sp.empirical_stress_recent_days))
+            if new_days < sp.empirical_recent_days:
+                print(
+                    f"[Empirical] Stressed calibration (overall WR {float(wr_c):.1%}) → "
+                    f"rolling recent_days {sp.empirical_recent_days} → {new_days}"
+                )
+                print()
+                sp.empirical_recent_days = new_days
 
     # Adaptive learning: recency-weighted performance, loss streak, per-series cooldown.
     adaptive_edge_bump: float = 0.0
@@ -4780,6 +4905,29 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             f"+{sp.series_cooldown_extra_edge:.3f} extra edge for this series"
                         )
             adaptive_edge_bump = min(adaptive_edge_bump, sp.adaptive_edge_max_extra + sp.loss_streak_max_extra)
+            if (
+                adaptive_edge_bump > 0
+                and get_seconds_since_last_resolved_trade
+                and sp.adaptive_edge_idle_decay_halflife_hours > 0
+            ):
+                try:
+                    sec_idle = get_seconds_since_last_resolved_trade(config=cfg)
+                    if sec_idle is not None:
+                        idle_h = sec_idle / 3600.0
+                        start = float(sp.adaptive_edge_idle_decay_start_hours)
+                        if idle_h > start:
+                            half = float(sp.adaptive_edge_idle_decay_halflife_hours)
+                            extra_h = idle_h - start
+                            factor = 0.5 ** (extra_h / max(1e-6, half))
+                            if factor < 1.0:
+                                prev_b = adaptive_edge_bump
+                                adaptive_edge_bump *= factor
+                                print(
+                                    f"[Adaptive] Idle decay: {idle_h:.1f}h since last resolution "
+                                    f"→ edge bump {prev_b:.3f} → {adaptive_edge_bump:.3f}"
+                                )
+                except Exception:
+                    pass
             if adaptive_edge_bump > 0:
                 print(f"[Adaptive] Total adaptive edge bump: +{adaptive_edge_bump:.3f}")
                 print()
@@ -4787,8 +4935,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             pass
 
     kelly_fraction_live = _adaptive_kelly_fraction(kelly_fraction, calibration, sp)
+    stress_sz = _adaptive_stress_size_multiplier(adaptive_edge_bump, sp)
+    if stress_sz < 1.0:
+        kelly_fraction_live = max(0.01, kelly_fraction_live * stress_sz)
     if use_kelly:
-        print(f"[Risk] Kelly fraction: base={kelly_fraction:.2f} adaptive={kelly_fraction_live:.2f}")
+        extra_risk = f" (adaptive stress ×{stress_sz:.2f})" if stress_sz < 1.0 else ""
+        print(f"[Risk] Kelly fraction: base={kelly_fraction:.2f} adaptive={kelly_fraction_live:.2f}{extra_risk}")
         print()
     macro_signal_24h = _compute_macro_signal_24h(cfg, sp)
     if sp.macro_signal_enabled:
@@ -5154,13 +5306,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     w_emp = max(w_emp, sp.intraday_min_empirical_weight)
-                    hist_p = _vol_disagree_dampened_blend(emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
+                    hist_p = _vol_emp_blend_hist_p(emp, vol_p, w_emp, sp)
                 elif sp.vol_blend_weight is not None:
                     w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     if _is_intra:
                         w_emp = max(w_emp, sp.intraday_min_empirical_weight)
-                    hist_p = _vol_disagree_dampened_blend(emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
+                    hist_p = _vol_emp_blend_hist_p(emp, vol_p, w_emp, sp)
                 else:
                     hist_p = max(emp, vol_p)
             # Anti-gambler sanity buffer on vol/emp blend (before bucket & signal layers)
@@ -5884,7 +6036,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         w_emp_g = _dte_adjusted_empirical_weight(w_emp_g, dte_g)
                         if _is_intra_g:
                             w_emp_g = max(w_emp_g, sp.intraday_min_empirical_weight)
-                        hist_p_gem = _vol_disagree_dampened_blend(emp, vol_p_gem, w_emp_g, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
+                        hist_p_gem = _vol_emp_blend_hist_p(emp, vol_p_gem, w_emp_g, sp)
                     else:
                         hist_p_gem = max(emp, vol_p_gem)
                 else:
@@ -6674,7 +6826,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                                 w_emp_pos = _dte_adjusted_empirical_weight(w_emp_pos, dte_pos)
                                                 if _is_intra_pos:
                                                     w_emp_pos = max(w_emp_pos, sp.intraday_min_empirical_weight)
-                                                hist_p = _vol_disagree_dampened_blend(emp_pos, vol_p, w_emp_pos, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
+                                                hist_p = _vol_emp_blend_hist_p(emp_pos, vol_p, w_emp_pos, sp)
                                             else:
                                                 hist_p = max(emp_pos, vol_p)
                                         if sp.enable_model_prob_hard_cap:
@@ -6934,7 +7086,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         w_emp_cached = _dte_adjusted_empirical_weight(w_emp_cached, dte_cached)
                         if _is_intra_c:
                             w_emp_cached = max(w_emp_cached, sp.intraday_min_empirical_weight)
-                        hist_p = _vol_disagree_dampened_blend(emp_cached, vol_p, w_emp_cached, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
+                        hist_p = _vol_emp_blend_hist_p(emp_cached, vol_p, w_emp_cached, sp)
                     else:
                         hist_p = max(emp_cached, vol_p)
                 maker_fee_cached = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, _yf)
@@ -7233,7 +7385,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 w_emp_g = _dte_adjusted_empirical_weight(w_emp_g, dte_g)
                                 if _is_intra_gp:
                                     w_emp_g = max(w_emp_g, sp.intraday_min_empirical_weight)
-                                hist_p_g = _vol_disagree_dampened_blend(emp_g, vol_p_g, w_emp_g, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend)
+                                hist_p_g = _vol_emp_blend_hist_p(emp_g, vol_p_g, w_emp_g, sp)
                             else:
                                 hist_p_g = max(emp_g, vol_p_g)
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win

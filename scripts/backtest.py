@@ -129,7 +129,8 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
             "pnl_cents": float(pnl_c),
             "outcome": p.get("outcome", "unknown"),
             "ticker": p.get("ticker", ""),
-            "side": p.get("side", ""),
+            "side": (p.get("side") or "").lower().strip(),
+            "direction": (p.get("direction") or "").lower().strip(),
             "entry_price": float(p.get("entry_price") or 0),
             "exit_price": float(p.get("exit_price") or 0),
         }

@@ -1730,16 +1730,29 @@ def get_calibration_stats(config: dict | None = None) -> dict[str, Any]:
             s = (r["side"] or "").strip().lower() or "unknown"
             key = f"{d}+{s}"
             if key not in by_ds:
-                by_ds[key] = {"wins": 0, "loses": 0}
+                by_ds[key] = {"wins": 0, "loses": 0, "entry_sum": 0.0, "entry_n": 0}
             if r["outcome"] == "win":
                 by_ds[key]["wins"] += 1
             else:
                 by_ds[key]["loses"] += 1
+            try:
+                ep = float(r["entry_price"] or 0)
+                if ep > 0:
+                    by_ds[key]["entry_sum"] += ep
+                    by_ds[key]["entry_n"] += 1
+            except (TypeError, ValueError):
+                pass
         by_direction_side = {}
         for k, v in by_ds.items():
             ww, wl = v["wins"], v["loses"] * loss_weight
             wr = ww / (ww + wl) if (ww + wl) > 0 else 0
-            by_direction_side[k] = {"count": v["wins"] + v["loses"], "win_rate": wr}
+            en = int(v.get("entry_n", 0) or 0)
+            avg_e = (float(v["entry_sum"]) / en) if en > 0 else None
+            by_direction_side[k] = {
+                "count": v["wins"] + v["loses"],
+                "win_rate": wr,
+                "avg_entry_price": avg_e,
+            }
         # Price-after-buy: how much lower/higher did contract go after we bought "low"
         rows_with_price = []
         for r in rows:
@@ -2402,6 +2415,31 @@ def _extract_series_prefix(ticker: str) -> str:
         return ""
     parts = ticker.split("-")
     return parts[0] if parts else ticker
+
+
+def get_seconds_since_last_resolved_trade(*, config: dict | None = None) -> float | None:
+    """
+    Seconds since the most recent resolved prediction (win/lose/sold).
+    None if there is no history. Used to decay adaptive edge bumps during quiet periods.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT MAX(COALESCE(resolved_ts, ts)) AS mx
+            FROM predictions
+            WHERE outcome IN ('win', 'lose', 'sold')
+            """
+        ).fetchone()
+        if not row or row["mx"] is None:
+            return None
+        return max(0.0, time.time() - float(row["mx"]))
+    except Exception:
+        return None
+    finally:
+        conn.close()
 
 
 def get_recent_performance(

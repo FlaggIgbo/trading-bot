@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 import sys
@@ -45,6 +46,91 @@ def _fmt_num(x) -> str:
 
 def _fmt_pnl_cents(x) -> str:
     return "n/a" if x is None else f"${float(x)/100:,.2f}"
+
+
+def _maker_fee_per_contract(price: float, maker_rate: float, min_fee: float = 0.01) -> float:
+    """Per-contract maker fee in price units (same convention as compare_historical)."""
+    p = float(price)
+    if maker_rate <= 0 or p <= 0 or p >= 1:
+        return 0.0
+    fee = maker_rate * p * (1.0 - p)
+    if fee <= 0:
+        return 0.0
+    rounded = math.ceil(fee * 100) / 100
+    return max(rounded, max(0.0, float(min_fee)))
+
+
+def _breakeven_win_rate(entry: float, maker_rate: float) -> float:
+    """Approx. breakeven win rate for a directional binary at entry (ignoring exit fees)."""
+    fee = _maker_fee_per_contract(entry, maker_rate)
+    return max(0.0, min(0.999, float(entry) + fee))
+
+
+def _append_risk_reward_section(
+    lines: list[str],
+    trade_details: list[dict],
+    label: str,
+    maker_rate: float,
+) -> None:
+    """Entry-price buckets, direction×side, and breakeven context (PnL-oriented reporting)."""
+    if not trade_details:
+        return
+    decided = [t for t in trade_details if t.get("outcome") in ("win", "lose")]
+    if not decided:
+        return
+    total_pnl = sum(float(t.get("pnl_cents") or 0) for t in decided)
+    be_sum = 0.0
+    for t in decided:
+        ep = float(t.get("entry_price") or 0)
+        if ep > 0:
+            be_sum += _breakeven_win_rate(ep, maker_rate)
+    avg_entry = sum(float(t.get("entry_price") or 0) for t in decided) / max(1, len(decided))
+    avg_be = be_sum / max(1, len([t for t in decided if float(t.get("entry_price") or 0) > 0]))
+
+    lines.append("")
+    lines.append(f"Risk / reward context — {label}")
+    lines.append("-" * 40)
+    lines.append(f"Resolved trades (win/lose): {len(decided)} | Net PnL: {_fmt_pnl_cents(total_pnl)}")
+    lines.append(f"Avg entry price: {avg_entry:.1%} | Approx breakeven WR @ avg entry: {avg_be:.1%}")
+
+    bands = [
+        (0.0, 0.15, "0–15¢"),
+        (0.15, 0.30, "15–30¢"),
+        (0.30, 0.45, "30–45¢"),
+        (0.45, 0.60, "45–60¢"),
+        (0.60, 0.75, "60–75¢"),
+        (0.75, 1.01, "75–100¢"),
+    ]
+    lines.append("By entry-price band (win/lose only):")
+    for lo, hi, name in bands:
+        sub = [
+            t
+            for t in decided
+            if lo <= float(t.get("entry_price") or 0) < hi
+        ]
+        if not sub:
+            continue
+        w = sum(1 for t in sub if t.get("outcome") == "win")
+        el = sum(1 for t in sub if t.get("outcome") == "lose")
+        pnl_b = sum(float(t.get("pnl_cents") or 0) for t in sub)
+        wr = w / (w + el) if (w + el) else 0.0
+        lines.append(f"  {name}: n={len(sub)} | WR {wr:.1%} | PnL {_fmt_pnl_cents(pnl_b)}")
+
+    by_ds: dict[str, list[dict]] = {}
+    for t in decided:
+        d = (t.get("direction") or "?").strip() or "?"
+        s = (t.get("side") or "?").strip() or "?"
+        key = f"{d}+{s}"
+        by_ds.setdefault(key, []).append(t)
+    if len(by_ds) > 1 or (len(by_ds) == 1 and next(iter(by_ds)) != "?+?"):
+        lines.append("By direction + side (win/lose):")
+        for key in sorted(by_ds.keys()):
+            sub = by_ds[key]
+            w = sum(1 for t in sub if t.get("outcome") == "win")
+            el = sum(1 for t in sub if t.get("outcome") == "lose")
+            pnl_b = sum(float(t.get("pnl_cents") or 0) for t in sub)
+            wr = w / (w + el) if (w + el) else 0.0
+            lines.append(f"  {key}: n={len(sub)} | WR {wr:.1%} | PnL {_fmt_pnl_cents(pnl_b)}")
 
 
 def _generate_performance_graph(
@@ -155,6 +241,8 @@ def _generate_performance_graph(
 
 def main() -> int:
     cfg = get_config()
+    strategy = (cfg or {}).get("strategy") or {}
+    maker_rate = float(strategy.get("kalshi_maker_fee_rate", 0.0175))
     bt_cfg = (cfg or {}).get("backtest", {})
     report_days_short = int(bt_cfg.get("daily_report_days_short", 7))
     report_days_long = int(bt_cfg.get("daily_report_days_long", 30))
@@ -211,6 +299,17 @@ def main() -> int:
     if syn_long.get("skipped_not_filled") is not None:
         lines.append(f"Skipped (not filled): {syn_long.get('skipped_not_filled')}")
 
+    rs, rl = real_short.get("sharpe"), real_long.get("sharpe")
+    ss = syn_long.get("sharpe")
+    if rs is not None and ss is not None and rs > 0 and ss < 0:
+        lines.append("")
+        lines.append("Real vs synthetic (same window note)")
+        lines.append("-" * 40)
+        lines.append(
+            "Real backtest Sharpe is positive while synthetic is negative — review fill/skip "
+            "assumptions in synthetic mode or non-stationarity in the live sample."
+        )
+
     # --- Bet Accuracy (distance between bet and resolution price) ---
     def _append_accuracy_section(lines: list[str], result: dict, label: str) -> None:
         acc = result.get("accuracy")
@@ -230,6 +329,13 @@ def main() -> int:
 
     _append_accuracy_section(lines, real_short, f"Real {report_days_short}d")
     _append_accuracy_section(lines, real_long, f"Real {report_days_long}d")
+
+    _append_risk_reward_section(
+        lines, real_short.get("trade_details") or [], f"Real {report_days_short}d", maker_rate
+    )
+    _append_risk_reward_section(
+        lines, real_long.get("trade_details") or [], f"Real {report_days_long}d", maker_rate
+    )
 
     if get_bet_accuracy_stats:
         end_ts = datetime.utcnow().timestamp()

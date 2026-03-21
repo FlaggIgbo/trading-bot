@@ -203,6 +203,11 @@ strategy:
   min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
   calibration_min_win_rate_above_yes: 0.55 # More conservative: require stronger observed above+YES performance
   calibration_extra_edge_above_yes: 0.07 # PnL: penalize underperforming above+YES harder (recovery can set lower)
+  # Hard block BUY YES on "above" only when slice WR is bad *and* avg entry is expensive
+  # (cheap long-shots can show low WR while still EV+; do not block those).
+  calibration_hard_block_above_yes_win_rate: 0.24
+  calibration_hard_block_above_yes_min_samples: 40
+  calibration_hard_block_above_yes_min_avg_entry: 0.36
   calibration_extra_edge_overall: 0.035 # Was 0.05 — less global choke when WR < 50%
   min_calibration_samples_overall: 20 # Min resolved trades before applying overall min_edge bump
   use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
@@ -232,6 +237,10 @@ strategy:
   live_price_weight: 0.6 # When both available: current_price = 0.6*live + 0.4*closes[-1]. Slightly prioritize live. Fallback: closes[-1] if snapshot fails.
   empirical_use_rolling_window: true # Empirical model uses rolling window for faster adaptation
   empirical_recent_days: 90 # Wider rolling window for more stable empirical P while still adapting to regime shifts
+  # When overall calibration WR is poor, shorten effective rolling window (regime-shift response)
+  empirical_stress_recent_days: 45
+  empirical_stress_calibration_max_wr: 0.42
+  empirical_stress_min_samples: 30
   empirical_recent_weight: 3.0 # Weight of recent samples relative to older data
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
@@ -275,6 +284,10 @@ strategy:
   vol_disagree_threshold: 0.30 # When |emp_p - vol_p| exceeds this, vol model is suspect — dampen blend and require extra edge
   vol_disagree_extra_edge: 0.045 # Extra min_edge when emp vs vol disagree (recovery overrides lower)
   vol_disagree_dampen_blend: 0.50 # Halve vol weight contribution when models strongly disagree
+  # When emp and vol *both* sit very high, disagreement logic never fires — pull blend toward 50% (PnL / overconfidence)
+  joint_high_confidence_enabled: true
+  joint_high_emp_vol_threshold: 0.88
+  joint_high_pull_to_half: 0.22
   intraday_vol_cap: 0.85 # Cap vol-model probability for intraday/hourly contracts (prevent 99%+ overconfidence)
   intraday_min_empirical_weight: 0.20 # Floor for empirical weight in intraday blending; prevents DTE decay from zeroing out the empirical signal
 
@@ -291,6 +304,11 @@ strategy:
   series_cooldown_extra_edge: 0.06 # Extra edge for series that are on a cold streak
   ewma_halflife_trades: 30 # EWMA halflife in trades (recent trades weighted exponentially more)
   ewma_edge_scale_per_pct: 0.001 # Per 1% below 50% EWMA win rate; was 0.004 (if adaptive re-enabled)
+  # Decay adaptive edge bump when no resolutions for a while; shrink Kelly when bump is large (if adaptive re-enabled)
+  adaptive_edge_idle_decay_start_hours: 2.5
+  adaptive_edge_idle_decay_halflife_hours: 10.0
+  adaptive_stress_size_edge_threshold: 0.06
+  adaptive_stress_size_min_mult: 0.58
 
   mc_enabled: true # Monte Carlo simulation: blend simulated paths with analytical CDF for tail-aware probability
   mc_paths: 10000 # Number of GBM paths to simulate (higher = more accurate, slower; 10k ≈ 50ms with numpy)
