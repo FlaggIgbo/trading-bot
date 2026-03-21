@@ -197,6 +197,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_pos_eval_ticker ON position_evaluations(ticker);
         CREATE INDEX IF NOT EXISTS idx_pos_eval_outcome ON position_evaluations(outcome);
         CREATE INDEX IF NOT EXISTS idx_pos_eval_ts ON position_evaluations(ts);
+        CREATE INDEX IF NOT EXISTS idx_pos_eval_resolved_ts ON position_evaluations(resolved_ts);
     """)
     _migrate_predictions_price_after_buy(conn)
     _migrate_predictions_fill_attribution(conn)
@@ -2366,6 +2367,52 @@ def get_position_evaluation_stats(
         }
     except Exception:
         return {"enabled": False}
+    finally:
+        conn.close()
+
+
+def get_position_evaluation_interval_stats(
+    config: dict | None = None,
+    *,
+    start_ts: float,
+    end_ts: float,
+) -> dict[str, Any]:
+    """
+    Aggregate resolved position evaluations with resolved_ts in (start_ts, end_ts].
+    Matches KEEP/SELL outcome semantics used by get_position_evaluation_stats (combined pool).
+
+    Returns keys: n, wins, losses, win_rate (0..1 or None if n==0), pnl_cents, enabled.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"enabled": False, "n": 0, "wins": 0, "losses": 0, "win_rate": None, "pnl_cents": 0}
+    try:
+        rows = conn.execute(
+            """
+            SELECT outcome, pnl_cents
+            FROM position_evaluations
+            WHERE outcome IS NOT NULL
+              AND resolved_ts IS NOT NULL
+              AND resolved_ts > ?
+              AND resolved_ts <= ?
+            """,
+            (float(start_ts), float(end_ts)),
+        ).fetchall()
+        wins = sum(1 for r in rows if (r["outcome"] or "").lower() == "win")
+        losses = sum(1 for r in rows if (r["outcome"] or "").lower() == "lose")
+        n = len(rows)
+        pnl = sum(int(r["pnl_cents"] or 0) for r in rows)
+        wr = (wins / n) if n else None
+        return {
+            "enabled": True,
+            "n": n,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": wr,
+            "pnl_cents": pnl,
+        }
+    except Exception:
+        return {"enabled": False, "n": 0, "wins": 0, "losses": 0, "win_rate": None, "pnl_cents": 0}
     finally:
         conn.close()
 

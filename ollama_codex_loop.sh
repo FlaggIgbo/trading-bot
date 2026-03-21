@@ -38,6 +38,8 @@ OLLAMA_TEMPERATURE="${OLLAMA_TEMPERATURE:-0.2}"
 OLLAMA_LOG_CONTEXT_MAX_CHARS="${OLLAMA_LOG_CONTEXT_MAX_CHARS:-24000}"
 # Shorter window for the Ollama prompt (so the model sees recent bleeding assets)
 OLLAMA_PROMPT_LB_HOURS="${OLLAMA_PROMPT_LB_HOURS:-72}"
+# First metrics row when metrics.csv is empty: window length (hours) ending at now_ts
+OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS="${OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS:-24}"
 SERIES_SUMMARY_HTML="${SERIES_SUMMARY_HTML:-/tmp/series_summary.html}"
 # Auto-blacklist: writes newline series file; compare_historical merges via strategy.blacklist_extra_file (no YAML corruption)
 OLLAMA_AUTO_BLACKLIST="${OLLAMA_AUTO_BLACKLIST:-1}"
@@ -85,10 +87,20 @@ else
 fi
 [[ ! -f "$LOG_FILE" ]] && LOG_FILE="$TMP_TAIL"
 
-read -r WIN_RATE PNL_CENTS < <("$PYTHON" "$REPO/scripts/parse_compare_log_metrics.py" "$LOG_FILE" 2>/dev/null || echo "0 0")
-PNL=$(awk "BEGIN {printf \"%.2f\", ${PNL_CENTS:-0}/100}")
+# Per-loop interval: position_evaluations resolved in (prev_csv_ts, now] (SQLite)
+NOW_TS=$(date -u +%s)
+read -r WIN_RATE PNL < <(
+  OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS="$OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS" \
+    "$PYTHON" "$REPO/scripts/metrics_interval_position_eval.py" \
+    --metrics-csv "$METRICS" --now-ts "$NOW_TS" 2>/dev/null || echo "0 0.00"
+)
+# If interval script produced nothing (empty DB window still prints "0 0.00"); detect parse failure
+if [[ -z "${WIN_RATE:-}" ]]; then
+  read -r WIN_RATE PNL_CENTS < <("$PYTHON" "$REPO/scripts/parse_compare_log_metrics.py" "$LOG_FILE" 2>/dev/null || echo "0 0")
+  PNL=$(awk "BEGIN {printf \"%.2f\", ${PNL_CENTS:-0}/100}")
+fi
 
-echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
+echo "$NOW_TS,$WIN_RATE,$PNL" >> "$METRICS"
 
 # --- 2) Per-series leaderboard + blacklist hints (SQLite; does not edit config) ---
 if ! "$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --out "$LB_HTML"; then
@@ -113,9 +125,11 @@ GEN_HTML_UTC=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
   echo "<html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>"
   echo "<h1>Ollama optimization runs</h1>"
   echo "<p>Validated loop: backtest baseline + smoke compare_historical before commit. "
-  echo "The table below appends one row per loop from the <strong>latest compare log</strong> "
-  echo "(win rate + position-eval KEEP/SELL PnL ¢ via <code>parse_compare_log_metrics.py</code>). "
-  echo "Per-series table/iframe come from SQLite (<code>export_series_leaderboard.py</code>), not log grep.</p>"
+  echo "Each table row is one Ollama loop tick. <strong>Win rate</strong> and <strong>PnL (\$)</strong> are for "
+  echo "<strong>position evaluations</strong> (KEEP/SELL) <em>resolved in SQLite</em> during "
+  echo "(previous row timestamp, this row timestamp], via <code>metrics_interval_position_eval.py</code>. "
+  echo "If the script fails, the loop falls back to a snapshot from the latest eval log "
+  echo "(<code>parse_compare_log_metrics.py</code>). Per-series iframe: <code>export_series_leaderboard.py</code>.</p>"
   echo "<p><small>Latest metrics log: ${METRICS_ESC} · Generated ${GEN_HTML_UTC} · metrics CSV: ${METRICS_FILE_ESC}</small></p>"
   echo "<table><tr><th>Timestamp (local)</th><th>Win rate</th><th>PnL (\$)</th></tr>"
   grep -E '^[0-9]+,[0-9.]+,-?[0-9.]+' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do

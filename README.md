@@ -382,10 +382,11 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 
 ### `ollama_codex_loop.sh` (metrics gate + leaderboard)
 
-The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metrics.csv`, refreshes `docs/series_leaderboard.html`, and runs **`ollama_codex_generate.py`** (HTTP API, temperature from **`OLLAMA_TEMPERATURE`**) → `git apply` → **`scripts/ollama_patch_validate.py`**. Metrics use **`parse_compare_log_metrics.py`**; the prompt uses **`extract_ollama_log_context.py`** for compact log excerpts.
+The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metrics.csv`, refreshes `docs/series_leaderboard.html`, and runs **`ollama_codex_generate.py`** (HTTP API, temperature from **`OLLAMA_TEMPERATURE`**) → `git apply` → **`scripts/ollama_patch_validate.py`**. **Metrics rows:** **`metrics_interval_position_eval.py`** — win rate and PnL for **`position_evaluations`** rows with `resolved_ts` in **(previous CSV timestamp, loop time]** (SQLite). If that script prints nothing, falls back to **`parse_compare_log_metrics.py`** on the eval log. The prompt uses **`extract_ollama_log_context.py`** for compact log excerpts.
 
 | Env | Default | Meaning |
 | --- | --- | --- |
+| `OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS` | `24` | When `metrics.csv` is **empty** (first row), interval stats use resolutions in the last *N* hours ending at the loop time. |
 | `OLLAMA_METRICS_GATE` | `0` | If `1`, **skip** the Ollama/backtest block when `metrics.csv` shows **no** net PnL drop ≥ `OLLAMA_METRICS_GATE_DROP` over the last `OLLAMA_METRICS_GATE_HOURS`. **Default `0`** so flat/misparsed PnL does not block the loop; set `1` for stress-only runs. If gate is on, **identical PnL** across samples in the window is treated as “no signal” and Ollama still runs. |
 | `OLLAMA_TEMPERATURE` | `0.2` | Sampling temperature for **`scripts/ollama_codex_generate.py`** (`/api/generate`); plist may set explicitly. |
 | `OLLAMA_AUTO_PUSH` | `0` in script | This repo’s **launchd** plist sets **`1`**: validated commits **`git push`** to `origin/main` (needs credentials). |
