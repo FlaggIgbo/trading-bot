@@ -187,6 +187,7 @@ class _StrategyParams:
     min_no_price: float
     max_yes_price_for_buy: float
     max_buy_limit_price: float
+    force_min_buy_contracts_one: bool
     max_buy_yes_strike_above_pct: float
     max_buy_no_strike_above_pct: float
     enable_intra_arb: bool
@@ -375,6 +376,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_no_price=float(strategy.get("min_no_price", 0.05)),
         max_yes_price_for_buy=float(strategy.get("max_yes_price_for_buy", 0)),
         max_buy_limit_price=max(0.0, min(1.0, float(strategy.get("max_buy_limit_price", 0) or 0))),
+        force_min_buy_contracts_one=bool(strategy.get("force_min_buy_contracts_one", False)),
         max_buy_yes_strike_above_pct=float(strategy.get("max_buy_yes_strike_above_pct", 0.05)),
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
@@ -810,6 +812,32 @@ def _display_model_probability(p: float | None, sp: _StrategyParams) -> float | 
     if p is None:
         return None
     return _sanitize_model_probability(float(p), lo=sp.model_prob_hard_lo, hi=sp.model_prob_hard_hi, enabled=sp.enable_model_prob_hard_cap)
+
+
+def _strategy_with_recovery_overrides(cfg: dict) -> dict:
+    """
+    Merge optional top-level `recovery:` into a copy of strategy (recovery injector / micro-balance).
+    Keys: min_edge, adaptive_edge_max_extra, loss_streak_max_extra, force_min_buy_contracts_one
+    """
+    s = dict(cfg.get("strategy") or {})
+    r = cfg.get("recovery") or {}
+    if not r:
+        return s
+    if r.get("min_edge") is not None:
+        s["min_edge"] = float(r["min_edge"])
+    if r.get("adaptive_edge_max_extra") is not None:
+        s["adaptive_edge_max_extra"] = float(r["adaptive_edge_max_extra"])
+    if r.get("loss_streak_max_extra") is not None:
+        s["loss_streak_max_extra"] = float(r["loss_streak_max_extra"])
+    if r.get("force_min_buy_contracts_one") is not None:
+        s["force_min_buy_contracts_one"] = bool(r["force_min_buy_contracts_one"])
+    return s
+
+
+def _effective_strategy_dict(cfg: dict) -> dict:
+    """strategy.yaml + optional `recovery:` + optional `execution:` merges."""
+    base = _strategy_with_recovery_overrides(cfg)
+    return _merge_execution_into_strategy({**cfg, "strategy": base})
 
 
 def _merge_execution_into_strategy(cfg: dict) -> dict:
@@ -3299,6 +3327,45 @@ def _allocate_budget_to_orders(
         pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
 
 
+def _recovery_force_one_contract_if_affordable(
+    orders: list[dict],
+    *,
+    balance_cents: int,
+    max_total_buy_pct: float,
+    enabled: bool,
+    logger=print,
+) -> None:
+    """
+    After Kelly/budget zeroed count, promote the best edge BUY YES/NO to 1 contract if it fits max_total_buy_pct slice.
+    """
+    if not enabled or balance_cents <= 0 or not orders:
+        return
+    budget = max(0, int(balance_cents * max_total_buy_pct))
+    used = 0
+    for o in orders:
+        cnt = int(o.get("count", 0) or 0)
+        if cnt <= 0:
+            continue
+        pc = int(max(1, round(float(o.get("price", 0)) * 100)))
+        used += pc * cnt
+    candidates = [
+        o
+        for o in orders
+        if str(o.get("rec", "")) in (REC_BUY_YES, REC_BUY_NO) and int(o.get("count", 0) or 0) <= 0
+    ]
+    candidates.sort(key=lambda x: -float(x.get("edge", 0) or 0))
+    for o in candidates:
+        pc = int(max(1, round(float(o.get("price", 0)) * 100)))
+        if pc <= 0 or used + pc > budget:
+            continue
+        o["count"] = 1
+        used += pc
+        logger(
+            f"[Recovery] force_min_buy_contracts_one: {o.get('platform')} {o.get('ticker')} "
+            f"x1 @ ${float(o.get('price', 0)):.2f} (edge {float(o.get('edge', 0)):.1%})"
+        )
+
+
 def _filter_pending_buys_by_max_limit_price(
     pending_orders: list[dict],
     *,
@@ -3672,7 +3739,7 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
                 break
     except Exception:
         return
-    sp_sync = _load_strategy_params(_merge_execution_into_strategy(cfg or {}))
+    sp_sync = _load_strategy_params(_effective_strategy_dict(cfg or {}))
     min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
     for p in kalshi_preds:
         t = p.get("ticker")
@@ -3800,7 +3867,7 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
     if not events_contracts:
         return
     resolved_count = 0
-    sp_sync = _load_strategy_params(_merge_execution_into_strategy(cfg or {}))
+    sp_sync = _load_strategy_params(_effective_strategy_dict(cfg or {}))
     min_fee = float(((cfg or {}).get("strategy", {}) or {}).get("min_fee_per_order", 0.01))
     for p in gemini_preds:
         t = p.get("ticker")
@@ -3876,7 +3943,7 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
 def _show_config(args) -> int:
     """Print resolved config (Freqtrade show-config style). No API calls."""
     cfg = get_config()
-    strategy = _merge_execution_into_strategy(cfg)
+    strategy = _effective_strategy_dict(cfg)
     trading = cfg.get("trading", {})
     markets = cfg.get("markets", [])
     yf = cfg.get("yfinance_tickers", {})
@@ -3887,6 +3954,11 @@ def _show_config(args) -> int:
     print("=" * 60)
     print(f"\nmarkets: {markets}")
     print(f"yfinance_tickers: {list(yf.keys()) if isinstance(yf, dict) else yf}")
+    rec = cfg.get("recovery") or {}
+    if rec:
+        print(f"\nrecovery (merged into strategy for hurdle / sizing):")
+        for k, v in rec.items():
+            print(f"  {k}: {v}")
     ex = cfg.get("execution") or {}
     if ex:
         print(f"\nexecution (merged into strategy for pricing):")
@@ -3900,7 +3972,8 @@ def _show_config(args) -> int:
               "max_dip_cap", "limit_dip_pct",
               "passive_limit_quote", "blacklist_extra_file", "max_buy_limit_price",
               "empirical_weighting", "empirical_exponential_halflife_bars",
-              "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi"):
+              "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi",
+              "adaptive_edge_max_extra", "loss_streak_max_extra", "force_min_buy_contracts_one"):
         v = strategy.get(k)
         if v is not None:
             print(f"  {k}: {v}")
@@ -3916,7 +3989,7 @@ def _show_config(args) -> int:
 
 def main():
     cfg = get_config()
-    strategy = cfg.get("strategy", {})
+    strategy = _effective_strategy_dict(cfg)
     default_days = int(strategy.get("days_back", 365))
 
     parser = argparse.ArgumentParser(
@@ -3961,7 +4034,7 @@ def _run(args) -> int:
     cfg = get_config()
     markets_list = cfg.get("markets", [])
     yf_mapping = cfg.get("yfinance_tickers", {})
-    strategy = _merge_execution_into_strategy(cfg)
+    strategy = _effective_strategy_dict(cfg)
     trading = cfg.get("trading", {})
     min_edge = float(strategy.get("min_edge", args.edge))
     use_kelly = strategy.get("use_kelly", False)
@@ -6812,6 +6885,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     _allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct, filter_zero=False)
+    if sp.force_min_buy_contracts_one:
+        _recovery_force_one_contract_if_affordable(
+            kalshi_orders,
+            balance_cents=balance_cents,
+            max_total_buy_pct=max_total_buy_pct,
+            enabled=True,
+            logger=print,
+        )
+        _recovery_force_one_contract_if_affordable(
+            gemini_orders,
+            balance_cents=gemini_balance_cents,
+            max_total_buy_pct=max_total_buy_pct,
+            enabled=True,
+            logger=print,
+        )
     # Keep Gemini orders with count=0 so we can re-allocate after cancels free up balance
     pending_orders[:] = [o for o in kalshi_orders if o.get("count", 0) > 0] + gemini_orders
     _cap_cross_platform_exposure(

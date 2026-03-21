@@ -31,11 +31,18 @@ execution:
   # Penny-jump: bid+1¢ (or min with ask−1¢) for queue priority vs stink bids
   limit_offset_cents: 1 # 0 = mid; >=1 = bid_plus_tick (better fills on tight DTE)
 
+# Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
+recovery:
+  min_edge: 0.10 # Hurdle for BUY YES/NO (can mirror strategy.min_edge)
+  adaptive_edge_max_extra: 0.0 # Caps recent-performance bump (0 = no extra from this path)
+  loss_streak_max_extra: 0.0 # Caps loss-streak bump when adaptive_learning re-enabled
+  force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
+
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
-  min_edge: 0.18 # Lowered from 0.28 for capital-starved recovery; avoid 50% effective hurdle (28% + 22% adaptive = death spiral)
+  min_edge: 0.10 # Lowered from 0.28 for capital-starved recovery; avoid 50% effective hurdle (28% + 22% adaptive = death spiral)
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
