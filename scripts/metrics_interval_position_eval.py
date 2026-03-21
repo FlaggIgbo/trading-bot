@@ -4,7 +4,9 @@ Interval metrics for ollama_codex_loop: win rate + PnL for position_evaluations
 resolved between the previous metrics CSV row timestamp and --now-ts.
 
 Output (stdout): `<win_rate_percent> <pnl_dollars>` e.g. `29.4 0.50`
-(win_rate is 0..100 for display; pnl_dollars has 2 decimal places)
+(win_rate is 0..100 for display; pnl_dollars has 2 decimal places).
+If no position_evaluations resolved in the interval (n==0), prints `null null` so dashboards
+don't show misleading 0% / $0.00.
 
 If there is no prior row in metrics.csv, start_ts = now_ts - fallback_hours (env
 OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS, default 24).
@@ -64,7 +66,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not get_position_evaluation_interval_stats:
-        print("0 0.00", flush=True)
+        print("null null", flush=True)
         print("storage.get_position_evaluation_interval_stats not available", file=sys.stderr)
         return 0
 
@@ -87,10 +89,16 @@ def main() -> int:
     cfg = get_config()
     stats = get_position_evaluation_interval_stats(cfg, start_ts=start_ts, end_ts=now_ts)
     if not stats.get("enabled"):
-        print("0 0.00", flush=True)
+        print("null null", flush=True)
         return 0
 
     n = int(stats.get("n") or 0)
+    if n == 0:
+        print("null null", flush=True)
+        if os.environ.get("OLLAMA_METRICS_INTERVAL_DEBUG", "").lower() in ("1", "true", "yes"):
+            print(f"# interval ({start_ts:g}, {now_ts:g}] n=0 (no resolved position evals)", file=sys.stderr)
+        return 0
+
     wr = stats.get("win_rate")
     wr_pct = (wr * 100.0) if wr is not None else 0.0
     pnl_cents = int(stats.get("pnl_cents") or 0)

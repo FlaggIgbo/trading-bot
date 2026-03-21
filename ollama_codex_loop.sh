@@ -120,7 +120,7 @@ NOW_TS=$(date -u +%s)
 read -r WIN_RATE PNL < <(
   OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS="$OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS" \
     "$PYTHON" "$REPO/scripts/metrics_interval_position_eval.py" \
-    --metrics-csv "$METRICS" --now-ts "$NOW_TS" 2>/dev/null || echo "0 0.00"
+    --metrics-csv "$METRICS" --now-ts "$NOW_TS" 2>/dev/null || echo "null null"
 )
 # If interval script produced nothing (empty DB window still prints "0 0.00"); detect parse failure
 if [[ -z "${WIN_RATE:-}" ]]; then
@@ -158,10 +158,13 @@ GEN_HTML_UTC=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
   echo "(previous row timestamp, this row timestamp], via <code>metrics_interval_position_eval.py</code>. "
   echo "If the script fails, the loop falls back to a snapshot from the latest eval log "
   echo "(<code>parse_compare_log_metrics.py</code>). Per-series iframe: <code>export_series_leaderboard.py</code>.</p>"
+  echo "<p><small>Empty interval (no resolved position evals): win rate and PnL show as <code>null</code>.</small></p>"
   echo "<p><small>Latest metrics log: ${METRICS_ESC} · Generated ${GEN_HTML_UTC} · metrics CSV: ${METRICS_FILE_ESC}</small></p>"
   echo "<table><tr><th>Timestamp (local)</th><th>Win rate</th><th>PnL (\$)</th></tr>"
-  grep -E '^[0-9]+,[0-9.]+,-?[0-9.]+' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
-    echo "<tr><td>$(date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")</td><td>${wr}%</td><td>$pnl</td></tr>"
+  grep -E '^[0-9]+,.+,.+$' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
+    if [[ "$wr" == "null" ]]; then wr_disp="null"; else wr_disp="${wr}%"; fi
+    if [[ "$pnl" == "null" ]]; then pnl_disp="null"; else pnl_disp="$pnl"; fi
+    echo "<tr><td>$(date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")</td><td>${wr_disp}</td><td>${pnl_disp}</td></tr>"
   done
   echo "</table>"
   echo "<h2>Series leaderboard (${OLLAMA_LEADERBOARD_HOURS}h lookback)</h2>"
@@ -268,7 +271,7 @@ _strategy_slice() {
   printf "\n### RECENT LOG SIGNALS (errors, calibration, adaptive, risk, losses — not full tail)\n"
   cat "$TMP_TAIL"
   printf "\n### METRICS CSV (last 10 rows)\n"
-  grep -E '^[0-9]+,[0-9.]+,' "$METRICS" 2>/dev/null | tail -n 10 || true
+  grep -E '^[0-9]+,.+,.+$' "$METRICS" 2>/dev/null | tail -n 10 || true
   printf "\n### OPTIMIZATION JOURNAL (last 8 lines)\n"
   tail -n 8 "$JOURNAL" 2>/dev/null || true
 } > "$TMP_PROMPT"
@@ -286,7 +289,8 @@ MSG=$(grep -i '^Commit message:' "$TMP_OUTPUT" | head -n 1 | cut -d: -f2- | sed 
 
 if [[ -z "$PATCH" ]]; then
   echo "ℹ️  No fenced diff block (markdown \`\`\`diff) in model output; nothing to apply."
-  echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":$WIN_RATE}" >>"$JOURNAL"
+  _wr_json=$([[ "${WIN_RATE:-}" == "null" ]] && echo null || echo "$WIN_RATE")
+  echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":${_wr_json}}" >>"$JOURNAL"
   _commit_dashboard_if_changed || true
   exit 0
 fi
