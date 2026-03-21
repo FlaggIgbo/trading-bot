@@ -40,6 +40,7 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) and the [Gemin
    ```yaml
    markets:
      - KXBTCD # Bitcoin daily
+     - KXBTC15M # Bitcoin 15-minute up/down (optional; see `strategy.ultra_short_*`)
      - KXETHD # Ethereum daily
      - KXSOLD # Solana
      - KXINXU # S&P 500

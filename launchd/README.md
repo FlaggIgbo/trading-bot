@@ -1,6 +1,6 @@
 # LaunchAgents: Trading Engine + Daily Performance Report
 
-> **Picking up code/config changes:** `launchd` runs your repo’s Python and reads `config.yaml` from **`WorkingDirectory` on every scheduled run**. After `git pull origin main`, the next tick (or `launchctl kickstart -k …`) uses the new code — including top-level **`recovery:`**, **`execution:`**, **`trading.dust_trade_*`**, **`strategy.min_payout_ratio` / `dte_edge_*` / `passive_bid_chase_*`**, and the rest of the strategy block. **You do not need to re-copy plists** unless **`ProgramArguments`** or **`WorkingDirectory`** in the plist file changed.
+> **Picking up code/config changes:** `launchd` runs your repo’s Python and reads `config.yaml` from **`WorkingDirectory` on every scheduled run**. After `git pull origin main`, the next tick (or `launchctl kickstart -k …`) uses the new code — including top-level **`recovery:`** (can override `min_edge`, `calibration_extra_edge_overall`, `calibration_extra_edge_above_yes`, `parity_penalty_enabled`, `uncertainty_edge_mult`, `vol_disagree_extra_edge`, `yes_overconfidence_extra_edge`, `max_buy_limit_price` (0 = disable cap), `enable_vol_regime_scaling`, `dte_edge_scaling_enabled`, `ultra_short_min_edge_mult`, etc.), **`execution:`**, **`trading.dust_trade_*`**, **`strategy.min_payout_ratio` / `dte_edge_*` / `passive_bid_chase_*` / `position_flip_sell_*` / `hold_winner_*` / `ultra_short_*` (15m BTC)**, and the rest of the strategy block. **You do not need to re-copy plists** unless **`ProgramArguments`** or **`WorkingDirectory`** in the plist file changed.
 
 This setup includes:
 - `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes.
@@ -34,7 +34,7 @@ git pull origin main
 launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
 ```
 
-After pull, **launchd runs the updated `config.yaml` and scripts from disk** on the next timer tick — no plist reload needed for strategy-only changes (lottery penny-jump, dip %, execution offset, **`max_buy_limit_price`**, **`recovery:`** hurdle/min-contract, strike % filters).
+After pull, **launchd runs the updated `config.yaml` and scripts from disk** on the next timer tick — no plist reload needed for strategy-only changes (lottery penny-jump, dip %, execution offset, **`max_buy_limit_price`**, **`recovery:`** hurdle/min-contract, **`trading.micro_balance_*`**, **`min_balance_for_limit_fallback_cents`**, strike % filters).
 
 Optional: `tail -f /tmp/compare_historical.out.log` and confirm the banner says **`LIVE — will place orders`** and `CLI flags: --execute=True`.
 

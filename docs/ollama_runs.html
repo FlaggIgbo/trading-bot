@@ -1,13 +1,24 @@
 <html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>
-<h1>Ollama optimization runs</h1><p>Validated loop: backtest baseline + smoke compare_historical before commit.</p><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>
-<tr><td>2026-03-20 18:30:01</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 18:15:37</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 18:00:01</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 17:43:57</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 17:36:38</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 17:30:35</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 17:30:01</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 17:00:01</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 16:59:42</td><td>100%</td><td>0.29</td></tr>
-<tr><td>2026-03-20 16:30:01</td><td>100%</td><td>0.29</td></tr>
-</table></body></html>
+<h1>Ollama optimization runs</h1><p>Validated loop: backtest baseline + smoke compare_historical before commit. Per-series stats come from SQLite, not log grep.</p><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>
+<tr><td>2026-03-20 22:20:09</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 22:00:01</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 21:50:08</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 21:30:01</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 21:20:08</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 21:00:00</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 20:50:07</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 20:30:01</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 20:20:06</td><td>100%</td><td>0.29</td></tr>
+<tr><td>2026-03-20 20:00:01</td><td>100%</td><td>0.29</td></tr>
+</table>
+<h2>Series leaderboard (336h lookback)</h2>
+<p>Open <a href="series_leaderboard.html">series_leaderboard.html</a> or see embedded view below.</p>
+<iframe src="series_leaderboard.html" title="Series leaderboard" width="100%" height="360" style="border:1px solid #ccc"></iframe>
+<h2>Blacklist suggestions (WR &lt;30%, n≥50 — manual review only)</h2>
+<pre style="white-space:pre-wrap"># Suggested blacklist (lookback 336h, n&gt;=50, WR&lt;30%)
+# strategy:
+#   blacklist: ['KXBTCD', 'KXETHD']
+#   - KXBTCD: n=836 wr=6.5% pnl_cents=-4245
+#   - KXETHD: n=520 wr=6.9% pnl_cents=-4338
+</pre>
+</body></html>

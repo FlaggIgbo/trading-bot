@@ -68,6 +68,8 @@ def main() -> int:
 
     ewma_lambda = _as_float(strategy.get("ewma_lambda"), 0.94)
     intraday_ewma_lambda = _as_float(strategy.get("intraday_ewma_lambda"), ewma_lambda)
+    intraday_other_min_p_win = _as_float(strategy.get("intraday_other_min_p_win"), 0.90)
+    intraday_other_min_p_win_with_vol = _as_float(strategy.get("intraday_other_min_p_win_with_vol"), 0.80)
 
     max_cross_platform_exposure = _as_float(strategy.get("max_cross_platform_exposure"), 0.30)
     max_daily_loss_pct = _as_float(strategy.get("max_daily_loss_pct"), 0.10)
@@ -164,6 +166,10 @@ def main() -> int:
         errors.append("`strategy.ewma_lambda` must be in (0, 1).")
     if not (0.0 < intraday_ewma_lambda < 1.0):
         errors.append("`strategy.intraday_ewma_lambda` must be in (0, 1).")
+    if not (0.0 <= intraday_other_min_p_win <= 1.0):
+        errors.append("`strategy.intraday_other_min_p_win` must be in [0, 1].")
+    if not (0.0 <= intraday_other_min_p_win_with_vol <= 1.0):
+        errors.append("`strategy.intraday_other_min_p_win_with_vol` must be in [0, 1].")
     if intraday_ewma_lambda > ewma_lambda:
         warnings.append(
             "`strategy.intraday_ewma_lambda` is higher than `strategy.ewma_lambda`; "
@@ -208,10 +214,43 @@ def main() -> int:
     if chase_min < 0:
         errors.append("`strategy.passive_bid_chase_refresh_minutes` must be >= 0.")
 
+    flip_edge_buf = _as_float(strategy.get("position_flip_sell_min_negative_edge"), 0.0)
+    if flip_edge_buf < 0 or flip_edge_buf > 0.99:
+        errors.append("`strategy.position_flip_sell_min_negative_edge` must be in [0, 0.99] (0 = legacy flip sells).")
+    p_lose_margin = _as_float(strategy.get("position_loser_sell_p_lose_margin"), 0.0)
+    if p_lose_margin < 0 or p_lose_margin > 0.5:
+        errors.append("`strategy.position_loser_sell_p_lose_margin` must be in [0, 0.5].")
+    hold_itm_pct = _as_float(strategy.get("hold_winner_min_spot_vs_strike_pct"), 0.10)
+    if hold_itm_pct < 0 or hold_itm_pct > 0.5:
+        errors.append("`strategy.hold_winner_min_spot_vs_strike_pct` must be in [0, 0.5].")
+    hold_max_dte = _as_float(strategy.get("hold_winner_max_dte_days"), 1.0)
+    if hold_max_dte <= 0 or hold_max_dte > 30.0:
+        errors.append("`strategy.hold_winner_max_dte_days` must be in (0, 30].")
+
+    ultra_short_h = _as_float(strategy.get("ultra_short_dte_hours"), 0.0)
+    if ultra_short_h < 0 or ultra_short_h > 168.0:
+        errors.append("`strategy.ultra_short_dte_hours` must be in [0, 168] (0 = title/ticker ultra-short only).")
+    for key, lo, hi in (
+        ("ultra_short_min_p_win", 0.0, 1.0),
+        ("ultra_short_min_p_win_with_vol", 0.0, 1.0),
+    ):
+        v = _as_float(strategy.get(key), 0.92)
+        if v < lo or v > hi:
+            errors.append(f"`strategy.{key}` must be in [{lo}, {hi}].")
+    ultra_mult = _as_float(strategy.get("ultra_short_min_edge_mult"), 1.0)
+    if ultra_mult < 1.0 or ultra_mult > 3.0:
+        errors.append("`strategy.ultra_short_min_edge_mult` must be in [1.0, 3.0].")
+
     trading = cfg.get("trading") or {}
     dust_max = _as_int(trading.get("dust_trade_max_balance_cents"), 0)
     if dust_max < 0:
         errors.append("`trading.dust_trade_max_balance_cents` must be >= 0.")
+    micro_max = _as_int(trading.get("micro_balance_max_balance_cents"), 0)
+    if micro_max < 0:
+        errors.append("`trading.micro_balance_max_balance_cents` must be >= 0 (0 = use dust cap).")
+    min_bal_fb = _as_int(trading.get("min_balance_for_limit_fallback_cents"), 0)
+    if min_bal_fb < 0:
+        errors.append("`trading.min_balance_for_limit_fallback_cents` must be >= 0.")
 
     print("[Config Validation]")
     print(f"  errors={len(errors)} warnings={len(warnings)}")

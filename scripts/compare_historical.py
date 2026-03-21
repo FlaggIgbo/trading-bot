@@ -227,6 +227,17 @@ class _StrategyParams:
     dynamic_sell_threshold: bool
     p_lose_blend_market_max_weight: float
     p_lose_blend_market_half_life_days: float
+    # Position exits: loosen mean-reversion / EV sells without touching stop-loss or rule violations.
+    position_flip_sell_min_negative_edge: float
+    position_loser_sell_p_lose_margin: float
+    hold_winner_to_expiry_enabled: bool
+    hold_winner_min_spot_vs_strike_pct: float
+    hold_winner_max_dte_days: float
+    # Sub-hour / 15m contracts (e.g. Kalshi KXBTC15M): stricter buys when enabled.
+    ultra_short_dte_hours: float
+    ultra_short_min_p_win: float
+    ultra_short_min_p_win_with_vol: float
+    ultra_short_min_edge_mult: float
     use_intraday_empirical: bool
     dynamic_kelly_enabled: bool
     dynamic_kelly_floor: float
@@ -425,6 +436,15 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         dynamic_sell_threshold=bool(strategy.get("dynamic_sell_threshold", True)),
         p_lose_blend_market_max_weight=float(strategy.get("p_lose_blend_market_max_weight", 0.5)),
         p_lose_blend_market_half_life_days=float(strategy.get("p_lose_blend_market_half_life_days", 0.5)),
+        position_flip_sell_min_negative_edge=float(strategy.get("position_flip_sell_min_negative_edge", 0.0)),
+        position_loser_sell_p_lose_margin=float(strategy.get("position_loser_sell_p_lose_margin", 0.0)),
+        hold_winner_to_expiry_enabled=bool(strategy.get("hold_winner_to_expiry_enabled", False)),
+        hold_winner_min_spot_vs_strike_pct=float(strategy.get("hold_winner_min_spot_vs_strike_pct", 0.10)),
+        hold_winner_max_dte_days=float(strategy.get("hold_winner_max_dte_days", 1.0)),
+        ultra_short_dte_hours=float(strategy.get("ultra_short_dte_hours", 0.0)),
+        ultra_short_min_p_win=float(strategy.get("ultra_short_min_p_win", 0.92)),
+        ultra_short_min_p_win_with_vol=float(strategy.get("ultra_short_min_p_win_with_vol", 0.86)),
+        ultra_short_min_edge_mult=float(strategy.get("ultra_short_min_edge_mult", 1.0)),
         use_intraday_empirical=bool(strategy.get("use_intraday_empirical", True)),
         dynamic_kelly_enabled=bool(strategy.get("dynamic_kelly_enabled", True)),
         dynamic_kelly_floor=float(strategy.get("dynamic_kelly_floor", 0.10)),
@@ -836,7 +856,18 @@ def _display_model_probability(p: float | None, sp: _StrategyParams) -> float | 
 def _strategy_with_recovery_overrides(cfg: dict) -> dict:
     """
     Merge optional top-level `recovery:` into a copy of strategy (recovery injector / micro-balance).
-    Keys: min_edge, adaptive_edge_max_extra, loss_streak_max_extra, force_min_buy_contracts_one
+    Keys: min_edge, adaptive_edge_max_extra, loss_streak_max_extra, force_min_buy_contracts_one,
+    calibration_extra_edge_overall, calibration_extra_edge_above_yes (BUY YES above-X downgrade gate),
+    parity_penalty_enabled, uncertainty_edge_mult,
+    vol_disagree_extra_edge, max_buy_limit_price (0 = disable cap on bought-leg limit),
+    enable_vol_regime_scaling, dte_edge_scaling_enabled, ultra_short_min_edge_mult (1.0 = no extra on 15m).
+
+    Note: Lowering min_edge alone often still yields all SKIP because calibration (win rate < 50%)
+    adds calibration_extra_edge_overall and parity adds large YES/NO penalties — override those here
+    for short preview/live trials, then remove when performance recovers.
+    uncertainty_edge_mult / vol_disagree_extra_edge stack on top of min_edge (empirical CI width,
+    emp-vs-vol disagreement) and often explain “min 10%” in SKIP reasons when min_edge is ~6%.
+    yes_overconfidence_extra_edge: extra required edge on BUY YES only (merged so recovery can set 0).
     """
     s = dict(cfg.get("strategy") or {})
     r = cfg.get("recovery") or {}
@@ -850,6 +881,31 @@ def _strategy_with_recovery_overrides(cfg: dict) -> dict:
         s["loss_streak_max_extra"] = float(r["loss_streak_max_extra"])
     if r.get("force_min_buy_contracts_one") is not None:
         s["force_min_buy_contracts_one"] = bool(r["force_min_buy_contracts_one"])
+    if r.get("calibration_extra_edge_overall") is not None:
+        s["calibration_extra_edge_overall"] = float(r["calibration_extra_edge_overall"])
+    if r.get("calibration_extra_edge_above_yes") is not None:
+        s["calibration_extra_edge_above_yes"] = max(0.0, float(r["calibration_extra_edge_above_yes"]))
+    if r.get("parity_penalty_enabled") is not None:
+        s["parity_penalty_enabled"] = bool(r["parity_penalty_enabled"])
+    if r.get("uncertainty_edge_mult") is not None:
+        s["uncertainty_edge_mult"] = float(r["uncertainty_edge_mult"])
+    if r.get("vol_disagree_extra_edge") is not None:
+        s["vol_disagree_extra_edge"] = float(r["vol_disagree_extra_edge"])
+    if r.get("yes_overconfidence_extra_edge") is not None:
+        s["yes_overconfidence_extra_edge"] = float(r["yes_overconfidence_extra_edge"])
+    # Non–5pm/4pm intraday uses recommend_strict: needs P(win) ≥ these AND edge — often the real “all SKIP” cause.
+    if r.get("intraday_other_min_p_win") is not None:
+        s["intraday_other_min_p_win"] = float(r["intraday_other_min_p_win"])
+    if r.get("intraday_other_min_p_win_with_vol") is not None:
+        s["intraday_other_min_p_win_with_vol"] = float(r["intraday_other_min_p_win_with_vol"])
+    if r.get("max_buy_limit_price") is not None:
+        s["max_buy_limit_price"] = max(0.0, min(1.0, float(r["max_buy_limit_price"])))
+    if r.get("enable_vol_regime_scaling") is not None:
+        s["enable_vol_regime_scaling"] = bool(r["enable_vol_regime_scaling"])
+    if r.get("dte_edge_scaling_enabled") is not None:
+        s["dte_edge_scaling_enabled"] = bool(r["dte_edge_scaling_enabled"])
+    if r.get("ultra_short_min_edge_mult") is not None:
+        s["ultra_short_min_edge_mult"] = max(1.0, float(r["ultra_short_min_edge_mult"]))
     return s
 
 
@@ -1171,6 +1227,67 @@ def _is_other_intraday(market_or_title: dict | str, yf_ticker: str) -> bool:
     return is_sp500 or is_crypto
 
 
+_ULTRA_SHORT_TITLE_RE = re.compile(
+    r"(?i)\b15\s*min|15m\b|next\s+fifteen|up\s+in\s+next\s+15",
+)
+
+
+def _hours_until_resolution_unified(market_or_title: dict | str, yf_ticker: str) -> float | None:
+    """Hours until resolution from API fields (Kalshi/Gemini) or parsed title. None if unknown."""
+    if isinstance(market_or_title, dict):
+        res_dt = _resolution_utc_from_market_or_event(market_or_title)
+        if res_dt is not None:
+            return (res_dt - datetime.now(UTC)).total_seconds() / 3600.0
+    title = _get_title(market_or_title)
+    res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
+    if res_dt is None:
+        return None
+    if res_dt.tzinfo is None:
+        res_dt = res_dt.replace(tzinfo=ET)
+    return (res_dt.astimezone(UTC) - datetime.now(UTC)).total_seconds() / 3600.0
+
+
+def _is_ultra_short_horizon(
+    market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
+) -> bool:
+    """
+    True for sub-hour style contracts: title hints (15m) or time-to-expiry <= ultra_short_dte_hours.
+    When ultra_short_dte_hours <= 0, only title / ticker patterns trigger (e.g. KXBTC15M, Gemini BTC15M).
+    """
+    if isinstance(market_or_title, dict):
+        ser = str(market_or_title.get("series") or "")
+        tkr = str(market_or_title.get("ticker") or "")
+        if re.search(r"(?i)BTC15M|KXBTC15M", f"{ser} {tkr}"):
+            return True
+    title = _get_title(market_or_title)
+    if _ULTRA_SHORT_TITLE_RE.search(title):
+        return True
+    if sp.ultra_short_dte_hours <= 0:
+        return False
+    h = _hours_until_resolution_unified(market_or_title, yf_ticker)
+    if h is None:
+        return False
+    return 0 < h <= sp.ultra_short_dte_hours
+
+
+def _strict_intraday_evaluation(
+    market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
+) -> bool:
+    """Use recommend_strict (min P(win) + edge) for non-5pm/4pm intraday or ultra-short horizons."""
+    if _is_other_intraday(market_or_title, yf_ticker):
+        return True
+    return _is_ultra_short_horizon(market_or_title, yf_ticker, sp)
+
+
+def _is_intraday_or_ultra_short(
+    market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
+) -> bool:
+    """Intraday-style vol cap / EWMA / blend: clock intraday OR ultra-short (e.g. Kalshi KXBTC15M)."""
+    if _is_intraday_market(market_or_title, yf_ticker):
+        return True
+    return _is_ultra_short_horizon(market_or_title, yf_ticker, sp)
+
+
 # ---------------------------------------------------------------------------
 # Resolution datetime parsing (for per-contract time-to-expiry)
 # ---------------------------------------------------------------------------
@@ -1319,18 +1436,62 @@ def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetim
     return None
 
 
+def _parse_iso8601_utc(value: str | None) -> datetime | None:
+    """Parse API timestamps (Kalshi close_time, Gemini expiryDate) to UTC-aware datetime."""
+    if not value or not str(value).strip():
+        return None
+    s = str(value).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _resolution_utc_from_market_or_event(obj: dict) -> datetime | None:
+    """
+    Best-effort resolution instant from Kalshi market dict, Gemini event, or wrapped {market: ...}.
+    Prefers close_time / expected_expiration_time (Kalshi) and expiryDate (Gemini).
+    """
+    if not isinstance(obj, dict):
+        return None
+    inner = obj.get("market", obj)
+    for key in ("close_time", "expected_expiration_time", "expiration_time", "expiryDate", "latest_expiration_time"):
+        raw = inner.get(key)
+        if raw:
+            dt = _parse_iso8601_utc(str(raw))
+            if dt is not None:
+                return dt
+    for c in inner.get("contracts") or []:
+        raw = c.get("expiryDate")
+        if raw:
+            dt = _parse_iso8601_utc(str(raw))
+            if dt is not None:
+                return dt
+    return None
+
+
 def _get_days_to_expiry_from_market(
     market_or_title: dict | str, yf_ticker: str, default_days: float = 30.0
 ) -> float:
     """
-    Compute days (or fraction) until resolution. Uses _parse_resolution_datetime_from_title.
-    Falls back to default_days if title cannot be parsed (e.g. daily-close "on March 16" without time).
+    Compute days (or fraction) until resolution.
+    Uses API timestamps when present (critical for KXBTC15M / sub-hour titles without clock text),
+    else _parse_resolution_datetime_from_title.
     """
+    if isinstance(market_or_title, dict):
+        res_dt = _resolution_utc_from_market_or_event(market_or_title)
+        if res_dt is not None:
+            now_utc = datetime.now(UTC)
+            days = (res_dt - now_utc).total_seconds() / 86400.0
+            return max(0.0007, days)  # ~1 min floor for very short-dated contracts
+
     title = _get_title(market_or_title)
     res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
     if res_dt is None:
         return default_days
-    # Ensure we use aware datetimes and compare in UTC
     if res_dt.tzinfo is None:
         res_dt = res_dt.replace(tzinfo=ET)
     now_utc = datetime.now(UTC)
@@ -1777,7 +1938,7 @@ def _get_closes_for_empirical(
     cfg: dict,
 ) -> list[float]:
     """For intraday + use_intraday_empirical: return prices at resolution hour; else daily closes."""
-    if _is_intraday_market(market_or_title, yf_ticker) and sp.use_intraday_empirical:
+    if _is_intraday_or_ultra_short(market_or_title, yf_ticker, sp) and sp.use_intraday_empirical:
         hour = _get_resolution_hour_from_title(_get_title(market_or_title))
         if hour is not None:
             intraday = yf_get_intraday_aggs(yf_ticker, days_back, hour, cfg)
@@ -1788,7 +1949,7 @@ def _get_closes_for_empirical(
 
 def _ewma_lambda_for_market(sp: "_StrategyParams", market_or_title: dict | str, yf_ticker: str) -> float:
     """Use a faster EWMA decay for intraday contracts when configured."""
-    if _is_intraday_market(market_or_title, yf_ticker):
+    if _is_intraday_or_ultra_short(market_or_title, yf_ticker, sp):
         return float(sp.intraday_ewma_lambda)
     return float(sp.ewma_lambda)
 
@@ -2451,6 +2612,89 @@ def _ev_sell_threshold(
     return max(0.01, min(0.99, 1.0 - (sell_price - exit_fee)))
 
 
+def _position_held_side_model_edge(
+    hist_p: float,
+    *,
+    yes_bid: float,
+    no_bid: float,
+    side: str,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+) -> float:
+    """
+    Signed edge for the *held* leg (same convention as buy-side edge):
+      YES: P_yes - yes_bid - fee_yes
+      NO:  (1 - P_yes) - no_bid - fee_no
+    """
+    my = max(0.0, min(0.99, float(yes_bid)))
+    mn = max(0.0, min(0.99, float(no_bid)))
+    p = float(hist_p)
+    if str(side).lower() == "yes":
+        fee = _fee_per_contract(my, maker_fee_rate, min_fee_per_order)
+        return p - my - fee
+    fee = _fee_per_contract(mn, maker_fee_rate, min_fee_per_order)
+    return (1.0 - p) - mn - fee
+
+
+def _position_flip_sell_allowed(
+    sp: _StrategyParams,
+    *,
+    hist_p: float,
+    yes_bid: float,
+    no_bid: float,
+    side: str,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+) -> bool:
+    """Mean-reversion flip sell: 0 buffer = legacy (any rec flip may sell); >0 requires strong negative held-side edge."""
+    buf = float(sp.position_flip_sell_min_negative_edge)
+    if buf <= 0:
+        return True
+    edge = _position_held_side_model_edge(
+        hist_p,
+        yes_bid=yes_bid,
+        no_bid=no_bid,
+        side=side,
+        maker_fee_rate=maker_fee_rate,
+        min_fee_per_order=min_fee_per_order,
+    )
+    return edge < -buf
+
+
+def _hold_winner_skip_discretionary_sells(
+    sp: _StrategyParams,
+    *,
+    current_price: float,
+    threshold: float,
+    direction: str,
+    side: str,
+    dte_days: float | None,
+) -> bool:
+    """
+    When enabled, skip REC_LIKELY_LOSE and rec-flip sells for deep ITM winners with short DTE.
+    Does not affect STOP_LOSS or REC_RULE_VIOLATION.
+    """
+    if not sp.hold_winner_to_expiry_enabled:
+        return False
+    if dte_days is None or float(dte_days) > float(sp.hold_winner_max_dte_days):
+        return False
+    if current_price <= 0 or threshold <= 0:
+        return False
+    pct = max(0.0, float(sp.hold_winner_min_spot_vs_strike_pct))
+    cp, th = float(current_price), float(threshold)
+    d = str(direction or "").strip().lower()
+    s = str(side or "").strip().lower()
+    if d == "above" and s == "yes":
+        return cp >= th * (1.0 + pct)
+    if d == "above" and s == "no":
+        return cp <= th * (1.0 - pct)
+    if d == "below" and s == "yes":
+        return cp <= th * (1.0 - pct)
+    if d == "below" and s == "no":
+        return cp >= th * (1.0 + pct)
+    return False
+
+
 def _maybe_add_reentry_order(
     sp: _StrategyParams,
     min_edge: float,
@@ -2752,8 +2996,17 @@ def _format_reason(
     no_bid: float,
     min_edge: float,
     use_vol: bool,
+    *,
+    net_edge_yes: float | None = None,
+    net_edge_no: float | None = None,
+    req_yes: float | None = None,
+    req_no: float | None = None,
 ) -> str:
-    """Build human-readable reasoning for the recommendation."""
+    """Build human-readable reasoning for the recommendation.
+
+    When SKIP is due to thresholding, pass net_edge_* and req_* so logs match
+    DefaultThresholdStrategy (fee-adjusted edge vs effective min_edge_yes/no), not raw P−market gaps.
+    """
     if rec == REC_BUY_YES:
         if violates_rule:
             return f"Price {_fmt_price(current_price)} above strike {_fmt_price(threshold)} → favor YES (edge {hist_p - market_yes:.1%})"
@@ -2782,12 +3035,29 @@ def _format_reason(
         )
     if violates_rule and hist_p < market_yes + min_edge:
         parts.append(f"would favor YES (price above strike) but no edge: model {hist_p:.1%} vs market {market_yes:.1%}")
-    if hist_p >= market_yes + min_edge and (1 - hist_p) < (1 - market_yes) + min_edge and not parts:
+    # Raw P−market checks ignore fees; skip when caller passes net_edge_* (fee-adjusted truth).
+    if (
+        net_edge_yes is None
+        and hist_p >= market_yes + min_edge
+        and (1 - hist_p) < (1 - market_yes) + min_edge
+        and not parts
+    ):
         parts.append(f"no edge either way: model {hist_p:.1%} vs market {market_yes:.1%} (gap < {min_edge:.0%})")
     if not parts:
         edge_yes = hist_p - market_yes
         edge_no = (1 - hist_p) - (1 - market_yes)
-        if abs(edge_yes) < min_edge and abs(edge_no) < min_edge:
+        if (
+            net_edge_yes is not None
+            and net_edge_no is not None
+            and req_yes is not None
+            and req_no is not None
+        ):
+            parts.append(
+                f"net edge vs hurdle (fee-adjusted): YES {net_edge_yes:.1%} vs req {req_yes:.1%}; "
+                f"NO {net_edge_no:.1%} vs req {req_no:.1%} "
+                f"(raw gaps {edge_yes:.1%} / {edge_no:.1%})"
+            )
+        elif abs(edge_yes) < min_edge and abs(edge_no) < min_edge:
             parts.append(f"insufficient edge: YES gap {edge_yes:.1%}, NO gap {edge_no:.1%} (min {min_edge:.0%})")
         else:
             parts.append(f"model {hist_p:.1%} vs market {market_yes:.1%} — no clear mispricing")
@@ -3403,6 +3673,48 @@ def _promote_zero_count_buys_if_affordable(
         logger(
             f"{log_tag} promote x1: {o.get('platform')} {o.get('ticker')} "
             f"@ ${float(o.get('price', 0)):.2f} (edge {float(o.get('edge', 0)):.1%})"
+        )
+
+
+def _micro_balance_force_min_one_before_budget(
+    pending_orders: list[dict],
+    *,
+    kalshi_balance_cents: int,
+    gemini_balance_cents: int,
+    trading: dict,
+    logger=print,
+) -> None:
+    """
+    When venue balance is at/below a micro cap, set count=1 on any directional BUY that
+    still has count 0 *before* budget allocation (Kelly/vol-Kelly edge cases, etc.).
+    Uses `micro_balance_max_balance_cents`; if unset/0, falls back to `dust_trade_max_balance_cents`.
+    """
+    if not bool(trading.get("micro_balance_force_min_one_contract", False)):
+        return
+    max_bc = int(trading.get("micro_balance_max_balance_cents") or 0)
+    if max_bc <= 0:
+        max_bc = int(trading.get("dust_trade_max_balance_cents", 0) or 0)
+    if max_bc <= 0:
+        return
+    for o in pending_orders:
+        if str(o.get("rec", "")) not in (REC_BUY_YES, REC_BUY_NO):
+            continue
+        if int(o.get("count", 0) or 0) > 0:
+            continue
+        plat = str(o.get("platform") or "")
+        bal = int(gemini_balance_cents) if plat == PLATFORM_GEMINI else int(kalshi_balance_cents)
+        if bal <= 0 or bal > max_bc:
+            continue
+        try:
+            pc = int(max(1, round(float(o.get("price", 0)) * 100)))
+        except (TypeError, ValueError):
+            continue
+        if pc > bal:
+            continue
+        o["count"] = 1
+        logger(
+            f"[MicroBalance] force x1 (pre-budget): {plat} {o.get('ticker')} "
+            f"@ ${float(o.get('price', 0)):.2f} (bal {bal}¢ ≤ {max_bc}¢ cap)"
         )
 
 
@@ -4060,14 +4372,21 @@ def _show_config(args) -> int:
               "passive_bid_chase_enabled", "passive_bid_chase_refresh_minutes",
               "empirical_weighting", "empirical_exponential_halflife_bars",
               "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi",
-              "adaptive_edge_max_extra", "loss_streak_max_extra", "force_min_buy_contracts_one"):
+              "adaptive_edge_max_extra", "loss_streak_max_extra", "force_min_buy_contracts_one",
+              "dynamic_sell_threshold", "position_flip_sell_min_negative_edge",
+              "position_loser_sell_p_lose_margin", "hold_winner_to_expiry_enabled",
+              "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
+              "ultra_short_dte_hours", "ultra_short_min_p_win", "ultra_short_min_p_win_with_vol",
+              "ultra_short_min_edge_mult"):
         v = strategy.get(k)
         if v is not None:
             print(f"  {k}: {v}")
     print(f"\n  (effective min_edge: {min_edge})")
     print(f"\ntrading:")
     for k in ("dry_run", "max_pct_of_balance", "max_total_buy_pct", "min_contracts",
-              "dust_trade_enabled", "dust_trade_max_balance_cents"):
+              "dust_trade_enabled", "dust_trade_max_balance_cents",
+              "micro_balance_force_min_one_contract", "micro_balance_max_balance_cents",
+              "min_balance_for_limit_fallback_cents"):
         v = trading.get(k)
         if v is not None:
             print(f"  {k}: {v}")
@@ -4826,7 +5145,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if use_vol else None
             )
             if vol_p is not None and use_vol:
-                _is_intra = _is_intraday_market(m, yf_ticker)
+                _is_intra = _is_intraday_or_ultra_short(m, yf_ticker, sp)
                 if _is_intra:
                     vol_p = _cap_intraday_vol_p(vol_p, sp.intraday_vol_cap)
                 if _is_intra and not sp.use_intraday_empirical:
@@ -4981,10 +5300,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     effective_min += sp.series_cooldown_extra_edge
             if sp.dte_edge_scaling_enabled and dte is not None:
                 effective_min *= _dte_edge_scale_factor(float(dte), sp)
+            if _is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                effective_min *= float(sp.ultra_short_min_edge_mult)
             effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
             effective_min_no = effective_min + no_parity_penalty + obi_adj_no + ll_adj_no
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
+            if _is_ultra_short_horizon(m, yf_ticker, sp):
+                _up = (
+                    sp.ultra_short_min_p_win_with_vol
+                    if (use_vol and vol_p is not None)
+                    else sp.ultra_short_min_p_win
+                )
+                min_p_win = max(min_p_win, _up)
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
             cross_sanity_block_side = None
             cross_sanity_reason = ""
@@ -5022,7 +5350,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     min_edge_yes=effective_min_yes,
                     min_edge_no=effective_min_no,
                 )
-                if _is_other_intraday(m, yf_ticker)
+                if _strict_intraday_evaluation(m, yf_ticker, sp)
                 else strategy_engine.recommend(
                     p_yes=hist_p,
                     market_yes=yes_bid,
@@ -5185,13 +5513,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 min_fee_per_order=sp.min_fee_per_order,
                 effective_min_yes=effective_min_yes,
                 effective_min_no=effective_min_no,
-                is_strict_intraday=bool(_is_other_intraday(m, yf_ticker)),
+                is_strict_intraday=bool(_strict_intraday_evaluation(m, yf_ticker, sp)),
                 sp=sp,
             )
+            _fee_yes_r = _fee_per_contract(yes_bid, maker_fee_rate, sp.min_fee_per_order)
+            _fee_no_r = _fee_per_contract(no_bid_early, maker_fee_rate, sp.min_fee_per_order)
+            _net_yes_r = hist_p - yes_bid - _fee_yes_r
+            _net_no_r = (1.0 - hist_p) - no_bid_early - _fee_no_r
             reason = _format_reason(
                 rec, hist_p, yes_bid, threshold, current_price, direction,
                 violates_rule, vol_p, sp.min_yes_price, sp.min_no_price,
                 sp.max_buy_yes_strike_above_pct, no_bid_early, effective_min, use_vol,
+                net_edge_yes=_net_yes_r,
+                net_edge_no=_net_no_r,
+                req_yes=effective_min_yes,
+                req_no=effective_min_no,
             )
             if rec == REC_SKIP and momentum_crash:
                 reason = (
@@ -5538,7 +5874,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if use_vol else None
                 )
                 if vol_p_gem is not None and use_vol:
-                    _is_intra_g = _is_intraday_market(evt, yf_ticker)
+                    _is_intra_g = _is_intraday_or_ultra_short(evt, yf_ticker, sp)
                     if _is_intra_g:
                         vol_p_gem = _cap_intraday_vol_p(vol_p_gem, sp.intraday_vol_cap)
                     if _is_intra_g and not sp.use_intraday_empirical:
@@ -5670,10 +6006,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         effective_min_gem += sp.series_cooldown_extra_edge
                 if sp.dte_edge_scaling_enabled and dte_g is not None:
                     effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
+                if _is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                    effective_min_gem *= float(sp.ultra_short_min_edge_mult)
                 effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
                 effective_min_no_g = effective_min_gem + no_parity_penalty + obi_adj_no_g
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
+                if _is_ultra_short_horizon(evt, yf_ticker, sp):
+                    _ug = (
+                        sp.ultra_short_min_p_win_with_vol
+                        if (use_vol and vol_p_gem is not None)
+                        else sp.ultra_short_min_p_win
+                    )
+                    min_p_win_gem = max(min_p_win_gem, _ug)
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
                 cross_sanity_block_side_g = None
                 cross_sanity_reason_g = ""
@@ -5716,7 +6061,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         min_edge_yes=effective_min_yes_g,
                         min_edge_no=effective_min_no_g,
                     )
-                    if _is_other_intraday(evt, yf_ticker)
+                    if _strict_intraday_evaluation(evt, yf_ticker, sp)
                     else strategy_engine.recommend(
                         p_yes=hist_p_gem,
                         market_yes=impl,
@@ -5858,7 +6203,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     min_fee_per_order=sp.min_fee_per_order,
                     effective_min_yes=effective_min_yes_g,
                     effective_min_no=effective_min_no_g,
-                    is_strict_intraday=bool(_is_other_intraday(evt, yf_ticker)),
+                    is_strict_intraday=bool(_strict_intraday_evaluation(evt, yf_ticker, sp)),
                     sp=sp,
                 )
                 _reason_g = ""
@@ -5873,6 +6218,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _reason_g = (
                         f"momentum protection "
                         f"({momentum_ret:.2%} <= {sp.momentum_crash_threshold_pct:.2%})"
+                    )
+                elif rec == REC_SKIP:
+                    _fq_r = 1.0 - impl
+                    _fy_r = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
+                    _fn_r = _fee_per_contract(_fq_r, maker_fee_rate_gem, sp.min_fee_per_order)
+                    _reason_g = _format_reason(
+                        rec,
+                        hist_p_gem,
+                        impl,
+                        threshold_g,
+                        current_price,
+                        direction_g,
+                        violates_rule_g,
+                        vol_p_gem,
+                        sp.min_yes_price,
+                        sp.min_no_price,
+                        sp.max_buy_yes_strike_above_pct,
+                        _fq_r,
+                        effective_min_gem,
+                        use_vol,
+                        net_edge_yes=hist_p_gem - impl - _fy_r,
+                        net_edge_no=(1.0 - hist_p_gem) - _fq_r - _fn_r,
+                        req_yes=effective_min_yes_g,
+                        req_no=effective_min_no_g,
                     )
                 if _reason_g:
                     print(f"    └─ Reason:       {_reason_g}")
@@ -6216,7 +6585,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     series = s
                                     break
                             if not series:
-                                for prefix, s in [("KXBTC", "KXBTCD"), ("KXETH", "KXETHD"), ("KXSOL", "KXSOLD"), ("KXXRP", "KXXRPD"), ("KXINX", "KXINXU")]:
+                                for prefix, s in [
+                                    ("KXBTC15M", "KXBTC15M"),
+                                    ("KXBTC", "KXBTCD"),
+                                    ("KXETH", "KXETHD"),
+                                    ("KXSOL", "KXSOLD"),
+                                    ("KXXRP", "KXXRPD"),
+                                    ("KXINX", "KXINXU"),
+                                ]:
                                     if prefix in t:
                                         series = s
                                         break
@@ -6288,7 +6664,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             if use_vol else None
                                         )
                                         if vol_p is not None and use_vol:
-                                            _is_intra_pos = _is_intraday_market(m, pos_yf)
+                                            _is_intra_pos = _is_intraday_or_ultra_short(m, pos_yf, sp)
                                             if _is_intra_pos:
                                                 vol_p = _cap_intraday_vol_p(vol_p, sp.intraday_vol_cap)
                                             if _is_intra_pos and not sp.use_intraday_empirical:
@@ -6324,21 +6700,48 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
                                     if sp.dte_edge_scaling_enabled and dte_pos is not None:
                                         eff_pos *= _dte_edge_scale_factor(float(dte_pos), sp)
+                                    if _is_ultra_short_horizon(m, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                                        eff_pos *= float(sp.ultra_short_min_edge_mult)
                                     if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                                         eff_pos += adaptive_edge_bump
                                     eff_pos_yes = eff_pos + yes_parity_penalty + sp.yes_overconfidence_extra_edge
                                     eff_pos_no = eff_pos + no_parity_penalty
-                                    rec = strategy_engine.recommend(
-                                        p_yes=hist_p,
-                                        market_yes=yes_bid,
-                                        min_edge=eff_pos,
-                                        maker_fee_rate=maker_fee_pos,
-                                        min_fee_per_order=sp.min_fee_per_order,
-                                        min_edge_yes=eff_pos_yes,
-                                        min_edge_no=eff_pos_no,
-                                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
-                                        easy_win_min_p_win=sp.easy_win_min_p_win,
-                                        easy_win_min_market_p=sp.easy_win_min_market_p,
+                                    min_p_win_pos = (
+                                        sp.intraday_other_min_p_win_with_vol
+                                        if (use_vol and vol_p is not None)
+                                        else sp.intraday_other_min_p_win
+                                    )
+                                    if _is_ultra_short_horizon(m, pos_yf, sp):
+                                        _upp = (
+                                            sp.ultra_short_min_p_win_with_vol
+                                            if (use_vol and vol_p is not None)
+                                            else sp.ultra_short_min_p_win
+                                        )
+                                        min_p_win_pos = max(min_p_win_pos, _upp)
+                                    rec = (
+                                        strategy_engine.recommend_strict(
+                                            p_yes=hist_p,
+                                            market_yes=yes_bid,
+                                            min_p_win=min_p_win_pos,
+                                            min_edge=eff_pos,
+                                            maker_fee_rate=maker_fee_pos,
+                                            min_fee_per_order=sp.min_fee_per_order,
+                                            min_edge_yes=eff_pos_yes,
+                                            min_edge_no=eff_pos_no,
+                                        )
+                                        if _strict_intraday_evaluation(m, pos_yf, sp)
+                                        else strategy_engine.recommend(
+                                            p_yes=hist_p,
+                                            market_yes=yes_bid,
+                                            min_edge=eff_pos,
+                                            maker_fee_rate=maker_fee_pos,
+                                            min_fee_per_order=sp.min_fee_per_order,
+                                            min_edge_yes=eff_pos_yes,
+                                            min_edge_no=eff_pos_no,
+                                            min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                                            easy_win_min_p_win=sp.easy_win_min_p_win,
+                                            easy_win_min_market_p=sp.easy_win_min_market_p,
+                                        )
                                     )
                                     sell_price = yes_bid if side == "yes" else no_bid
                                     # Persist orphan position eval for calibration (positions not in main market loop)
@@ -6386,7 +6789,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         if sp.dynamic_sell_threshold
                                         else sp.sell_losing_pct
                                     )
-                                    if p_lose >= sell_threshold:
+                                    eff_sell_thresh = sell_threshold + max(
+                                        0.0, float(sp.position_loser_sell_p_lose_margin)
+                                    )
+                                    hold_skip = _hold_winner_skip_discretionary_sells(
+                                        sp,
+                                        current_price=current_price_pos,
+                                        threshold=threshold,
+                                        direction=direction,
+                                        side=side,
+                                        dte_days=dte_pos,
+                                    )
+                                    flip_cond = (side == "yes" and rec == REC_BUY_NO) or (
+                                        side == "no" and rec == REC_BUY_YES
+                                    )
+                                    flip_ok = flip_cond and _position_flip_sell_allowed(
+                                        sp,
+                                        hist_p=hist_p,
+                                        yes_bid=yes_bid,
+                                        no_bid=no_bid,
+                                        side=side,
+                                        maker_fee_rate=maker_fee_pos,
+                                        min_fee_per_order=sp.min_fee_per_order,
+                                    )
+                                    if not hold_skip and p_lose >= eff_sell_thresh:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -6403,7 +6829,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             maker_fee_pos, position_count,
                                             current_price=current_price_pos, dte_days=dte_pos,
                                         )
-                                    elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
+                                    elif not hold_skip and flip_ok:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -6498,7 +6924,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if use_vol else None
                 )
                 if vol_p is not None and use_vol:
-                    _is_intra_c = _is_intraday_market(m, _yf)
+                    _is_intra_c = _is_intraday_or_ultra_short(m, _yf, sp)
                     if _is_intra_c:
                         vol_p = _cap_intraday_vol_p(vol_p, sp.intraday_vol_cap)
                     if _is_intra_c and not sp.use_intraday_empirical:
@@ -6515,21 +6941,48 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 eff_cached = _get_effective_min_edge(min_edge, direction, calibration, sp)
                 if sp.dte_edge_scaling_enabled and dte_cached is not None:
                     eff_cached *= _dte_edge_scale_factor(float(dte_cached), sp)
+                if _is_ultra_short_horizon(m, _yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                    eff_cached *= float(sp.ultra_short_min_edge_mult)
                 if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                     eff_cached += adaptive_edge_bump
                 eff_cached_yes = eff_cached + yes_parity_penalty + sp.yes_overconfidence_extra_edge
                 eff_cached_no = eff_cached + no_parity_penalty
-                rec = strategy_engine.recommend(
-                    p_yes=hist_p,
-                    market_yes=yes_bid,
-                    min_edge=eff_cached,
-                    maker_fee_rate=maker_fee_cached,
-                    min_fee_per_order=sp.min_fee_per_order,
-                    min_edge_yes=eff_cached_yes,
-                    min_edge_no=eff_cached_no,
-                    min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
-                    easy_win_min_p_win=sp.easy_win_min_p_win,
-                    easy_win_min_market_p=sp.easy_win_min_market_p,
+                min_p_win_c = (
+                    sp.intraday_other_min_p_win_with_vol
+                    if (use_vol and vol_p is not None)
+                    else sp.intraday_other_min_p_win
+                )
+                if _is_ultra_short_horizon(m, _yf, sp):
+                    _uc = (
+                        sp.ultra_short_min_p_win_with_vol
+                        if (use_vol and vol_p is not None)
+                        else sp.ultra_short_min_p_win
+                    )
+                    min_p_win_c = max(min_p_win_c, _uc)
+                rec = (
+                    strategy_engine.recommend_strict(
+                        p_yes=hist_p,
+                        market_yes=yes_bid,
+                        min_p_win=min_p_win_c,
+                        min_edge=eff_cached,
+                        maker_fee_rate=maker_fee_cached,
+                        min_fee_per_order=sp.min_fee_per_order,
+                        min_edge_yes=eff_cached_yes,
+                        min_edge_no=eff_cached_no,
+                    )
+                    if _strict_intraday_evaluation(m, _yf, sp)
+                    else strategy_engine.recommend(
+                        p_yes=hist_p,
+                        market_yes=yes_bid,
+                        min_edge=eff_cached,
+                        maker_fee_rate=maker_fee_cached,
+                        min_fee_per_order=sp.min_fee_per_order,
+                        min_edge_yes=eff_cached_yes,
+                        min_edge_no=eff_cached_no,
+                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                        easy_win_min_p_win=sp.easy_win_min_p_win,
+                        easy_win_min_market_p=sp.easy_win_min_market_p,
+                    )
                 )
                 current_price_pos = current_price_cached
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -6565,7 +7018,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if sp.dynamic_sell_threshold
                     else sp.sell_losing_pct
                 )
-                if p_lose >= sell_threshold:
+                eff_sell_thresh = sell_threshold + max(0.0, float(sp.position_loser_sell_p_lose_margin))
+                hold_skip = _hold_winner_skip_discretionary_sells(
+                    sp,
+                    current_price=current_price_pos,
+                    threshold=threshold,
+                    direction=direction,
+                    side=side,
+                    dte_days=dte_cached,
+                )
+                flip_cond = (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES)
+                flip_ok = flip_cond and _position_flip_sell_allowed(
+                    sp,
+                    hist_p=hist_p,
+                    yes_bid=yes_bid,
+                    no_bid=no_bid,
+                    side=side,
+                    maker_fee_rate=maker_fee_cached,
+                    min_fee_per_order=sp.min_fee_per_order,
+                )
+                if not hold_skip and p_lose >= eff_sell_thresh:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -6583,7 +7055,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         current_price=current_price_pos, dte_days=dte_cached,
                     )
                 # SELL YES when we'd now recommend BUY NO; SELL NO when we'd recommend BUY YES
-                elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
+                elif not hold_skip and flip_ok:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -6751,7 +7223,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         )
                         hist_p_g = emp_g
                         if vol_p_g is not None and use_vol:
-                            _is_intra_gp = _is_intraday_market(evt, pos_yf)
+                            _is_intra_gp = _is_intraday_or_ultra_short(evt, pos_yf, sp)
                             if _is_intra_gp:
                                 vol_p_g = _cap_intraday_vol_p(vol_p_g, sp.intraday_vol_cap)
                             if _is_intra_gp and not sp.use_intraday_empirical:
@@ -6765,10 +7237,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             else:
                                 hist_p_g = max(emp_g, vol_p_g)
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
+                        if _is_ultra_short_horizon(evt, pos_yf, sp):
+                            _ugp = (
+                                sp.ultra_short_min_p_win_with_vol
+                                if (use_vol and vol_p_g is not None)
+                                else sp.ultra_short_min_p_win
+                            )
+                            min_p_win_g = max(min_p_win_g, _ugp)
                         maker_fee_pos_g = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, pos_yf)
                         pos_min_edge_g = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                         if sp.dte_edge_scaling_enabled and dte_g is not None:
                             pos_min_edge_g *= _dte_edge_scale_factor(float(dte_g), sp)
+                        if _is_ultra_short_horizon(evt, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                            pos_min_edge_g *= float(sp.ultra_short_min_edge_mult)
                         if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                             pos_min_edge_g += adaptive_edge_bump
                         rec = (
@@ -6782,7 +7263,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 min_edge_yes=pos_min_edge_g + yes_parity_penalty + sp.yes_overconfidence_extra_edge,
                                 min_edge_no=pos_min_edge_g + no_parity_penalty,
                             )
-                            if _is_other_intraday(evt, pos_yf)
+                            if _strict_intraday_evaluation(evt, pos_yf, sp)
                             else strategy_engine.recommend(
                                 p_yes=hist_p_g,
                                 market_yes=impl,
@@ -6845,7 +7326,28 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if sp.dynamic_sell_threshold
                             else sp.sell_losing_pct
                         )
-                        if p_lose >= sell_threshold:
+                        eff_sell_thresh = sell_threshold + max(0.0, float(sp.position_loser_sell_p_lose_margin))
+                        hold_skip = _hold_winner_skip_discretionary_sells(
+                            sp,
+                            current_price=current_price_g,
+                            threshold=threshold_g,
+                            direction=direction_g,
+                            side=side,
+                            dte_days=dte_g,
+                        )
+                        flip_cond = (side == "yes" and rec == REC_BUY_NO) or (
+                            side == "no" and rec == REC_BUY_YES
+                        )
+                        flip_ok = flip_cond and _position_flip_sell_allowed(
+                            sp,
+                            hist_p=hist_p_g,
+                            yes_bid=impl,
+                            no_bid=no_price_g,
+                            side=side,
+                            maker_fee_rate=maker_fee_pos_g,
+                            min_fee_per_order=sp.min_fee_per_order,
+                        )
+                        if not hold_skip and p_lose >= eff_sell_thresh:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,
@@ -6865,7 +7367,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 extra={"instrument_symbol": sym, "gemini_evt": evt},
                                 current_price=current_price_g, dte_days=dte_g,
                             )
-                        elif (side == "yes" and rec == REC_BUY_NO) or (side == "no" and rec == REC_BUY_YES):
+                        elif not hold_skip and flip_ok:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,
@@ -6976,6 +7478,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     )
     _filter_pending_buys_by_min_payout_ratio(
         pending_orders, min_ratio=sp.min_payout_ratio, logger=print,
+    )
+
+    gemini_bal_for_micro = 0
+    if any(o.get("platform") == PLATFORM_GEMINI for o in pending_orders):
+        try:
+            gemini_bal_for_micro = int(
+                GeminiTradingClient().get_balance().get("balance", 0) or 0
+            )
+        except Exception:
+            gemini_bal_for_micro = 0
+    _micro_balance_force_min_one_before_budget(
+        pending_orders,
+        kalshi_balance_cents=balance_cents,
+        gemini_balance_cents=gemini_bal_for_micro,
+        trading=trading,
+        logger=print,
     )
 
     # Budget-aware allocation per platform (Kalshi and Gemini have separate balances)
@@ -7349,6 +7867,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         symbol=sym, side="buy", outcome=o["side"], quantity=count, price=o["price"],
                         ticker_label=o["ticker"],
                         max_pct_of_balance=max_pct,
+                        min_balance_for_limit_fallback_cents=min_balance_fallback,
                     )
                     if result:
                         print(f"  Placed BUY {o['side'].upper()} (Gemini) {o['ticker']} x {count}")
@@ -7375,7 +7894,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 config=cfg,
                             )
                     else:
-                        print(f"  (skipped BUY (Gemini) {o['ticker']} - balance/API constraint)")
+                        _gem_err = getattr(gemini_trading, "last_place_order_error", None) or "balance/API constraint"
+                        print(f"  (skipped BUY (Gemini) {o['ticker']} - {_gem_err})")
                 elif sym and not gemini_trading:
                     print(f"  (Gemini {o['ticker']}: GEMINI_API_KEY/SECRET not set - skip)")
 

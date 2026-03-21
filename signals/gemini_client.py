@@ -43,6 +43,47 @@ PRODUCTION_BASE = "https://api.gemini.com"
 SANDBOX_BASE = "https://api.sandbox.gemini.com"
 
 
+def _balance_rows_from_response(resp: Any) -> list[dict]:
+    """
+    Normalize /v1/balances JSON into a list of balance dicts.
+    Gemini sometimes returns a bare list; other times a wrapper dict.
+    """
+    if isinstance(resp, list):
+        return [x for x in resp if isinstance(x, dict)]
+    if not isinstance(resp, dict):
+        return []
+    for key in ("balances", "data", "result", "response", "details", "balancesList"):
+        v = resp.get(key)
+        if isinstance(v, list):
+            return [x for x in v if isinstance(x, dict)]
+    if "currency" in resp or "available" in resp or "amount" in resp:
+        return [resp]
+    return []
+
+
+def _usd_available_cents_from_rows(rows: list[dict]) -> int:
+    """Sum USD available across rows (exchange + prediction markets may each have a row)."""
+    total = 0.0
+    for b in rows:
+        cur = (b.get("currency") or "").upper().strip()
+        if cur != "USD":
+            continue
+        val = None
+        for key in ("available", "availableForWithdrawal", "available_for_withdrawal"):
+            if b.get(key) is not None:
+                val = b.get(key)
+                break
+        if val is None:
+            val = b.get("amount")
+        if val is None:
+            continue
+        try:
+            total += float(val)
+        except (TypeError, ValueError):
+            continue
+    return int(round(total * 100))
+
+
 def parse_gemini_error(response) -> tuple[str | None, str]:
     """
     Parse Gemini 4xx/406 error response. Returns (reason, message).
@@ -174,6 +215,16 @@ class GeminiPredictionClient:
             _fetch_category("hourly")  # hourly (BTC, ETH, SOL, XRP at 1am EDT etc.)
         except Exception as e:
             log.debug("Gemini hourly category fetch failed (API may have deprecated it): %s", e)
+        # 15-minute BTC interval events (ticker BTC15M*); may be buried in long crypto pagination
+        try:
+            r = self.get_events(category="crypto", status="active", search="BTC15M", limit=100, offset=0)
+            for evt in r.get("data") or []:
+                eid = evt.get("id") or evt.get("ticker") or ""
+                if eid and eid not in seen:
+                    seen.add(eid)
+                    out.append(evt)
+        except Exception as e:
+            log.debug("Gemini BTC15M search fetch failed: %s", e)
         return out
 
     def get_events_by_asset(
@@ -343,6 +394,8 @@ class GeminiTradingClient(GeminiPredictionClient):
             raise ValueError("GEMINI_API_KEY and GEMINI_API_SECRET must be set for authenticated API")
         self._nonce_lock = threading.Lock()
         self._last_nonce = 0
+        # Last failure from place_order_safe (for clearer CLI messages than "balance/API constraint")
+        self.last_place_order_error: str | None = None
 
     def _next_nonce(self) -> int:
         """Return a nonce strictly greater than the last. Gemini requires monotonic increase per API key."""
@@ -405,12 +458,24 @@ class GeminiTradingClient(GeminiPredictionClient):
         except Exception as e:
             log.warning("get_balance: could not fetch Gemini balance: %s", e)
             return {"balance": 0}
-        balances = resp if isinstance(resp, list) else []
-        for b in balances:
-            if (b.get("currency") or "").upper() == "USD":
-                avail = float(b.get("available") or b.get("amount") or 0)
-                return {"balance": int(avail * 100)}
-        return {"balance": 0}
+        rows = _balance_rows_from_response(resp)
+        cents = _usd_available_cents_from_rows(rows)
+        if cents <= 0 and rows:
+            log.warning(
+                "get_balance: no USD balance parsed from %d row(s); sample keys=%s",
+                len(rows),
+                list(rows[0].keys())[:12] if rows else [],
+            )
+        elif cents <= 0 and not rows:
+            snippet = ""
+            if isinstance(resp, dict):
+                snippet = str(list(resp.keys())[:8])
+            log.warning(
+                "get_balance: empty or unknown balances shape (type=%s keys=%s)",
+                type(resp).__name__,
+                snippet,
+            )
+        return {"balance": max(0, cents)}
 
     def get_active_orders(
         self, symbol: str | None = None, limit: int = 50, offset: int = 0
@@ -558,6 +623,7 @@ class GeminiTradingClient(GeminiPredictionClient):
         order_type: str = "limit",
         time_in_force: str = "good-til-cancel",
         max_pct_of_balance: float = 0.90,
+        min_balance_for_limit_fallback_cents: int = 0,
     ) -> dict | None:
         """
         Place limit order; never raises on 4xx/406. Logs error and returns None on failure.
@@ -565,12 +631,15 @@ class GeminiTradingClient(GeminiPredictionClient):
         ticker_label: optional label for log messages (e.g. Kalshi ticker).
         Rounds price to 0.01 to avoid InvalidPrice (Gemini uses 1¢ ticks).
         """
+        self.last_place_order_error = None
         p = float(price)
         if 0 < p < 1:
-            price = round(p * 100) / 100
-        price_cents = int(p * 100)
+            p = round(p * 100) / 100
+        price = p
+        price_cents = max(1, min(100, int(round(p * 100))))
         qty = int(quantity) if quantity else 0
         if qty < 1:
+            self.last_place_order_error = "quantity must be >= 1"
             log.warning("place_order_safe: quantity must be >= 1")
             return None
         # Cap by balance (buy only; sell uses position)
@@ -579,19 +648,39 @@ class GeminiTradingClient(GeminiPredictionClient):
                 bal = self.get_balance()
                 balance_cents = int(bal.get("balance", 0) or 0)
             except Exception as e:
+                self.last_place_order_error = f"balance fetch failed: {e}"
                 log.warning("place_order_safe: could not fetch balance: %s", e)
                 return None
-            max_spend = int(balance_cents * max_pct_of_balance)
+            # Match Kalshi: micro accounts below fallback threshold may use full balance for sizing (not only max_pct slice).
+            eff_pct = float(max_pct_of_balance)
+            if (
+                min_balance_for_limit_fallback_cents > 0
+                and 0 < balance_cents < min_balance_for_limit_fallback_cents
+            ):
+                eff_pct = 1.0
+            max_spend = int(balance_cents * eff_pct)
             max_count = max_spend // price_cents if price_cents else 0
+            # If max_pct slices the bankroll so small that we cannot buy 1 lot, but cash covers 1+ contracts, allow it
+            # (e.g. max_pct_of_balance 0.18 × $3 = $0.54 < $0.69 ask → without this, Gemini never trades.)
+            if max_count < 1 and balance_cents >= price_cents:
+                max_count = min(qty, balance_cents // price_cents)
             if max_count <= 0:
+                self.last_place_order_error = (
+                    f"balance ${balance_cents / 100:.2f} (max spend ${max_spend / 100:.2f}) "
+                    f"insufficient for ≥1 @ {price_cents}¢ — check get_balance / GEMINI_ACCOUNT"
+                )
                 log.info(
-                    "place_order_safe: skip - Gemini balance $%.2f insufficient for %s @ %d¢",
+                    "place_order_safe: skip - Gemini balance $%.2f insufficient for %s @ %d¢ (max %d contracts)",
                     balance_cents / 100,
                     ticker_label or symbol,
                     price_cents,
+                    max_count,
                 )
                 return None
             qty = min(qty, max_count)
+            if qty < 1:
+                self.last_place_order_error = "count 0 after balance cap"
+                return None
         try:
             return self.place_order(
                 symbol=symbol,
@@ -620,6 +709,10 @@ class GeminiTradingClient(GeminiPredictionClient):
                     hint = " (accept Prediction Markets terms at exchange.gemini.com)"
                 elif reason == GEMINI_REASON_MISSING_ACCOUNTS:
                     hint = " (Master API key: set GEMINI_ACCOUNT in .env, or use account-scoped key at exchange.gemini.com/settings/api)"
+                detail = f"{reason or e.response.status_code}{hint}"
+                if msg:
+                    detail = f"{detail}: {msg[:180]}"
+                self.last_place_order_error = detail.strip()
                 log.warning(
                     "place_order_safe: order rejected %s %s %s - %s%s",
                     symbol,
