@@ -2744,6 +2744,17 @@ def _barbell_no_bucket(
     return None
 
 
+def _barbell_status_for_log(bucket: str, blocked: bool, rec: str) -> str:
+    """Label for the Barbell: tree line when barbell_enabled (never bare em dash for SKIP-before-gate)."""
+    if bucket:
+        return bucket
+    if blocked:
+        return "blocked (not base/alpha)"
+    if rec == REC_SKIP:
+        return "n/a (SKIP before barbell; only classifies BUY YES/NO)"
+    return "—"
+
+
 def _maker_fee_rate_for_market(sp: _StrategyParams, platform: str, yf_ticker: str | None) -> float:
     """Platform-specific maker fee with index override support."""
     if platform == PLATFORM_KALSHI and (yf_ticker or "").upper() in {"^GSPC", "SPY"}:
@@ -5758,7 +5769,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if sp.barbell_enabled:
                 print(
                     f"    ├─ Barbell:      "
-                    f"{barbell_bucket or ('—' if not barbell_blocked else 'blocked (not base/alpha)')}"
+                    f"{_barbell_status_for_log(barbell_bucket, barbell_blocked, rec)}"
                 )
             print(f"    │    → {_rec_plain}")
             _print_multi_strategy_compare_line(
@@ -6484,7 +6495,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if sp.barbell_enabled:
                     print(
                         f"    ├─ Barbell:      "
-                        f"{barbell_bucket_g or ('—' if not barbell_blocked_g else 'blocked (not base/alpha)')}"
+                        f"{_barbell_status_for_log(barbell_bucket_g, barbell_blocked_g, rec)}"
                     )
                 print(f"    │    → {_rec_plain_g}")
                 _print_multi_strategy_compare_line(
