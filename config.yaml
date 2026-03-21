@@ -36,13 +36,14 @@ execution:
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
 # Short test window: recovery.min_edge overrides strategy.min_edge — lower hurdle to surface fills (tighten again after review).
 recovery:
-  min_edge: 0.038 # Slightly under ~4¢ fee drag so 69¢ YES / ~75% model can clear hurdle after ultra_short mult
+  min_edge: 0.035 # Bit looser than 3.8%; circuit breaker (adaptive_loss_*) still halts buys on bad streaks
   adaptive_edge_max_extra: 0.0 # Caps recent-performance bump (0 = no extra from this path)
   loss_streak_max_extra: 0.0 # Caps loss-streak bump when adaptive_learning re-enabled
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
   # Without these, low min_edge is negated: calibration adds +edge when WR<50%; parity adds up to ~20% on the dominant side.
   calibration_extra_edge_overall: 0 # Suppress “bad history” min_edge bump while testing (strategy default is 0.05)
-  calibration_extra_edge_above_yes: 0 # Else BUY YES can pass min_edge then fail _should_downgrade (base+0.04 extra)
+  # PnL: weak historical above+YES should still pay extra hurdle (aligns with strategy 0.07)
+  calibration_extra_edge_above_yes: 0.07
   parity_penalty_enabled: false # Suppress YES/NO parity add-on during recovery (re-enable after WR improves)
   # Empirical CI + vol-disagree stack on min_edge (often pushes “required” to ~7% while raw gap looks ~6%).
   uncertainty_edge_mult: 0 # Recovery: surface trades; restore 0.12–0.18 when WR stabilizes
@@ -53,8 +54,8 @@ recovery:
   dte_edge_scaling_enabled: false
   ultra_short_min_edge_mult: 1.0 # No extra × on KXBTC15M / 15m; strategy default 1.06 stacks on min_edge
   # Hourly / non–5pm crypto (and non–4pm S&P) use strict mode: model P(win) must exceed these AND edge — funding wallets does not change that.
-  intraday_other_min_p_win: 0.78 # Bit more aggressive than 0.80; still strict vs default 0.90
-  intraday_other_min_p_win_with_vol: 0.70 # Paired loosen with vol path
+  intraday_other_min_p_win: 0.75 # Loosened with global circuit breaker as backstop
+  intraday_other_min_p_win_with_vol: 0.67 # Paired with vol path
   # 0 = off. A low strategy cap (e.g. 22¢) drops almost every BUY (69¢ YES / 31¢ NO both fail).
   max_buy_limit_price: 0
 
@@ -62,7 +63,7 @@ recovery:
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
   # Base min_edge (overridden by recovery.min_edge when set). See IMPROVEMENTS.md — micro-compounder / launchd picks up YAML each run.
-  min_edge: 0.065 # Base when recovery block removed; recovery.min_edge overrides while present
+  min_edge: 0.060 # Base when recovery removed; slightly looser with circuit breaker on blended recent WR
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
@@ -88,7 +89,7 @@ strategy:
   # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
   max_buy_yes_strike_above_pct: 0.08
   max_buy_no_strike_above_pct: 0.08
-  min_no_price: 0.01 # Allow NO side on 97¢ contracts (NO=3¢); capital-starved recovery mode
+  min_no_price: 0.03 # PnL: skip NO quotes <3¢ (symmetric with min_yes; thin book protection)
   days_back: 365 # Days of historical data for P(above/below). Longer = more stable empirical P
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
@@ -128,10 +129,10 @@ strategy:
   limit_order_ttl_minutes: 30 # Cancel and refresh resting BUY limits older than this TTL
   # Passive bid chase: if still recommended, cancel resting BUY after N minutes so next cycle re-quotes at fresh bid
   passive_bid_chase_enabled: true
-  passive_bid_chase_refresh_minutes: 5
+  passive_bid_chase_refresh_minutes: 3 # PnL: re-quote resting buys sooner when book moves (was 5)
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
-  layered_order_levels: 3 # Used by layered mode to spread large intents across deeper quote levels
+  layered_order_levels: 4 # PnL: one extra level vs 3 for smoother VWAP when size > 1
   limit_dip_pct_high_confidence: 0.08 # High P(win): still shallow dip so 90%+ ideas can fill before theta eats the book
   limit_dip_pct_price_decline: 0.06 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg
   # DTE-confidence dip scaling: when resolution is far out AND model is confident,
@@ -171,12 +172,12 @@ strategy:
   intraday_ewma_lambda: 0.90 # Faster intraday EWMA response for flash moves while keeping daily lambda stable
   vol_model: auto # auto|ewma|garch|sample. auto uses GARCH(1,1) when available, then falls back safely.
   garch_min_returns: 80 # Minimum return observations before enabling GARCH fit in auto/garch mode
-  intraday_other_min_p_win: 0.87 # Was 0.90 — still high bar for non–5pm/4pm intraday
-  intraday_other_min_p_win_with_vol: 0.76 # Was 0.80
+  intraday_other_min_p_win: 0.85 # Non–5pm/4pm intraday strict gate (recovery can override lower)
+  intraday_other_min_p_win_with_vol: 0.74
   # Sub-hour / 15m (Kalshi KXBTC15M title, Gemini BTC15M* ticker, or DTE <= ultra_short_dte_hours)
   ultra_short_dte_hours: 1.0
-  ultra_short_min_p_win: 0.90 # Was 0.93 — still conservative vs 15m noise
-  ultra_short_min_p_win_with_vol: 0.84 # Was 0.88
+  ultra_short_min_p_win: 0.88 # 15m BTC; circuit breaker limits damage if edge is illusory
+  ultra_short_min_p_win_with_vol: 0.82
   ultra_short_min_edge_mult: 1.06 # Was 1.12 — less edge stacking on 15m
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
@@ -201,7 +202,7 @@ strategy:
   enforce_no_above_rule: false # Disable forced BUY NO suppression when price is above strike
   min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
   calibration_min_win_rate_above_yes: 0.55 # More conservative: require stronger observed above+YES performance
-  calibration_extra_edge_above_yes: 0.04 # Was 0.05
+  calibration_extra_edge_above_yes: 0.07 # PnL: penalize underperforming above+YES harder (recovery can set lower)
   calibration_extra_edge_overall: 0.035 # Was 0.05 — less global choke when WR < 50%
   min_calibration_samples_overall: 20 # Min resolved trades before applying overall min_edge bump
   use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
@@ -213,14 +214,16 @@ strategy:
   p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
-  kelly_fraction: 0.15 # Fractional Kelly: smaller bets while we recover
+  kelly_fraction: 0.18 # Fractional Kelly; circuit breaker caps runaway sizing on bad regimes
   dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
   dynamic_kelly_floor: 0.10 # Min Kelly fraction floor under stress
   dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
   dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
   dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
-  adaptive_loss_block_win_rate: 0.25 # Block new buys if recent win rate dips below this (was 0.35; allows trading through moderate drawdowns)
-  adaptive_loss_block_lookback_hours: 6.0 # Lookback window for the circuit-breaker win rate
+  # Global circuit breaker: blended Kalshi+Gemini resolved trades in lookback; clears all pending BUYS.
+  # Slightly relaxed vs 25% so we trade through rough patches; still stops sustained bleed.
+  adaptive_loss_block_win_rate: 0.20 # Block new buys when recent WR below this
+  adaptive_loss_block_lookback_hours: 8.0 # Longer window = less noise, fewer false trips
   enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
   two_sided_quote_min_edge: 0.03 # Aligned with higher min_edge; still must be <= min_edge
   macro_signal_enabled: true # Include macro cross-asset context in signal model
@@ -236,7 +239,7 @@ strategy:
   stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
   weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
-  momentum_crash_threshold_pct: -0.05 # Widened from -3.5% to -5%; dips are where passive limit value is
+  momentum_crash_threshold_pct: -0.04 # PnL: block knives a bit earlier than -5% (still allows normal dips)
   max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
   max_daily_loss_pct: 0 # Disabled: was blocking all buys with low balance ($3.40 loss = 155% of ~$2). Re-enable when balance recovers (e.g. 0.25)
   max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
@@ -291,9 +294,9 @@ strategy:
 
   mc_enabled: true # Monte Carlo simulation: blend simulated paths with analytical CDF for tail-aware probability
   mc_paths: 10000 # Number of GBM paths to simulate (higher = more accurate, slower; 10k ≈ 50ms with numpy)
-  mc_blend_weight: 0.3 # Weight of MC result vs analytical (0 = pure analytical, 1 = pure MC; 0.3 = 30% MC)
-  liquidity_spread_bps_soft: 1500 # Start reducing size when spread proxy > 15%
-  liquidity_spread_bps_hard: 4000 # Max size reduction at/above 40% spread proxy
+  mc_blend_weight: 0.38 # PnL: more tail weight vs pure CDF on crypto (was 0.30; cap 1.0)
+  liquidity_spread_bps_soft: 1200 # PnL: shrink size earlier in wide books → less slippage pain
+  liquidity_spread_bps_hard: 3500 # Full haircut kicks in before 40% proxy spread
   liquidity_min_size_multiplier: 0.20 # At hard spread, keep at least 20% of base size
   liquidity_missing_ask_multiplier: 0.80 # If ask unavailable, apply conservative 20% size haircut
   # ML/AI-style signal model: combine multiple signals into a unified P(YES)
@@ -376,8 +379,8 @@ storage:
 # Underlying: yfinance + live snapshot — not exchange websocket latency; favor limit/maker fills (taker fees are higher).
 trading:
   dry_run: false # Set true for paper runs until forward performance recovers (preview: --preview --no-llm)
-  max_pct_of_balance: 0.18 # Was 0.15 — modestly larger per order; total cap still bounds risk
-  max_total_buy_pct: 0.50 # max % of balance for ALL buys combined (budget-aware diversification)
+  max_pct_of_balance: 0.22 # Per-order cap vs venue balance; total buy % still applies
+  max_total_buy_pct: 0.55 # max % of balance for ALL buys combined (budget-aware diversification)
   min_contracts: 1 # skip if capped count < this
   # Dust-to-trade: when venue balance ≤ threshold, promote best zero-count BUY to x1 after budget pass (data + compounding on micro bankrolls)
   dust_trade_enabled: true
