@@ -2431,6 +2431,20 @@ def _joint_dual_high_pessimism(
     return b * (1.0 - lam) + 0.5 * lam
 
 
+def _vol_emp_blend_hist_p_with_joint_trace(
+    emp: float,
+    vol_p: float,
+    w_emp: float,
+    sp: _StrategyParams,
+) -> tuple[float, float]:
+    """Empirical–vol dampened blend: (P before joint-high pull, P after)."""
+    blended = _vol_disagree_dampened_blend(
+        emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend
+    )
+    after = _joint_dual_high_pessimism(blended, emp, vol_p, sp)
+    return blended, after
+
+
 def _vol_emp_blend_hist_p(
     emp: float,
     vol_p: float | None,
@@ -2440,10 +2454,54 @@ def _vol_emp_blend_hist_p(
     """Empirical–vol blend + vol-disagreement dampening + joint high-P pessimism."""
     if vol_p is None:
         return float(emp)
-    blended = _vol_disagree_dampened_blend(
-        emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend
+    _, after = _vol_emp_blend_hist_p_with_joint_trace(emp, vol_p, w_emp, sp)
+    return after
+
+
+def _print_barbell_joint_blend_diagnostic(
+    sp: _StrategyParams,
+    *,
+    emp: float,
+    vol_p: float,
+    yes_bid: float,
+    no_bid: float,
+    maker_fee_rate: float,
+    joint_pre: float | None,
+    joint_post: float | None,
+    final_p_yes: float,
+) -> None:
+    """
+    Log whether joint-high pessimism moves vol/emp blend across barbell *base* gates
+    (hypothetical BUY YES / BUY NO at current quotes). Final trade logic uses final_p_yes
+    after shrinkage / signal / anti-hallucination.
+    """
+    if not sp.barbell_enabled or joint_pre is None or joint_post is None:
+        return
+    yb = _barbell_yes_bucket(joint_pre, yes_bid, maker_fee_rate, sp)
+    ya = _barbell_yes_bucket(joint_post, yes_bid, maker_fee_rate, sp)
+    nb = _barbell_no_bucket(joint_pre, no_bid, maker_fee_rate, sp)
+    na = _barbell_no_bucket(joint_post, no_bid, maker_fee_rate, sp)
+    dual_zone = min(float(emp), float(vol_p)) >= float(sp.joint_high_emp_vol_threshold)
+    zone_lbl = (
+        f"dual-high zone min(emp,vol)≥{sp.joint_high_emp_vol_threshold:.0%}"
+        if dual_zone
+        else f"outside dual-high zone (<{sp.joint_high_emp_vol_threshold:.0%})"
     )
-    return _joint_dual_high_pessimism(blended, emp, vol_p, sp)
+    def _buck(x: str | None) -> str:
+        return x if x else "—"
+
+    warn = ""
+    if yb == "base" and ya != "base":
+        warn = "  [WARN] joint-high pulled YES leg out of base bucket @ blend"
+    elif nb == "base" and na != "base":
+        warn = "  [WARN] joint-high pulled NO leg out of base bucket @ blend"
+    print(
+        f"    ├─ Barbell@blend: P(YES) {joint_pre:.1%}→{joint_post:.1%} "
+        f"(joint_high λ={sp.joint_high_pull_to_half:.2f}, {zone_lbl}); "
+        f"YES-base: {_buck(yb)}→{_buck(ya)}; NO-base: {_buck(nb)}→{_buck(na)}; "
+        f"final P(YES) {final_p_yes:.1%} (used for rec)"
+        f"{warn}"
+    )
 
 
 def _adaptive_stress_size_multiplier(bump: float, sp: _StrategyParams) -> float:
@@ -5321,6 +5379,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         for mkt in mkt_list or []:
             barbell_bucket = ""
             barbell_blocked = False
+            joint_blend_pre: float | None = None
+            joint_blend_post: float | None = None
             ticker = mkt.get("ticker", "?")
             title = (mkt.get("title") or "")[:55]
             try:
@@ -5450,13 +5510,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     w_emp = max(w_emp, sp.intraday_min_empirical_weight)
-                    hist_p = _vol_emp_blend_hist_p(emp, vol_p, w_emp, sp)
+                    joint_blend_pre, joint_blend_post = _vol_emp_blend_hist_p_with_joint_trace(
+                        emp, vol_p, w_emp, sp
+                    )
+                    hist_p = joint_blend_post
                 elif sp.vol_blend_weight is not None:
                     w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     if _is_intra:
                         w_emp = max(w_emp, sp.intraday_min_empirical_weight)
-                    hist_p = _vol_emp_blend_hist_p(emp, vol_p, w_emp, sp)
+                    joint_blend_pre, joint_blend_post = _vol_emp_blend_hist_p_with_joint_trace(
+                        emp, vol_p, w_emp, sp
+                    )
+                    hist_p = joint_blend_post
                 else:
                     hist_p = max(emp, vol_p)
             # Anti-gambler sanity buffer on vol/emp blend (before bucket & signal layers)
@@ -5804,9 +5870,27 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 ah_delta = abs(hist_p - hist_p_raw)
                 ah_tag = f"  (AH: {hist_p_raw:.1%}→{hist_p:.1%})" if ah_delta >= 0.02 else ""
                 print(f"    ├─ Blended P:    {hist_p:.1%}  (final model probability){ah_tag}")
+                _print_barbell_joint_blend_diagnostic(
+                    sp,
+                    emp=emp,
+                    vol_p=float(vol_p),
+                    yes_bid=yes_bid,
+                    no_bid=no_bid_early,
+                    maker_fee_rate=maker_fee_rate,
+                    joint_pre=joint_blend_pre,
+                    joint_post=joint_blend_post,
+                    final_p_yes=hist_p,
+                )
             else:
                 print(f"    ├─ Model P(YES): {hist_p:.1%}")
             print(f"    ├─ Market YES:   {yes_bid:.1%}  (what the market is pricing)")
+            if _is_ultra_short_horizon(m, yf_ticker, sp):
+                _usm = float(sp.ultra_short_min_edge_mult)
+                _us_note = " (no extra ×)" if _usm <= 1.0 else ""
+                print(
+                    f"    ├─ Ultra-short:  min_edge ×{_usm:.2f} "
+                    f"(ultra_short_min_edge_mult){_us_note}"
+                )
             _alpha_tags = []
             if obi_val is not None:
                 _alpha_tags.append(f"OBI={obi_val:+.2f}")
@@ -6134,6 +6218,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             for mkt in gemini_markets:
                 barbell_bucket_g = ""
                 barbell_blocked_g = False
+                joint_blend_pre_g: float | None = None
+                joint_blend_post_g: float | None = None
                 evt = mkt["event"]
                 contract = mkt.get("contract")
                 g_ticker = mkt["ticker"]
@@ -6218,7 +6304,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         w_emp_g = _dte_adjusted_empirical_weight(w_emp_g, dte_g)
                         if _is_intra_g:
                             w_emp_g = max(w_emp_g, sp.intraday_min_empirical_weight)
-                        hist_p_gem = _vol_emp_blend_hist_p(emp, vol_p_gem, w_emp_g, sp)
+                        joint_blend_pre_g, joint_blend_post_g = _vol_emp_blend_hist_p_with_joint_trace(
+                            emp, vol_p_gem, w_emp_g, sp
+                        )
+                        hist_p_gem = joint_blend_post_g
                     else:
                         hist_p_gem = max(emp, vol_p_gem)
                 else:
@@ -6540,9 +6629,27 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _vp_g_note = "" if _vp_g is None or abs(float(_vp_g) - float(vol_p_gem)) < 1e-9 else " (display capped)"
                     print(f"    ├─ Volatility P: {_vp_g:.1%}{_vp_g_note}  (model based on current price + DTE)")
                     print(f"    ├─ Blended P:    {hist_p_gem:.1%}  (final model probability)")
+                    _print_barbell_joint_blend_diagnostic(
+                        sp,
+                        emp=emp,
+                        vol_p=float(vol_p_gem),
+                        yes_bid=impl,
+                        no_bid=no_bid_gem_early,
+                        maker_fee_rate=maker_fee_rate_gem,
+                        joint_pre=joint_blend_pre_g,
+                        joint_post=joint_blend_post_g,
+                        final_p_yes=hist_p_gem,
+                    )
                 else:
                     print(f"    ├─ Model P(YES): {hist_p_gem:.1%}")
                 print(f"    ├─ Market YES:   {impl:.1%}  (what the market is pricing)")
+                if _is_ultra_short_horizon(evt, yf_ticker, sp):
+                    _usm_g = float(sp.ultra_short_min_edge_mult)
+                    _us_note_g = " (no extra ×)" if _usm_g <= 1.0 else ""
+                    print(
+                        f"    ├─ Ultra-short:  min_edge ×{_usm_g:.2f} "
+                        f"(ultra_short_min_edge_mult){_us_note_g}"
+                    )
                 print(f"    ├─ Verdict:      {rec}")
                 if sp.barbell_enabled:
                     print(

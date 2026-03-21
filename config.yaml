@@ -52,7 +52,7 @@ recovery:
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
   enable_vol_regime_scaling: false
   dte_edge_scaling_enabled: false
-  ultra_short_min_edge_mult: 1.0 # No extra × on KXBTC15M / 15m; strategy default 1.06 stacks on min_edge
+  ultra_short_min_edge_mult: 1.0 # No extra × on KXBTC15M / 15m; strategy default 1.04 stacks on min_edge when recovery off
   # Hourly / non–5pm crypto (and non–4pm S&P) use strict mode: model P(win) must exceed these AND edge — funding wallets does not change that.
   intraday_other_min_p_win: 0.75 # Loosened with global circuit breaker as backstop
   intraday_other_min_p_win_with_vol: 0.67 # Paired with vol path
@@ -196,7 +196,8 @@ strategy:
   ultra_short_dte_hours: 1.0
   ultra_short_min_p_win: 0.88 # 15m BTC; circuit breaker limits damage if edge is illusory
   ultra_short_min_p_win_with_vol: 0.82
-  ultra_short_min_edge_mult: 1.06 # Was 1.12 — less edge stacking on 15m
+  # 15m / sub-hour: small extra hurdle on top of scaled min_edge (logs show active mult). Recovery often sets 1.0 to disable.
+  ultra_short_min_edge_mult: 1.04
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
   kalshi_sp500_maker_fee_rate: 0.00875 # Lower maker fee assumption for S&P 500-style index markets
