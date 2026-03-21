@@ -1,18 +1,24 @@
 <html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>
-<h1>Ollama optimization runs</h1><p>Validated loop: backtest baseline + smoke compare_historical before commit. Per-series stats come from SQLite, not log grep.</p><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>
+<h1>Ollama optimization runs</h1>
+<p>Validated loop: backtest baseline + smoke compare_historical before commit. 
+The table below appends one row per loop from the <strong>latest compare log</strong> 
+(win rate + position-eval KEEP/SELL PnL ¢ via <code>parse_compare_log_metrics.py</code>). 
+Per-series table/iframe come from SQLite (<code>export_series_leaderboard.py</code>), not log grep.</p>
+<p><small>Latest metrics log: /Users/ogechukwuflagg-igbo/comparisons/eval_2026032120.log · Generated 2026-03-21 20:30:02 UTC · metrics CSV: /Users/ogechukwuflagg-igbo/comparisons/metrics.csv</small></p>
+<table><tr><th>Timestamp (local)</th><th>Win rate</th><th>PnL ($)</th></tr>
+<tr><td>2026-03-21 16:30:01</td><td>29.4%</td><td>0.36</td></tr>
+<tr><td>2026-03-21 16:16:55</td><td>29.4%</td><td>0.36</td></tr>
+<tr><td>2026-03-21 16:15:13</td><td>29.4%</td><td>0.36</td></tr>
+<tr><td>2026-03-21 16:00:01</td><td>29.4%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 15:39:55</td><td>100%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 15:30:01</td><td>100%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 15:07:42</td><td>100%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 15:00:00</td><td>100%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 14:35:55</td><td>100%</td><td>0.36</td></tr>
 <tr><td>2026-03-21 14:30:02</td><td>100%</td><td>0.36</td></tr>
-<tr><td>2026-03-21 14:03:27</td><td>100%</td><td>0.36</td></tr>
-<tr><td>2026-03-21 14:00:02</td><td>100%</td><td>0.36</td></tr>
-<tr><td>2026-03-21 13:50:01</td><td>100%</td><td>0.36</td></tr>
-<tr><td>2026-03-21 13:30:00</td><td>100%</td><td>0.36</td></tr>
 </table>
 <h2>Series leaderboard (336h lookback)</h2>
-<p>Open <a href="series_leaderboard.html">series_leaderboard.html</a> or see embedded view below.</p>
+<p>Open <a href="series_leaderboard.html">series_leaderboard.html</a> (same folder). Sorted by PnL, then win rate; iframe below.</p>
 <iframe src="series_leaderboard.html" title="Series leaderboard" width="100%" height="360" style="border:1px solid #ccc"></iframe>
 <h2>Blacklist suggestions (WR &lt;30%, n≥50 — manual review only)</h2>
 <pre style="white-space:pre-wrap"># Suggested blacklist (lookback 336h, n&gt;=50, WR&lt;30%)
