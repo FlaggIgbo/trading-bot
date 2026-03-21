@@ -318,6 +318,8 @@ strategy:
   adaptive_edge_max_extra: 0.10 # Cap on adaptive edge from recent performance (was 0.15; prevents effective edge from exceeding ~0.38)
   loss_streak_threshold: 5 # After this many consecutive losses, activate circuit breaker
   loss_streak_extra_edge: 0.04 # Base extra edge per consecutive loss beyond threshold
+  # Trust-the-model: was hardcoded 0.5 in engine (steep compounding on long streaks). Lower = milder bump per extra loss.
+  adaptive_loss_streak_step: 0.12
   loss_streak_max_extra: 0.05 # Max extra edge from loss streak; was 0.12 compounding to death spiral (if re-enabled)
   series_cooldown_threshold: 4 # After N consecutive losses on same series (e.g. KXBTCD), add extra edge
   series_cooldown_extra_edge: 0.06 # Extra edge for series that are on a cold streak
