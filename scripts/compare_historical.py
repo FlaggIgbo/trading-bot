@@ -381,6 +381,8 @@ class _StrategyParams:
     barbell_alpha_min_net_edge: float
     barbell_base_kelly_mult: float
     barbell_alpha_kelly_mult: float
+    consensus_sniper_enabled: bool
+    consensus_sniper_min_edge: float
     yes_overconfidence_extra_edge: float
     model_probability_shrinkage: float
     passive_limit_quote: str
@@ -616,6 +618,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         barbell_alpha_min_net_edge=max(0.0, min(1.0, float(strategy.get("barbell_alpha_min_net_edge", 0.18)))),
         barbell_base_kelly_mult=max(0.05, min(3.0, float(strategy.get("barbell_base_kelly_mult", 1.0)))),
         barbell_alpha_kelly_mult=max(0.05, min(3.0, float(strategy.get("barbell_alpha_kelly_mult", 0.12)))),
+        consensus_sniper_enabled=bool(strategy.get("consensus_sniper_enabled", False)),
+        consensus_sniper_min_edge=max(-0.05, min(1.0, float(strategy.get("consensus_sniper_min_edge", -0.01)))),
         yes_overconfidence_extra_edge=float(strategy.get("yes_overconfidence_extra_edge", 0.0)),
         model_probability_shrinkage=float(strategy.get("model_probability_shrinkage", 1.0)),
         passive_limit_quote=str(strategy.get("passive_limit_quote", "dip")).strip().lower(),
@@ -627,6 +631,20 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
     )
+
+
+def _strategy_recommend_extras(sp: _StrategyParams) -> dict[str, Any]:
+    """Forwarded to strategy_engine.recommend; consensus sniper only active when barbell is on."""
+    _on = bool(sp.barbell_enabled and sp.consensus_sniper_enabled)
+    return {
+        "consensus_sniper_enabled": _on,
+        "consensus_sniper_min_edge": float(sp.consensus_sniper_min_edge) if _on else None,
+        "barbell_base_min_market_yes": sp.barbell_base_min_market_yes,
+        "barbell_base_min_model_p": sp.barbell_base_min_model_p,
+        "barbell_base_max_model_vs_market_gap": sp.barbell_base_max_model_vs_market_gap,
+        "barbell_base_max_yes_price": sp.barbell_base_max_yes_price,
+        "barbell_base_max_no_price": sp.barbell_base_max_no_price,
+    }
 
 
 def _build_strategy_engine(strategy_cfg: dict) -> BaseStrategy:
@@ -695,6 +713,7 @@ def _print_multi_strategy_compare_line(
                 min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                 easy_win_min_p_win=sp.easy_win_min_p_win,
                 easy_win_min_market_p=sp.easy_win_min_market_p,
+                **_strategy_recommend_extras(sp),
             )
         parts.append(f"{sn}:{mr}")
     if parts:
@@ -5611,6 +5630,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                     easy_win_min_p_win=sp.easy_win_min_p_win,
                     easy_win_min_market_p=sp.easy_win_min_market_p,
+                    **_strategy_recommend_extras(sp),
                 )
             )
             if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte is not None and float(dte) > sp.max_new_buy_dte_days:
@@ -6358,6 +6378,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                         easy_win_min_p_win=sp.easy_win_min_p_win,
                         easy_win_min_market_p=sp.easy_win_min_market_p,
+                        **_strategy_recommend_extras(sp),
                     )
                 )
                 if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte_g is not None and float(dte_g) > sp.max_new_buy_dte_days:
@@ -7059,6 +7080,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                                             easy_win_min_p_win=sp.easy_win_min_p_win,
                                             easy_win_min_market_p=sp.easy_win_min_market_p,
+                                            **_strategy_recommend_extras(sp),
                                         )
                                     )
                                     sell_price = yes_bid if side == "yes" else no_bid
@@ -7300,6 +7322,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                         easy_win_min_p_win=sp.easy_win_min_p_win,
                         easy_win_min_market_p=sp.easy_win_min_market_p,
+                        **_strategy_recommend_extras(sp),
                     )
                 )
                 current_price_pos = current_price_cached
@@ -7593,6 +7616,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                                 easy_win_min_p_win=sp.easy_win_min_p_win,
                                 easy_win_min_market_p=sp.easy_win_min_market_p,
+                                **_strategy_recommend_extras(sp),
                             )
                         )
                         violates_g = _violates_no_above_rule(current_price_g, threshold_g, direction_g, sp.no_above_cushion)

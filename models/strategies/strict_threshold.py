@@ -30,8 +30,22 @@ class StrictThresholdStrategy(DefaultThresholdStrategy):
         min_edge_easy_win: float | None = None,
         easy_win_min_p_win: float = 0.90,
         easy_win_min_market_p: float = 0.85,
+        consensus_sniper_enabled: bool = False,
+        consensus_sniper_min_edge: float | None = None,
+        barbell_base_min_market_yes: float = 0.82,
+        barbell_base_min_model_p: float = 0.78,
+        barbell_base_max_model_vs_market_gap: float = 0.10,
+        barbell_base_max_yes_price: float = 0.92,
+        barbell_base_max_no_price: float = 0.92,
     ) -> str:
         s = max(1.0, float(self.edge_scale))
+        if consensus_sniper_min_edge is None:
+            cs = None
+        elif consensus_sniper_min_edge < 0:
+            # Negative = max allowed fee drag; stricter engine pulls toward 0 (needs more net edge).
+            cs = consensus_sniper_min_edge / s
+        else:
+            cs = consensus_sniper_min_edge * s
         return super().recommend(
             p_yes=p_yes,
             market_yes=market_yes,
@@ -43,6 +57,13 @@ class StrictThresholdStrategy(DefaultThresholdStrategy):
             min_edge_easy_win=(min_edge_easy_win * s) if min_edge_easy_win is not None else None,
             easy_win_min_p_win=easy_win_min_p_win,
             easy_win_min_market_p=easy_win_min_market_p,
+            consensus_sniper_enabled=consensus_sniper_enabled,
+            consensus_sniper_min_edge=cs,
+            barbell_base_min_market_yes=barbell_base_min_market_yes,
+            barbell_base_min_model_p=barbell_base_min_model_p,
+            barbell_base_max_model_vs_market_gap=barbell_base_max_model_vs_market_gap,
+            barbell_base_max_yes_price=barbell_base_max_yes_price,
+            barbell_base_max_no_price=barbell_base_max_no_price,
         )
 
     def recommend_strict(

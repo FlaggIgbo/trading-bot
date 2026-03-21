@@ -39,6 +39,13 @@ class DefaultThresholdStrategy(BaseStrategy):
         min_edge_easy_win: float | None = None,
         easy_win_min_p_win: float = 0.90,
         easy_win_min_market_p: float = 0.85,
+        consensus_sniper_enabled: bool = False,
+        consensus_sniper_min_edge: float | None = None,
+        barbell_base_min_market_yes: float = 0.82,
+        barbell_base_min_model_p: float = 0.78,
+        barbell_base_max_model_vs_market_gap: float = 0.10,
+        barbell_base_max_yes_price: float = 0.92,
+        barbell_base_max_no_price: float = 0.92,
     ) -> str:
         if market_yes <= 0:
             return REC_SKIP
@@ -62,6 +69,26 @@ class DefaultThresholdStrategy(BaseStrategy):
             and market_no >= float(easy_win_min_market_p)
         ):
             req_no = min(req_no, float(min_edge_easy_win))
+        if consensus_sniper_enabled and consensus_sniper_min_edge is not None:
+            gap = float(barbell_base_max_model_vs_market_gap)
+            yb = float(market_yes)
+            hp = float(p_yes)
+            if (
+                yb >= float(barbell_base_min_market_yes)
+                and hp >= float(barbell_base_min_model_p)
+                and hp + gap >= yb
+                and yb <= float(barbell_base_max_yes_price)
+            ):
+                req_yes = min(req_yes, float(consensus_sniper_min_edge))
+            nb = float(market_no)
+            p_no = 1.0 - hp
+            if (
+                nb >= float(barbell_base_min_market_yes)
+                and p_no >= float(barbell_base_min_model_p)
+                and p_no + gap >= nb
+                and nb <= float(barbell_base_max_no_price)
+            ):
+                req_no = min(req_no, float(consensus_sniper_min_edge))
         has_yes = edge_yes >= req_yes
         has_no = edge_no >= req_no
         if has_yes and has_no:

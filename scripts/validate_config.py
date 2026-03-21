@@ -96,6 +96,18 @@ def main() -> int:
         errors.append("`strategy.min_edge_easy_win` must be >= 0.")
     if min_edge_easy_win > min_edge:
         errors.append("`strategy.min_edge_easy_win` should be <= `strategy.min_edge`.")
+    consensus_sniper_enabled = bool(strategy.get("consensus_sniper_enabled", False))
+    consensus_sniper_min_edge = _as_float(strategy.get("consensus_sniper_min_edge"), -0.01)
+    barbell_enabled = bool(strategy.get("barbell_enabled", False))
+    if consensus_sniper_enabled and not barbell_enabled:
+        warnings.append(
+            "`strategy.consensus_sniper_enabled` is true but `strategy.barbell_enabled` is false; "
+            "consensus sniper is only applied when barbell is enabled."
+        )
+    if consensus_sniper_min_edge < -0.05:
+        errors.append("`strategy.consensus_sniper_min_edge` must be >= -0.05 (cap on fee-drag tolerance).")
+    if consensus_sniper_min_edge > min_edge:
+        errors.append("`strategy.consensus_sniper_min_edge` should be <= `strategy.min_edge`.")
     if limit_order_mode not in {"fixed_pct", "dynamic_tick", "layered"}:
         errors.append("`strategy.limit_order_mode` must be one of: fixed_pct, dynamic_tick, layered.")
     if tick_offset < 1:
@@ -145,6 +157,16 @@ def main() -> int:
         warnings.append(
             f"`strategy.min_edge_easy_win` ({min_edge_easy_win:.3f}) is below fee floor "
             f"({fee_floor:.3f}); fills may be unprofitable after rounding."
+        )
+    if consensus_sniper_min_edge > 0 and consensus_sniper_min_edge < fee_floor:
+        warnings.append(
+            f"`strategy.consensus_sniper_min_edge` ({consensus_sniper_min_edge:.3f}) is below fee floor "
+            f"({fee_floor:.3f}); fills may be unprofitable after rounding."
+        )
+    if consensus_sniper_min_edge < 0:
+        warnings.append(
+            f"`strategy.consensus_sniper_min_edge` is negative ({consensus_sniper_min_edge:.3f}); "
+            "consensus-shaped trades may clear despite small negative net edge after fees — monitor PnL."
         )
 
     # Guardrail: min edge should exceed a conservative fee + friction floor.
