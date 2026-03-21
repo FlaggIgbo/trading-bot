@@ -145,7 +145,8 @@ except ImportError:
 try:
     from sklearn.isotonic import IsotonicRegression
     from sklearn.linear_model import LogisticRegression
-except ImportError:
+except (ImportError, OSError):
+    # OSError: broken/missing extension libs in some minimal or mixed-arch installs
     IsotonicRegression = LogisticRegression = None
 
 # ---------------------------------------------------------------------------
@@ -4630,7 +4631,7 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
                 ticker=t,
                 yes_settled=yes_settled,
                 platform=PLATFORM_GEMINI,
-                title=snap.get("title") if snap else (evt.get("title") or None),
+                title=snap.get("title") if snap else None,
                 our_last_rec=snap.get("rec") if snap else None,
                 our_last_hist_p=snap.get("hist_p") if snap else None,
                 market_yes_at_last=snap.get("yes_bid") if snap else None,
@@ -4993,9 +4994,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     if (sp.use_sklearn_calibration or sp.enable_auto_signal_weight_fit) and (
         IsotonicRegression is None or LogisticRegression is None
     ):
+        venv_py = _ROOT / ".venv" / "bin" / "python3"
+        wrong_interp = venv_py.is_file() and Path(sys.executable).resolve() != venv_py.resolve()
+        tip = ""
+        if wrong_interp:
+            tip = (
+                f" This interpreter is {sys.executable}; launchd uses {venv_py}. "
+                f"Install with: {venv_py} -m pip install -r {_ROOT / 'requirements.txt'}"
+            )
         print(
             "[Learning] sklearn not available: adaptive calibration/weight fitting disabled. "
             "Install scikit-learn in this runtime environment."
+            + tip
         )
         print()
 
