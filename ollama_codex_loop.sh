@@ -73,6 +73,9 @@ if [[ -z "${LOG_FILE:-}" || ! -f "$LOG_FILE" ]]; then
 fi
 [[ -z "${LOG_FILE:-}" ]] && LOG_FILE="$LOG_DIR/last_run.log"
 
+# Path shown in ollama_runs.html (before we fall back to empty TMP_TAIL for parsing)
+METRICS_LOG_LABEL="$LOG_FILE"
+
 # Token-efficient prompt context: errors, calibration/adaptive/risk lines, losses (+ short tail fallback)
 if [[ -f "$LOG_FILE" ]]; then
   "$PYTHON" "$REPO/scripts/extract_ollama_log_context.py" "$LOG_FILE" \
@@ -88,9 +91,13 @@ PNL=$(awk "BEGIN {printf \"%.2f\", ${PNL_CENTS:-0}/100}")
 echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
 
 # --- 2) Per-series leaderboard + blacklist hints (SQLite; does not edit config) ---
-"$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --out "$LB_HTML" 2>/dev/null || true
+if ! "$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --out "$LB_HTML"; then
+  echo "⚠️  export_series_leaderboard.py failed — $LB_HTML may be stale or missing." >&2
+fi
 "$PYTHON" "$REPO/scripts/suggest_series_blacklist.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --min-trades "$OLLAMA_BLACKLIST_MIN_TRADES" >"$SUGGEST_TMP" 2>/dev/null || true
-"$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_PROMPT_LB_HOURS" --out "$SERIES_SUMMARY_HTML" 2>/dev/null || true
+if ! "$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_PROMPT_LB_HOURS" --out "$SERIES_SUMMARY_HTML"; then
+  echo "⚠️  export_series_leaderboard.py (prompt summary) failed — $SERIES_SUMMARY_HTML may be stale." >&2
+fi
 if [[ "$OLLAMA_AUTO_BLACKLIST" == "1" ]]; then
   mkdir -p "$(dirname "$BLACKLIST_EXTRA_FILE")"
   "$PYTHON" "$REPO/scripts/apply_series_blacklist.py" --hours "${OLLAMA_AUTO_BLACKLIST_HOURS:-168}" \
@@ -99,16 +106,29 @@ if [[ "$OLLAMA_AUTO_BLACKLIST" == "1" ]]; then
 fi
 
 # --- 3) HTML metrics table + embedded leaderboard ---
+METRICS_ESC=$("$PYTHON" -c "import html,sys; print(html.escape(sys.argv[1]))" "$METRICS_LOG_LABEL" 2>/dev/null || printf '%s' "$METRICS_LOG_LABEL")
+METRICS_FILE_ESC=$("$PYTHON" -c "import html,sys; print(html.escape(sys.argv[1]))" "$METRICS" 2>/dev/null || printf '%s' "$METRICS")
+GEN_HTML_UTC=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 {
   echo "<html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>"
-  echo "<h1>Ollama optimization runs</h1><p>Validated loop: backtest baseline + smoke compare_historical before commit. Per-series stats come from SQLite, not log grep.</p><table><tr><th>Timestamp</th><th>Win rate</th><th>PnL</th></tr>"
-  grep -E '^[0-9]+,[0-9.]+,' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
+  echo "<h1>Ollama optimization runs</h1>"
+  echo "<p>Validated loop: backtest baseline + smoke compare_historical before commit. "
+  echo "The table below appends one row per loop from the <strong>latest compare log</strong> "
+  echo "(win rate + position-eval KEEP/SELL PnL ¢ via <code>parse_compare_log_metrics.py</code>). "
+  echo "Per-series table/iframe come from SQLite (<code>export_series_leaderboard.py</code>), not log grep.</p>"
+  echo "<p><small>Latest metrics log: ${METRICS_ESC} · Generated ${GEN_HTML_UTC} · metrics CSV: ${METRICS_FILE_ESC}</small></p>"
+  echo "<table><tr><th>Timestamp (local)</th><th>Win rate</th><th>PnL (\$)</th></tr>"
+  grep -E '^[0-9]+,[0-9.]+,-?[0-9.]+' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
     echo "<tr><td>$(date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")</td><td>${wr}%</td><td>$pnl</td></tr>"
   done
   echo "</table>"
   echo "<h2>Series leaderboard (${OLLAMA_LEADERBOARD_HOURS}h lookback)</h2>"
-  echo "<p>Open <a href=\"series_leaderboard.html\">series_leaderboard.html</a> or see embedded view below.</p>"
-  echo "<iframe src=\"series_leaderboard.html\" title=\"Series leaderboard\" width=\"100%\" height=\"360\" style=\"border:1px solid #ccc\"></iframe>"
+  echo "<p>Open <a href=\"series_leaderboard.html\">series_leaderboard.html</a> (same folder). Sorted by PnL, then win rate; iframe below.</p>"
+  if [[ -f "$LB_HTML" ]]; then
+    echo "<iframe src=\"series_leaderboard.html\" title=\"Series leaderboard\" width=\"100%\" height=\"360\" style=\"border:1px solid #ccc\"></iframe>"
+  else
+    echo "<p><em>series_leaderboard.html not found — export_series_leaderboard.py may have failed.</em></p>"
+  fi
   echo "<h2>Blacklist suggestions (WR &lt;30%, n≥${OLLAMA_BLACKLIST_MIN_TRADES} — manual review only)</h2>"
   echo -n "<pre style=\"white-space:pre-wrap\">"
   sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$SUGGEST_TMP" 2>/dev/null || true

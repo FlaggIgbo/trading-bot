@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import html
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -35,19 +36,27 @@ def main() -> int:
 
     cfg = get_config()
     perf = get_recent_performance_by_series(lookback_hours=args.hours, config=cfg) or {}
+    # PnL-first matches a trading leaderboard; tie-breaker higher win rate.
     rows = sorted(
         perf.items(),
-        key=lambda kv: (kv[1].get("win_rate") or 0, kv[1].get("pnl_cents", 0)),
+        key=lambda kv: (kv[1].get("pnl_cents", 0), kv[1].get("win_rate") or 0),
         reverse=True,
     )
+    gen_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     lines = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'/>",
-        "<style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;}</style>",
+        "<style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} "
+        "th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;} "
+        ".num{text-align:right;font-variant-numeric:tabular-nums;}</style>",
         "</head><body>",
-        f"<h1>Series leaderboard ({args.hours:.0f}h)</h1>",
-        "<p>From SQLite <code>predictions</code> (resolved). Use with <code>suggest_series_blacklist.py</code> for config hints.</p>",
-        "<table><tr><th>Series</th><th>Trades</th><th>Win rate</th><th>PnL (¢)</th><th>Consec. losses</th></tr>",
+        f"<h1>Series leaderboard ({args.hours:g}h lookback)</h1>",
+        "<p>From SQLite <code>predictions</code> (resolved: win / lose / sold). "
+        "Sorted by <strong>PnL (¢)</strong> desc, then win rate. "
+        "Consecutive losses = streak from the <em>most recent</em> resolved trade backward per series.</p>",
+        f"<p><small>Generated {html.escape(gen_utc)}</small></p>",
+        "<table><tr><th>Series</th><th class='num'>Trades</th><th class='num'>Win rate</th>"
+        "<th class='num'>PnL (¢)</th><th class='num'>Consec. losses</th></tr>",
     ]
     for series, p in rows:
         wr = p.get("win_rate")
@@ -55,10 +64,10 @@ def main() -> int:
         lines.append(
             "<tr>"
             f"<td>{html.escape(str(series))}</td>"
-            f"<td>{int(p.get('total', 0))}</td>"
-            f"<td>{wr_s}</td>"
-            f"<td>{int(p.get('pnl_cents', 0))}</td>"
-            f"<td>{int(p.get('consecutive_losses', 0))}</td>"
+            f"<td class='num'>{int(p.get('total', 0))}</td>"
+            f"<td class='num'>{wr_s}</td>"
+            f"<td class='num'>{int(p.get('pnl_cents', 0))}</td>"
+            f"<td class='num'>{int(p.get('consecutive_losses', 0))}</td>"
             "</tr>"
         )
     if not rows:

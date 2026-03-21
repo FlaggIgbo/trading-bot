@@ -2520,9 +2520,13 @@ def get_recent_performance_by_series(
         for r in rows:
             ticker = r["ticker"] or ""
             series = _extract_series_prefix(ticker)
-            by_series[series].append({"outcome": r["outcome"], "pnl": int(r["pnl"])})
+            rts = float(r["rts"] or 0)
+            by_series[series].append(
+                {"outcome": r["outcome"], "pnl": int(r["pnl"]), "rts": rts}
+            )
         result = {}
         for series, trades in by_series.items():
+            trades.sort(key=lambda t: t["rts"], reverse=True)
             wins = sum(1 for t in trades if t["outcome"] == "win")
             losses = sum(1 for t in trades if t["outcome"] in ("lose", "sold"))
             pnl = sum(t["pnl"] for t in trades)
