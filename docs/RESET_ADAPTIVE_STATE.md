@@ -29,3 +29,7 @@ This removes calibration samples, fill history, and backtest inputs — only do 
 
 - `python3 scripts/suggest_series_blacklist.py` — hints for `strategy.blacklist` from recent per-series stats.
 - `python3 scripts/export_series_leaderboard.py` — HTML table of series PnL / win rate.
+
+## Barbell (optional)
+
+To temporarily allow more directional trades without deleting SQLite history, set **`strategy.barbell_enabled: false`** in `config.yaml` (disables the base/alpha-only filter). Restart or wait for the next launchd tick; use **`launchctl kickstart -k gui/$(id -u)/com.user.compare_historical`** for an immediate reload.

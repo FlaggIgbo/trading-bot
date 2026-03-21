@@ -2,22 +2,15 @@
 
 This document summarizes the investigation into poor PnL across Kalshi and Gemini, tracing the decision flow in `compare_historical.py` and identifying likely root causes and fixes.
 
+**Note:** The log-path and plist items in §1 were **addressed** in the main branch (see §6). The loop now resolves the newest compare log under `~/comparisons`, uses **`parse_compare_log_metrics.py`**, and the repo **`launchd/com.user.compare_historical.plist`** logs with **`--log …/comparisons`** and **`--position-eval-analysis`**.
+
 ---
 
-## 1. Log Path Mismatch (Immediate Fix)
+## 1. Log Path Mismatch (historical — fixed in tree)
 
-**Problem:** The `ollama_codex_loop.sh` reads metrics from `$HOME/comparisons/last_run.log`, but the launchd plist logs compare_historical output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log` (via `--log` with no argument). The "Win rate" and "P&L" lines that the loop greps for only appear when `--position-eval-analysis` is passed—and that flag is **not** in the plist.
+**Original problem:** The `ollama_codex_loop.sh` read metrics from a path that did not always match where launchd wrote compare output, and position-eval lines were missing without **`--position-eval-analysis`**.
 
-**Impact:** The loop may be reading stale/empty data or wrong files, so the Ollama prompt gets no real performance context.
-
-**Fix:**
-1. Update the plist to log to `~/comparisons` and add `--position-eval-analysis`:
-   ```xml
-   <string>--log</string>
-   <string>/Users/ogechukwuflagg-igbo/comparisons</string>
-   <string>--position-eval-analysis</string>
-   ```
-2. Ensure compare_historical writes `eval_YYYYMMDDHH.log` into that dir. The loop expects `last_run.log` or `last_run_*.log`—either add a symlink/copy step, or change the loop to read the latest `eval_*.log` in `~/comparisons`.
+**Current state:** Plist logs to **`~/comparisons`** with **`--position-eval-analysis`**. **`ollama_codex_loop.sh`** picks the newest of `last_run.log` and `eval_*.log` and parses metrics with Python (see §6).
 
 ---
 
@@ -37,6 +30,8 @@ model_probability_shrinkage (0.75) → pulls toward 0.5
 anti_hallucination pipeline (Bayesian, EWMA, vol Z-score, adaptive edge, regime filter)
                     ↓
 recommendation engine (REC_BUY_YES / REC_BUY_NO / REC_SKIP)
+                    ↓
+barbell gate (if barbell_enabled): base | alpha only, else SKIP
                     ↓
 min_edge + calibration + adaptive learning + vol regime scaling
                     ↓
@@ -117,13 +112,14 @@ pending_orders / pending_sells → execution
 | Recent perf   | `get_recent_performance`                    | When adaptive learning adds edge      |
 | Daily report  | `daily_performance_report.py`               | Once daily (different script)         |
 
-The ollama_codex_loop expects "Win rate" and "P&L" in the log; those come from position-eval-analysis. Without that flag, the loop gets no useful metrics.
+The Ollama loop still benefits from **`--position-eval-analysis`** in compare logs for human-readable win-rate / PnL lines; numeric metrics also use **`parse_compare_log_metrics.py`** on the resolved log file.
 
 ---
 
 ## 6. Status
 
 - ✅ Circuit breaker added (`adaptive_loss_block_*` + `pending_orders.clear()`) to hold buys when recent win rate < 35% over 6h.
-- ✅ Config tuned: higher `min_edge`, lower `kelly_fraction`, stronger `model_probability_shrinkage`, tighter `intraday_vol_cap`, and two-sided quotes disabled.
-- ✅ `ollama_codex_loop.sh` picks the **newest** of `~/comparisons/last_run.log` and `~/comparisons/eval_*.log` for win-rate / PnL greps; the compare_historical plist logs to `~/comparisons` with `--position-eval-analysis` so metrics are logged reliably.
+- ✅ Config tuned over time: `min_edge`, `kelly_fraction`, `model_probability_shrinkage`, `intraday_vol_cap`, two-sided quotes, and **`strategy.barbell_enabled`** (base/alpha directional filter) — see `config.yaml` and `README.md`.
+- ✅ `ollama_codex_loop.sh` picks the **newest** of `~/comparisons/last_run.log` and `~/comparisons/eval_*.log` for metrics; compare plist logs to `~/comparisons` with `--position-eval-analysis`.
+- ✅ HTML outputs: **`docs/ollama_runs.html`** documents data provenance; **`export_series_leaderboard.py`** sorts by PnL with correct per-series time order for consecutive-loss counts.
 - ✅ Metrics gate default is **off** (`OLLAMA_METRICS_GATE=0`); with gate **on**, **flat identical PnL** in the window no longer blocks Ollama forever (treated as insufficient signal).

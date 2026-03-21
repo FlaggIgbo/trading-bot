@@ -64,6 +64,17 @@ The engine will:
 - Recommend BUY YES / BUY NO / SKIP and optionally stage limit orders
 - Apply strategy-engine logic from `strategy.strategy_engine` in `config.yaml`
 
+### Barbell strategy (`strategy.barbell_enabled`)
+
+When **`barbell_enabled: true`** (default in repo `config.yaml`), directional **BUY YES / BUY NO** trades must fall into one of two buckets:
+
+- **Base:** High quoted price on the side you buy (consensus), high model P(win), and model P not far below the market bid (tunable via `barbell_base_*`). Lets **expensive YES** through the usual steamroller cap **only** for this base bucket (up to `barbell_base_max_yes_price`), still subject to `min_payout_ratio` and other gates.
+- **Alpha:** **Cheap** leg (bid ≤ `barbell_alpha_max_cheap_price`), minimum model P, and a large **net** edge after maker fees (`barbell_alpha_min_net_edge`). Kelly sizing is scaled down via `barbell_alpha_kelly_mult`.
+
+Trades in the **middle** of the book (not cheap enough for alpha, not high-P enough for base) are **SKIP**ped. Logs show **`├─ Barbell: base`**, **`alpha`**, **`blocked (not base/alpha)`**, or **`—`** when the verdict was already SKIP before the barbell gate. **Arb**, disagreement-dip, and lottery-limit paths are unchanged.
+
+Set **`barbell_enabled: false`** to restore the prior “any edge” directional behavior (still subject to `min_edge`, strike guards, etc.).
+
 ## Kalshi API Overview
 
 - **Auth**: RSA-PSS signature with your private key. Required headers: `KALSHI-ACCESS-KEY`, `KALSHI-ACCESS-TIMESTAMP`, `KALSHI-ACCESS-SIGNATURE`.
@@ -371,11 +382,13 @@ If Ollama isn't running or the model is missing, scripts still run and finish wi
 
 ### `ollama_codex_loop.sh` (metrics gate + leaderboard)
 
-The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metrics.csv`, refreshes `docs/series_leaderboard.html`, and runs Ollama → `git apply` → `ollama_patch_validate.py`.
+The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metrics.csv`, refreshes `docs/series_leaderboard.html`, and runs **`ollama_codex_generate.py`** (HTTP API, temperature from **`OLLAMA_TEMPERATURE`**) → `git apply` → **`scripts/ollama_patch_validate.py`**. Metrics use **`parse_compare_log_metrics.py`**; the prompt uses **`extract_ollama_log_context.py`** for compact log excerpts.
 
 | Env | Default | Meaning |
 | --- | --- | --- |
 | `OLLAMA_METRICS_GATE` | `0` | If `1`, **skip** the Ollama/backtest block when `metrics.csv` shows **no** net PnL drop ≥ `OLLAMA_METRICS_GATE_DROP` over the last `OLLAMA_METRICS_GATE_HOURS`. **Default `0`** so flat/misparsed PnL does not block the loop; set `1` for stress-only runs. If gate is on, **identical PnL** across samples in the window is treated as “no signal” and Ollama still runs. |
+| `OLLAMA_TEMPERATURE` | `0.2` | Sampling temperature for **`scripts/ollama_codex_generate.py`** (`/api/generate`); plist may set explicitly. |
+| `OLLAMA_AUTO_PUSH` | `0` in script | This repo’s **launchd** plist sets **`1`**: validated commits **`git push`** to `origin/main` (needs credentials). |
 | `OLLAMA_METRICS_GATE_HOURS` | `4` | Lookback window (hours) for first-vs-last PnL in `metrics.csv`. |
 | `OLLAMA_METRICS_GATE_DROP` | `0.20` | Trigger Ollama when `(last_pnl - first_pnl) ≤ -0.20` in that window. |
 | `OLLAMA_LEADERBOARD_HOURS` | `336` | Lookback for `export_series_leaderboard.py` / `suggest_series_blacklist.py` (14 days). |
@@ -418,7 +431,7 @@ Stronger coding models (if your machine can handle them): `ollama pull phi4` or 
 
 ### Main evaluation: `scripts/compare_historical.py`
 
-**In plain English:** The bot looks at how often the asset (e.g. Bitcoin) closed above or below a target price in a recent rolling window (default 90 days). It compares that "historical chance" to what the market is charging. If the market is underpricing (e.g. we think 30% chance, market says 15¢), we **BUY YES**. If overpricing, we **BUY NO**. If there's not enough of a bargain, we **SKIP**.
+**In plain English:** The bot looks at how often the asset (e.g. Bitcoin) closed above or below a target price in a recent rolling window (default 90 days). It compares that "historical chance" to what the market is charging. If the market is underpricing (e.g. we think 30% chance, market says 15¢), we **BUY YES**. If overpricing, we **BUY NO**. If there's not enough of a bargain, we **SKIP**. With **`strategy.barbell_enabled: true`**, only **base** (high-P consensus) or **alpha** (cheap + large net edge) directional trades proceed; see **Barbell strategy** above.
 
 ```bash
 python3 scripts/compare_historical.py --days 365 --markets 0 --edge 0.22   # 0 = all markets; edge flag overrides config min_edge for that run
@@ -466,7 +479,7 @@ Requires `trading.dry_run: false` in config.yaml.
 
 **Fill reconciliation (Kalshi + Gemini):** Confirmed fills are written to SQLite as `predictions` (idempotent by `fill_id`). Gemini uses **paginated** fetch (`get_fills_paginated`) and flexible JSON parsing so fills aren’t dropped after the first 200 rows or under alternate response keys (`fills`, `trades`, `data`, …). Timestamps are normalized (ISO-8601, ms, or unix) and rows outside the lookback window are skipped. Reconciliation errors are logged instead of failing silently; `record_prediction_from_fill` logs SQLite insert failures.
 
-Config: `strategy.strategy_engine`, `strategy.min_edge`, `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, `strategy.mc_enabled`, `strategy.mc_paths`, `strategy.mc_blend_weight`, and related keys in `config.yaml`.
+Config: `strategy.strategy_engine`, `strategy.min_edge`, `strategy.barbell_enabled`, `strategy.barbell_*` (base/alpha thresholds and Kelly multipliers), `strategy.enable_easy_win`, `strategy.vol_blend_weight`, `strategy.use_volatility_by_default`, `strategy.use_ewma_vol`, `strategy.ewma_lambda`, `strategy.empirical_recent_days`, `strategy.empirical_recent_weight`, `strategy.empirical_use_rolling_window`, `strategy.enable_otm_smile_adjustment`, `strategy.otm_smile_strength`, `strategy.otm_smile_max_mult`, `strategy.uncertainty_edge_mult`, `strategy.stop_loss_pct`, `strategy.enable_strike_validation`, `strategy.liquidity_spread_bps_soft`, `strategy.liquidity_spread_bps_hard`, `strategy.enable_signal_model`, `strategy.signal_model_weights`, `strategy.use_sklearn_calibration`, `strategy.mc_enabled`, `strategy.mc_paths`, `strategy.mc_blend_weight`, and related keys in `config.yaml`.
 
 ### Intraday markets (5pm, 8pm, etc.)
 

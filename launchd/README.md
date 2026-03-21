@@ -2,6 +2,8 @@
 
 > **Picking up code/config changes:** `launchd` runs your repo’s Python and reads `config.yaml` from **`WorkingDirectory` on every scheduled run**. After `git pull origin main`, the next tick (or `launchctl kickstart -k …`) uses the new code — including top-level **`recovery:`** (can override `min_edge`, `calibration_extra_edge_overall`, `calibration_extra_edge_above_yes`, `parity_penalty_enabled`, `uncertainty_edge_mult`, `vol_disagree_extra_edge`, `yes_overconfidence_extra_edge`, `max_buy_limit_price` (0 = disable cap), `enable_vol_regime_scaling`, `dte_edge_scaling_enabled`, `ultra_short_min_edge_mult`, etc.), **`execution:`**, **`trading.dust_trade_*`**, **`strategy.barbell_*` / `enable_easy_win`**, **`strategy.min_payout_ratio` / `dte_edge_*` / `passive_bid_chase_*` / `position_flip_sell_*` / `hold_winner_*` / `ultra_short_*` (15m BTC)**, and the rest of the strategy block. **You do not need to re-copy plists** unless **`ProgramArguments`** or **`WorkingDirectory`** in the plist file changed.
 
+**Barbell (live trading):** With **`strategy.barbell_enabled: true`** in repo `config.yaml`, each scheduled compare run only places directional BUY YES/NO trades that qualify as **base** (high-P consensus) or **alpha** (cheap + large net edge). See root **`README.md`** § *Barbell strategy*. Toggle in YAML only; no plist key required.
+
 This setup includes:
 - `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes.
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
@@ -22,7 +24,7 @@ Both jobs use your `.venv` Python so dependencies are available.
 
 **Crypto underlying prices:** `signals/yfinance_client.py` prefers **Gemini Exchange** public REST (`api.gemini.com`, `v2/ticker` / `v2/candles`) for mapped USD pairs (BTC/ETH/SOL/XRP) when `YFINANCE_CRYPTO_GEMINI` is enabled (default **on**). S&P 500 still uses Yahoo/yfinance. Launchd runs the script from disk each tick—`git pull` on `main` picks this up on the **next** scheduled run (no plist edit). To force crypto back to Yahoo-only, add to the plist’s `EnvironmentVariables`: `YFINANCE_CRYPTO_GEMINI` = `0`. Optional: `GEMINI_SPOT_API_BASE` if you need a different API host.
 
-**Repo `config.yaml`:** Uses the **defensive profitability preset** (e.g. higher `min_edge`, `enable_easy_win: false`, smaller absolute-winner balance slice). Launchd loads this from `WorkingDirectory` on every run—pull `main` and you pick up strategy changes without editing the plist.
+**Repo `config.yaml`:** Strategy is tuned for profitability and risk (e.g. `min_edge`, **`barbell_enabled`**, **`enable_easy_win`** paired with barbell base layer, `min_payout_ratio`, recovery overrides). Launchd loads this from `WorkingDirectory` on every run—pull `main` and you pick up strategy changes without editing the plist.
 
 ## Pick up latest code and run compare now (after `git pull`)
 

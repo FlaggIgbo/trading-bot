@@ -260,7 +260,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
      - Blend: `hist_p = vol_blend_weight * emp + (1−w) * vol_p` when both; DTE-aware decay (`_dte_adjusted_empirical_weight`) reduces empirical weight toward 0 when DTE < 1 day; for intraday without use_intraday_empirical, hist_p = vol_p only.
      - Apply bucket penalty: `_apply_bucket_penalty()` — dampen hist_p if that bucket underperforms in calibration.
      - Recommend: `_recommend(hist_p, yes_bid, min_edge)` or `_recommend_strict()` for non-standard intraday.
-     - Safety rules: skip BUY NO when price above strike; skip BUY YES when yes_bid < min_yes_price (unless vol override); skip BUY YES when strike far above current — DTE-aware via `_dte_adjusted_strike_pct()` (unless vol ≥ 97%); skip BUY NO when no_bid < min_no_price; calibration downgrade for "above+yes" underperformers.
+     - Safety rules: skip BUY NO when price above strike; skip BUY YES when yes_bid < min_yes_price (unless vol override); steamroller cap on expensive YES with **barbell base** exception (`_barbell_yes_bucket == "base"`); skip BUY YES when strike far above current — DTE-aware via `_dte_adjusted_strike_pct()` (unless vol ≥ 97%); skip BUY NO when no_bid < min_no_price; calibration downgrade for "above+yes" underperformers.
+     - **Barbell** (`strategy.barbell_enabled`): after safety filters, directional BUY YES/NO must match **`_barbell_yes_bucket` / `_barbell_no_bucket`** — **base** (high market bid + model P + consensus gap) or **alpha** (cheap bid + min model P + large net edge after fees); otherwise **SKIP**. Kelly fraction is scaled by `barbell_base_kelly_mult` / `barbell_alpha_kelly_mult` before vol-adjusted Kelly. Logs **`├─ Barbell:`**; `quote_candidates` / orders may include `"barbell"` key. Arb / disagreement-dip / lottery paths bypass this gate.
      - Compute limit price: bid × (1−dip); use larger dip when P(win)≥90% or when vol/decline regime.
      - Add to `pending_orders` and `market_data_cache`.
    - **Gemini loop:** Expand events to markets via `expand_gemini_events_to_markets()`. For each Gemini market (crypto only): same flow — arb, P(YES), recommend, safety rules. Add to pending_orders.
@@ -275,7 +276,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 9. **Execute (if --execute):** Review open orders via `execution.engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`; near-expiry orders kept) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
 
 **Key data structures:**
-- `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, etc.
+- `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, `barbell` (optional: `base` / `alpha` when `barbell_enabled`), etc.
 - `pending_sells`: list of dicts with platform, ticker, side, action="sell", count, price, rec.
 - `market_data_cache`: ticker → (series, yf_ticker, closes, market_dict, current_price). current_price is live when available.
 - `existing_by_underlying`: (yf_ticker, res_key, platform) → [(threshold, direction, side), ...] for conflict check.
