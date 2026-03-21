@@ -115,6 +115,14 @@ _CRYPTO_ASSET_KEYS = {
     "solana": "SOL-USD",
     "xrp": "XRP-USD",
     "ripple": "XRP-USD",
+    "doge": "DOGE-USD",
+    "dogecoin": "DOGE-USD",
+    "bnb": "BNB-USD",
+    "binance": "BNB-USD",
+    "zec": "ZEC-USD",
+    "zcash": "ZEC-USD",
+    "hype": "HYPE-USD",
+    "hyperliquid": "HYPE-USD",
 }
 
 
@@ -215,23 +223,34 @@ class GeminiPredictionClient:
             _fetch_category("hourly")  # hourly (BTC, ETH, SOL, XRP at 1am EDT etc.)
         except Exception as e:
             log.debug("Gemini hourly category fetch failed (API may have deprecated it): %s", e)
-        # 15-minute BTC interval events (ticker BTC15M*); may be buried in long crypto pagination
+        # 15-minute interval events (*15M*); may be buried in long crypto pagination
+        for term in ("BTC15M", "DOGE15M", "BNB15M", "HYPE15M"):
+            try:
+                r = self.get_events(category="crypto", status="active", search=term, limit=100, offset=0)
+                for evt in r.get("data") or []:
+                    eid = evt.get("id") or evt.get("ticker") or ""
+                    if eid and eid not in seen:
+                        seen.add(eid)
+                        out.append(evt)
+            except Exception as e:
+                log.debug("Gemini %s search fetch failed: %s", term, e)
+        # Zcash daily/weekly (e.g. ZEC2603222100)
         try:
-            r = self.get_events(category="crypto", status="active", search="BTC15M", limit=100, offset=0)
+            r = self.get_events(category="crypto", status="active", search="ZEC", limit=100, offset=0)
             for evt in r.get("data") or []:
                 eid = evt.get("id") or evt.get("ticker") or ""
                 if eid and eid not in seen:
                     seen.add(eid)
                     out.append(evt)
         except Exception as e:
-            log.debug("Gemini BTC15M search fetch failed: %s", e)
+            log.debug("Gemini ZEC search fetch failed: %s", e)
         return out
 
     def get_events_by_asset(
         self, asset: str, limit_per_asset: int = 10
     ) -> list[dict]:
         """
-        Fetch crypto events grouped by asset (BTC-USD, ETH-USD, SOL-USD).
+        Fetch crypto events grouped by yfinance-style asset (BTC-USD, ETH-USD, …, ZEC-USD, DOGE-USD).
         Returns events that match the asset, up to limit_per_asset each.
         """
         events = self.get_crypto_events(limit=200)

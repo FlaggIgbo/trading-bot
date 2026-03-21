@@ -12,6 +12,11 @@ markets:
   - KXSOLD
   - KXINXU
   - KXXRPD
+  # Dogecoin / BNB / Hyperliquid 15m + Doge daily (hourly/weekly share KXDOGED series ticker)
+  - KXDOGE15M
+  - KXDOGED
+  - KXBNB15M
+  - KXHYPE15M
 
 # How often to poll markets (seconds)
 poll_interval_seconds: 60
@@ -25,6 +30,11 @@ yfinance_tickers:
   KXSOLD: "SOL-USD"
   KXINXU: "^GSPC" # S&P 500
   KXXRPD: "XRP-USD" # XRP (Ripple)
+  KXDOGE15M: "DOGE-USD"
+  KXDOGED: "DOGE-USD"
+  KXBNB15M: "BNB-USD"
+  # Hyperliquid (Yahoo); if data missing, rely on yfinance/CoinGecko fallbacks in yfinance_client
+  KXHYPE15M: "HYPE-USD"
 
 # Optional execution overrides (merged into strategy in compare_historical.py)
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢
@@ -194,7 +204,7 @@ strategy:
   garch_min_returns: 80 # Minimum return observations before enabling GARCH fit in auto/garch mode
   intraday_other_min_p_win: 0.85 # Non–5pm/4pm intraday strict gate (recovery can override lower)
   intraday_other_min_p_win_with_vol: 0.74
-  # Sub-hour / 15m (Kalshi KXBTC15M title, Gemini BTC15M* ticker, or DTE <= ultra_short_dte_hours)
+  # Sub-hour / 15m (Kalshi KX*15M e.g. KXBTC15M/KXDOGE15M, Gemini *15M* tickers, or DTE <= ultra_short_dte_hours)
   ultra_short_dte_hours: 1.0
   ultra_short_min_p_win: 0.88 # 15m BTC; circuit breaker limits damage if edge is illusory
   ultra_short_min_p_win_with_vol: 0.82

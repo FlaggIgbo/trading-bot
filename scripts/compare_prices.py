@@ -29,8 +29,17 @@ from kalshi_client import KalshiClient
 from ollama_analysis import capture_and_analyze
 from yfinance_client import get_snapshot as yf_get_snapshot
 
-# Gemini only supports crypto (BTC, ETH, SOL, XRP)
-GEMINI_CRYPTO_YF = {"BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"}
+# Underlyings we treat as crypto for Gemini ↔ Yahoo snapshot (inter-venue sanity, etc.)
+GEMINI_CRYPTO_YF = {
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "DOGE-USD",
+    "BNB-USD",
+    "ZEC-USD",
+    "HYPE-USD",
+}
 
 
 # ---------------------------------------------------------------------------

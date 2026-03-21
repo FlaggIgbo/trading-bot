@@ -38,6 +38,9 @@ _YF_TO_GEMINI_PAIR: dict[str, str] = {
     "ETH-USD": "ethusd",
     "SOL-USD": "solusd",
     "XRP-USD": "xrpusd",
+    "DOGE-USD": "dogeusd",
+    "ZEC-USD": "zecusd",
+    "BNB-USD": "bnbusd",
 }
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,10 @@ _COINGECKO_IDS: dict[str, str] = {
     "bitcoin": "BTC-USD",
     "ethereum": "ETH-USD",
     "solana": "SOL-USD",
+    "dogecoin": "DOGE-USD",
+    "zcash": "ZEC-USD",
+    "binancecoin": "BNB-USD",
+    "hyperliquid": "HYPE-USD",
 }
 
 

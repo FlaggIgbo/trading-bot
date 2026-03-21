@@ -22,7 +22,7 @@ import re
 import sys
 import time
 from typing import Any
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -153,7 +153,16 @@ except (ImportError, OSError):
 # Constants
 # ---------------------------------------------------------------------------
 # Gemini supports crypto only (BTC, ETH, SOL, XRP; no S&P 500). Used for event filtering.
-GEMINI_CRYPTO_YF = {"BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD"}
+GEMINI_CRYPTO_YF = {
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "DOGE-USD",
+    "BNB-USD",
+    "ZEC-USD",
+    "HYPE-USD",
+}
 _GARCH_VAR_CACHE: dict[tuple[int, int, int], float] = {}
 
 
@@ -1362,12 +1371,13 @@ def _is_ultra_short_horizon(
 ) -> bool:
     """
     True for sub-hour style contracts: title hints (15m) or time-to-expiry <= ultra_short_dte_hours.
-    When ultra_short_dte_hours <= 0, only title / ticker patterns trigger (e.g. KXBTC15M, Gemini BTC15M).
+    When ultra_short_dte_hours <= 0, only title / ticker patterns trigger (e.g. Kalshi KX*15M, Gemini *15M).
     """
     if isinstance(market_or_title, dict):
         ser = str(market_or_title.get("series") or "")
         tkr = str(market_or_title.get("ticker") or "")
-        if re.search(r"(?i)BTC15M|KXBTC15M", f"{ser} {tkr}"):
+        # Kalshi: KXBTC15M, KXDOGE15M, …; Gemini event tickers often *15M*
+        if re.search(r"(?i)KX[A-Z0-9]*15M|[A-Z]{2,10}15M", f"{ser} {tkr}"):
             return True
     title = _get_title(market_or_title)
     if _ULTRA_SHORT_TITLE_RE.search(title):
@@ -4880,16 +4890,29 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
     def _fetch_kalshi_markets() -> dict[str, list]:
         out: dict[str, list] = {}
-        for s in markets_list:
-            series = s.strip()
+
+        def _one_series(series_raw: str) -> tuple[str, list]:
+            s = series_raw.strip()
             try:
-                r = kalshi.get_markets(series_ticker=series.upper(), status="open")
+                r = kalshi.get_markets(series_ticker=s.upper(), status="open")
                 mkt_list = r.get("markets", []) or []
                 if args.markets > 0:
                     mkt_list = mkt_list[: args.markets]
-                out[series] = mkt_list
+                return s, mkt_list
             except Exception:
-                out[series] = []
+                return s, []
+
+        if len(markets_list) <= 1:
+            for s in markets_list:
+                k, v = _one_series(s)
+                out[k] = v
+            return out
+        n_k = min(8, len(markets_list))
+        with ThreadPoolExecutor(max_workers=n_k) as k_ex:
+            futs = [k_ex.submit(_one_series, s) for s in markets_list]
+            for fut in as_completed(futs):
+                k, v = fut.result()
+                out[k] = v
         return out
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -5302,21 +5325,46 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     any_defensive_mode = False
 
     use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
+
+    # Parallel Yahoo/Gemini spot history + snapshot prefetch (one thread per series)
+    def _prefetch_series_yf(series_raw: str) -> tuple[str, str | None, list[float] | None, float | None, str]:
+        s = series_raw.strip()
+        yt = yf_mapping.get(s.upper())
+        if not yt:
+            return s, None, None, None, "no_map"
+        try:
+            cl = yf_get_aggs(yt, days_back=args.days, config=cfg)
+            if not cl:
+                return s, yt, None, None, "no_closes"
+            snap = yf_get_snapshot(yt) if sp.use_live_price else None
+            return s, yt, cl, snap, "ok"
+        except Exception:
+            return s, yt, None, None, "err"
+
+    _yf_series_cache: dict[str, tuple[str | None, list[float] | None, float | None, str]] = {}
+    _yf_workers = min(8, max(1, len(markets_list)))
+    with ThreadPoolExecutor(max_workers=_yf_workers) as _yf_ex:
+        _yf_futs = [_yf_ex.submit(_prefetch_series_yf, s) for s in markets_list]
+        for _fut in as_completed(_yf_futs):
+            s_key, yt, cl, snap, st = _fut.result()
+            _yf_series_cache[s_key] = (yt, cl, snap, st)
+
     for series in markets_list:
         series = series.strip()
-        yf_ticker = yf_mapping.get(series.upper())
-        if not yf_ticker:
+        _cached = _yf_series_cache.get(series, (None, None, None, "no_map"))
+        yf_ticker, closes, snap_pref, _pst = _cached
+        if _pst == "no_map" or not yf_ticker:
             print(f"[{series}] No yfinance_tickers mapping - skip")
             continue
-
-        closes = yf_get_aggs(yf_ticker, days_back=args.days, config=cfg)
-        if not closes:
+        if _pst in ("no_closes", "err") or not closes:
             print(f"[{series}] No close data for {yf_ticker}")
             continue
 
         # Blend live + closes[-1] when both available — use all signals, slightly prioritize live
         last_close = float(closes[-1])
-        _snap = yf_get_snapshot(yf_ticker) if sp.use_live_price else None
+        _snap = snap_pref if (sp.use_live_price and snap_pref is not None and snap_pref > 0) else None
+        if _snap is None and sp.use_live_price:
+            _snap = yf_get_snapshot(yf_ticker)
         if _snap is not None and _snap > 0:
             live_f = float(_snap)
             w = sp.live_price_weight
