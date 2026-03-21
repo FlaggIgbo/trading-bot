@@ -16,8 +16,11 @@ TMP_TAIL="/tmp/ollama_tail.log"
 TMP_OUTPUT="/tmp/ollama_codex_output.txt"
 BASELINE_JSON="/tmp/ollama_backtest_baseline_$$.json"
 PATCH_FILE="/tmp/ollama_codex_patch.diff"
-# Backward compat typo
-OLLAMA_PORT="${OLLAMA_PORT:-${OLLMAPORT:-11434}}"
+# Prefer OLLAMA_PORT; OLLMAPORT is legacy typo alias (deprecated).
+if [[ -z "${OLLAMA_PORT:-}" && -n "${OLLMAPORT:-}" ]]; then
+  OLLAMA_PORT="$OLLMAPORT"
+fi
+OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 OLLMAPATH="${OLLAMA_HOST:-http://127.0.0.1:${OLLAMA_PORT}}"
 # Default: coding-specialized model (run once: ollama pull qwen2.5-coder:7b). Override: OLLAMA_MODEL=mistral, llama3.2, etc.
 OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:7b}"
@@ -31,6 +34,8 @@ OLLAMA_METRICS_GATE_HOURS="${OLLAMA_METRICS_GATE_HOURS:-4}"
 OLLAMA_METRICS_GATE_DROP="${OLLAMA_METRICS_GATE_DROP:-0.20}"
 OLLAMA_LEADERBOARD_HOURS="${OLLAMA_LEADERBOARD_HOURS:-336}"
 OLLAMA_BLACKLIST_MIN_TRADES="${OLLAMA_BLACKLIST_MIN_TRADES:-50}"
+OLLAMA_TEMPERATURE="${OLLAMA_TEMPERATURE:-0.2}"
+OLLAMA_LOG_CONTEXT_MAX_CHARS="${OLLAMA_LOG_CONTEXT_MAX_CHARS:-24000}"
 # Shorter window for the Ollama prompt (so the model sees recent bleeding assets)
 OLLAMA_PROMPT_LB_HOURS="${OLLAMA_PROMPT_LB_HOURS:-72}"
 SERIES_SUMMARY_HTML="${SERIES_SUMMARY_HTML:-/tmp/series_summary.html}"
@@ -68,11 +73,16 @@ if [[ -z "${LOG_FILE:-}" || ! -f "$LOG_FILE" ]]; then
 fi
 [[ -z "${LOG_FILE:-}" ]] && LOG_FILE="$LOG_DIR/last_run.log"
 
-tail -n 200 "$LOG_FILE" > "$TMP_TAIL" 2>/dev/null || touch "$TMP_TAIL"
+# Token-efficient prompt context: errors, calibration/adaptive/risk lines, losses (+ short tail fallback)
+if [[ -f "$LOG_FILE" ]]; then
+  "$PYTHON" "$REPO/scripts/extract_ollama_log_context.py" "$LOG_FILE" \
+    --max-chars "$OLLAMA_LOG_CONTEXT_MAX_CHARS" >"$TMP_TAIL" 2>/dev/null || tail -n 200 "$LOG_FILE" >"$TMP_TAIL"
+else
+  touch "$TMP_TAIL"
+fi
 [[ ! -f "$LOG_FILE" ]] && LOG_FILE="$TMP_TAIL"
 
-WIN_RATE=$(grep -iE 'win rate [0-9.]+%|overall win rate [0-9.]+%|trades, [0-9.]+% win rate' "$LOG_FILE" 2>/dev/null | tail -n 1 | grep -oE '[0-9.]+%' | head -1 | tr -d '%' || echo "0")
-PNL_CENTS=$(grep -E 'PnL|P&L' "$LOG_FILE" 2>/dev/null | grep -E 'KEEP|SELL' | tail -n 1 | grep -oE '[+-]?[0-9]+¢' | tr -d '¢' | tail -1 || echo "0")
+read -r WIN_RATE PNL_CENTS < <("$PYTHON" "$REPO/scripts/parse_compare_log_metrics.py" "$LOG_FILE" 2>/dev/null || echo "0 0")
 PNL=$(awk "BEGIN {printf \"%.2f\", ${PNL_CENTS:-0}/100}")
 
 echo "$(date -u +%s),$WIN_RATE,$PNL" >> "$METRICS"
@@ -192,7 +202,7 @@ _strategy_slice() {
   else
     echo "(no leaderboard file; export_series_leaderboard may have failed)"
   fi
-  printf "\n### RECENT LOG TAIL\n"
+  printf "\n### RECENT LOG SIGNALS (errors, calibration, adaptive, risk, losses — not full tail)\n"
   cat "$TMP_TAIL"
   printf "\n### METRICS CSV (last 10 rows)\n"
   grep -E '^[0-9]+,[0-9.]+,' "$METRICS" 2>/dev/null | tail -n 10 || true
@@ -200,9 +210,10 @@ _strategy_slice() {
   tail -n 8 "$JOURNAL" 2>/dev/null || true
 } > "$TMP_PROMPT"
 
-# --- 7) Ollama (override model: phi4, mistral-small, qwen2.5-coder, etc. if installed) ---
-OLLAMA_HOST="$OLLMAPATH" ollama run "$OLLAMA_MODEL" "$(cat "$TMP_PROMPT")" > "$TMP_OUTPUT" || {
-  echo "❌ ollama run failed (host=$OLLMAPATH model=$OLLAMA_MODEL)" >&2
+# --- 7) Ollama: /api/generate with low temperature (ollama run has no CLI temperature flag) ---
+OLLAMA_HOST="$OLLMAPATH" OLLAMA_TEMPERATURE="$OLLAMA_TEMPERATURE" \
+  "$PYTHON" "$REPO/scripts/ollama_codex_generate.py" "$OLLAMA_MODEL" "$TMP_PROMPT" > "$TMP_OUTPUT" || {
+  echo "❌ ollama_codex_generate.py failed (host=$OLLMAPATH model=$OLLAMA_MODEL temp=$OLLAMA_TEMPERATURE)" >&2
   exit 1
 }
 

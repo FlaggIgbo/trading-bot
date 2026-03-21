@@ -7,6 +7,8 @@ What this can and cannot do:
 - Optionally runs scripts/backtest.py --json before/after; on the *same* SQLite DB, synthetic/real
   backtest numbers usually do NOT change when you only edit strategy *code* (snapshots store prior recs).
   Set OLLAMA_REQUIRE_PNL_IMPROVE=1 only when comparing against a baseline JSON from an *earlier* DB state.
+- Optional OLLAMA_VALIDATE_MAX_BACKTEST_DROP_CENTS=N (with baseline-json): reject if post-patch
+  total_pnl_cents falls more than N below baseline (guards against an immediate backtest tank).
 
 Usage:
   python3 scripts/ollama_patch_validate.py --repo . --baseline-json /tmp/bt.json
@@ -93,6 +95,8 @@ def main() -> int:
 
     require_improve = os.environ.get("OLLAMA_REQUIRE_PNL_IMPROVE", "").lower() in ("1", "true", "yes")
     tol = int(os.environ.get("OLLAMA_PNL_TOLERANCE_CENTS", "0"))
+    max_drop_raw = os.environ.get("OLLAMA_VALIDATE_MAX_BACKTEST_DROP_CENTS", "").strip()
+    max_drop = int(max_drop_raw) if max_drop_raw.isdigit() else None
 
     _smoke(repo, py, args.smoke_markets, args.smoke_timeout)
     print(f"✅ Smoke OK ({py.name} compare_historical --markets {args.smoke_markets})")
@@ -120,6 +124,16 @@ def main() -> int:
                 )
                 return 1
             print(f"✅ PnL gate: {p_pnl}¢ >= {b_pnl}¢ - {tol}¢")
+        elif max_drop is not None:
+            floor = b_pnl - max_drop
+            if p_pnl < floor:
+                print(
+                    f"❌ OLLAMA_VALIDATE_MAX_BACKTEST_DROP_CENTS: pnl {p_pnl}¢ < floor {floor}¢ "
+                    f"(baseline {b_pnl}¢, max drop {max_drop}¢)",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"✅ Backtest floor: {p_pnl}¢ >= {floor}¢ (baseline {b_pnl}¢, max drop {max_drop}¢)")
         else:
             if b_pnl != p_pnl or b_tr != p_tr:
                 print(
