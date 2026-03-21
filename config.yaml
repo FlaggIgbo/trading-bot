@@ -28,7 +28,8 @@ yfinance_tickers:
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢
 execution:
   price_strategy: passive # passive | aggressive | market — maps to passive_limit_quote
-  limit_offset_cents: 0 # 0 = mid; >=1 = bid_plus_tick
+  # Penny-jump: bid+1¢ (or min with ask−1¢) for queue priority vs stink bids
+  limit_offset_cents: 1 # 0 = mid; >=1 = bid_plus_tick (better fills on tight DTE)
 
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
@@ -54,7 +55,7 @@ strategy:
   dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
   aggressive_limit_orders: true # Place deep limit orders on all buys; worst case = no fill = no fee (platform cancels unfilled)
   # Micro-balance: avoid paying the spread — quote mid or bid+1¢ instead of deep dip (see compare_historical passive limits)
-  passive_limit_quote: mid # dip | mid | bid_plus_tick — mid = (bid+ask)/2 capped by fair edge; bid_plus_tick = bid + 1¢
+  passive_limit_quote: bid_plus_tick # overridden by execution.limit_offset_cents≥1 → same; dip|mid for deeper passive
   # Empirical P(above/below): exponential weights recent bars (crypto regime shifts); step_recent = legacy flat window
   empirical_weighting: exponential # step_recent | exponential
   empirical_exponential_halflife_bars: 14 # Recent ~2 weeks of daily bars dominate vs flat 365d average
@@ -62,8 +63,8 @@ strategy:
   enable_model_prob_hard_cap: true
   model_prob_hard_lo: 0.02 # Anti-gambler floor: never assume <2% chance of black swan
   model_prob_hard_hi: 0.98
-  max_dip_cap: 0.35 # Cap limit price discount (35% below bid when aggressive; 25% default). Deeper = more fill opportunities.
-  limit_dip_pct: 0.12 # Deeper base dip (12%) when aggressive — prioritize limit orders to catch dips
+  max_dip_cap: 0.15 # Tighter cap near expiry so limits stay within ~15% of bid (fewer empty stink bids)
+  limit_dip_pct: 0.05 # ~5% under bid for main limits — small discount but realistic fills on penny books
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
@@ -77,8 +78,8 @@ strategy:
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   layered_order_levels: 3 # Used by layered mode to spread large intents across deeper quote levels
-  limit_dip_pct_high_confidence: 0.22 # When P(win) >= 90%, use larger dip (22%) — aggressive limits on high-certainty
-  limit_dip_pct_price_decline: 0.15 # When price might decline (vol/dte), use 15% dip — prioritize limit orders
+  limit_dip_pct_high_confidence: 0.08 # High P(win): still shallow dip so 90%+ ideas can fill before theta eats the book
+  limit_dip_pct_price_decline: 0.06 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg
   # DTE-confidence dip scaling: when resolution is far out AND model is confident,
   # place deeper limit orders to catch uncertainty-driven price dips.
   # Markets with distant resolution are prone to mean-reverting dips even when
@@ -97,11 +98,18 @@ strategy:
   disagreement_dip_min_price: 0.02 # Floor 2¢ (min valid price)
   disagreement_dip_max_price: 0.15 # Cap 15¢ so we don't overpay on dips
   disagreement_dip_contracts: 2 # Small size for speculative dip-fishing
-  # Lottery limits: 1¢ (or close) limit orders on high-probability SKIPs — free lottery tickets (no fill = no fee)
-  enable_lottery_limits: true # Place 1¢ limits when rec==SKIP but model P(win) >= 95% (ITM YES or OTM NO)
-  lottery_limit_min_p_win: 0.95 # Require 95%+ model probability for lottery ticket
-  lottery_limit_price: 0.01 # 1¢ limit (min valid)
-  lottery_limit_contracts: 1 # Small size
+  # Lottery limits on SKIP + very high model P(win): use penny_jump so bid is best_bid+1¢ (cheap legs capped)
+  enable_lottery_limits: true
+  lottery_limit_min_p_win: 0.95
+  lottery_limit_price_mode: penny_jump # fixed | penny_jump — jump beats 1¢ stink bids when the book is 3–7¢
+  lottery_limit_price: 0.01 # used when mode=fixed
+  lottery_limit_max_price: 0.10 # when working bid < lottery_penny_jump_apply_cap_bid_below, cap absolute limit (micro bankroll)
+  lottery_penny_jump_apply_cap_bid_below: 0.22 # only cap when bid on traded side is under ~22¢ (expensive YES legs uncapped)
+  lottery_limit_contracts: 1
+  # Optional: only place lottery when market YES is in ATM band (more churn / fills; turns off “sure thing” penny NO lotteries)
+  lottery_market_yes_band_enabled: false
+  lottery_market_yes_band_lo: 0.40
+  lottery_market_yes_band_hi: 0.60
   vol_blend_weight: 0.35 # Reduced from 0.45; further reduce vol model weight due to continued overconfidence
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.

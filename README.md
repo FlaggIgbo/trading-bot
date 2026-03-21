@@ -393,6 +393,7 @@ Stronger coding models (if your machine can handle them): `ollama pull phi4` or 
 - **`enable_model_prob_hard_cap`** / **`model_prob_hard_lo`** / **`model_prob_hard_hi`**: clip blended P (e.g. **0.02–0.98**) before edge/Kelly and early in the vol/emp blend path.
 - **`execution.price_strategy`** / **`limit_offset_cents`**: optional spread squeeze (`passive` + `0` → **mid**; `1` → **bid+1¢**), merged into effective `passive_limit_quote`.
 - **`blacklist_extra_file`**: newline-separated series merged into the runtime blacklist; `ollama_codex_loop.sh` can refresh it via **`apply_series_blacklist.py`** (avoids corrupting `config.yaml`).
+- **Lottery / fills:** **`lottery_limit_price_mode: penny_jump`** places **best bid + 1¢** (capped vs ask) on the traded side; **`lottery_limit_max_price`** + **`lottery_penny_jump_apply_cap_bid_below`** keep cheap-leg tickets small while leaving expensive legs uncapped. Optional **`lottery_market_yes_band_*`** restricts lottery to an ATM YES band (40–60%) for churn-heavy books.
 - **Adaptive penalty reset:** there is no `calibration_data.json`; see **`docs/RESET_ADAPTIVE_STATE.md`** (SQLite + `adaptive_learning_enabled`).
 
 ## Scripts

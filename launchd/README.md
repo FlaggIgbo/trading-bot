@@ -32,6 +32,8 @@ git pull origin main
 launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
 ```
 
+After pull, **launchd runs the updated `config.yaml` and scripts from disk** on the next timer tick — no plist reload needed for strategy-only changes (lottery penny-jump, dip %, execution offset).
+
 Optional: `tail -f /tmp/compare_historical.out.log` and confirm the banner says **`LIVE — will place orders`** and `CLI flags: --execute=True`.
 
 Re-copy the plist **only** when `ProgramArguments` or `WorkingDirectory` in the repo file changed:

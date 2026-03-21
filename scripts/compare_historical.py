@@ -304,6 +304,12 @@ class _StrategyParams:
     lottery_limit_min_p_win: float
     lottery_limit_price: float
     lottery_limit_contracts: int
+    lottery_limit_price_mode: str
+    lottery_limit_max_price: float
+    lottery_penny_jump_apply_cap_bid_below: float
+    lottery_market_yes_band_enabled: bool
+    lottery_market_yes_band_lo: float
+    lottery_market_yes_band_hi: float
     mc_enabled: bool
     mc_paths: int
     mc_blend_weight: float
@@ -485,6 +491,12 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         lottery_limit_min_p_win=float(strategy.get("lottery_limit_min_p_win", 0.95)),
         lottery_limit_price=max(0.01, min(0.99, float(strategy.get("lottery_limit_price", 0.01)))),
         lottery_limit_contracts=int(strategy.get("lottery_limit_contracts", 1)),
+        lottery_limit_price_mode=str(strategy.get("lottery_limit_price_mode", "fixed")).strip().lower(),
+        lottery_limit_max_price=max(0.01, min(0.99, float(strategy.get("lottery_limit_max_price", 0.99)))),
+        lottery_penny_jump_apply_cap_bid_below=max(0.01, min(0.99, float(strategy.get("lottery_penny_jump_apply_cap_bid_below", 0.22)))),
+        lottery_market_yes_band_enabled=bool(strategy.get("lottery_market_yes_band_enabled", False)),
+        lottery_market_yes_band_lo=max(0.0, min(0.99, float(strategy.get("lottery_market_yes_band_lo", 0.40)))),
+        lottery_market_yes_band_hi=max(0.0, min(1.0, float(strategy.get("lottery_market_yes_band_hi", 0.60)))),
         mc_enabled=bool(strategy.get("mc_enabled", True)),
         mc_paths=max(100, int(strategy.get("mc_paths", 10000))),
         mc_blend_weight=max(0.0, min(1.0, float(strategy.get("mc_blend_weight", 0.3)))),
@@ -711,6 +723,42 @@ def _extract_book_fields(market: dict, yes_bid: float, no_bid: float) -> dict[st
 
 def _clip_price(v: float) -> float:
     return max(0.01, min(0.99, float(v)))
+
+
+def _compute_lottery_limit_price(
+    *,
+    sp: _StrategyParams,
+    side: str,
+    yes_bid: float,
+    no_bid: float,
+    yes_ask: float | None,
+    no_ask: float | None,
+) -> float:
+    """
+    Lottery resting bids: fixed micro price, or penny_jump (best bid on that side + 1¢).
+    When the working bid is below lottery_penny_jump_apply_cap_bid_below, clip to
+    lottery_limit_max_price so cheap-leg lotteries stay small; high-priced legs skip the cap.
+    """
+    mode = (sp.lottery_limit_price_mode or "fixed").strip().lower()
+    if mode in ("", "fixed", "absolute"):
+        return _clip_price(float(sp.lottery_limit_price))
+    if mode not in ("penny_jump", "bid_plus_tick", "bid_plus_one_tick", "jump"):
+        return _clip_price(float(sp.lottery_limit_price))
+    tick = 0.01
+    if side.lower() == "yes":
+        bid = float(yes_bid)
+        ask = yes_ask
+    else:
+        bid = float(no_bid)
+        ask = no_ask
+    # Match passive bid_plus_tick: front-of-queue without crossing the ask
+    px = bid + tick
+    if ask is not None and float(ask) > 0:
+        px = min(px, max(bid, float(ask) - tick))
+    th = float(sp.lottery_penny_jump_apply_cap_bid_below)
+    if bid < th:
+        px = min(px, float(sp.lottery_limit_max_price))
+    return _clip_price(px)
 
 
 def _resolve_passive_quote_price(
@@ -3803,7 +3851,10 @@ def _show_config(args) -> int:
             print(f"  {k}: {v}")
     print(f"\nstrategy (key params):")
     for k in ("strategy_engine", "min_edge", "kelly_fraction", "limit_order_mode", "vol_model",
-              "enable_disagreement_dip", "enable_lottery_limits", "max_dip_cap", "limit_dip_pct",
+              "enable_disagreement_dip", "enable_lottery_limits", "lottery_limit_price_mode",
+              "lottery_limit_max_price", "lottery_penny_jump_apply_cap_bid_below",
+              "lottery_market_yes_band_enabled", "lottery_market_yes_band_lo", "lottery_market_yes_band_hi",
+              "max_dip_cap", "limit_dip_pct",
               "passive_limit_quote", "blacklist_extra_file", "empirical_weighting", "empirical_exponential_halflife_bars",
               "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi"):
         v = strategy.get(k)
@@ -5138,8 +5189,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             })
                             print(f"       [Disagreement Dip] {side_dip.upper()} | gap={gap:.1%} | limit ${price_dip:.2f} (below ${bid_dip:.2f}) x {sp.disagreement_dip_contracts}")
                             added_dip = True
-            # Lottery limits: 1¢ on high-P(win) SKIPs when no disagreement dip — free lottery tickets
-            if not added_dip and rec == REC_SKIP and sp.enable_lottery_limits:
+            # Lottery limits: micro bid on high-P(win) SKIPs — fixed 1¢ or penny_jump (bid+1¢) for queue priority
+            _lot_band_ok = True
+            if sp.lottery_market_yes_band_enabled:
+                _lo, _hi = sp.lottery_market_yes_band_lo, sp.lottery_market_yes_band_hi
+                if _hi > _lo:
+                    _lot_band_ok = _lo <= float(yes_bid) <= _hi
+            if not added_dip and rec == REC_SKIP and sp.enable_lottery_limits and _lot_band_ok:
                 p_win_yes, p_win_no = hist_p, 1.0 - hist_p
                 if p_win_yes >= sp.lottery_limit_min_p_win or p_win_no >= sp.lottery_limit_min_p_win:
                     side_lot = "yes" if p_win_yes >= p_win_no else "no"
@@ -5149,13 +5205,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         skip_in_preview=getattr(args, "preview", False),
                     ):
                         bid_lot = yes_bid if side_lot == "yes" else (float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
+                        _book_lot = _extract_book_fields(m, yes_bid, float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
+                        _lot_px = _compute_lottery_limit_price(
+                            sp=sp,
+                            side=side_lot,
+                            yes_bid=yes_bid,
+                            no_bid=float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid),
+                            yes_ask=_book_lot.get("yes_ask"),
+                            no_ask=_book_lot.get("no_ask"),
+                        )
                         pending_orders.append({
                             "platform": PLATFORM_KALSHI,
                             "ticker": ticker,
                             "title": title,
                             "rec": REC_BUY_YES if side_lot == "yes" else REC_BUY_NO,
                             "side": side_lot,
-                            "price": sp.lottery_limit_price,
+                            "price": _lot_px,
                             "bid_at_place": bid_lot,
                             "theoretical_price": bid_lot,
                             "spread_bps_at_place": 0,
@@ -5170,7 +5235,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             "dte": dte,
                             "lottery_limit": True,
                         })
-                        print(f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | limit ${sp.lottery_limit_price:.2f} x {sp.lottery_limit_contracts}")
+                        print(
+                            f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | "
+                            f"limit ${_lot_px:.2f} ({sp.lottery_limit_price_mode}) x {sp.lottery_limit_contracts}"
+                        )
                         added_dip = True
             _eval_count_total += 1
             if rec != REC_SKIP or added_dip:
@@ -5796,8 +5864,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 pending_orders.append(dip_entry)
                                 print(f"       [Disagreement Dip] {side_dip.upper()} | gap={gap:.1%} | limit ${price_dip:.2f} (below ${bid_dip:.2f}) x {sp.disagreement_dip_contracts}")
                                 added_dip = True
-                # Lottery limits: 1¢ on high-P(win) SKIPs when no disagreement dip
-                if not added_dip and rec == REC_SKIP and sp.enable_lottery_limits:
+                # Lottery limits: micro bid on high-P(win) SKIPs — penny_jump improves fill rate vs 1¢ stink bids
+                _lot_band_ok_g = True
+                if sp.lottery_market_yes_band_enabled:
+                    _lo_g, _hi_g = sp.lottery_market_yes_band_lo, sp.lottery_market_yes_band_hi
+                    if _hi_g > _lo_g:
+                        _lot_band_ok_g = _lo_g <= float(impl) <= _hi_g
+                if not added_dip and rec == REC_SKIP and sp.enable_lottery_limits and _lot_band_ok_g:
                     p_win_yes_g, p_win_no_g = hist_p_gem, 1.0 - hist_p_gem
                     if p_win_yes_g >= sp.lottery_limit_min_p_win or p_win_no_g >= sp.lottery_limit_min_p_win:
                         side_lot = "yes" if p_win_yes_g >= p_win_no_g else "no"
@@ -5810,13 +5883,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             skip_in_preview=getattr(args, "preview", False),
                         ):
                             bid_lot = impl if side_lot == "yes" else (1.0 - impl)
+                            _yes_ask_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
+                            _no_ask_g = _gemini_no_ask(evt)
+                            _lot_px_g = _compute_lottery_limit_price(
+                                sp=sp,
+                                side=side_lot,
+                                yes_bid=float(impl),
+                                no_bid=float(1.0 - impl),
+                                yes_ask=_yes_ask_g,
+                                no_ask=_no_ask_g,
+                            )
                             lot_entry = {
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": evt.get("ticker", "?"),
                                 "title": title,
                                 "rec": REC_BUY_YES if side_lot == "yes" else REC_BUY_NO,
                                 "side": side_lot,
-                                "price": sp.lottery_limit_price,
+                                "price": _lot_px_g,
                                 "bid_at_place": bid_lot,
                                 "theoretical_price": bid_lot,
                                 "spread_bps_at_place": 0,
@@ -5835,7 +5918,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if instrument_symbol:
                                 lot_entry["instrument_symbol"] = get_instrument_symbol(evt, side_lot) or instrument_symbol
                             pending_orders.append(lot_entry)
-                            print(f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | limit ${sp.lottery_limit_price:.2f} x {sp.lottery_limit_contracts}")
+                            print(
+                                f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | "
+                                f"limit ${_lot_px_g:.2f} ({sp.lottery_limit_price_mode}) x {sp.lottery_limit_contracts}"
+                            )
                             added_dip = True
                 _eval_count_total += 1
                 if rec != REC_SKIP or added_dip:
