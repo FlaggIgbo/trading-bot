@@ -20,6 +20,8 @@
         <string>0</string>
         <key>OLLAMA_TEMPERATURE</key>
         <string>0.2</string>
+        <key>OLLAMA_AUTO_PUSH</key>
+        <string>1</string>
     </dict>
     <key>WorkingDirectory</key>
     <string>/Users/ogechukwuflagg-igbo/git/trading-bot</string>
