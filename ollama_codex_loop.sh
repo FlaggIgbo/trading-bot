@@ -27,6 +27,8 @@ OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:7b}"
 OLLAMA_BT_DAYS="${OLLAMA_BT_DAYS:-30}"
 OLLAMA_BT_MODE="${OLLAMA_BT_MODE:-synthetic}"
 OLLAMA_AUTO_PUSH="${OLLAMA_AUTO_PUSH:-0}"
+# Commit docs/ollama_runs.html, series_leaderboard.html, journal after each refresh — not only when Ollama ships a code patch
+OLLAMA_AUTO_COMMIT_DOCS="${OLLAMA_AUTO_COMMIT_DOCS:-1}"
 MAX_STRATEGY_CHARS="${OLLAMA_MAX_STRATEGY_CHARS:-28000}"
 # Default off: flat / misparsed PnL in metrics.csv used to skip Ollama forever (see docs/PNL_INVESTIGATION.md). Set OLLAMA_METRICS_GATE=1 to only run when PnL drops ≥ OLLAMA_METRICS_GATE_DROP in the window.
 OLLAMA_METRICS_GATE="${OLLAMA_METRICS_GATE:-0}"
@@ -52,6 +54,32 @@ if [[ -x "$REPO/.venv/bin/python" ]]; then
 else
   PYTHON="${OLLAMA_PYTHON:-python3}"
 fi
+
+# Stage + commit dashboard artifacts when they differ from HEAD (honors OLLAMA_AUTO_PUSH).
+_commit_dashboard_if_changed() {
+  [[ "${OLLAMA_AUTO_COMMIT_DOCS:-1}" == "1" ]] || return 0
+  [[ -d "$REPO/.git" ]] || return 0
+  local f
+  for f in "$HTML" "$LB_HTML" "$JOURNAL"; do
+    [[ -f "$f" ]] || continue
+    git -C "$REPO" add -- "$f" 2>/dev/null || true
+  done
+  if git -C "$REPO" diff --cached --quiet 2>/dev/null; then
+    return 0
+  fi
+  if git -C "$REPO" commit -m "chore: refresh Ollama dashboard (ollama_runs, series leaderboard, journal)"; then
+    echo "✅ Committed dashboard files."
+    if [[ "${OLLAMA_AUTO_PUSH:-0}" == "1" ]]; then
+      if git -C "$REPO" push origin HEAD; then
+        echo "✅ Pushed dashboard commit."
+      else
+        echo "⚠️  git push failed (credentials/network)." >&2
+      fi
+    fi
+  else
+    echo "ℹ️  Dashboard commit not created (pre-commit hook or empty author?)." >&2
+  fi
+}
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$METRICS")"
@@ -186,6 +214,7 @@ sys.exit(0 if (last - first) <= -drop else 1)
 "; then
     echo "⏭️  Skipping Ollama/backtest: no PnL drop ≥ \$${OLLAMA_METRICS_GATE_DROP} in last ${OLLAMA_METRICS_GATE_HOURS}h (set OLLAMA_METRICS_GATE=0 to always run)."
     echo "{\"ts\":$(date +%s),\"event\":\"metrics_gate_skip\",\"model\":\"$OLLAMA_MODEL\",\"drop\":${OLLAMA_METRICS_GATE_DROP},\"hours\":${OLLAMA_METRICS_GATE_HOURS}}" >>"$JOURNAL"
+    _commit_dashboard_if_changed || true
     exit 0
   fi
 fi
@@ -248,6 +277,7 @@ _strategy_slice() {
 OLLAMA_HOST="$OLLMAPATH" OLLAMA_TEMPERATURE="$OLLAMA_TEMPERATURE" \
   "$PYTHON" "$REPO/scripts/ollama_codex_generate.py" "$OLLAMA_MODEL" "$TMP_PROMPT" > "$TMP_OUTPUT" || {
   echo "❌ ollama_codex_generate.py failed (host=$OLLMAPATH model=$OLLAMA_MODEL temp=$OLLAMA_TEMPERATURE)" >&2
+  _commit_dashboard_if_changed || true
   exit 1
 }
 
@@ -257,6 +287,7 @@ MSG=$(grep -i '^Commit message:' "$TMP_OUTPUT" | head -n 1 | cut -d: -f2- | sed 
 if [[ -z "$PATCH" ]]; then
   echo "ℹ️  No fenced diff block (markdown \`\`\`diff) in model output; nothing to apply."
   echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":$WIN_RATE}" >>"$JOURNAL"
+  _commit_dashboard_if_changed || true
   exit 0
 fi
 
@@ -268,6 +299,7 @@ if git apply --verbose --recount --whitespace=fix "$PATCH_FILE"; then
 else
   echo "❌ git apply failed (malformed diff)."
   echo "{\"ts\":$(date +%s),\"event\":\"apply_failed\",\"model\":\"$OLLAMA_MODEL\"}" >>"$JOURNAL"
+  _commit_dashboard_if_changed || true
   exit 1
 fi
 
@@ -290,5 +322,6 @@ else
   echo "❌ Validation failed — reverting applied patch."
   git apply -R --whitespace=fix "$PATCH_FILE" 2>/dev/null || git checkout -- .
   echo "{\"ts\":$(date +%s),\"event\":\"reverted\",\"model\":\"$OLLAMA_MODEL\"}" >>"$JOURNAL"
+  _commit_dashboard_if_changed || true
   exit 1
 fi

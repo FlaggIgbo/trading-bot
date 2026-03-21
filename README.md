@@ -386,6 +386,7 @@ The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metr
 
 | Env | Default | Meaning |
 | --- | --- | --- |
+| `OLLAMA_AUTO_COMMIT_DOCS` | `1` | If `1`, **`git commit`** `docs/ollama_runs.html`, `docs/series_leaderboard.html`, and `docs/ollama_journal.jsonl` whenever they differ from HEAD — including **`no_patch`**, **`metrics_gate_skip`**, and Ollama/apply/validate failures — not only when a code patch lands. Set `0` to leave dashboard files unstaged. |
 | `OLLAMA_METRICS_INTERVAL_FALLBACK_HOURS` | `24` | When `metrics.csv` is **empty** (first row), interval stats use resolutions in the last *N* hours ending at the loop time. |
 | `OLLAMA_METRICS_GATE` | `0` | If `1`, **skip** the Ollama/backtest block when `metrics.csv` shows **no** net PnL drop ≥ `OLLAMA_METRICS_GATE_DROP` over the last `OLLAMA_METRICS_GATE_HOURS`. **Default `0`** so flat/misparsed PnL does not block the loop; set `1` for stress-only runs. If gate is on, **identical PnL** across samples in the window is treated as “no signal” and Ollama still runs. |
 | `OLLAMA_TEMPERATURE` | `0.2` | Sampling temperature for **`scripts/ollama_codex_generate.py`** (`/api/generate`); plist may set explicitly. |
