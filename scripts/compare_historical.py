@@ -188,6 +188,16 @@ class _StrategyParams:
     max_yes_price_for_buy: float
     max_buy_limit_price: float
     force_min_buy_contracts_one: bool
+    # Anti–steamroller: min (profit_if_win / stake) = (1-price)/price on the bought side; 0 = off
+    min_payout_ratio: float
+    dte_edge_scaling_enabled: bool
+    dte_edge_short_threshold_days: float
+    dte_edge_long_threshold_days: float
+    dte_edge_mult_short: float
+    dte_edge_mult_long: float
+    max_new_buy_dte_days: float  # 0 = off; skip directional BUY when DTE exceeds
+    passive_bid_chase_enabled: bool
+    passive_bid_chase_refresh_minutes: int
     max_buy_yes_strike_above_pct: float
     max_buy_no_strike_above_pct: float
     enable_intra_arb: bool
@@ -377,6 +387,15 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         max_yes_price_for_buy=float(strategy.get("max_yes_price_for_buy", 0)),
         max_buy_limit_price=max(0.0, min(1.0, float(strategy.get("max_buy_limit_price", 0) or 0))),
         force_min_buy_contracts_one=bool(strategy.get("force_min_buy_contracts_one", False)),
+        min_payout_ratio=max(0.0, float(strategy.get("min_payout_ratio", 0) or 0)),
+        dte_edge_scaling_enabled=bool(strategy.get("dte_edge_scaling_enabled", False)),
+        dte_edge_short_threshold_days=max(1e-6, float(strategy.get("dte_edge_short_threshold_days", 1.0))),
+        dte_edge_long_threshold_days=max(1e-3, float(strategy.get("dte_edge_long_threshold_days", 3.0))),
+        dte_edge_mult_short=max(0.1, float(strategy.get("dte_edge_mult_short", 0.88))),
+        dte_edge_mult_long=max(0.1, float(strategy.get("dte_edge_mult_long", 1.18))),
+        max_new_buy_dte_days=max(0.0, float(strategy.get("max_new_buy_dte_days", 0) or 0)),
+        passive_bid_chase_enabled=bool(strategy.get("passive_bid_chase_enabled", False)),
+        passive_bid_chase_refresh_minutes=max(0, int(strategy.get("passive_bid_chase_refresh_minutes", 0) or 0)),
         max_buy_yes_strike_above_pct=float(strategy.get("max_buy_yes_strike_above_pct", 0.05)),
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
@@ -2184,6 +2203,26 @@ def _get_effective_min_edge(
     return effective
 
 
+def _dte_edge_scale_factor(dte_days: float, sp: _StrategyParams) -> float:
+    """
+    Scale required min_edge: easier hurdle when DTE is short (less time for model error),
+    harder when DTE is long ("dead zone" contracts).
+    """
+    if not sp.dte_edge_scaling_enabled:
+        return 1.0
+    d = max(0.0, float(dte_days))
+    s_days = float(sp.dte_edge_short_threshold_days)
+    l_days = max(s_days + 1e-6, float(sp.dte_edge_long_threshold_days))
+    sm = float(sp.dte_edge_mult_short)
+    lm = float(sp.dte_edge_mult_long)
+    if d <= s_days:
+        return sm
+    if d >= l_days:
+        return lm
+    t = (d - s_days) / (l_days - s_days)
+    return sm + t * (lm - sm)
+
+
 def _volatility_spike_metrics(closes: list[float]) -> tuple[float | None, float | None]:
     """
     Return (current_vol, baseline_vol) using recent log-return windows.
@@ -3327,13 +3366,14 @@ def _allocate_budget_to_orders(
         pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
 
 
-def _recovery_force_one_contract_if_affordable(
+def _promote_zero_count_buys_if_affordable(
     orders: list[dict],
     *,
     balance_cents: int,
     max_total_buy_pct: float,
     enabled: bool,
     logger=print,
+    log_tag: str = "[Recovery]",
 ) -> None:
     """
     After Kelly/budget zeroed count, promote the best edge BUY YES/NO to 1 contract if it fits max_total_buy_pct slice.
@@ -3361,8 +3401,8 @@ def _recovery_force_one_contract_if_affordable(
         o["count"] = 1
         used += pc
         logger(
-            f"[Recovery] force_min_buy_contracts_one: {o.get('platform')} {o.get('ticker')} "
-            f"x1 @ ${float(o.get('price', 0)):.2f} (edge {float(o.get('edge', 0)):.1%})"
+            f"{log_tag} promote x1: {o.get('platform')} {o.get('ticker')} "
+            f"@ ${float(o.get('price', 0)):.2f} (edge {float(o.get('edge', 0)):.1%})"
         )
 
 
@@ -3403,6 +3443,49 @@ def _filter_pending_buys_by_max_limit_price(
     if dropped:
         pending_orders[:] = kept
         logger(f"[Risk] Dropped {dropped} BUY(s) above max limit price ${cap_f:.2f}.")
+    else:
+        pending_orders[:] = kept
+
+
+def _filter_pending_buys_by_min_payout_ratio(
+    pending_orders: list[dict],
+    *,
+    min_ratio: float,
+    logger=print,
+) -> None:
+    """
+    Skip BUYs where profit-if-win / stake is below min_ratio: (1-price)/price for the limit price (YES or NO leg).
+    min_ratio <= 0 disables. Complements max_buy_limit_price / max_yes_price_for_buy with an explicit ROI floor.
+    """
+    if min_ratio <= 0 or not pending_orders:
+        return
+    kept: list[dict] = []
+    dropped = 0
+    for o in pending_orders:
+        rec = str(o.get("rec") or "")
+        if rec not in (REC_BUY_YES, REC_BUY_NO):
+            kept.append(o)
+            continue
+        try:
+            px = float(o.get("price") or 0)
+        except (TypeError, ValueError):
+            kept.append(o)
+            continue
+        if px <= 0 or px >= 1:
+            kept.append(o)
+            continue
+        payout_ratio = (1.0 - px) / px
+        if payout_ratio + 1e-12 < float(min_ratio):
+            dropped += 1
+            logger(
+                f"[Risk] min_payout_ratio {min_ratio:.0%}: skip {o.get('platform')} {o.get('ticker')} {rec} "
+                f"@ ${px:.2f} (ROI if win {payout_ratio:.1%} < floor)"
+            )
+            continue
+        kept.append(o)
+    if dropped:
+        pending_orders[:] = kept
+        logger(f"[Risk] Dropped {dropped} BUY(s) below min payout ratio {min_ratio:.0%}.")
     else:
         pending_orders[:] = kept
 
@@ -3969,8 +4052,12 @@ def _show_config(args) -> int:
               "enable_disagreement_dip", "enable_lottery_limits", "lottery_limit_price_mode",
               "lottery_limit_max_price", "lottery_penny_jump_apply_cap_bid_below",
               "lottery_market_yes_band_enabled", "lottery_market_yes_band_lo", "lottery_market_yes_band_hi",
+              "lottery_limit_min_p_win", "yes_overconfidence_extra_edge",
               "max_dip_cap", "limit_dip_pct",
-              "passive_limit_quote", "blacklist_extra_file", "max_buy_limit_price",
+              "passive_limit_quote", "blacklist_extra_file", "max_buy_limit_price", "min_payout_ratio",
+              "dte_edge_scaling_enabled", "dte_edge_short_threshold_days", "dte_edge_long_threshold_days",
+              "dte_edge_mult_short", "dte_edge_mult_long", "max_new_buy_dte_days",
+              "passive_bid_chase_enabled", "passive_bid_chase_refresh_minutes",
               "empirical_weighting", "empirical_exponential_halflife_bars",
               "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi",
               "adaptive_edge_max_extra", "loss_streak_max_extra", "force_min_buy_contracts_one"):
@@ -3979,7 +4066,8 @@ def _show_config(args) -> int:
             print(f"  {k}: {v}")
     print(f"\n  (effective min_edge: {min_edge})")
     print(f"\ntrading:")
-    for k in ("dry_run", "max_pct_of_balance", "max_total_buy_pct", "min_contracts"):
+    for k in ("dry_run", "max_pct_of_balance", "max_total_buy_pct", "min_contracts",
+              "dust_trade_enabled", "dust_trade_max_balance_cents"):
         v = trading.get(k)
         if v is not None:
             print(f"  {k}: {v}")
@@ -4891,6 +4979,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _sp_info = series_performance.get(_series_prefix)
                 if _sp_info and _sp_info.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
                     effective_min += sp.series_cooldown_extra_edge
+            if sp.dte_edge_scaling_enabled and dte is not None:
+                effective_min *= _dte_edge_scale_factor(float(dte), sp)
             effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
             effective_min_no = effective_min + no_parity_penalty + obi_adj_no + ll_adj_no
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
@@ -4946,6 +5036,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     easy_win_min_market_p=sp.easy_win_min_market_p,
                 )
             )
+            if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte is not None and float(dte) > sp.max_new_buy_dte_days:
+                rec = REC_SKIP
             # Skip BUY NO when price already above strike (risky to bet NO)
             violates_rule = _violates_no_above_rule(current_price, threshold, direction, sp.no_above_cushion)
             if rec == REC_BUY_NO and sp.enforce_no_above_rule and violates_rule:
@@ -5576,6 +5668,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _sp_info_g = series_performance.get(_series_prefix_g)
                     if _sp_info_g and _sp_info_g.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
                         effective_min_gem += sp.series_cooldown_extra_edge
+                if sp.dte_edge_scaling_enabled and dte_g is not None:
+                    effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
                 effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
                 effective_min_no_g = effective_min_gem + no_parity_penalty + obi_adj_no_g
                 # For non-standard intraday: use relaxed threshold when volatility model available
@@ -5636,6 +5730,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         easy_win_min_market_p=sp.easy_win_min_market_p,
                     )
                 )
+                if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte_g is not None and float(dte_g) > sp.max_new_buy_dte_days:
+                    rec = REC_SKIP
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, sp.no_above_cushion)
                 if rec == REC_BUY_NO and sp.enforce_no_above_rule and violates_rule_g:
                     rec = REC_SKIP
@@ -6226,6 +6322,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     )
                                     maker_fee_pos = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
+                                    if sp.dte_edge_scaling_enabled and dte_pos is not None:
+                                        eff_pos *= _dte_edge_scale_factor(float(dte_pos), sp)
                                     if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                                         eff_pos += adaptive_edge_bump
                                     eff_pos_yes = eff_pos + yes_parity_penalty + sp.yes_overconfidence_extra_edge
@@ -6415,6 +6513,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         hist_p = max(emp_cached, vol_p)
                 maker_fee_cached = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, _yf)
                 eff_cached = _get_effective_min_edge(min_edge, direction, calibration, sp)
+                if sp.dte_edge_scaling_enabled and dte_cached is not None:
+                    eff_cached *= _dte_edge_scale_factor(float(dte_cached), sp)
                 if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                     eff_cached += adaptive_edge_bump
                 eff_cached_yes = eff_cached + yes_parity_penalty + sp.yes_overconfidence_extra_edge
@@ -6667,6 +6767,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
                         maker_fee_pos_g = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, pos_yf)
                         pos_min_edge_g = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
+                        if sp.dte_edge_scaling_enabled and dte_g is not None:
+                            pos_min_edge_g *= _dte_edge_scale_factor(float(dte_g), sp)
                         if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                             pos_min_edge_g += adaptive_edge_bump
                         rec = (
@@ -6872,6 +6974,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     _filter_pending_buys_by_max_limit_price(
         pending_orders, cap=sp.max_buy_limit_price, logger=print,
     )
+    _filter_pending_buys_by_min_payout_ratio(
+        pending_orders, min_ratio=sp.min_payout_ratio, logger=print,
+    )
 
     # Budget-aware allocation per platform (Kalshi and Gemini have separate balances)
     kalshi_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI]
@@ -6885,20 +6990,43 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     _allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct, filter_zero=False)
+    dust_on = bool(trading.get("dust_trade_enabled", False))
+    dust_max_bc = int(trading.get("dust_trade_max_balance_cents", 0) or 0)
+    if dust_on and dust_max_bc > 0:
+        if balance_cents <= dust_max_bc:
+            _promote_zero_count_buys_if_affordable(
+                kalshi_orders,
+                balance_cents=balance_cents,
+                max_total_buy_pct=max_total_buy_pct,
+                enabled=True,
+                logger=print,
+                log_tag="[DustTrade]",
+            )
+        if gemini_balance_cents <= dust_max_bc:
+            _promote_zero_count_buys_if_affordable(
+                gemini_orders,
+                balance_cents=gemini_balance_cents,
+                max_total_buy_pct=max_total_buy_pct,
+                enabled=True,
+                logger=print,
+                log_tag="[DustTrade]",
+            )
     if sp.force_min_buy_contracts_one:
-        _recovery_force_one_contract_if_affordable(
+        _promote_zero_count_buys_if_affordable(
             kalshi_orders,
             balance_cents=balance_cents,
             max_total_buy_pct=max_total_buy_pct,
             enabled=True,
             logger=print,
+            log_tag="[Recovery]",
         )
-        _recovery_force_one_contract_if_affordable(
+        _promote_zero_count_buys_if_affordable(
             gemini_orders,
             balance_cents=gemini_balance_cents,
             max_total_buy_pct=max_total_buy_pct,
             enabled=True,
             logger=print,
+            log_tag="[Recovery]",
         )
     # Keep Gemini orders with count=0 so we can re-allocate after cancels free up balance
     pending_orders[:] = [o for o in kalshi_orders if o.get("count", 0) > 0] + gemini_orders
@@ -7027,6 +7155,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             pending_sells=pending_sells,
             regime_shift_active=regime_shift_active,
             limit_order_ttl_minutes=sp.limit_order_ttl_minutes,
+            passive_bid_chase_enabled=sp.passive_bid_chase_enabled,
+            passive_bid_chase_refresh_minutes=sp.passive_bid_chase_refresh_minutes,
             platform_kalshi=PLATFORM_KALSHI,
             platform_gemini=PLATFORM_GEMINI,
             gemini_events_by_asset=gemini_events_by_asset,

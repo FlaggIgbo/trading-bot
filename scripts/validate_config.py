@@ -188,6 +188,31 @@ def main() -> int:
         if not isinstance(macro_signal_tickers, list) or not macro_signal_tickers:
             errors.append("`strategy.macro_signal_tickers` must be a non-empty list when macro signal is enabled.")
 
+    min_payout_ratio = _as_float(strategy.get("min_payout_ratio"), 0)
+    if min_payout_ratio < 0 or min_payout_ratio > 5.0:
+        errors.append("`strategy.min_payout_ratio` must be in [0, 5] (0 disables).")
+    dte_short = _as_float(strategy.get("dte_edge_short_threshold_days"), 1.0)
+    dte_long = _as_float(strategy.get("dte_edge_long_threshold_days"), 3.0)
+    if dte_short <= 0:
+        errors.append("`strategy.dte_edge_short_threshold_days` must be > 0.")
+    if dte_long < dte_short:
+        errors.append("`strategy.dte_edge_long_threshold_days` must be >= dte_edge_short_threshold_days.")
+    dte_mshort = _as_float(strategy.get("dte_edge_mult_short"), 0.88)
+    dte_mlong = _as_float(strategy.get("dte_edge_mult_long"), 1.18)
+    if dte_mshort <= 0 or dte_mlong <= 0:
+        errors.append("`strategy.dte_edge_mult_short` and `dte_edge_mult_long` must be > 0.")
+    max_new_buy_dte = _as_float(strategy.get("max_new_buy_dte_days"), 0)
+    if max_new_buy_dte < 0:
+        errors.append("`strategy.max_new_buy_dte_days` must be >= 0 (0 disables).")
+    chase_min = _as_int(strategy.get("passive_bid_chase_refresh_minutes"), 0)
+    if chase_min < 0:
+        errors.append("`strategy.passive_bid_chase_refresh_minutes` must be >= 0.")
+
+    trading = cfg.get("trading") or {}
+    dust_max = _as_int(trading.get("dust_trade_max_balance_cents"), 0)
+    if dust_max < 0:
+        errors.append("`trading.dust_trade_max_balance_cents` must be >= 0.")
+
     print("[Config Validation]")
     print(f"  errors={len(errors)} warnings={len(warnings)}")
     for msg in errors:

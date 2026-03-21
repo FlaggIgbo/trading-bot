@@ -32,8 +32,9 @@ execution:
   limit_offset_cents: 1 # 0 = mid; >=1 = bid_plus_tick (better fills on tight DTE)
 
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
+# Short test window: recovery.min_edge overrides strategy.min_edge — lower hurdle to surface fills (tighten again after review).
 recovery:
-  min_edge: 0.10 # Hurdle for BUY YES/NO (can mirror strategy.min_edge)
+  min_edge: 0.07 # Overrides strategy.min_edge while present (e.g. 0.06–0.08 micro-compounder trial)
   adaptive_edge_max_extra: 0.0 # Caps recent-performance bump (0 = no extra from this path)
   loss_streak_max_extra: 0.0 # Caps loss-streak bump when adaptive_learning re-enabled
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -41,8 +42,8 @@ recovery:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
-  # Defensive preset: wider edge + less concentration + trust market more (see docs/IMPROVEMENTS.md § profitability)
-  min_edge: 0.10 # Lowered from 0.28 for capital-starved recovery; avoid 50% effective hurdle (28% + 22% adaptive = death spiral)
+  # Base min_edge (overridden by recovery.min_edge when set). See IMPROVEMENTS.md — micro-compounder / launchd picks up YAML each run.
+  min_edge: 0.08 # Slightly above recovery overlay default; remove or raise recovery.min_edge to use this alone
   # Easy win: disabled — high-priced "aligned" YES was a major tail-risk / steamroller profile on crypto
   enable_easy_win: false
   min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
@@ -52,7 +53,16 @@ strategy:
   max_yes_price_for_buy: 0.85 # Skip BUY YES when market YES > 85¢; worst risk-reward for small balance (steamroller)
   # Hard cap on limit price for any proposed BUY (YES or NO). Blocks 99¢ NO "nickels in front of steamroller" on micro balance. 0 = off
   max_buy_limit_price: 0.20
-  yes_overconfidence_extra_edge: 0.04 # Extra edge required for BUY YES to offset structural model bullish bias
+  # Min (profit if win / stake) on limit price = (1−price)/price; blocks thin steamrollers even under cap. 0 = off
+  min_payout_ratio: 0.15
+  # Scale required edge by DTE: easier <~24h, harder >~3d (prioritize “hot” zone)
+  dte_edge_scaling_enabled: true
+  dte_edge_short_threshold_days: 1.0
+  dte_edge_long_threshold_days: 3.0
+  dte_edge_mult_short: 0.88
+  dte_edge_mult_long: 1.15
+  max_new_buy_dte_days: 0 # e.g. 7 to skip directional BUYs when DTE > 7d; 0 = off
+  yes_overconfidence_extra_edge: 0.01 # Lowered for micro test — BUY YES fires on smaller gaps; raise if YES bias returns
   model_probability_shrinkage: 0.40 # Aggressive pull toward 0.5; 4% win rate = model wildly overconfident (was 0.65; stop steamrolling)
   # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
   max_buy_yes_strike_above_pct: 0.08
@@ -85,6 +95,9 @@ strategy:
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
   cancel_all_on_regime_shift: true # During momentum crash or vol-spike regime, cancel resting BUY limits before re-quoting
   limit_order_ttl_minutes: 30 # Cancel and refresh resting BUY limits older than this TTL
+  # Passive bid chase: if still recommended, cancel resting BUY after N minutes so next cycle re-quotes at fresh bid
+  passive_bid_chase_enabled: true
+  passive_bid_chase_refresh_minutes: 5
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   layered_order_levels: 3 # Used by layered mode to spread large intents across deeper quote levels
@@ -110,7 +123,7 @@ strategy:
   disagreement_dip_contracts: 2 # Small size for speculative dip-fishing
   # Lottery limits on SKIP + very high model P(win): use penny_jump so bid is best_bid+1¢ (cheap legs capped)
   enable_lottery_limits: true
-  lottery_limit_min_p_win: 0.95
+  lottery_limit_min_p_win: 0.90 # Lowered for micro test — more lottery-style limits on high-P(skip) names
   lottery_limit_price_mode: penny_jump # fixed | penny_jump — jump beats 1¢ stink bids when the book is 3–7¢
   lottery_limit_price: 0.01 # used when mode=fixed
   lottery_limit_max_price: 0.10 # when working bid < lottery_penny_jump_apply_cap_bid_below, cap absolute limit (micro bankroll)
@@ -330,6 +343,9 @@ trading:
   max_pct_of_balance: 0.15 # Tighter per-order cap vs 20%; pairs with smaller absolute_winner slice
   max_total_buy_pct: 0.50 # max % of balance for ALL buys combined (budget-aware diversification)
   min_contracts: 1 # skip if capped count < this
+  # Dust-to-trade: when venue balance ≤ threshold, promote best zero-count BUY to x1 after budget pass (data + compounding on micro bankrolls)
+  dust_trade_enabled: true
+  dust_trade_max_balance_cents: 1000 # $10.00; 0 disables
   # Kalshi low-balance fallback (create_order_safe): only when a buy would skip (count<=0 after
   # sizing) AND balance_cents < this threshold, place 1 contract at max affordable price.
   # Lottery-sized buys (e.g. 1×5¢) usually use the normal path; this helps when default sizing fails.

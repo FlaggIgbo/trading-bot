@@ -1192,6 +1192,7 @@ def record_order_cancel(
     - 'no_longer_rec': model no longer recommends this trade (rec=SKIP)
     - 'want_better_price': model still recommends but wants to reprice at a better level
     - 'stale_ttl': order exceeded limit_order_ttl_minutes
+    - 'bid_chase_refresh': passive bid chase — resting buy older than passive_bid_chase_refresh_minutes while still recommended (next cycle re-quotes at fresh bid)
     - 'regime_shift_guard': cancelled during momentum/volatility regime shift
     - 'expired_unfilled': auto-cancelled by platform at resolution (never filled)
     If we have a row (we placed it), update it. Else insert minimal row for historical record.

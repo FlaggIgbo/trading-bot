@@ -1,6 +1,6 @@
 # LaunchAgents: Trading Engine + Daily Performance Report
 
-> **Picking up code/config changes:** `launchd` runs your repo’s Python and reads `config.yaml` from **`WorkingDirectory` on every scheduled run**. After `git pull origin main`, the next tick (or `launchctl kickstart -k …`) uses the new code — including top-level **`recovery:`**, **`execution:`**, and strategy keys. **You do not need to re-copy plists** unless **`ProgramArguments`** or **`WorkingDirectory`** in the plist file changed.
+> **Picking up code/config changes:** `launchd` runs your repo’s Python and reads `config.yaml` from **`WorkingDirectory` on every scheduled run**. After `git pull origin main`, the next tick (or `launchctl kickstart -k …`) uses the new code — including top-level **`recovery:`**, **`execution:`**, **`trading.dust_trade_*`**, **`strategy.min_payout_ratio` / `dte_edge_*` / `passive_bid_chase_*`**, and the rest of the strategy block. **You do not need to re-copy plists** unless **`ProgramArguments`** or **`WorkingDirectory`** in the plist file changed.
 
 This setup includes:
 - `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes.

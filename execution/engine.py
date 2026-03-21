@@ -76,6 +76,8 @@ def sync_and_cancel_resting_orders(
     pending_sells: list[dict[str, Any]],
     regime_shift_active: bool,
     limit_order_ttl_minutes: int,
+    passive_bid_chase_enabled: bool = False,
+    passive_bid_chase_refresh_minutes: int = 0,
     platform_kalshi: str,
     platform_gemini: str,
     gemini_events_by_asset: dict[str, list[dict[str, Any]]],
@@ -149,6 +151,23 @@ def sync_and_cancel_resting_orders(
                                 "order_id": oid,
                                 "label": label,
                                 "reason": "regime_shift_guard",
+                                "ticker": ticker,
+                                "side": side,
+                                "old_price": old_price,
+                            }
+                        )
+                    elif (
+                        passive_bid_chase_enabled
+                        and passive_bid_chase_refresh_minutes > 0
+                        and pend
+                        and _is_order_stale(ord_, passive_bid_chase_refresh_minutes, now_ts)
+                    ):
+                        to_cancel.append(
+                            {
+                                "platform": platform_kalshi,
+                                "order_id": oid,
+                                "label": label,
+                                "reason": "bid_chase_refresh",
                                 "ticker": ticker,
                                 "side": side,
                                 "old_price": old_price,
@@ -254,6 +273,23 @@ def sync_and_cancel_resting_orders(
                                 "order_id": str(oid),
                                 "label": label,
                                 "reason": "regime_shift_guard",
+                                "ticker": str(symbol),
+                                "side": outcome,
+                                "old_price": old_price,
+                            }
+                        )
+                    elif (
+                        passive_bid_chase_enabled
+                        and passive_bid_chase_refresh_minutes > 0
+                        and pend
+                        and _is_order_stale(ord_, passive_bid_chase_refresh_minutes, now_ts)
+                    ):
+                        to_cancel.append(
+                            {
+                                "platform": platform_gemini,
+                                "order_id": str(oid),
+                                "label": label,
+                                "reason": "bid_chase_refresh",
                                 "ticker": str(symbol),
                                 "side": outcome,
                                 "old_price": old_price,

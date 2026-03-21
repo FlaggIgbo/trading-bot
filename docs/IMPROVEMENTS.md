@@ -2,6 +2,36 @@
 
 Inspired by top open-source trading repositories: [freqtrade](https://github.com/freqtrade/freqtrade), [ccxt](https://github.com/ccxt/ccxt), [hummingbot](https://github.com/hummingbot/hummingbot), [gekko](https://github.com/askmike/gekko), and [Stock-Prediction-Models](https://github.com/huseinzol05/Stock-Prediction-Models).
 
+## How this doc is organized
+
+| Section | What it is |
+| --------|------------ |
+| **Micro-compounder (priority)** | High-impact execution/risk ideas and what’s implemented vs configurable only |
+| **Implemented ✓** | Large chronological/feature table of shipped capabilities |
+| **Repo & code** | Refactors, quality, TODOs |
+| **Python ML ecosystem** | Library roadmap |
+| **Priority backlogs** | Freqtrade-style high/medium items |
+| **Research / references** | Taylor, CLM, Tsay, external repos |
+
+Signal-model consolidation is **not** required for this layout — strategy routing stays in `strategies/` + `strategy_engine` as today.
+
+---
+
+## Micro-compounder & execution priority
+
+Targets **low fill rates**, **post-budget count=0**, and **steamroller risk** on micro balance — without abandoning defensive caps.
+
+| Feature | Difficulty | Impact | Status |
+| :--- | :--- | :--- | :--- |
+| **Hard limit price cap** (`max_buy_limit_price`) | Low | High | ✓ Already in config + `_filter_pending_buys_by_max_limit_price` |
+| **Floor payout / ROI** (`min_payout_ratio`) | Low | High | ✓ `(1−price)/price` gate on directional BUY limits |
+| **Force qty = 1 after budget** | Low | High | ✓ `recovery.force_min_buy_contracts_one` + **`trading.dust_trade_*`** when balance ≤ threshold |
+| **DTE-aware edge** | Medium | Medium | ✓ `_dte_edge_scale_factor` on Kalshi/Gemini + position-eval paths |
+| **Skip far-DTE BUYs** | Low | Medium | ✓ `max_new_buy_dte_days` (0 = off) |
+| **Passive bid chase** | Medium | High | ✓ `passive_bid_chase_refresh_minutes` → cancel reason `bid_chase_refresh` in `execution/engine.py` |
+
+**Config quick reference:** `config.yaml` → `recovery.min_edge` (short test hurdle), `strategy.min_edge`, `yes_overconfidence_extra_edge`, `lottery_limit_min_p_win`, `min_payout_ratio`, `dte_edge_*`, `max_new_buy_dte_days`, `passive_bid_chase_*`, `trading.dust_trade_*`. **`launchd`** reads `WorkingDirectory` + `config.yaml` on **every** run — `git pull` then `launchctl kickstart -k gui/$(id -u)/com.user.compare_historical` to apply immediately (see `launchd/README.md`).
+
 ---
 
 ## Implemented ✓
@@ -20,6 +50,11 @@ Inspired by top open-source trading repositories: [freqtrade](https://github.com
 | XRP (Ripple) market support             | —                                       | ✓ KXXRPD, XRP-USD; crypto treatment, arbitrage, intraday                                                                                                                                                                                                 |
 | Ollama LLM analysis                     | —                                       | ✓ Local free analysis; `scripts/debug_ollama.py`; llama3.2:1b fallback                                                                                                                                                                                   |
 | **Budget-aware order allocation**       | —                                       | ✓ `_allocate_budget_to_orders`; when total cost exceeds budget, prefers 1 contract each (diversification) over 10 of one; `trading.max_total_buy_pct` (default 50%)                                                                                      |
+| **Min payout ratio (anti-steamroller)** | Micro-compounder                        | ✓ `strategy.min_payout_ratio`: require `(1−limit_price)/limit_price` ≥ floor on directional BUYs; complements `max_buy_limit_price`                                                                                                                     |
+| **Dust-to-trade (micro balance)**       | Micro-compounder                        | ✓ `trading.dust_trade_enabled`, `dust_trade_max_balance_cents`: after budget pass, promote best zero-count BUY to ×1 when venue balance ≤ threshold (before `recovery.force_min_buy_contracts_one`)                                                       |
+| **DTE-scaled min edge**                 | Micro-compounder                        | ✓ `dte_edge_scaling_enabled`, `dte_edge_*_threshold_days`, `dte_edge_mult_short/long`; applied after adaptive layers on Kalshi, Gemini, and position-eval paths                                                                                          |
+| **Max DTE for new BUYs**                | Micro-compounder                        | ✓ `max_new_buy_dte_days`: skip directional BUY when DTE exceeds cap (0 = off)                                                                                                                                                                            |
+| **Passive bid chase (resting refresh)** | Micro-compounder                        | ✓ `passive_bid_chase_enabled`, `passive_bid_chase_refresh_minutes`; `sync_and_cancel_resting_orders` cancels with `bid_chase_refresh` while still recommended                                                                                           |
 | **Ollama per-trade analysis**           | —                                       | ✓ Each proposed buy/sell is interpreted by Ollama as it's displayed (not batch at end); `analyze_single_trade()` in ollama_analysis.py                                                                                                                   |
 | **Flexible margin config**              | —                                       | ✓ `trading.max_pct_of_balance` (per order), `trading.max_total_buy_pct` (all buys combined)                                                                                                                                                              |
 | Recommendation constants                | —                                       | ✓ `constants.py`: REC*SKIP, REC_BUY_YES, REC_BUY_NO, REC_ARB*\*, REC_LIKELY_LOSE, REC_RULE_VIOLATION                                                                                                                                                     |
@@ -120,7 +155,7 @@ Refactoring, architecture, and code quality changes.
 | **Strategy plugin migration**          | Signal feature building/scoring and recommendation routing are delegated to `strategies/` implementations; `compare_historical.py` handles data/execution plumbing. |
 | **CI sample-size honesty**          | `_empirical_ci_halfwidth` now uses the effective rolling-window sample size (`empirical_recent_days`) instead of the full `days_back` history length, preventing artificially tight confidence intervals when rolling window is enabled. |
 | **Position eval persistence**       | New `position_evaluations` table + `record_position_evaluation()` / `resolve_position_evaluations()` / `get_position_evaluation_stats()` in storage; KEEP decisions tracked at all position eval paths (Kalshi cached/uncached + Gemini). |
-| **Cancel reason classification**    | `record_order_cancel` docstring and schema updated to document all 5 cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled`. |
+| **Cancel reason classification**    | `record_order_cancel` / storage: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled`, `bid_chase_refresh`. |
 | **`_fmt_price` smart formatter**    | Formats price/threshold values with appropriate decimal places based on magnitude ($81,250 for BTC, $1.24 for XRP, $0.0034 for sub-penny). Applied to strike display, distance display, reason strings, and closes range. |
 | **Monte Carlo GBM simulation**      | `_monte_carlo_probability()` + `_volatility_probability_with_mc()` wrapper; multi-step daily GBM with numpy vectorization (pure-Python fallback); Student-t innovations; blended with analytical CDF at all 5 vol_p call sites. |
 | **Expired unfilled order tracking** | `expire_unfilled_orders()` marks still-placed limit orders as `expired_unfilled` when market resolves (platform auto-cancel). Called from settlement sync. |
@@ -207,7 +242,7 @@ Use `--log` to append output to `~/Desktop/trading-bot-logs/eval_YYYYMMDDHH.log`
 
 **Implemented**: Orphan Kalshi positions and all Gemini position evals persist via `record_market_snapshot`. **Limit order tracking** (`limit_orders` table): we record every limit order placed (platform, ticker, order_id, limit_price, bid_at_place, dip_pct_used, hist_p, etc.) and record cancel reasons. Use `--limit-analysis` to see unfilled orders, min/max price during order lifetime, and "would have filled" stats — informs `limit_dip_pct` tuning.
 - ~~**Kept position outcomes**~~: ✓ New `position_evaluations` table tracks every KEEP decision with model context (hist_p, vol_p, p_lose, rec, entry_price, current_price). When the market resolves, outcomes are linked automatically via `resolve_position_evaluations()` in settlement sync. Use `--position-eval-analysis` to see KEEP vs SELL win rates, PnL, and win rate by hist_p bucket. Rate-limited to one row per (platform, ticker, side) per hour.
-- ~~**Cancel reason classification**~~: ✓ Four distinct cancel reasons are tracked: `no_longer_rec` (model stopped recommending), `want_better_price` (model wants to reprice), `stale_ttl` (order exceeded TTL), `regime_shift_guard` (cancelled during volatility/momentum regime shift). Stored in `limit_orders.cancel_reason`.
+- ~~**Cancel reason classification**~~: ✓ Reasons include: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled`, and **`bid_chase_refresh`** (passive bid chase — still recommended, refresh quote). Stored in `limit_orders.cancel_reason`.
 
 ### 6. ~~Modular Strategy Interface (Freqtrade)~~ ✓ Implemented
 
