@@ -25,7 +25,7 @@ empirical + vol blend (DTE-adjusted) → hist_p
                     ↓
 signal model (optional) + probability calibrator
                     ↓
-model_probability_shrinkage (0.75) → pulls toward 0.5
+model_probability_shrinkage → pulls toward 0.5 (`strategy.model_probability_shrinkage` in config.yaml)
                     ↓
 anti_hallucination pipeline (Bayesian, EWMA, vol Z-score, adaptive edge, regime filter)
                     ↓
@@ -40,9 +40,9 @@ pending_orders / pending_sells → execution
 
 **Weak spots:**
 - **Empirical P**: 90-day rolling window; if regime changed recently, empirical is stale.
-- **Vol model**: Can be overconfident on intraday; `intraday_vol_cap: 0.90` helps but may not be enough.
-- **Anti-hallucination**: Bayesian update with `market_strength: 2.0` pulls model toward market; if market is wrong, we may over-correct.
-- **YES bias**: `yes_overconfidence_extra_edge: 0.04`, `model_probability_shrinkage: 0.75`, `favor_yes_when_above_strike: false`—structural bias may still leak.
+- **Vol model**: Can be overconfident on intraday; `intraday_vol_cap` (repo default **0.85**) caps vol-model probability—tune if tails still look hot.
+- **Anti-hallucination**: Bayesian update (`strategy.anti_hallucination.bayesian_market_strength`) pulls model toward market; if the market is wrong, we may over-correct.
+- **YES bias**: `yes_overconfidence_extra_edge`, `model_probability_shrinkage`, `favor_yes_when_above_strike`, parity caps—structural bias may still leak; compare to current `config.yaml` and `README.md` defensive preset.
 - **Calibration**: `use_bucket_penalty`, `_get_effective_min_edge`, `_should_downgrade_buy_yes_above`—only help when we have enough resolved samples.
 
 ---
@@ -95,7 +95,7 @@ pending_orders / pending_sells → execution
    - `model_probability_shrinkage: 0.65`
    - `anti_hallucination.bayesian_market_strength: 2.75`
 4. **Raise min_edge further** if win rate stays &lt; 40%: e.g. `min_edge: 0.35`.
-5. **Reduce position size:** `kelly_fraction: 0.15` (from 0.25).
+5. **Reduce position size:** lower `kelly_fraction` (repo default **0.18** in `config.yaml`).
 6. **Disable two-sided quotes** temporarily: `enable_two_sided_quotes: false`.
 7. **Add a circuit breaker:** When `get_recent_performance` win rate &lt; 35% over 6h, block new BUYs (adaptive learning already adds edge; consider hard block).
 8. **Dry-run validation:** Set `dry_run: true` for 2–3 days and compare proposed trades vs. what would have happened (requires backtest or manual tracking).

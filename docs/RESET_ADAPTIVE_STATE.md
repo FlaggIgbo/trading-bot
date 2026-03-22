@@ -18,7 +18,7 @@ The bot does **not** use a `calibration_data.json` file. Learning signals come f
 If you truly want a clean slate for **stored** outcomes:
 
 1. Stop the bot / launchd jobs.
-2. Locate the DB: default `~/.trading-bot-data/trading_bot.sqlite` (or `TRADING_BOT_DATA_DIR`).
+2. Locate the DB: default `~/.trading-bot-data/trading_bot.db` (or `TRADING_BOT_DATA_DIR`).
 3. **Backup** the file, then either:
    - Delete only resolved rows (advanced SQL), or
    - Move/rename the whole DB and let the app recreate an empty one.

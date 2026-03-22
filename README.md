@@ -130,7 +130,9 @@ trading-bot/
 │
 ├── docs/                    # Documentation
 │   ├── CODE_EXPLAINER.md    #   Step-by-step flow, file-by-file reference
-│   └── IMPROVEMENTS.md      #   Roadmap and backlog
+│   ├── IMPROVEMENTS.md      #   Roadmap and backlog
+│   ├── PNL_INVESTIGATION.md #   PnL / decision-flow notes and mitigations
+│   └── RESET_ADAPTIVE_STATE.md # SQLite + adaptive-learning reset guidance
 │
 ├── launchd/                 # macOS scheduling (run every 5 min / daily)
 ├── pyproject.toml           # Ruff (linter/formatter) config

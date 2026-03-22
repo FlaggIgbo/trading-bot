@@ -224,6 +224,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | **`package.json`**                              | Prettier dev dependency for YAML/JSON/MD formatting       |
 | **`.pre-commit-config.yaml`**                   | Ruff (Python linter/formatter) + Prettier on git push     |
 | **`docs/IMPROVEMENTS.md`**                      | Ideas and backlog for future work                         |
+| **`docs/PNL_INVESTIGATION.md`**               | PnL investigation: decision flow, weak spots, metrics sources |
+| **`docs/RESET_ADAPTIVE_STATE.md`**            | Reset adaptive pressure via config vs SQLite (no `calibration_data.json`) |
 | **`README.md`**                                 | Project overview, setup, usage, cron/launchd instructions |
 
 ---
