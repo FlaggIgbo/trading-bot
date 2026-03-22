@@ -1,4 +1,6 @@
 # Kalshi API trading bot
+# Install into the SAME interpreter you use for launchd/cron:  python3 -m pip install -r requirements.txt
+# scikit-learn → import sklearn (calibration / signal weights in compare_historical --preview and --execute)
 requests>=2.31.0
 python-dotenv>=1.0.0
 cryptography>=42.0.0

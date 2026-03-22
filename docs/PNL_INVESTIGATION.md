@@ -118,8 +118,9 @@ The Ollama loop still benefits from **`--position-eval-analysis`** in compare lo
 
 ## 6. Status
 
-- ✅ Circuit breaker added (`adaptive_loss_block_*` + `pending_orders.clear()`) to hold buys when recent win rate < 35% over 6h.
+- ✅ Circuit breaker (`adaptive_loss_block_*`) holds buys **per venue**: Kalshi loss vs Kalshi balance and Gemini loss vs Gemini balance are evaluated separately; only that platform's pending BUYs are removed (not win-rate based).
 - ✅ Config tuned over time: `min_edge`, `kelly_fraction`, `model_probability_shrinkage`, `intraday_vol_cap`, two-sided quotes, and **`strategy.barbell_enabled`** (base/alpha directional filter) — see `config.yaml` and `README.md`.
 - ✅ `ollama_codex_loop.sh` picks the **newest** of `~/comparisons/last_run.log` and `~/comparisons/eval_*.log` for metrics; compare plist logs to `~/comparisons` with `--position-eval-analysis`.
 - ✅ HTML outputs: **`docs/ollama_runs.html`** documents data provenance; **`export_series_leaderboard.py`** sorts by PnL with correct per-series time order for consecutive-loss counts.
 - ✅ Metrics gate default is **off** (`OLLAMA_METRICS_GATE=0`); with gate **on**, **flat identical PnL** in the window no longer blocks Ollama forever (treated as insufficient signal).
+- ✅ **Liquidity / PnL execution:** `max_pct_of_book_volume` caps clip size vs same-side depth; `near_expiry_aggressive_hours` (via `execution:`) forces dip-style quotes when DTE is very short; Ollama loop uses **`OLLAMA_MAX_PATCH_ATTEMPTS`** (default 3) with revert-between-retries so bad patches are less likely to stick.

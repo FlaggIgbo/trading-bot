@@ -38,7 +38,8 @@ def _load_compare_historical():
 
 
 def _maker_for_platform(sp, platform: str, yf_ticker: str | None) -> float:
-    if platform == PLATFORM_KALSHI and (yf_ticker or "").upper() in {"^GSPC", "SPY"}:
+    _idx = frozenset({"^GSPC", "GSPC", "^NDX", "NDX", "SPY", "QQQ"})
+    if platform == PLATFORM_KALSHI and (yf_ticker or "").strip().upper() in _idx:
         return max(0.0, float(sp.kalshi_sp500_maker_fee_rate))
     if platform == PLATFORM_GEMINI:
         return max(0.0, float(sp.gemini_maker_fee_rate))

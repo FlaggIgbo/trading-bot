@@ -87,6 +87,7 @@ Give a general analysis of the run:
 - Summary of what the bot evaluated (markets, recommendations, any orders placed)
 - Which contracts or trades stand out as interesting, risky, or mispriced?
 - Any caveats, correlations (e.g. many similar strikes on same asset), or things to watch?
+- PnL focus: comment on adverse selection / mark-to-market quality (did prices move against fills?) more than one-off win/loss labels.
 Be concise but substantive. Use actual tickers and numbers from the output.
 Do not cherry-pick a single trade — analyze the overall picture.
 
@@ -228,6 +229,7 @@ def analyze_single_trade(trade: dict, action: str, model: str | None = None) -> 
 Rules for your answer:
 - Treat LIMIT_PRICE_PER_SHARE_USD only as the order price per share (0–1 USD). Do not call it the strike, spot, or barrier unless that field is absent and the title clearly states otherwise.
 - If BARRIER_STRIKE_LEVEL or BARRIER_CONDITION is present, that is the settlement threshold language, not the limit price.
+- Prioritize expected PnL and post-fill markout risk (would the book likely move against this entry?) over whether the trade "looks like a quick win."
 
 In 1-3 sentences, interpret this trade: what it means, whether it is plausible, main risks. Be concise."""
 

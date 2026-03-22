@@ -16,6 +16,8 @@ A bot that connects to the [Kalshi API](https://docs.kalshi.com/) and the [Gemin
 
    If you use system Python and see `ModuleNotFoundError`, create a venv and install there.
 
+   **scikit-learn** (`import sklearn`) powers optional calibration / signal-weight fitting in `compare_historical.py` (`--preview` / `--execute`). It’s listed in `requirements.txt`. Use the **same** `python3` for `pip install` and for launchd/cron (e.g. `.venv/bin/python3 scripts/compare_historical.py`), or you’ll see `[Learning] sklearn not available`.
+
 2. **Configure credentials**
 
    Copy `.env.example` to `.env` and fill in your values:
@@ -182,7 +184,7 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 - **yfinance FutureWarning:** Fixed deprecation warning (`Calling float on a single element Series`) in `yfinance_client.py` intraday aggregation by using `iloc[0]` when the row value is a Series.
 - **yfinance_client.py cleanup:** Consolidated 19 duplicate `get_aggs_as_of` function definitions into a single implementation that accepts `datetime | str | None` for `end_date`, with CoinGecko fallback for crypto tickers.
 - **Adaptive learning system:** The bot now learns from recent trades in real-time. Recency-weighted performance tracking (last 6h win rate, EWMA win rate), loss-streak detection with circuit breaker (extra edge required after consecutive losses), per-series cooldown when a market series has consecutive losses, and `sold` trades now count in calibration stats (previously excluded). Config: `adaptive_learning_enabled`, `adaptive_edge_lookback_hours`, `loss_streak_threshold`, `series_cooldown_threshold`, `ewma_halflife_trades`.
-- **Fresh-circuit breaker:** When the last 6h win rate (via `get_recent_performance`) falls below `adaptive_loss_block_win_rate: 0.35`, the bot blocks new BUY orders until performance stabilizes. This gives the strategy time to recover rather than averaging down into a losing streak.
+- **Fresh-circuit breaker (balance-loss, per venue):** For **Kalshi** and **Gemini** independently, when that platform's realized PnL in `adaptive_loss_block_lookback_hours` implies a **loss ≥ `adaptive_loss_block_max_balance_loss_pct` of that venue's balance** (and at least `adaptive_loss_block_min_trades` resolutions on that platform), the bot drops **only that venue's** pending BUYs. The other venue keeps trading. Set `adaptive_loss_block_max_balance_loss_pct: 0` to disable both.
 - **YES bias correction:** The model was structurally biased toward YES (86% YES vs 14% NO). Five fixes: `yes_overconfidence_extra_edge: 0.04` (YES trades require 4% more edge than NO), `model_probability_shrinkage: 0.65` (stronger pull toward 50%), removed vol-model override on `min_yes_price`, `parity_max_penalty` doubled from 0.10 to 0.20, and `easy_win_min_p_win`/`easy_win_min_market_p` raised to 0.93/0.88.
 - **Gemini settlement sync fix:** Gemini trades were not being resolved. Fixed API category filter (was causing 400 errors) and rewrote contract-to-prediction matching to use threshold-based matching instead of label matching.
 - **Intraday vol model corrections:** Reduced vol model overconfidence on intraday crypto. `vol_blend_weight` reduced from 0.75 to 0.45; added `vol_disagree_threshold`/`vol_disagree_dampen_blend` to dampen blending when empirical and vol models strongly disagree; added `intraday_vol_cap: 0.85` (tighter cap) and `intraday_min_empirical_weight: 0.20`.
@@ -399,6 +401,7 @@ The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metr
 | `OLLAMA_AUTO_BLACKLIST` | `1` | If `1`, runs `apply_series_blacklist.py --merge` → `BLACKLIST_EXTRA_FILE`. Set `0` to disable. |
 | `BLACKLIST_EXTRA_FILE` | `~/…/series_blacklist_auto.txt` | Output path; must match `strategy.blacklist_extra_file` in config. |
 | `OLLAMA_AUTO_BLACKLIST_HOURS` / `MIN_TRADES` / `MAX_WR` | `168` / `20` / `0.25` | Thresholds for the auto-blacklist writer. |
+| `OLLAMA_MAX_PATCH_ATTEMPTS` | `3` | Per tick: regenerate Ollama diff and retry after apply/validate failure (reverts between tries). |
 
 Stronger coding models (if your machine can handle them): `ollama pull phi4` or `ollama pull mistral-small`, then `OLLAMA_MODEL=phi4 ./ollama_codex_loop.sh`.
 
@@ -408,6 +411,8 @@ Stronger coding models (if your machine can handle them): `ollama pull phi4` or 
 - **`empirical_weighting`**: `exponential` + **`empirical_exponential_halflife_bars`** weights recent bars more than a flat year of history.
 - **`enable_model_prob_hard_cap`** / **`model_prob_hard_lo`** / **`model_prob_hard_hi`**: clip blended P (e.g. **0.02–0.98**) before edge/Kelly and early in the vol/emp blend path.
 - **`execution.price_strategy`** / **`limit_offset_cents`**: optional spread squeeze (`passive` + `0` → **mid**; `1` → **bid+1¢**), merged into effective `passive_limit_quote`.
+- **`execution.near_expiry_aggressive_hours`**: when time-to-resolution is under this many hours, limit quotes switch to **dip** style so ultra-short markets still get fill-friendly prices (even if `price_strategy` is passive).
+- **`strategy.max_pct_of_book_volume`**: cap each BUY clip to at most this fraction of visible same-side bid depth (reduces adverse selection / book impact); **0** disables.
 - **`blacklist_extra_file`**: newline-separated series merged into the runtime blacklist; `ollama_codex_loop.sh` can refresh it via **`apply_series_blacklist.py`** (avoids corrupting `config.yaml`).
 - **Lottery / fills:** **`lottery_limit_price_mode: penny_jump`** places **best bid + 1¢** (capped vs ask) on the traded side; **`lottery_limit_max_price`** + **`lottery_penny_jump_apply_cap_bid_below`** keep cheap-leg tickets small while leaving expensive legs uncapped. Optional **`lottery_market_yes_band_*`** restricts lottery to an ATM YES band (40–60%) for churn-heavy books.
 - **`max_buy_limit_price`:** drops any proposed BUY whose **limit price** exceeds the cap (e.g. **0.20** stops 99¢ NO steamrollers). Set **0** to disable.
@@ -542,7 +547,7 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`tick_offset`**: Number of ticks used for dynamic quote stepping (default `1`).
 - **`max_inventory_skew_pct`**: Inventory-aware quote skew; same-side inventory lowers quote aggressiveness, opposite-side inventory can modestly increase it.
 - **`min_stability_duration_seconds`**: Anti-sniping guard; requires recent mid-price stability before posting new BUY limits.
-- **`min_order_book_depth`**: In normal modes, skip posting BUY limits when same-side depth is too thin; in `layered` mode, downscale order size instead of hard-skipping.
+- **`min_order_book_depth`**: In normal modes, skip posting BUY limits when same-side depth is too thin; in `layered` mode, downscale order size instead of hard-skipping. Pair with **`max_pct_of_book_volume`** so thin books are not eaten whole.
 - **`cancel_on_vol_spike`**: When vol-spike safety triggers, cancel resting BUY limits and block new BUYs until regime normalizes.
 - **`limit_order_ttl_minutes`**: Cancel and refresh stale resting BUY limits so order prices are based on current model state.
 - **`cancel_all_on_regime_shift`**: On strong momentum/volatility regime shifts, cancel risky resting BUY limits before re-quoting.
@@ -781,9 +786,16 @@ yfinance_tickers:
   KXSOLD: "SOL-USD" # Solana
   KXINXU: "^GSPC" # S&P 500
   KXXRPD: "XRP-USD" # XRP (Ripple)
+  KXWTI: "CL=F" # WTI crude (Kalshi KXWTI)
+  KXNASDAQ100U: "^NDX" # NASDAQ-100
+  KXSILVERW: "SI=F" # Silver futures
+  KXGOLDW: "GC=F" # Gold futures
+  KXAAAGASW: "RB=F" # RBOB gasoline (proxy for US gas weekly)
+# Optional: linear shift so Yahoo wholesale units match Kalshi retail-style strikes (e.g. AAA vs RB=F).
+# yfinance_underlying_adjust: { KXAAAGASW: { multiply: 1.0, add: 0.90 } }
 ```
 
-Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `SPY`, etc. See [yfinance](https://github.com/ranaroussi/yfinance).
+Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `^NDX`, `CL=F`, `GC=F`, `SI=F`, `RB=F`, `SPY`, etc. See [yfinance](https://github.com/ranaroussi/yfinance). For **KXAAAGASW** / **RB=F**, set **`yfinance_underlying_adjust`** in `config.yaml` so model spot/history are in roughly the same $/gal space as Kalshi (wholesale→retail spread is not fixed—tune `add`).
 
 **Gemini Exchange vs Yahoo (underlying spot, not prediction markets):** For the tickers above that map to Gemini USD pairs (`BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`), `get_snapshot` / `get_aggs` / `get_intraday_aggs_at_hour` try **[Gemini public REST](https://docs.gemini.com/rest-api/market-data)** first (no API key). S&P 500 data uses SPY `1h`/`1d` (converted ×10) combined with `^GSPC` when `YFINANCE_SPY_AS_SP500` is enabled (default on); set it to 0/false/no to rely on `^GSPC` only. Set `YFINANCE_CRYPTO_GEMINI=0` to use Yahoo (+ CoinGecko fallback for BTC/ETH/SOL) only. `GEMINI_SPOT_API_BASE` defaults to `https://api.gemini.com`. This is separate from **Gemini Prediction Markets** below (contracts/events API).
 

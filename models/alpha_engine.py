@@ -42,13 +42,14 @@ class AlphaEngineConfig:
     lead_lag_pairs: dict[str, str] = field(default_factory=lambda: {
         "^GSPC": "KXINXU",
         "^IXIC": "KXINXU",
+        "^NDX": "KXNASDAQ100U",
     })
     lead_lag_min_move_pct: float = 0.003
     lead_lag_edge_bonus: float = 0.02
     lead_lag_lookback_bars: int = 5
 
 
-_DEFAULT_LEAD_LAG_PAIRS = {"^GSPC": "KXINXU", "^IXIC": "KXINXU"}
+_DEFAULT_LEAD_LAG_PAIRS = {"^GSPC": "KXINXU", "^IXIC": "KXINXU", "^NDX": "KXNASDAQ100U"}
 _DEFAULT_MARKOUT_WINDOWS = [1, 5, 15]
 
 

@@ -43,6 +43,9 @@ def main() -> int:
     max_inventory_skew_pct = _as_float(strategy.get("max_inventory_skew_pct"), 0.10)
     min_stability_duration_seconds = _as_int(strategy.get("min_stability_duration_seconds"), 0)
     min_order_book_depth = _as_int(strategy.get("min_order_book_depth"), 0)
+    max_pct_of_book_volume = _as_float(strategy.get("max_pct_of_book_volume"), 0)
+    execution_cfg = cfg.get("execution") or {}
+    near_expiry_hours = execution_cfg.get("near_expiry_aggressive_hours", strategy.get("near_expiry_aggressive_hours"))
     layered_order_levels = _as_int(strategy.get("layered_order_levels"), 3)
     limit_order_ttl_minutes = _as_int(strategy.get("limit_order_ttl_minutes"), 30)
     arb_inter_require_group_preflight = strategy.get("arb_inter_require_group_preflight", True)
@@ -127,6 +130,12 @@ def main() -> int:
         errors.append("`strategy.min_stability_duration_seconds` must be >= 0.")
     if min_order_book_depth < 0:
         errors.append("`strategy.min_order_book_depth` must be >= 0.")
+    if max_pct_of_book_volume < 0 or max_pct_of_book_volume > 1.0:
+        errors.append("`strategy.max_pct_of_book_volume` must be in [0, 1] (0 disables book-% cap).")
+    if near_expiry_hours is not None:
+        neh = _as_float(near_expiry_hours, -1.0)
+        if neh < 0 or neh > 168.0:
+            errors.append("`execution.near_expiry_aggressive_hours` / `strategy.near_expiry_aggressive_hours` must be in [0, 168].")
     if layered_order_levels < 1:
         errors.append("`strategy.layered_order_levels` must be >= 1.")
     if limit_order_ttl_minutes < 0:
@@ -211,6 +220,13 @@ def main() -> int:
         errors.append("`strategy.max_cross_platform_exposure` must be in [0, 1].")
     if not (0.0 <= max_daily_loss_pct <= 1.0):
         errors.append("`strategy.max_daily_loss_pct` must be in [0, 1].")
+
+    cb_loss = _as_float(strategy.get("adaptive_loss_block_max_balance_loss_pct", 0.20), 0.20)
+    if cb_loss < 0 or cb_loss > 1.0:
+        errors.append("`strategy.adaptive_loss_block_max_balance_loss_pct` must be in [0, 1] (0 = disable).")
+    cb_min_tr = _as_int(strategy.get("adaptive_loss_block_min_trades", 5), 5)
+    if cb_min_tr < 1:
+        errors.append("`strategy.adaptive_loss_block_min_trades` must be >= 1.")
 
     if strategy.get("enable_two_sided_quotes", True):
         if two_sided_quote_min_edge < 0:

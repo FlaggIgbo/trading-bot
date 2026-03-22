@@ -33,6 +33,15 @@ from zoneinfo import ZoneInfo
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+import warnings
+
+# Before any `requests`/Gemini import loads urllib3: don't `import urllib3` here — that emits the warning.
+warnings.filterwarnings(
+    "ignore",
+    message="urllib3 v2 only supports OpenSSL",
+    category=Warning,
+)
+
 from dotenv import load_dotenv
 
 load_dotenv(_ROOT / ".env")
@@ -124,6 +133,11 @@ from yfinance_client import (
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
     get_snapshot as yf_get_snapshot,
 )
+from underlying_adjust import (
+    apply_underlying_closes,
+    apply_underlying_price,
+    underlying_adjust_params,
+)
 
 try:
     import numpy as np
@@ -169,6 +183,21 @@ GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
     "HYPE32196-USD": "HYPE-USD",
 }
 
+# US equity indices: same 4pm ET “regular close” intraday rules as ^GSPC (e.g. Kalshi Nasdaq-100).
+_US_EQUITY_INDEX_YF_TICKERS = frozenset({"^GSPC", "GSPC", "^NDX", "NDX"})
+# Yahoo continuous futures for Kalshi WTI / metals / RBOB (gas proxy) — allow titled intraday times.
+_COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "GC=F", "SI=F", "RB=F"})
+# Kalshi maker fee override (index-like); match _maker_fee_rate_for_market.
+_KALSHI_INDEX_MAKER_FEE_YF = frozenset({"^GSPC", "GSPC", "^NDX", "NDX", "SPY", "QQQ"})
+
+
+def _yf_is_us_equity_index(yf_ticker: str) -> bool:
+    return (yf_ticker or "").strip().upper() in _US_EQUITY_INDEX_YF_TICKERS
+
+
+def _yf_is_commodity_future(yf_ticker: str) -> bool:
+    return (yf_ticker or "").strip().upper() in _COMMODITY_FUTURES_YF_TICKERS
+
 
 def _gemini_events_list_for_yf_ticker(events_by_asset: dict[str, list], yf_ticker: str) -> list:
     key = GEMINI_ASSET_KEY_FOR_YFIN_TICKER.get(yf_ticker, yf_ticker)
@@ -194,6 +223,10 @@ class _StrategyParams:
     max_inventory_skew_pct: float
     min_stability_duration_seconds: int
     min_order_book_depth: int
+    # PnL: cap proposed BUY size to this fraction of same-side visible bid depth (0 = off)
+    max_pct_of_book_volume: float
+    # PnL: when time-to-resolution < this many hours, use fill-friendly dip quoting (overrides passive mid/bid_plus_tick)
+    near_expiry_aggressive_hours: float
     cancel_on_vol_spike: bool
     cancel_all_on_regime_shift: bool
     limit_order_ttl_minutes: int
@@ -385,8 +418,9 @@ class _StrategyParams:
     series_cooldown_extra_edge: float
     ewma_halflife_trades: int
     ewma_edge_scale_per_pct: float
-    adaptive_loss_block_win_rate: float
+    adaptive_loss_block_max_balance_loss_pct: float
     adaptive_loss_block_lookback_hours: float
+    adaptive_loss_block_min_trades: int
     adaptive_edge_idle_decay_start_hours: float
     adaptive_edge_idle_decay_halflife_hours: float
     adaptive_stress_size_edge_threshold: float
@@ -433,6 +467,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         max_inventory_skew_pct=max(0.0, float(strategy.get("max_inventory_skew_pct", 0.10))),
         min_stability_duration_seconds=max(0, int(strategy.get("min_stability_duration_seconds", 0))),
         min_order_book_depth=max(0, int(strategy.get("min_order_book_depth", 0))),
+        max_pct_of_book_volume=max(0.0, min(1.0, float(strategy.get("max_pct_of_book_volume", 0) or 0))),
+        near_expiry_aggressive_hours=max(0.0, float(strategy.get("near_expiry_aggressive_hours", 0) or 0)),
         cancel_on_vol_spike=bool(strategy.get("cancel_on_vol_spike", True)),
         cancel_all_on_regime_shift=bool(strategy.get("cancel_all_on_regime_shift", True)),
         limit_order_ttl_minutes=max(0, int(strategy.get("limit_order_ttl_minutes", 30))),
@@ -625,8 +661,11 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         series_cooldown_extra_edge=float(strategy.get("series_cooldown_extra_edge", 0.06)),
         ewma_halflife_trades=int(strategy.get("ewma_halflife_trades", 30)),
         ewma_edge_scale_per_pct=float(strategy.get("ewma_edge_scale_per_pct", 0.004)),
-        adaptive_loss_block_win_rate=float(strategy.get("adaptive_loss_block_win_rate", 0.0)),
-        adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 0.0)),
+        adaptive_loss_block_max_balance_loss_pct=float(
+            strategy.get("adaptive_loss_block_max_balance_loss_pct", 0.20)
+        ),
+        adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 8.0)),
+        adaptive_loss_block_min_trades=int(strategy.get("adaptive_loss_block_min_trades", 5)),
         adaptive_edge_idle_decay_start_hours=max(0.0, float(strategy.get("adaptive_edge_idle_decay_start_hours", 2.5))),
         adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
         adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
@@ -1068,7 +1107,46 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
             strategy.setdefault("passive_limit_quote", "mid")
     elif ps in ("aggressive", "market", "cross"):
         strategy["passive_limit_quote"] = "dip"
+    ne = ex.get("near_expiry_aggressive_hours")
+    if ne is not None:
+        try:
+            strategy["near_expiry_aggressive_hours"] = max(0.0, float(ne))
+        except (TypeError, ValueError):
+            pass
     return strategy
+
+
+def _effective_passive_limit_quote(sp: _StrategyParams, dte_days: float | None) -> str:
+    """
+    When resolution is very soon, prefer dip-style limits so penny books actually fill (PnL > maker queue risk).
+    """
+    base = sp.passive_limit_quote
+    h = float(sp.near_expiry_aggressive_hours or 0.0)
+    if h <= 0 or dte_days is None:
+        return base
+    try:
+        d = float(dte_days)
+    except (TypeError, ValueError):
+        return base
+    if d * 24.0 < h:
+        return "dip"
+    return base
+
+
+def _cap_buy_count_by_book_pct(count: int, book_bid_size: float | None, max_pct: float) -> int:
+    """Cap order size vs visible same-side depth to reduce adverse selection and book impact."""
+    if count <= 0 or max_pct <= 0:
+        return count
+    if book_bid_size is None:
+        return count
+    try:
+        depth = float(book_bid_size)
+    except (TypeError, ValueError):
+        return count
+    if depth <= 0:
+        return count
+    cap = max(1, int(depth * max_pct))
+    return min(count, cap)
 
 
 def _load_blacklist_extra_file(path: str | None) -> set[str]:
@@ -1261,9 +1339,10 @@ def _compute_macro_signal_24h(cfg: dict, sp: _StrategyParams) -> float:
 # Intraday vs daily-close: supported resolution times
 # ---------------------------------------------------------------------------
 # We only evaluate intraday markets that match our supported times:
-# - Crypto (BTC, ETH, SOL): 5pm ET (typical crypto settlement)
-# - S&P 500 (^GSPC): 4pm ET (US market close)
-# All other intraday times (e.g. 7pm EDT) are skipped.
+# - Crypto (BTC, ETH, SOL, …): 5pm ET (typical crypto settlement)
+# - US equity indices (^GSPC, ^NDX): 4pm ET (regular session close)
+# - Listed commodity futures (CL=F, GC=F, SI=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
+# All other intraday times on unsupported underlyings (e.g. 7pm EDT) are skipped.
 _RESOLUTION_HOUR_PATTERN = re.compile(
     r"(?:today|tomorrow)\s+at\s+(\d{1,2})(?::\d{2})?\s*(am|pm)"
     r"|"
@@ -1308,21 +1387,22 @@ def _should_skip_by_resolution(market_or_title: dict | str, yf_ticker: str) -> b
     """
     True if we should SKIP this market (never evaluate). We evaluate:
     - Daily-close markets (no intraday time in title)
-    - Crypto and S&P 500 at ANY intraday time (5pm, 4pm, 8pm, etc.)
-      - 5pm crypto / 4pm S&P: use standard min_edge
+    - Crypto, US equity indices (^GSPC, ^NDX), and listed commodity futures at ANY intraday time
+      - 5pm crypto / 4pm index: use standard min_edge
+      - Commodity futures: 4pm or 5pm ET = standard; other titled hours → strict
       - Other times (e.g. 8pm ET): use strict intraday_other_min_p_win (only buy when almost certain)
-    - Non–crypto/non–S&P with intraday → skip (no supported time)
+    - Non–supported underlyings with intraday → skip (no supported time)
     """
     title = _get_title(market_or_title)
     hour = _get_resolution_hour_from_title(title)
     if hour is None:
         return False  # No intraday time → treat as daily close, don't skip
 
-    is_sp500 = yf_ticker.upper() in ("^GSPC", "GSPC")
+    is_idx = _yf_is_us_equity_index(yf_ticker)
     is_crypto = yf_ticker in GEMINI_CRYPTO_YF
-    if is_sp500 or is_crypto:
-        return False  # Evaluate all crypto/S&P intraday (strict threshold for non-5pm/4pm)
-    # Other assets (non-crypto, non-S&P) with intraday → skip (no supported time)
+    is_cfu = _yf_is_commodity_future(yf_ticker)
+    if is_idx or is_crypto or is_cfu:
+        return False  # Evaluate (strict threshold for non-standard hours where applicable)
     return True
 
 
@@ -1333,14 +1413,17 @@ def _is_intraday_market(market_or_title: dict | str, yf_ticker: str) -> bool:
     hour = _get_resolution_hour_from_title(title)
     if hour is None:
         return False
-    is_sp500 = yf_ticker.upper() in ("^GSPC", "GSPC")
-    is_crypto = yf_ticker in GEMINI_CRYPTO_YF
-    return is_sp500 or is_crypto
+    return (
+        _yf_is_us_equity_index(yf_ticker)
+        or yf_ticker in GEMINI_CRYPTO_YF
+        or _yf_is_commodity_future(yf_ticker)
+    )
 
 
 def _is_other_intraday(market_or_title: dict | str, yf_ticker: str) -> bool:
     """
-    True if this is an intraday market at a time OTHER than our standard 5pm crypto / 4pm S&P.
+    True if this is an intraday market at a time OTHER than our standard 5pm crypto / 4pm US index
+    / 4–5pm commodity futures window.
     E.g. "Bitcoin today at 8pm ET" → use strict "almost certain" threshold (intraday_other_min_p_win).
     """
     title = _get_title(market_or_title)
@@ -1348,14 +1431,17 @@ def _is_other_intraday(market_or_title: dict | str, yf_ticker: str) -> bool:
     if hour is None:
         return False
 
-    is_sp500 = yf_ticker.upper() in ("^GSPC", "GSPC")
+    is_idx = _yf_is_us_equity_index(yf_ticker)
     is_crypto = yf_ticker in GEMINI_CRYPTO_YF
-    if is_sp500 and hour == 16:
-        return False  # Standard 4pm S&P
+    is_cfu = _yf_is_commodity_future(yf_ticker)
+    if is_idx and hour == 16:
+        return False  # Standard 4pm US equity index
     if is_crypto and hour == 17:
         return False  # Standard 5pm crypto
+    if is_cfu and hour in (16, 17):
+        return False  # US cash-session close window for futures-backed titles
     # Has intraday time but not standard → other intraday
-    return is_sp500 or is_crypto
+    return is_idx or is_crypto or is_cfu
 
 
 _ULTRA_SHORT_TITLE_RE = re.compile(
@@ -1551,9 +1637,8 @@ def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetim
             return None
         if cand.date() < now_et:
             year += 1
-        # Hour: from "at 5pm" in match, or default 17 (5pm) for crypto, 16 (4pm) for S&P
-        is_sp = yf_ticker.upper() in ("^GSPC", "GSPC")
-        default_hour = 16 if is_sp else 17
+        # Hour: from "at 5pm" in match, or default 16 (4pm) US index / 17 (5pm) crypto & others
+        default_hour = 16 if _yf_is_us_equity_index(yf_ticker) else 17
         if m3.group(3) is not None:
             h_str, min_str, am_pm = m3.group(3), m3.group(4), m3.group(5)
             hour = int(h_str)
@@ -2073,6 +2158,7 @@ def _get_closes_for_empirical(
     market_or_title: dict | str,
     sp: "_StrategyParams",
     cfg: dict,
+    kalshi_series: str | None = None,
 ) -> list[float]:
     """For intraday + use_intraday_empirical: return prices at resolution hour; else daily closes."""
     if _is_intraday_or_ultra_short(market_or_title, yf_ticker, sp) and sp.use_intraday_empirical:
@@ -2080,7 +2166,7 @@ def _get_closes_for_empirical(
         if hour is not None:
             intraday = yf_get_intraday_aggs(yf_ticker, days_back, hour, cfg)
             if intraday:
-                return intraday
+                return apply_underlying_closes(cfg, kalshi_series or "", intraday)
     return closes_daily
 
 
@@ -2886,7 +2972,7 @@ def _barbell_status_for_log(bucket: str, blocked: bool, rec: str) -> str:
 
 def _maker_fee_rate_for_market(sp: _StrategyParams, platform: str, yf_ticker: str | None) -> float:
     """Platform-specific maker fee with index override support."""
-    if platform == PLATFORM_KALSHI and (yf_ticker or "").upper() in {"^GSPC", "SPY"}:
+    if platform == PLATFORM_KALSHI and (yf_ticker or "").strip().upper() in _KALSHI_INDEX_MAKER_FEE_YF:
         return max(0.0, float(sp.kalshi_sp500_maker_fee_rate))
     if platform == PLATFORM_GEMINI:
         return max(0.0, float(sp.gemini_maker_fee_rate))
@@ -4394,7 +4480,7 @@ def _maybe_add_two_sided_quotes(
                 except (TypeError, ValueError):
                     pass
             price = _resolve_passive_quote_price(
-                passive_quote=sp.passive_limit_quote,
+                passive_quote=_effective_passive_limit_quote(sp, c.get("dte")),
                 bid=bid,
                 ask=ask_f,
                 dip_based_price=dip_price,
@@ -4405,6 +4491,14 @@ def _maybe_add_two_sided_quotes(
             )
             liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
             count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
+            _bsz = c.get("yes_bid_size") if side == "yes" else c.get("no_bid_size")
+            _bdv: float | None = None
+            if _bsz is not None:
+                try:
+                    _bdv = float(_bsz)
+                except (TypeError, ValueError):
+                    _bdv = None
+            count = _cap_buy_count_by_book_pct(count, _bdv, sp.max_pct_of_book_volume)
             if count <= 0:
                 continue
             order = {
@@ -5039,7 +5133,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
         print(
             "[Learning] sklearn not available: adaptive calibration/weight fitting disabled. "
-            "Install scikit-learn in this runtime environment."
+            "Install: python3 -m pip install 'scikit-learn>=1.3.0'  (or pip install -r requirements.txt "
+            "using the same interpreter as this run)."
             + tip
         )
         print()
@@ -5348,7 +5443,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             cl = yf_get_aggs(yt, days_back=args.days, config=cfg)
             if not cl:
                 return s, yt, None, None, "no_closes"
+            cl = apply_underlying_closes(cfg, s, cl)
             snap = yf_get_snapshot(yt) if sp.use_live_price else None
+            if snap is not None:
+                snap = apply_underlying_price(cfg, s, snap)
             return s, yt, cl, snap, "ok"
         except Exception:
             return s, yt, None, None, "err"
@@ -5376,7 +5474,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         last_close = float(closes[-1])
         _snap = snap_pref if (sp.use_live_price and snap_pref is not None and snap_pref > 0) else None
         if _snap is None and sp.use_live_price:
-            _snap = yf_get_snapshot(yf_ticker)
+            _snap = apply_underlying_price(cfg, series, yf_get_snapshot(yf_ticker))
         if _snap is not None and _snap > 0:
             live_f = float(_snap)
             w = sp.live_price_weight
@@ -5418,6 +5516,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         _lo = min(closes[-min(20, len(closes)):])
         print(f"\n{'─' * 75}")
         print(f"  {series} ({yf_ticker})")
+        _adj_m, _adj_a = underlying_adjust_params(cfg, series)
+        if _adj_a != 0.0 or _adj_m != 1.0:
+            print(
+                f"  Underlying adjust: Yahoo × {_adj_m:.4f} + {_adj_a:.2f} $/gal "
+                f"(align wholesale proxy to retail-style Kalshi thresholds)"
+            )
         print(f"  Current Price:  ${current_price:,.2f}{live_note}  ({_chg_sign}{_daily_chg:.2f}% vs last close)")
         print(f"  20-Day Range:   ${_lo:,.2f} – ${_hi:,.2f}")
         print(f"  History:        {len(closes)} daily closes loaded")
@@ -5538,7 +5642,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
                 continue
 
-            closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg)
+            closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
             recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
             emp = _empirical_probability(
                 closes_for_emp,
@@ -6124,7 +6228,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     layered_order_levels=sp.layered_order_levels,
                     order_count=inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0) + 1,
                     max_dip_cap=sp.max_dip_cap,
-                    passive_quote=sp.passive_limit_quote,
+                    passive_quote=_effective_passive_limit_quote(sp, dte),
                 )
                 _bb_k = 1.0
                 if sp.barbell_enabled and barbell_bucket == "base":
@@ -6148,6 +6252,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 liq_mult *= depth_mult
                 liq_mult *= size_regime_mult
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
+                _bdv_k: float | None = None
+                if bid_size_side is not None:
+                    try:
+                        _bdv_k = float(bid_size_side)
+                    except (TypeError, ValueError):
+                        _bdv_k = None
+                count = _cap_buy_count_by_book_pct(count, _bdv_k, sp.max_pct_of_book_volume)
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
                     "ticker": ticker,
@@ -6886,7 +6997,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         layered_order_levels=sp.layered_order_levels,
                         order_count=inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0) + 1,
                         max_dip_cap=sp.max_dip_cap,
-                        passive_quote=sp.passive_limit_quote,
+                        passive_quote=_effective_passive_limit_quote(sp, dte_g),
                     )
                     _bb_kg = 1.0
                     if sp.barbell_enabled and barbell_bucket_g == "base":
@@ -6910,6 +7021,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     liq_mult *= depth_mult
                     liq_mult *= size_regime_mult
                     count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
+                    _bdv_g: float | None = None
+                    if bid_size_side is not None:
+                        try:
+                            _bdv_g = float(bid_size_side)
+                        except (TypeError, ValueError):
+                            _bdv_g = None
+                    count = _cap_buy_count_by_book_pct(count, _bdv_g, sp.max_pct_of_book_volume)
                     order_entry = {
                         "platform": PLATFORM_GEMINI,
                         "ticker": evt.get("ticker", "?"),
@@ -7143,6 +7261,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     ("KXSOL", "KXSOLD"),
                                     ("KXXRP", "KXXRPD"),
                                     ("KXINX", "KXINXU"),
+                                    ("KXAAAGASW", "KXAAAGASW"),
                                 ]:
                                     if prefix in t:
                                         series = s
@@ -7168,11 +7287,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if pos_yf:
                             closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
                             if closes:
+                                    closes = apply_underlying_closes(cfg, series or "", closes)
                                     threshold, direction = _extract_strike(m)
                                     if threshold is not None and direction is not None:
                                         yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                                         no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
-                                        closes_for_emp_pos = _get_closes_for_empirical(pos_yf, args.days, closes, m, sp, cfg)
+                                        closes_for_emp_pos = _get_closes_for_empirical(
+                                            pos_yf, args.days, closes, m, sp, cfg, kalshi_series=series or ""
+                                        )
                                         recent_w_pos = _regime_adjusted_recent_weight(closes_for_emp_pos, sp.empirical_recent_weight)
                                         emp_pos = _empirical_probability(
                                             closes_for_emp_pos,
@@ -7188,7 +7310,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
                                         ewma_lambda_pos = _ewma_lambda_for_market(sp, m, pos_yf)
                                         last_close_pos = float(closes[-1])
-                                        _snap_pos = yf_get_snapshot(pos_yf) if sp.use_live_price else None
+                                        _snap_pos = (
+                                            apply_underlying_price(cfg, series or "", yf_get_snapshot(pos_yf))
+                                            if sp.use_live_price
+                                            else None
+                                        )
                                         if _snap_pos is not None and _snap_pos > 0:
                                             current_price_pos = sp.live_price_weight * float(_snap_pos) + (1 - sp.live_price_weight) * last_close_pos
                                         else:
@@ -7440,7 +7566,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if threshold is None or direction is None:
                     continue
                 yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
-                closes_for_emp_cached = _get_closes_for_empirical(_yf, args.days, closes, m, sp, cfg)
+                closes_for_emp_cached = _get_closes_for_empirical(_yf, args.days, closes, m, sp, cfg, kalshi_series=_series)
                 recent_w_cached = _regime_adjusted_recent_weight(closes_for_emp_cached, sp.empirical_recent_weight)
                 emp_cached = _empirical_probability(
                     closes_for_emp_cached,
@@ -8131,16 +8257,61 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"         {t} ({ticker_counts.get(t, 0)} existing entries)")
             print()
 
-    block_wr = sp.adaptive_loss_block_win_rate
-    block_hours = sp.adaptive_loss_block_lookback_hours
-    if block_wr > 0 and block_hours > 0 and get_recent_performance and pending_orders:
-        perf = get_recent_performance(lookback_hours=block_hours, config=cfg) or {}
-        total = int(perf.get("total", 0))
-        wr_val = perf.get("win_rate")
-        min_trades_for_block = max(5, int(sp.adaptive_edge_min_trades))
-        if wr_val is not None and total >= min_trades_for_block and wr_val < block_wr:
-            print(f"[Risk] Circuit breaker: recent {block_hours:.1f}h win rate {wr_val:.1%} below {block_wr:.1%}; blocking {len(pending_orders)} new buys.")
-            pending_orders.clear()
+    loss_cb_pct = float(sp.adaptive_loss_block_max_balance_loss_pct)
+    block_hours = float(sp.adaptive_loss_block_lookback_hours)
+    min_tr_cb = max(1, int(sp.adaptive_loss_block_min_trades))
+    if loss_cb_pct > 0 and block_hours > 0 and get_recent_performance and pending_orders:
+        # Independent per-venue breakers: Kalshi PnL vs Kalshi balance; Gemini PnL vs Gemini balance.
+        if any(o.get("platform") == PLATFORM_KALSHI for o in pending_orders):
+            k_bal = int(balance_cents)
+            if k_bal > 0:
+                perf_k = get_recent_performance(
+                    lookback_hours=block_hours, platform=PLATFORM_KALSHI, config=cfg
+                ) or {}
+                total_k = int(perf_k.get("total", 0))
+                pnl_k = int(perf_k.get("pnl_cents", 0) or 0)
+                if total_k >= min_tr_cb and pnl_k < 0:
+                    loss_k = -pnl_k
+                    loss_pct_k = loss_k / float(max(1, k_bal))
+                    if loss_pct_k >= loss_cb_pct:
+                        nk = sum(1 for o in pending_orders if o.get("platform") == PLATFORM_KALSHI)
+                        pending_orders[:] = [
+                            o for o in pending_orders if o.get("platform") != PLATFORM_KALSHI
+                        ]
+                        print(
+                            f"[Risk] Circuit breaker (Kalshi): realized loss ${loss_k / 100:.2f} in last {block_hours:.1f}h "
+                            f"({loss_pct_k:.1%} of ~${k_bal / 100:.2f} Kalshi balance) ≥ {loss_cb_pct:.1%}; "
+                            f"blocking {nk} Kalshi buy(s) (Gemini unchanged)."
+                        )
+
+        if any(o.get("platform") == PLATFORM_GEMINI for o in pending_orders):
+            g_bal_cb = int(gemini_balance_cents or 0)
+            if g_bal_cb <= 0:
+                try:
+                    g_bal_cb = int(
+                        GeminiTradingClient().get_balance().get("balance", 0) or 0
+                    )
+                except Exception:
+                    g_bal_cb = 0
+            if g_bal_cb > 0:
+                perf_g = get_recent_performance(
+                    lookback_hours=block_hours, platform=PLATFORM_GEMINI, config=cfg
+                ) or {}
+                total_g = int(perf_g.get("total", 0))
+                pnl_g = int(perf_g.get("pnl_cents", 0) or 0)
+                if total_g >= min_tr_cb and pnl_g < 0:
+                    loss_g = -pnl_g
+                    loss_pct_g = loss_g / float(max(1, g_bal_cb))
+                    if loss_pct_g >= loss_cb_pct:
+                        ng = sum(1 for o in pending_orders if o.get("platform") == PLATFORM_GEMINI)
+                        pending_orders[:] = [
+                            o for o in pending_orders if o.get("platform") != PLATFORM_GEMINI
+                        ]
+                        print(
+                            f"[Risk] Circuit breaker (Gemini): realized loss ${loss_g / 100:.2f} in last {block_hours:.1f}h "
+                            f"({loss_pct_g:.1%} of ~${g_bal_cb / 100:.2f} Gemini balance) ≥ {loss_cb_pct:.1%}; "
+                            f"blocking {ng} Gemini buy(s) (Kalshi unchanged)."
+                        )
 
     # Proposed trades + per-trade Ollama: print each trade and Ollama's interpretation
     if pending_orders or pending_sells:

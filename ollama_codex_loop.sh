@@ -37,6 +37,8 @@ OLLAMA_METRICS_GATE_DROP="${OLLAMA_METRICS_GATE_DROP:-0.20}"
 OLLAMA_LEADERBOARD_HOURS="${OLLAMA_LEADERBOARD_HOURS:-336}"
 OLLAMA_BLACKLIST_MIN_TRADES="${OLLAMA_BLACKLIST_MIN_TRADES:-50}"
 OLLAMA_TEMPERATURE="${OLLAMA_TEMPERATURE:-0.2}"
+# Max generate→apply→validate rounds per launchd tick (reduces one-shot bad patches; each fail reverts before retry)
+OLLAMA_MAX_PATCH_ATTEMPTS="${OLLAMA_MAX_PATCH_ATTEMPTS:-3}"
 OLLAMA_LOG_CONTEXT_MAX_CHARS="${OLLAMA_LOG_CONTEXT_MAX_CHARS:-24000}"
 # Shorter window for the Ollama prompt (so the model sees recent bleeding assets)
 OLLAMA_PROMPT_LB_HOURS="${OLLAMA_PROMPT_LB_HOURS:-72}"
@@ -276,56 +278,78 @@ _strategy_slice() {
   tail -n 8 "$JOURNAL" 2>/dev/null || true
 } > "$TMP_PROMPT"
 
-# --- 7) Ollama: /api/generate with low temperature (ollama run has no CLI temperature flag) ---
-OLLAMA_HOST="$OLLMAPATH" OLLAMA_TEMPERATURE="$OLLAMA_TEMPERATURE" \
-  "$PYTHON" "$REPO/scripts/ollama_codex_generate.py" "$OLLAMA_MODEL" "$TMP_PROMPT" > "$TMP_OUTPUT" || {
-  echo "❌ ollama_codex_generate.py failed (host=$OLLMAPATH model=$OLLAMA_MODEL temp=$OLLAMA_TEMPERATURE)" >&2
-  _commit_dashboard_if_changed || true
-  exit 1
-}
-
-PATCH=$(awk '/^```diff$/ {flag=1; next} /^```$/ && flag {flag=0} flag' "$TMP_OUTPUT")
-MSG=$(grep -i '^Commit message:' "$TMP_OUTPUT" | head -n 1 | cut -d: -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-if [[ -z "$PATCH" ]]; then
-  echo "ℹ️  No fenced diff block (markdown \`\`\`diff) in model output; nothing to apply."
-  _wr_json=$([[ "${WIN_RATE:-}" == "null" ]] && echo null || echo "$WIN_RATE")
-  echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":${_wr_json}}" >>"$JOURNAL"
-  _commit_dashboard_if_changed || true
-  exit 0
-fi
-
-echo "$PATCH" > "$PATCH_FILE"
-
-cd "$REPO"
-if git apply --verbose --recount --whitespace=fix "$PATCH_FILE"; then
-  echo "✅ Patch applied to working tree; running validator…"
-else
-  echo "❌ git apply failed (malformed diff)."
-  echo "{\"ts\":$(date +%s),\"event\":\"apply_failed\",\"model\":\"$OLLAMA_MODEL\"}" >>"$JOURNAL"
-  _commit_dashboard_if_changed || true
-  exit 1
-fi
-
+# --- 7) Ollama: generate → apply → validate (up to OLLAMA_MAX_PATCH_ATTEMPTS per tick; revert between tries) ---
 VALID_ARGS=(--repo "$REPO" --smoke-markets "${OLLAMA_SMOKE_MARKETS:-2}" --backtest-mode "$OLLAMA_BT_MODE" --backtest-days "$OLLAMA_BT_DAYS")
 [[ -n "$BASELINE_JSON" && -f "$BASELINE_JSON" ]] && VALID_ARGS+=(--baseline-json "$BASELINE_JSON")
 
-if "$PYTHON" "$REPO/scripts/ollama_patch_validate.py" "${VALID_ARGS[@]}"; then
-  echo "✅ Validation passed."
-  "$PYTHON" -m py_compile signals/yfinance_client.py 2>/dev/null || true
-  git add "$HTML" "$LB_HTML" "$JOURNAL" 2>/dev/null || true
-  git add -A
-  git commit -m "${MSG:-chore: ollama-optimized bot}" || {
-    echo "ℹ️  Nothing to commit (empty diff vs HEAD?)."
-  }
-  if [[ "$OLLAMA_AUTO_PUSH" == "1" ]]; then
-    git push origin HEAD
+PATCH_ATTEMPT=1
+VALIDATED_OK=0
+HAD_ANY_PATCH=0
+while (( PATCH_ATTEMPT <= OLLAMA_MAX_PATCH_ATTEMPTS )); do
+  if (( PATCH_ATTEMPT > 1 )); then
+    echo "↻ Ollama patch attempt ${PATCH_ATTEMPT}/${OLLAMA_MAX_PATCH_ATTEMPTS} (previous apply/validate failed)…"
   fi
-  echo "{\"ts\":$(date +%s),\"event\":\"committed\",\"model\":\"$OLLAMA_MODEL\"}" >>"$JOURNAL"
-else
-  echo "❌ Validation failed — reverting applied patch."
+  if ! OLLAMA_HOST="$OLLMAPATH" OLLAMA_TEMPERATURE="$OLLAMA_TEMPERATURE" \
+    "$PYTHON" "$REPO/scripts/ollama_codex_generate.py" "$OLLAMA_MODEL" "$TMP_PROMPT" > "$TMP_OUTPUT"; then
+    echo "❌ ollama_codex_generate.py failed (host=$OLLMAPATH model=$OLLAMA_MODEL temp=$OLLAMA_TEMPERATURE)" >&2
+    _commit_dashboard_if_changed || true
+    exit 1
+  fi
+
+  PATCH=$(awk '/^```diff$/ {flag=1; next} /^```$/ && flag {flag=0} flag' "$TMP_OUTPUT")
+  MSG=$(grep -i '^Commit message:' "$TMP_OUTPUT" | head -n 1 | cut -d: -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+  if [[ -z "$PATCH" ]]; then
+    if (( PATCH_ATTEMPT == 1 )); then
+      echo "ℹ️  No fenced diff block (markdown \`\`\`diff) in model output; nothing to apply."
+      _wr_json=$([[ "${WIN_RATE:-}" == "null" ]] && echo null || echo "$WIN_RATE")
+      echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":${_wr_json}}" >>"$JOURNAL"
+      _commit_dashboard_if_changed || true
+      exit 0
+    fi
+    echo "ℹ️  No patch on retry ${PATCH_ATTEMPT}; stopping attempts."
+    break
+  fi
+
+  HAD_ANY_PATCH=1
+  echo "$PATCH" > "$PATCH_FILE"
+  cd "$REPO"
+  if ! git apply --verbose --recount --whitespace=fix "$PATCH_FILE"; then
+    echo "❌ git apply failed (malformed diff), attempt ${PATCH_ATTEMPT}."
+    echo "{\"ts\":$(date +%s),\"event\":\"apply_failed\",\"model\":\"$OLLAMA_MODEL\",\"attempt\":${PATCH_ATTEMPT}}" >>"$JOURNAL"
+    ((PATCH_ATTEMPT++)) || true
+    continue
+  fi
+  echo "✅ Patch applied to working tree; running validator…"
+
+  if "$PYTHON" "$REPO/scripts/ollama_patch_validate.py" "${VALID_ARGS[@]}"; then
+    echo "✅ Validation passed."
+    VALIDATED_OK=1
+    "$PYTHON" -m py_compile signals/yfinance_client.py 2>/dev/null || true
+    git add "$HTML" "$LB_HTML" "$JOURNAL" 2>/dev/null || true
+    git add -A
+    git commit -m "${MSG:-chore: ollama-optimized bot}" || {
+      echo "ℹ️  Nothing to commit (empty diff vs HEAD?)."
+    }
+    if [[ "$OLLAMA_AUTO_PUSH" == "1" ]]; then
+      git push origin HEAD
+    fi
+    echo "{\"ts\":$(date +%s),\"event\":\"committed\",\"model\":\"$OLLAMA_MODEL\",\"attempt\":${PATCH_ATTEMPT}}" >>"$JOURNAL"
+    break
+  fi
+
+  echo "❌ Validation failed — reverting applied patch (attempt ${PATCH_ATTEMPT})."
   git apply -R --whitespace=fix "$PATCH_FILE" 2>/dev/null || git checkout -- .
-  echo "{\"ts\":$(date +%s),\"event\":\"reverted\",\"model\":\"$OLLAMA_MODEL\"}" >>"$JOURNAL"
+  echo "{\"ts\":$(date +%s),\"event\":\"reverted_retry\",\"model\":\"$OLLAMA_MODEL\",\"attempt\":${PATCH_ATTEMPT}}" >>"$JOURNAL"
+  ((PATCH_ATTEMPT++)) || true
+done
+
+if [[ "$VALIDATED_OK" == "1" ]]; then
+  exit 0
+fi
+if [[ "$HAD_ANY_PATCH" == "1" ]]; then
+  echo "❌ Exhausted ${OLLAMA_MAX_PATCH_ATTEMPTS} patch attempt(s) without passing validation." >&2
   _commit_dashboard_if_changed || true
   exit 1
 fi
+exit 0

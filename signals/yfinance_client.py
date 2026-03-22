@@ -1,5 +1,4 @@
-"""
-yfinance client for S&P 500 (primary) and backup for crypto/stocks.
+"""yfinance client for S&P 500 (primary) and backup for crypto/stocks.
 No API key required. Tickers: ^GSPC (S&P 500), BTC-USD, ETH-USD, SOL-USD, etc.
 
 Crypto spot prices:
@@ -15,8 +14,16 @@ need `1d` / `1h` (or Gemini `1day` / `1hr`), not 1m.
 from __future__ import annotations
 
 import os
+import warnings
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+
+# macOS LibreSSL: avoid importing urllib3 before filter (that triggers the warning).
+warnings.filterwarnings(
+    "ignore",
+    message="urllib3 v2 only supports OpenSSL",
+    category=Warning,
+)
 
 import yfinance as yf
 
@@ -361,6 +368,27 @@ _TICKER_FALLBACKS: dict[str, list[str]] = {
 }
 
 
+def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
+    """
+    Drop corrupted SQLite rows (e.g. index prices stored under a futures ticker).
+    """
+    if not closes:
+        return False
+    t = (ticker or "").strip().upper()
+    tail = closes[-min(120, len(closes)) :]
+    mx = max(tail)
+    mn = min(tail)
+    if mn <= 0:
+        return False
+    if t in ("RB=F", "CL=F"):
+        return mx < 500.0  # $/gal or $/bbl — not index scale
+    if t == "SI=F":
+        return mx < 500.0  # silver $/oz
+    if t == "GC=F":
+        return mx < 50_000.0  # gold $/oz
+    return True
+
+
 def _coingecko_aggs(ticker: str, days_back: int) -> list[float]:
     """Fallback: get crypto daily closes from CoinGecko (no key)."""
     id_map = {v: k for k, v in _COINGECKO_IDS.items()}
@@ -414,7 +442,7 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
     try:
         from storage import get_yf_closes
         cached = get_yf_closes(ticker, days_back, cfg)
-        if cached:
+        if cached and _yf_daily_closes_plausible(ticker, cached):
             return cached
     except ImportError:
         pass

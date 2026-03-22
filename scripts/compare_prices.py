@@ -13,6 +13,14 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message="urllib3 v2 only supports OpenSSL",
+    category=Warning,
+)
+
 from dotenv import load_dotenv
 
 load_dotenv(_ROOT / ".env")
@@ -27,6 +35,7 @@ from gemini_client import (
 )
 from kalshi_client import KalshiClient
 from ollama_analysis import capture_and_analyze
+from underlying_adjust import apply_underlying_price
 from yfinance_client import get_snapshot as yf_get_snapshot
 
 # Underlyings we treat as crypto for Gemini ↔ Yahoo snapshot (inter-venue sanity, etc.)
@@ -81,12 +90,16 @@ def _run() -> int:
             print(f"\n[{series}] No yfinance_tickers mapping - add to config.yaml")
             continue
 
-        price = yf_get_snapshot(yf_ticker)
+        raw = yf_get_snapshot(yf_ticker)
+        price = apply_underlying_price(cfg, series, raw)
         if price is None:
             print(f"\n[{series}] Could not get yfinance price for {yf_ticker}")
             continue
 
-        print(f"\n[{series}] → {yf_ticker}  ${price:,.2f}")
+        if raw is not None and price is not None and abs(float(price) - float(raw)) > 1e-6:
+            print(f"\n[{series}] → {yf_ticker}  ${price:,.2f}  (Yahoo raw ${float(raw):,.2f}, yfinance_underlying_adjust)")
+        else:
+            print(f"\n[{series}] → {yf_ticker}  ${price:,.2f}")
 
         try:
             r = kalshi.get_markets(series_ticker=series.upper(), status="open")
