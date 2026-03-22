@@ -26,6 +26,8 @@ Both jobs use your `.venv` Python so dependencies are available.
 
 **Repo `config.yaml`:** Strategy is tuned for profitability and risk (e.g. `min_edge`, **`barbell_enabled`**, **`enable_easy_win`** paired with barbell base layer, `min_payout_ratio`, recovery overrides). Launchd loads this from `WorkingDirectory` on every run—pull `main` and you pick up strategy changes without editing the plist.
 
+**Gemini WTI (commodities):** `compare_historical` loads WTI prediction events from Gemini (`commodities` + `search=WTI`) and uses Yahoo **`CL=F`** for history and live blend—the same underlying mapping as Kalshi **`KXWTI`**. This is implemented in Python only; **no plist or `ProgramArguments` change**. After `git pull origin main`, the next `StartInterval` run uses it, or run `launchctl kickstart -k gui/$(id -u)/com.user.compare_historical` to pick it up immediately (same as any other code-only change).
+
 ## Pick up latest code and run compare now (after `git pull`)
 
 launchd already points at your repo’s `scripts/compare_historical.py` and passes **`--execute`** (see `com.user.compare_historical.plist`). Each scheduled run loads **current** Python + `config.yaml` from disk—no plist edit needed for code/config-only changes.

@@ -788,7 +788,7 @@ yfinance_tickers:
   KXSOLD: "SOL-USD" # Solana
   KXINXU: "^GSPC" # S&P 500
   KXXRPD: "XRP-USD" # XRP (Ripple)
-  KXWTI: "CL=F" # WTI crude (Kalshi KXWTI)
+  KXWTI: "CL=F" # WTI crude — Kalshi KXWTI; Gemini WTI prediction markets use the same Yahoo ticker
   KXNASDAQ100U: "^NDX" # NASDAQ-100
   KXSILVERW: "SI=F" # Silver futures
   KXGOLDW: "GC=F" # Gold futures
@@ -801,9 +801,11 @@ Tickers: `BTC-USD`, `ETH-USD`, `^GSPC`, `^NDX`, `CL=F`, `GC=F`, `SI=F`, `RB=F`, 
 
 **Gemini Exchange vs Yahoo (underlying spot, not prediction markets):** For the tickers above that map to Gemini USD pairs (`BTC-USD`, `ETH-USD`, `SOL-USD`, `XRP-USD`), `get_snapshot` / `get_aggs` / `get_intraday_aggs_at_hour` try **[Gemini public REST](https://docs.gemini.com/rest-api/market-data)** first (no API key). S&P 500 data uses SPY `1h`/`1d` (converted ×10) combined with `^GSPC` when `YFINANCE_SPY_AS_SP500` is enabled (default on); set it to 0/false/no to rely on `^GSPC` only. Set `YFINANCE_CRYPTO_GEMINI=0` to use Yahoo (+ CoinGecko fallback for BTC/ETH/SOL) only. `GEMINI_SPOT_API_BASE` defaults to `https://api.gemini.com`. This is separate from **Gemini Prediction Markets** below (contracts/events API).
 
-### Gemini Prediction Markets (crypto only)
+### Gemini Prediction Markets (crypto and WTI crude)
 
-The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemini.com/prediction-markets/markets) for **crypto only** (BTC, ETH, SOL, XRP)—**daily/weekly** events via `category=crypto`. S&P 500 is not included. The events API is public; no API key required for listing. Optional env vars:
+The comparison scripts fetch [Gemini Prediction Markets](https://docs.gemini.com/prediction-markets/markets) for **crypto** (BTC, ETH, SOL, XRP, DOGE, BNB, ZEC, HYPE, 15m variants, etc.) via `category=crypto` (plus targeted searches), and for **WTI oil** via `category=commodities` with `search=WTI` (e.g. daily “tomorrow” and weekly “this week” categoricals). Underlying prices for those WTI events use Yahoo **`CL=F`**, the same continuous future as Kalshi **`KXWTI`** in `yfinance_tickers`. Gemini’s contract text may reference settlement against **KK_RFR_WTIUSDC** / WTIOIL-USDC (60s average); the bot still models spot/history with **CL=F**, consistent with Kalshi.
+
+S&P 500 is not listed on Gemini Prediction Markets. The events API is public; no API key required for listing. Optional env vars:
 
 - `GEMINI_USE_SANDBOX=true` - use sandbox API
 - `GEMINI_PREDICTION_BASE_URL` - override base URL
@@ -822,6 +824,8 @@ The comparison scripts also fetch [Gemini Prediction Markets](https://docs.gemin
 | Solana       | Hourly            | [SOL price today at 1am EDT](https://exchange.gemini.com/predictions/SOL2603160500/sol-price-today-at-1am-edt?categoryPath=crypto%2Chourly&status=active) |
 | XRP (Ripple) | Daily             | [XRP price on March 16](https://exchange.gemini.com/predictions/XRP2603162100/xrp-price-on-march-16?categoryPath=crypto%2Cdaily&status=active)         |
 | XRP (Ripple) | Hourly            | [XRP price today at 1am EDT](https://exchange.gemini.com/predictions/XRP2603160500/xrp-price-today-at-1am-edt?categoryPath=crypto%2Chourly&status=active) |
+| WTI crude    | Weekly            | [Oil (WTI) price this week](https://exchange.gemini.com/predictions/WTI2603272100/oil-wti-price-this-week?categoryPath=commodities&status=active) (ticker pattern `WTI…`; Yahoo **`CL=F`**) |
+| WTI crude    | Daily / tomorrow  | [Oil (WTI) price tomorrow](https://exchange.gemini.com/predictions/WTI2603222100/oil-wti-price-tomorrow?categoryPath=commodities&status=active) |
 
 **Note:** With `GEMINI_API_KEY` and `GEMINI_API_SECRET` set, `scripts/compare_historical.py --execute` places limit orders on both Kalshi and Gemini. Use `--preview` to see planned orders without placing them.
 

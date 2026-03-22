@@ -114,16 +114,16 @@ For each series (e.g. KXBTCD → Bitcoin):
 
 ---
 
-### Step 3: Evaluate Each Market (Gemini, Crypto Only)
+### Step 3: Evaluate Each Market (Gemini: crypto + WTI)
 
-Same logic for Gemini events (BTC, ETH, SOL, XRP):
+Same logic for Gemini events mapped to Yahoo underlyings in `GEMINI_CRYPTO_YF` (BTC, ETH, SOL, XRP, DOGE, BNB, ZEC, HYPE, **`CL=F`** for WTI, etc.):
 
 | Step              | What happens                               | Code pointer                                       |
 | ----------------- | ------------------------------------------ | -------------------------------------------------- |
-| Get Gemini events | `gemini.get_crypto_events()` (crypto category; hourly skipped if API returns 400) | `signals/gemini_client.py:147` → `get_crypto_events()`     |
-| Map asset         | Title/ticker → BTC-USD, ETH-USD, etc.      | `signals/gemini_client.py:74` → `_event_to_asset()`        |
-| Extract strike    | Parse from event title                     | `signals/gemini_client.py` → `extract_strike_from_event()` |
-| Same flow         | Arb, P(YES), recommend, rules, limit order | `compare_historical.py:1324-1435`                  |
+| Get Gemini events | `gemini.get_crypto_events()` — `crypto` category (plus 15m/ZEC searches), **`commodities` + `search=WTI`** for oil | `signals/gemini_client.py` → `get_crypto_events()`     |
+| Map asset         | Title/ticker → BTC-USD, ETH-USD, **CL=F** (WTI), etc.      | `signals/gemini_client.py` → `_event_to_asset()`        |
+| Extract strike    | Parse from event title or categorical contract label (`$X or above`, etc.)                     | `signals/gemini_client.py` → `extract_strike_from_event()`, `_extract_threshold_from_title()` |
+| Same flow         | Arb, P(YES), recommend, rules, limit order | `compare_historical.py` → Gemini branch                  |
 
 ---
 
@@ -202,7 +202,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | File                              | Purpose                            | Key functions                                                                                                                                                                                                                                            |
 | --------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **`signals/kalshi_client.py`**    | Kalshi API with RSA-PSS auth       | `KalshiClient`: `get_balance()`, `get_markets()`, `get_positions()`, `get_market()`, `get_historical_market()`, `get_orderbook()`, `create_order_safe()`, `cancel_order_safe()`. Root `kalshi_client.py` shim re-exports.                                                                        |
-| **`signals/gemini_client.py`**    | Gemini Prediction Markets (crypto) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`; `hourly` category skipped if API returns 400); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. Root `gemini_client.py` shim re-exports. |
+| **`signals/gemini_client.py`**    | Gemini Prediction Markets (crypto + WTI commodities) | `GeminiPredictionClient`: `get_events()`, `get_crypto_events()` (fetches `crypto`, targeted searches, **`commodities` WTI**); `GeminiTradingClient`: `get_balance()`, `place_order_safe()` (caps by balance like Kalshi), `cancel_order_safe()`, `get_positions()`, `get_active_orders()`; helpers: `_event_to_asset()`, `expand_gemini_events_to_markets()`, `extract_strike_from_event()`, `get_yes_price()`, `get_no_price()`. Nonce: monotonically increasing per API key. Root `gemini_client.py` shim re-exports. |
 | **`signals/yfinance_client.py`**  | Underlying spot history (no Yahoo key; Gemini REST is public) | `get_aggs()` (daily closes), `get_intraday_aggs_at_hour()` (Gemini 1hr or Yahoo 1h at resolution ET), `get_aggs_as_of()` (backtest; Gemini with UTC EOD cutoff), `get_snapshot()` (Gemini `v2/ticker` then Yahoo then CoinGecko for crypto). Env: `YFINANCE_CRYPTO_GEMINI`, `GEMINI_SPOT_API_BASE`, `YFINANCE_DEBUG`. Root `yfinance_client.py` shim re-exports. |
 
 ### Support Modules
@@ -246,7 +246,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 
 **`_run_impl()` flow (L1195) — the heart of the bot:**
 1. **Setup:** Create KalshiClient, fetch balance, load `_StrategyParams` from config. Sync Kalshi settlements into storage (updates resolved predictions).
-2. **Parallel fetch:** ThreadPoolExecutor fetches (a) Gemini crypto events and (b) Kalshi open markets per series. Results: `gemini_events_by_asset`, `kalshi_markets_by_series`. Optional **`--ticker`** filters both dicts to a single contract before the main loop.
+2. **Parallel fetch:** ThreadPoolExecutor fetches (a) Gemini prediction events (`get_crypto_events()`, including WTI commodities) and (b) Kalshi open markets per series. Results: `gemini_events_by_asset`, `kalshi_markets_by_series`. Optional **`--ticker`** filters both dicts to a single contract before the main loop.
 3. **Calibration:** If storage enabled, call `get_calibration_stats()` — win rate by bucket, by direction+side (e.g. "above+yes" underperforming). Used to adjust min_edge and favor_yes logic.
 4. **Main loop — for each series (KXBTCD, KXETHD, etc.):**
    - Resolve yf_ticker from config (e.g. KXBTCD → BTC-USD).
@@ -266,7 +266,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
      - **Barbell** (`strategy.barbell_enabled`): after safety filters, directional BUY YES/NO must match **`_barbell_yes_bucket` / `_barbell_no_bucket`** — **base** (high market bid + model P + consensus gap) or **alpha** (cheap bid + min model P + large net edge after fees); otherwise **SKIP**. Kelly fraction is scaled by `barbell_base_kelly_mult` / `barbell_alpha_kelly_mult` before vol-adjusted Kelly. Logs **`├─ Barbell:`**; `quote_candidates` / orders may include `"barbell"` key. Arb / disagreement-dip / lottery paths bypass this gate.
      - Compute limit price: bid × (1−dip); use larger dip when P(win)≥90% or when vol/decline regime.
      - Add to `pending_orders` and `market_data_cache`.
-   - **Gemini loop:** Expand events to markets via `expand_gemini_events_to_markets()`. For each Gemini market (crypto only): same flow — arb, P(YES), recommend, safety rules. Add to pending_orders.
+   - **Gemini loop:** Expand events to markets via `expand_gemini_events_to_markets()`. For each Gemini market whose Yahoo ticker is in `GEMINI_CRYPTO_YF` (crypto **and** **`CL=F`** WTI): same flow — arb, P(YES), recommend, safety rules. Add to pending_orders.
 5. **Position evaluation:** Fetch Kalshi positions (`get_positions()`), Gemini positions (`GeminiTradingClient.get_positions()`). For each position:
    - If ticker in `market_data_cache`, use cached closes/market. Else fetch market + closes for orphan positions.
    - Compute P(lose) via `_compute_p_lose()` — blends model with market odds; more weight on market near resolution.
@@ -340,9 +340,9 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 
 ### `scripts/compare_prices.py` — Live Price Snapshot
 
-**Purpose:** Quick view of Kalshi + Gemini market prices vs current underlying spot (`get_snapshot`: Gemini crypto + Yahoo). No recommendations.
+**Purpose:** Quick view of Kalshi + Gemini market prices vs current underlying spot (`get_snapshot`: Gemini Exchange for mapped crypto + Yahoo for indices/commodities). No recommendations.
 
-**Flow:** `_run()` → load config → create KalshiClient + GeminiPredictionClient → fetch Gemini events by asset → for each series: get underlying snapshot → fetch Kalshi markets → print YES/NO bids for up to 5 markets; if crypto, print Gemini events too. Wrapped in `capture_and_analyze()` for optional Ollama analysis.
+**Flow:** `_run()` → load config → create KalshiClient + GeminiPredictionClient → fetch Gemini events by asset → for each series: get underlying snapshot → fetch Kalshi markets → print YES/NO bids for up to 5 markets; when the series maps to a ticker in `GEMINI_CRYPTO_YF` (including **`CL=F`** / KXWTI), print Gemini events too. Wrapped in `capture_and_analyze()` for optional Ollama analysis.
 
 ---
 
@@ -589,7 +589,7 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 - `create_order_safe(ticker, side, action, count, yes_price_dollars|no_price_dollars, ...)` — Places limit order; caps by `max_pct_of_balance`; retries on 429.
 - `cancel_order_safe(order_id)` — Cancels by order ID.
 
-### `signals/gemini_client.py` — Gemini Prediction Markets (Crypto)
+### `signals/gemini_client.py` — Gemini Prediction Markets (Crypto + WTI)
 
 **Two clients:** Root `gemini_client.py` shim re-exports.
 
@@ -597,9 +597,9 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 2. **GeminiTradingClient** — Place orders; needs `GEMINI_API_KEY` + `GEMINI_API_SECRET`.
 
 **PredictionClient:**
-- `get_crypto_events(limit)` — Fetches `crypto` category; skips `hourly` if API returns 400.
-- `_event_to_asset(evt)` — Maps event title/ticker → BTC-USD, ETH-USD, etc.
-- `extract_strike_from_event(evt)` — Parses strike from title.
+- `get_crypto_events(limit)` — Fetches `crypto` category (plus hourly best-effort, 15m/ZEC searches, **`commodities` + `search=WTI`**).
+- `_event_to_asset(evt)` — Maps event title/ticker → BTC-USD, ETH-USD, **CL=F** (WTI), etc.
+- `extract_strike_from_event(evt)` / `_extract_threshold_from_title()` — Parses strike from title or categorical labels (e.g. `$90 or above`).
 - `get_yes_price(contract)`, `get_no_price(contract)` — From orderbook or last trade.
 
 **TradingClient:**

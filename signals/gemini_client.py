@@ -1,5 +1,5 @@
 """
-Gemini Prediction Markets API client (crypto only).
+Gemini Prediction Markets API client (crypto, commodities, etc.).
 Docs: https://docs.gemini.com/prediction-markets/markets
 
 Two clients:
@@ -123,27 +123,37 @@ _CRYPTO_ASSET_KEYS = {
     "zcash": "ZEC-USD",
     "hype": "HYPE-USD",
     "hyperliquid": "HYPE-USD",
+    # Oil / WTI — Yahoo CL=F (Kalshi KXWTI); Gemini terms cite KK_RFR_WTIUSDC / WTIOIL-USDC
+    "wtioil": "CL=F",
+    "wti": "CL=F",
 }
 
 
 def _event_to_asset(event: dict) -> str | None:
-    """Map Gemini event to asset (BTC-USD, ETH-USD, SOL-USD) from title/ticker/tags."""
+    """Map Gemini event to yfinance ticker (e.g. BTC-USD, CL=F) from title/ticker/tags."""
     title = (event.get("title") or "").lower()
     ticker = (event.get("ticker") or "").lower()
     tags = [t.lower() for t in event.get("tags") or []]
     combined = f"{title} {ticker} {' '.join(tags)}"
 
-    for key, asset in _CRYPTO_ASSET_KEYS.items():
+    # Longer keys first (e.g. wtioil before wti) to reduce accidental substring matches
+    for key, asset in sorted(_CRYPTO_ASSET_KEYS.items(), key=lambda kv: -len(kv[0])):
         if key in combined:
             return asset
     return None
 
 
 def _extract_threshold_from_title(title: str) -> tuple[float | None, str | None]:
-    """Parse threshold and direction from event title. Returns (threshold, direction)."""
+    """Parse threshold and direction from event title or contract label. Returns (threshold, direction)."""
     import re
     title_lower = (title or "").lower()
     for pattern, direction in [
+        # Gemini commodities categoricals: "$90 or above", "$85 or below"
+        (r"\$?\s*([\d,]+(?:\.\d+)?)\s+or\s+above\b", "above"),
+        (r"\$?\s*([\d,]+(?:\.\d+)?)\s+or\s+below\b", "below"),
+        # Prose thresholds: "greater than $95", "less than $80"
+        (r"(?:greater\s+than|more\s+than)\s*\$?\s*([\d,]+(?:\.\d+)?)", "above"),
+        (r"(?:less\s+than)\s*\$?\s*([\d,]+(?:\.\d+)?)", "below"),
         (r"(?:above|over|reach|hit)\s*\$?([\d,]+(?:\.\d+)?)[kK]?", "above"),
         (r">\s*\$?([\d,]+(?:\.\d+)?)", "above"),
         (r"(?:below|under)\s*\$?([\d,]+(?:\.\d+)?)[kK]?", "below"),
@@ -196,7 +206,7 @@ class GeminiPredictionClient:
         return resp.json() if resp.text else {"data": [], "pagination": {}}
 
     def get_crypto_events(self, limit: int = 100) -> list[dict]:
-        """Fetch active crypto prediction events (daily, weekly, hourly). Returns list of events with contracts."""
+        """Fetch active prediction events: crypto (daily/weekly/hourly/15m), ZEC, WTI commodities. Returns events with contracts."""
         seen: set[str] = set()
         out: list[dict] = []
 
@@ -244,13 +254,23 @@ class GeminiPredictionClient:
                     out.append(evt)
         except Exception as e:
             log.debug("Gemini ZEC search fetch failed: %s", e)
+        # WTI daily/weekly (e.g. WTI2603222100) — category commodities; Yahoo underlying CL=F (same as Kalshi KXWTI)
+        try:
+            r = self.get_events(category="commodities", status="active", search="WTI", limit=100, offset=0)
+            for evt in r.get("data") or []:
+                eid = evt.get("id") or evt.get("ticker") or ""
+                if eid and eid not in seen:
+                    seen.add(eid)
+                    out.append(evt)
+        except Exception as e:
+            log.debug("Gemini WTI search fetch failed: %s", e)
         return out
 
     def get_events_by_asset(
         self, asset: str, limit_per_asset: int = 10
     ) -> list[dict]:
         """
-        Fetch crypto events grouped by yfinance-style asset (BTC-USD, ETH-USD, …, ZEC-USD, DOGE-USD).
+        Fetch prediction events grouped by yfinance-style asset (BTC-USD, ETH-USD, …, CL=F, …).
         Returns events that match the asset, up to limit_per_asset each.
         """
         events = self.get_crypto_events(limit=200)

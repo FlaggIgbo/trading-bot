@@ -166,7 +166,7 @@ except (ImportError, OSError):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-# Gemini supports crypto only (BTC, ETH, SOL, XRP; no S&P 500). Used for event filtering.
+# Yahoo underlyings we fetch Gemini events for and evaluate (crypto + WTI crude = same CL=F as Kalshi KXWTI).
 GEMINI_CRYPTO_YF = {
     "BTC-USD",
     "ETH-USD",
@@ -177,6 +177,7 @@ GEMINI_CRYPTO_YF = {
     "ZEC-USD",
     "HYPE-USD",
     "HYPE32196-USD",  # Yahoo symbol for Hyperliquid; Gemini buckets still use HYPE-USD from _event_to_asset
+    "CL=F",  # WTI — Gemini KK_RFR_WTIUSDC / WTIOIL-USDC; Kalshi KXWTI uses same Yahoo continuous future
 }
 # When Yahoo ticker ≠ Gemini _event_to_asset key, map here for inter-arb / sanity / Gemini loop lookups.
 GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
@@ -1345,9 +1346,7 @@ def _compute_macro_signal_24h(cfg: dict, sp: _StrategyParams) -> float:
 # - Listed commodity futures (CL=F, GC=F, SI=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
 # All other intraday times on unsupported underlyings (e.g. 7pm EDT) are skipped.
 _RESOLUTION_HOUR_PATTERN = re.compile(
-    r"(?:today|tomorrow)\s+at\s+(\d{1,2})(?::\d{2})?\s*(am|pm)"
-    r"|"
-    r"at\s+(\d{1,2})(?::\d{2})?\s*(am|pm)",
+    r"(?:(?:today|tomorrow)\s+at|@|\bat)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)\b",
     re.I,
 )
 
@@ -1359,9 +1358,8 @@ def _get_resolution_hour_from_title(title: str) -> int | None:
     m = _RESOLUTION_HOUR_PATTERN.search(title)
     if not m:
         return None
-    # Group 1,2 = "today at N am/pm"  or  Group 3,4 = "at N am/pm"
-    hour_str = m.group(1) or m.group(3)
-    am_pm = (m.group(2) or m.group(4) or "").lower()
+    hour_str = m.group(1)
+    am_pm = (m.group(2) or "").lower()
     if not hour_str or not am_pm:
         return None
     hour = int(hour_str)
