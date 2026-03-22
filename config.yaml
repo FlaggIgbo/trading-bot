@@ -60,7 +60,7 @@ execution:
   price_strategy: aggressive # passive | aggressive | market — cross spread when edge clears (PnL / fills on fast crypto books)
   # Penny-jump: bid+1¢ (or min with ask−1¢) for queue priority vs stink bids
   limit_offset_cents: 1 # 0 = mid; >=1 = bid_plus_tick (better fills on tight DTE)
-  # PnL: if you switch to passive/mid, still use dip-style limits when DTE < this many hours (ultra-short fills)
+  # PnL: if passive/mid, force dip-style limits when time-to-resolution ≤ this many hours (inclusive at boundary)
   near_expiry_aggressive_hours: 1.0
 
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
@@ -486,6 +486,6 @@ backtest:
   pre_push_days: 30 # Guard lookback window
   pre_push_min_trades: 20 # Minimum trades required for meaningful gate
   pre_push_fail_on_insufficient_trades: false # true blocks push if trades < min_trades
-  pre_push_min_win_rate: 0.35 # Keep realistic for high-edge payout profile; guard still enforces pnl floor
-  pre_push_min_pnl_cents: 0 # Block push when pnl below this
+  pre_push_min_win_rate: 0.35 # High-edge books can look “low WR”; PnL-first: pair with pre_push_min_pnl_cents / Sharpe flags
+  pre_push_min_pnl_cents: 0 # Block push when realized PnL (¢) in window is below this — primary $ guard vs WR alone
   pre_push_require_positive_sharpe: false # Optional stricter risk-adjusted gate

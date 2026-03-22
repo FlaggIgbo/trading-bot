@@ -1128,7 +1128,8 @@ def _effective_passive_limit_quote(sp: _StrategyParams, dte_days: float | None) 
         d = float(dte_days)
     except (TypeError, ValueError):
         return base
-    if d * 24.0 < h:
+    # Inclusive at h: DTE of exactly h wall-clock hours still gets dip (fill / adverse-selection vs missing by <).
+    if d * 24.0 <= h:
         return "dip"
     return base
 
