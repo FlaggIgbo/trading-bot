@@ -1636,6 +1636,52 @@ def get_fill_attribution_stats(
         conn.close()
 
 
+def get_limit_order_fill_rate_stats(
+    config: dict | None = None,
+    *,
+    days: int = 30,
+) -> dict[str, Any]:
+    """
+    Placed vs filled limit orders from limit_orders (terminal statuses: filled, cancelled).
+    fill_rate = filled / (filled + cancelled); open placed-only orders excluded from denominator.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {"enabled": False}
+    try:
+        since = time.time() - max(1, int(days)) * 86400
+        row = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) AS n_filled,
+              SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS n_cancelled,
+              SUM(CASE WHEN status = 'placed' THEN 1 ELSE 0 END) AS n_open
+            FROM limit_orders
+            WHERE ts >= ?
+            """,
+            (since,),
+        ).fetchone()
+        if not row:
+            return {"enabled": True, "days": days, "n_filled": 0, "n_cancelled": 0, "n_open": 0, "fill_rate": None}
+        nf = int(row["n_filled"] or 0)
+        nc = int(row["n_cancelled"] or 0)
+        no = int(row["n_open"] or 0)
+        denom = nf + nc
+        rate = (nf / float(denom)) if denom > 0 else None
+        return {
+            "enabled": True,
+            "days": days,
+            "n_filled": nf,
+            "n_cancelled": nc,
+            "n_open": no,
+            "fill_rate": rate,
+        }
+    except Exception:
+        return {"enabled": False}
+    finally:
+        conn.close()
+
+
 def get_market_snapshots_for_backtest(
     start_ts: float | None = None,
     end_ts: float | None = None,

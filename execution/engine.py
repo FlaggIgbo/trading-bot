@@ -68,6 +68,74 @@ def _is_order_stale(order: dict[str, Any], ttl_minutes: int, now_ts: float | Non
     return (now_v - created_ts) >= (float(ttl_minutes) * 60.0)
 
 
+def collect_resting_buy_order_ages(
+    *,
+    kalshi: Any | None,
+    gemini_trading: Any | None,
+    platform_kalshi: str,
+    platform_gemini: str,
+    now_ts: float | None = None,
+) -> dict[tuple[str, str, str], float]:
+    """
+    Map (platform, market_key, side) -> resting BUY age in minutes.
+    Kalshi market_key is ticker; Gemini market_key is instrument symbol (aligns with pending_orders instrument_symbol).
+    When duplicate keys exist, keeps the maximum age.
+    """
+    out: dict[tuple[str, str, str], float] = {}
+    now_v = float(now_ts if now_ts is not None else time.time())
+    if kalshi:
+        try:
+            cursor = ""
+            while True:
+                page = kalshi.get_orders(status="resting", limit=200, **({"cursor": cursor} if cursor else {}))
+                for ord_ in page.get("orders") or []:
+                    if (ord_.get("action") or "").lower() != "buy":
+                        continue
+                    ticker = ord_.get("ticker")
+                    side = (ord_.get("side") or "").lower()
+                    if not ticker or side not in ("yes", "no"):
+                        continue
+                    ct = _order_created_ts(ord_)
+                    if ct is None:
+                        continue
+                    age_min = max(0.0, (now_v - ct) / 60.0)
+                    key = (platform_kalshi, str(ticker), side)
+                    prev = out.get(key)
+                    if prev is None or age_min > prev:
+                        out[key] = age_min
+                cursor = page.get("cursor") or ""
+                if not cursor:
+                    break
+        except Exception:
+            pass
+    if gemini_trading:
+        try:
+            active = gemini_trading.get_active_orders(limit=200)
+            rows = active.get("orders")
+            if not isinstance(rows, list):
+                rows = []
+            for ord_ in rows:
+                if not isinstance(ord_, dict):
+                    continue
+                if (ord_.get("side") or "").lower() != "buy":
+                    continue
+                outcome = (ord_.get("outcome") or ord_.get("label") or "").lower()
+                symbol = ord_.get("symbol") or ord_.get("instrumentSymbol")
+                if not symbol or outcome not in ("yes", "no"):
+                    continue
+                ct = _order_created_ts(ord_)
+                if ct is None:
+                    continue
+                age_min = max(0.0, (now_v - ct) / 60.0)
+                key = (platform_gemini, str(symbol), outcome)
+                prev = out.get(key)
+                if prev is None or age_min > prev:
+                    out[key] = age_min
+        except Exception:
+            pass
+    return out
+
+
 def sync_and_cancel_resting_orders(
     *,
     kalshi: Any,
@@ -78,6 +146,7 @@ def sync_and_cancel_resting_orders(
     limit_order_ttl_minutes: int,
     passive_bid_chase_enabled: bool = False,
     passive_bid_chase_refresh_minutes: int = 0,
+    limit_buy_escalation_cancel_minutes: int = 0,
     resting_cancel_if_market_bid_above_limit_by: float = 0.0,
     platform_kalshi: str,
     platform_gemini: str,
@@ -186,6 +255,21 @@ def sync_and_cancel_resting_orders(
                                 "order_id": oid,
                                 "label": label,
                                 "reason": "bid_chase_refresh",
+                                "ticker": ticker,
+                                "side": side,
+                                "old_price": old_price,
+                            }
+                        )
+                    elif (
+                        limit_buy_escalation_cancel_minutes > 0
+                        and _is_order_stale(ord_, limit_buy_escalation_cancel_minutes, now_ts)
+                    ):
+                        to_cancel.append(
+                            {
+                                "platform": platform_kalshi,
+                                "order_id": oid,
+                                "label": label,
+                                "reason": "escalation_patience_exhausted",
                                 "ticker": ticker,
                                 "side": side,
                                 "old_price": old_price,
@@ -325,6 +409,21 @@ def sync_and_cancel_resting_orders(
                                 "order_id": str(oid),
                                 "label": label,
                                 "reason": "bid_chase_refresh",
+                                "ticker": str(symbol),
+                                "side": outcome,
+                                "old_price": old_price,
+                            }
+                        )
+                    elif (
+                        limit_buy_escalation_cancel_minutes > 0
+                        and _is_order_stale(ord_, limit_buy_escalation_cancel_minutes, now_ts)
+                    ):
+                        to_cancel.append(
+                            {
+                                "platform": platform_gemini,
+                                "order_id": str(oid),
+                                "label": label,
+                                "reason": "escalation_patience_exhausted",
                                 "ticker": str(symbol),
                                 "side": outcome,
                                 "old_price": old_price,

@@ -60,7 +60,7 @@ from constants import (
     REC_RULE_VIOLATION,
     REC_SKIP,
 )
-from execution_engine import sync_and_cancel_resting_orders
+from execution_engine import collect_resting_buy_order_ages, sync_and_cancel_resting_orders
 from fill_reconciliation import reconcile_confirmed_fills
 from gemini_client import (
     GeminiPredictionClient,
@@ -110,6 +110,7 @@ try:
         get_fill_attribution_stats,
         get_last_snapshot_for_ticker,
         get_limit_order_analysis,
+        get_limit_order_fill_rate_stats,
         get_loss_streak,
         get_market_snapshots_for_backtest,
         get_position_evaluation_stats,
@@ -135,7 +136,7 @@ try:
         get_markout_history,
     )
 except ImportError:
-    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
+    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_limit_order_fill_rate_stats = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
     get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_unresolved_contract_sums_by_platform_yf = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
@@ -479,6 +480,15 @@ class _StrategyParams:
     limit_buy_near_market_min_edge: float
     # Below this net edge, skip cross/near-market aggression (passive/layered only). 0 = off.
     limit_buy_passive_only_below_edge: float
+    limit_buy_ev_tier_pricing: bool
+    limit_buy_weak_bid_min_edge: float
+    limit_buy_skip_below_weak_edge: bool
+    limit_buy_medium_quote_mode: str
+    limit_buy_medium_spread_fraction: float
+    limit_buy_escalation_price_enabled: bool
+    limit_buy_escalate_after_minutes_1: float
+    limit_buy_escalate_after_minutes_2: float
+    limit_buy_escalation_cancel_minutes: int
     resting_cancel_if_market_bid_above_limit_by: float
     # Simple EV mode: single net-edge gate, Kelly sizing, uncertainty/calibration → size only.
     simple_ev_decision_enabled: bool
@@ -775,6 +785,15 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_buy_passive_only_below_edge=max(
             0.0, min(0.95, float(strategy.get("limit_buy_passive_only_below_edge", 0.0)))
         ),
+        limit_buy_ev_tier_pricing=bool(strategy.get("limit_buy_ev_tier_pricing", True)),
+        limit_buy_weak_bid_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_weak_bid_min_edge", 0.03)))),
+        limit_buy_skip_below_weak_edge=bool(strategy.get("limit_buy_skip_below_weak_edge", True)),
+        limit_buy_medium_quote_mode=str(strategy.get("limit_buy_medium_quote_mode", "spread_fraction")).strip().lower(),
+        limit_buy_medium_spread_fraction=max(0.0, min(1.0, float(strategy.get("limit_buy_medium_spread_fraction", 0.25)))),
+        limit_buy_escalation_price_enabled=bool(strategy.get("limit_buy_escalation_price_enabled", True)),
+        limit_buy_escalate_after_minutes_1=max(0.0, float(strategy.get("limit_buy_escalate_after_minutes_1", 5.0))),
+        limit_buy_escalate_after_minutes_2=max(0.0, float(strategy.get("limit_buy_escalate_after_minutes_2", 10.0))),
+        limit_buy_escalation_cancel_minutes=max(0, int(strategy.get("limit_buy_escalation_cancel_minutes", 0))),
         resting_cancel_if_market_bid_above_limit_by=max(0.0, min(0.5, float(strategy.get("resting_cancel_if_market_bid_above_limit_by", 0.0)))),
         simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
         simple_ev_min_edge=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge", 0.03)))),
@@ -1251,6 +1270,10 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
         "limit_buy_cross_spread_min_edge",
         "limit_buy_near_market_min_edge",
         "limit_buy_passive_only_below_edge",
+        "limit_buy_weak_bid_min_edge",
+        "limit_buy_medium_spread_fraction",
+        "limit_buy_escalate_after_minutes_1",
+        "limit_buy_escalate_after_minutes_2",
     )
     for k in _ex_float:
         if ex.get(k) is not None:
@@ -1258,7 +1281,20 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
                 strategy[k] = float(ex[k])
             except (TypeError, ValueError):
                 pass
-    for k in ("limit_buy_edge_aggression_enabled", "skip_new_buy_when_unresolved_same_side"):
+    if ex.get("limit_buy_escalation_cancel_minutes") is not None:
+        try:
+            strategy["limit_buy_escalation_cancel_minutes"] = max(0, int(ex["limit_buy_escalation_cancel_minutes"]))
+        except (TypeError, ValueError):
+            pass
+    if ex.get("limit_buy_medium_quote_mode") is not None:
+        strategy["limit_buy_medium_quote_mode"] = str(ex["limit_buy_medium_quote_mode"]).strip().lower()
+    for k in (
+        "limit_buy_edge_aggression_enabled",
+        "skip_new_buy_when_unresolved_same_side",
+        "limit_buy_ev_tier_pricing",
+        "limit_buy_skip_below_weak_edge",
+        "limit_buy_escalation_price_enabled",
+    ):
         if ex.get(k) is not None:
             strategy[k] = bool(ex[k])
     ps = str(ex.get("price_strategy") or "").strip().lower()
@@ -1415,13 +1451,22 @@ def _compute_limit_price(
     cross_spread_min_edge: float = 0.10,
     near_market_min_edge: float = 0.05,
     passive_only_below_edge: float = 0.0,
-) -> tuple[float, float]:
+    ev_tier_pricing: bool = True,
+    weak_bid_min_edge: float = 0.03,
+    skip_below_weak_edge: bool = True,
+    medium_quote_mode: str = "spread_fraction",
+    medium_spread_fraction: float = 0.25,
+    resting_order_age_minutes: float | None = None,
+    escalation_price_enabled: bool = False,
+    escalate_after_minutes_1: float = 5.0,
+    escalate_after_minutes_2: float = 10.0,
+) -> tuple[float | None, float]:
     """
-    Returns (limit_price, dip_used_proxy).
+    Returns (limit_price, dip_used_proxy). limit_price is None when EV-tier policy skips the quote.
     dip_used_proxy is for logging/analysis; dynamic modes may return 0.
-    When edge_aggression_enabled and net_edge is set, quote closer to the market for large edge
-    (near bid+tick, or just inside ask) instead of only deep dip bids.
-    If passive_only_below_edge > 0 and net_edge is below it, aggression is skipped (maker-style limits).
+    When edge_aggression_enabled and net_edge is set, quote by edge tier (strong→ask, medium→mid/spread,
+    weak→bid) instead of only deep dip bids. If passive_only_below_edge > 0 and net_edge is below it,
+    aggression is skipped (maker-style limits). Set ev_tier_pricing=False for legacy bid+tick / ask−1¢ tiers.
     """
     mode_norm = (mode or "fixed_pct").strip().lower()
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
@@ -1433,22 +1478,67 @@ def _compute_limit_price(
     _ne_ok = net_edge is not None and float(net_edge) > 0
     if _po > 0 and _ne_ok and float(net_edge) < _po:
         _ne_ok = False
-    if (
-        edge_aggression_enabled
-        and _ne_ok
-        and fair_cap > 0
-    ):
+    if edge_aggression_enabled and _ne_ok and fair_cap > 0:
         ne = float(net_edge)
         tick = max(1, int(tick_offset)) * 0.01
-        if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
-            aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
-            return _clip_price(aggressive), 0.0
-        if ne >= float(near_market_min_edge):
-            jump = float(bid) + tick
-            if ask is not None and ask > 0:
-                jump = min(jump, max(0.01, float(ask) - 0.01))
-            near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
-            return _clip_price(near_px), 0.0
+        cross_th = max(0.0, float(cross_spread_min_edge))
+        near_th = max(0.0, float(near_market_min_edge))
+        weak_th = max(0.0, float(weak_bid_min_edge))
+        if near_th > cross_th:
+            near_th = cross_th
+        if weak_th > near_th:
+            weak_th = near_th
+
+        if ev_tier_pricing:
+            base_px_ev: float | None = None
+            if ne >= cross_th:
+                if ask is not None and float(ask) > 0:
+                    base_px_ev = min(float(ask), fair_cap)
+                else:
+                    base_px_ev = min(float(bid) + tick, fair_cap)
+            elif ne >= near_th:
+                spread_v = 0.0
+                if ask is not None and float(ask) > float(bid):
+                    spread_v = float(ask) - float(bid)
+                mode_m = (medium_quote_mode or "spread_fraction").strip().lower()
+                if mode_m == "mid" and ask is not None and float(ask) > float(bid):
+                    mid_px = (float(bid) + float(ask)) / 2.0
+                    base_px_ev = min(mid_px, fair_cap)
+                else:
+                    frac = max(0.0, min(1.0, float(medium_spread_fraction)))
+                    base_px_ev = float(bid) + frac * spread_v
+                    base_px_ev = min(max(0.01, base_px_ev), fair_cap)
+                if ask is not None and float(ask) > 0:
+                    base_px_ev = min(float(base_px_ev), float(ask))
+            elif ne >= weak_th:
+                base_px_ev = min(float(bid), fair_cap)
+            elif skip_below_weak_edge:
+                return None, 0.0
+
+            if base_px_ev is not None:
+                px_esc = float(base_px_ev)
+                if escalation_price_enabled and resting_order_age_minutes is not None:
+                    age = float(resting_order_age_minutes)
+                    extra_ticks = 0
+                    if age >= float(escalate_after_minutes_1):
+                        extra_ticks += 1
+                    if age >= float(escalate_after_minutes_2):
+                        extra_ticks += 1
+                    px_esc += extra_ticks * 0.01
+                    px_esc = min(px_esc, fair_cap)
+                    if ask is not None and float(ask) > 0:
+                        px_esc = min(px_esc, float(ask))
+                return _clip_price(px_esc), 0.0
+        else:
+            if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
+                aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
+                return _clip_price(aggressive), 0.0
+            if ne >= float(near_market_min_edge):
+                jump = float(bid) + tick
+                if ask is not None and ask > 0:
+                    jump = min(jump, max(0.01, float(ask) - 0.01))
+                near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
+                return _clip_price(near_px), 0.0
 
     if mode_norm == "fixed_pct":
         dip = max(0.0, min(max_dip_cap, float(base_dip)))
@@ -5628,6 +5718,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     except Exception:
         pass
     gemini_balance_for_arb = 0
+    gt_route = None
     try:
         gt_route = GeminiTradingClient()
         gemini_balance_for_arb = int(gt_route.get_balance().get("balance", 0) or 0)
@@ -6073,6 +6164,40 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             f"near_market {sp.limit_buy_near_market_min_edge:.3f} -> {near_market_min_edge_live:.3f}"
         )
         print()
+
+    resting_buy_age_minutes: dict[tuple[str, str, str], float] = {}
+    if sp.limit_buy_escalation_price_enabled:
+        try:
+            resting_buy_age_minutes = collect_resting_buy_order_ages(
+                kalshi=kalshi,
+                gemini_trading=gt_route,
+                platform_kalshi=PLATFORM_KALSHI,
+                platform_gemini=PLATFORM_GEMINI,
+            )
+        except Exception:
+            resting_buy_age_minutes = {}
+
+    if get_limit_order_fill_rate_stats:
+        try:
+            fr = get_limit_order_fill_rate_stats(cfg, days=30)
+            if fr.get("enabled"):
+                nf = int(fr.get("n_filled") or 0)
+                nc = int(fr.get("n_cancelled") or 0)
+                no = int(fr.get("n_open") or 0)
+                denom = nf + nc
+                rate = fr.get("fill_rate")
+                if denom > 0 and rate is not None:
+                    print(
+                        f"[Limit order fills] last {int(fr.get('days') or 30)}d: "
+                        f"fill_rate={float(rate):.1%} ({nf} filled / {denom} closed) | open_resting={no}"
+                    )
+                    if float(rate) < 0.10:
+                        print("  Hint: fill_rate <10% often means limits too passive for current books.")
+                    elif float(rate) > 0.70:
+                        print("  Hint: fill_rate >70% — check you are not overpaying spread vs edge.")
+                    print()
+        except Exception:
+            pass
 
     yes_parity_penalty, no_parity_penalty = _compute_directional_parity_penalty(sp, cfg)
     if yes_parity_penalty > 0 or no_parity_penalty > 0:
@@ -7083,6 +7208,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
                 _fee_le = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
                 _net_edge_le = _chosen_net_k
+                _age_k = resting_buy_age_minutes.get((PLATFORM_KALSHI, ticker, side))
                 price, dip_used = _compute_limit_price(
                     bid=bid,
                     ask=ask_side,
@@ -7104,7 +7230,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     cross_spread_min_edge=cross_spread_min_edge_live,
                     near_market_min_edge=near_market_min_edge_live,
                     passive_only_below_edge=sp.limit_buy_passive_only_below_edge,
+                    ev_tier_pricing=sp.limit_buy_ev_tier_pricing,
+                    weak_bid_min_edge=sp.limit_buy_weak_bid_min_edge,
+                    skip_below_weak_edge=sp.limit_buy_skip_below_weak_edge,
+                    medium_quote_mode=sp.limit_buy_medium_quote_mode,
+                    medium_spread_fraction=sp.limit_buy_medium_spread_fraction,
+                    resting_order_age_minutes=_age_k,
+                    escalation_price_enabled=sp.limit_buy_escalation_price_enabled,
+                    escalate_after_minutes_1=sp.limit_buy_escalate_after_minutes_1,
+                    escalate_after_minutes_2=sp.limit_buy_escalate_after_minutes_2,
                 )
+                if price is None:
+                    print(
+                        f"    Why: limit quote skipped — net edge {_net_edge_le:.1%} below weak tier "
+                        f"({sp.limit_buy_weak_bid_min_edge:.1%}) or EV-tier skip enabled"
+                    )
+                    print()
+                    continue
                 _bb_k = 1.0
                 if sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket == "base":
                     _bb_k = sp.barbell_base_kelly_mult
@@ -8032,6 +8174,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
                     _fee_leg = _fee_per_contract(bid, maker_fee_rate_gem, sp.min_fee_per_order)
                     _net_edge_leg = _chosen_net_g
+                    _sym_g = get_instrument_symbol(evt, side) or ""
+                    _age_g = resting_buy_age_minutes.get((PLATFORM_GEMINI, _sym_g, side)) if _sym_g else None
                     price, dip_used = _compute_limit_price(
                         bid=bid,
                         ask=ask_side,
@@ -8053,7 +8197,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         cross_spread_min_edge=cross_spread_min_edge_live,
                         near_market_min_edge=near_market_min_edge_live,
                         passive_only_below_edge=sp.limit_buy_passive_only_below_edge,
+                        ev_tier_pricing=sp.limit_buy_ev_tier_pricing,
+                        weak_bid_min_edge=sp.limit_buy_weak_bid_min_edge,
+                        skip_below_weak_edge=sp.limit_buy_skip_below_weak_edge,
+                        medium_quote_mode=sp.limit_buy_medium_quote_mode,
+                        medium_spread_fraction=sp.limit_buy_medium_spread_fraction,
+                        resting_order_age_minutes=_age_g,
+                        escalation_price_enabled=sp.limit_buy_escalation_price_enabled,
+                        escalate_after_minutes_1=sp.limit_buy_escalate_after_minutes_1,
+                        escalate_after_minutes_2=sp.limit_buy_escalate_after_minutes_2,
                     )
+                    if price is None:
+                        print(
+                            f"    Why: limit quote skipped — net edge {_net_edge_leg:.1%} below weak tier "
+                            f"({sp.limit_buy_weak_bid_min_edge:.1%}) or EV-tier skip enabled"
+                        )
+                        print()
+                        continue
                     _bb_kg = 1.0
                     if sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket_g == "base":
                         _bb_kg = sp.barbell_base_kelly_mult
@@ -9686,6 +9846,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             limit_order_ttl_minutes=sp.limit_order_ttl_minutes,
             passive_bid_chase_enabled=sp.passive_bid_chase_enabled,
             passive_bid_chase_refresh_minutes=sp.passive_bid_chase_refresh_minutes,
+            limit_buy_escalation_cancel_minutes=sp.limit_buy_escalation_cancel_minutes,
             resting_cancel_if_market_bid_above_limit_by=sp.resting_cancel_if_market_bid_above_limit_by,
             platform_kalshi=PLATFORM_KALSHI,
             platform_gemini=PLATFORM_GEMINI,

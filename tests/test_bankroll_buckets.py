@@ -106,5 +106,99 @@ class TestPassiveOnlyBelowEdge(unittest.TestCase):
         self.assertGreaterEqual(px, 0.40)
 
 
+class TestEvTierLimitPricing(unittest.TestCase):
+    def test_medium_tier_uses_spread_fraction(self) -> None:
+        px, _ = _compute_limit_price(
+            bid=0.40,
+            ask=0.44,
+            p_win=0.60,
+            maker_fee_rate=0.0,
+            min_fee_per_order=0.0,
+            mode="layered",
+            base_dip=0.10,
+            tick_offset=1,
+            held_same_side=0,
+            held_opp_side=0,
+            max_inventory_skew_pct=0.1,
+            layered_order_levels=2,
+            order_count=1,
+            max_dip_cap=0.25,
+            passive_quote="dip",
+            net_edge=0.07,
+            edge_aggression_enabled=True,
+            cross_spread_min_edge=0.10,
+            near_market_min_edge=0.05,
+            passive_only_below_edge=0.0,
+            ev_tier_pricing=True,
+            weak_bid_min_edge=0.03,
+            skip_below_weak_edge=True,
+            medium_quote_mode="spread_fraction",
+            medium_spread_fraction=0.25,
+        )
+        self.assertIsNotNone(px)
+        assert px is not None
+        # bid + 0.25 * 0.04 = 0.41
+        self.assertAlmostEqual(px, 0.41, places=2)
+
+    def test_weak_tier_at_bid(self) -> None:
+        px, _ = _compute_limit_price(
+            bid=0.35,
+            ask=0.40,
+            p_win=0.55,
+            maker_fee_rate=0.0,
+            min_fee_per_order=0.0,
+            mode="layered",
+            base_dip=0.10,
+            tick_offset=1,
+            held_same_side=0,
+            held_opp_side=0,
+            max_inventory_skew_pct=0.1,
+            layered_order_levels=2,
+            order_count=1,
+            max_dip_cap=0.25,
+            passive_quote="dip",
+            net_edge=0.04,
+            edge_aggression_enabled=True,
+            cross_spread_min_edge=0.10,
+            near_market_min_edge=0.05,
+            passive_only_below_edge=0.0,
+            ev_tier_pricing=True,
+            weak_bid_min_edge=0.03,
+            skip_below_weak_edge=True,
+        )
+        self.assertIsNotNone(px)
+        assert px is not None
+        self.assertAlmostEqual(px, 0.35, places=2)
+
+    def test_skip_when_below_weak_and_skip_enabled(self) -> None:
+        px, dip = _compute_limit_price(
+            bid=0.40,
+            ask=0.42,
+            p_win=0.55,
+            maker_fee_rate=0.0,
+            min_fee_per_order=0.0,
+            mode="layered",
+            base_dip=0.05,
+            tick_offset=1,
+            held_same_side=0,
+            held_opp_side=0,
+            max_inventory_skew_pct=0.1,
+            layered_order_levels=2,
+            order_count=1,
+            max_dip_cap=0.25,
+            passive_quote="dip",
+            net_edge=0.02,
+            edge_aggression_enabled=True,
+            cross_spread_min_edge=0.10,
+            near_market_min_edge=0.05,
+            passive_only_below_edge=0.0,
+            ev_tier_pricing=True,
+            weak_bid_min_edge=0.03,
+            skip_below_weak_edge=True,
+        )
+        self.assertIsNone(px)
+        self.assertEqual(dip, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

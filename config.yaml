@@ -85,11 +85,23 @@ execution:
   position_exit_stale_edge_floor: 0.0
   # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
   limit_buy_edge_aggression_enabled: true
-  # Tiered aggression: cross spread only on strong edge; thin edge stays passive (saves spread tax).
-  limit_buy_cross_spread_min_edge: 0.12
-  limit_buy_near_market_min_edge: 0.08
-  # Below this net edge, skip cross/near-market paths entirely (maker-style limits only). 0 = off.
+  # EV-tier pricing (PnL / fills): strong → at ask; medium → bid + fraction×spread or mid; weak → bid; else skip.
+  limit_buy_ev_tier_pricing: true
+  limit_buy_weak_bid_min_edge: 0.03
+  limit_buy_skip_below_weak_edge: true
+  limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
+  limit_buy_medium_spread_fraction: 0.25
+  # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
+  limit_buy_cross_spread_min_edge: 0.10
+  limit_buy_near_market_min_edge: 0.05
+  # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
   limit_buy_passive_only_below_edge: 0.075
+  # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
+  limit_buy_escalation_price_enabled: true
+  limit_buy_escalate_after_minutes_1: 5
+  limit_buy_escalate_after_minutes_2: 10
+  # Optional: cancel stale resting BUYs earlier than limit_order_ttl (0 = off). 15 = patience exhausted.
+  limit_buy_escalation_cancel_minutes: 0
   # Avoid stacking another same-side BUY while an unresolved position exists for that market (platform+ticker+side).
   skip_new_buy_when_unresolved_same_side: true
 
