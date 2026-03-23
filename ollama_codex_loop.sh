@@ -172,42 +172,21 @@ if [[ "$OLLAMA_AUTO_BLACKLIST" == "1" ]]; then
     --out "$BLACKLIST_EXTRA_FILE" --merge 2>/dev/null || true
 fi
 
-# --- 3) HTML metrics table + embedded leaderboard ---
-METRICS_ESC=$("$PYTHON" -c "import html,sys; print(html.escape(sys.argv[1]))" "$METRICS_LOG_LABEL" 2>/dev/null || printf '%s' "$METRICS_LOG_LABEL")
-METRICS_FILE_ESC=$("$PYTHON" -c "import html,sys; print(html.escape(sys.argv[1]))" "$METRICS" 2>/dev/null || printf '%s' "$METRICS")
-GEN_HTML_UTC=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-{
-  echo "<html><head><style>body{font-family:system-ui,sans-serif;} table{border-collapse:collapse;} td,th{padding:8px; border:1px solid #ccc;}</style></head><body>"
-  echo "<h1>Ollama optimization runs</h1>"
-  echo "<p>Validated loop: backtest baseline + smoke compare_historical before commit. "
-  echo "Each table row is one Ollama loop tick. <strong>Win rate</strong> and <strong>PnL (\$)</strong> are for "
-  echo "<strong>position evaluations</strong> (KEEP/SELL) <em>resolved in SQLite</em> during "
-  echo "(previous row timestamp, this row timestamp], via <code>metrics_interval_position_eval.py</code>. "
-  echo "If the script fails, the loop falls back to a snapshot from the latest eval log "
-  echo "(<code>parse_compare_log_metrics.py</code>). Per-series iframe: <code>export_series_leaderboard.py</code>.</p>"
-  echo "<p><small>Empty interval (no resolved position evals): win rate and PnL show as <code>null</code>.</small></p>"
-  echo "<p><small>Latest metrics log: ${METRICS_ESC} · Generated ${GEN_HTML_UTC} · metrics CSV: ${METRICS_FILE_ESC}</small></p>"
-  echo "<table><tr><th>Timestamp (local)</th><th>Win rate</th><th>PnL (\$)</th></tr>"
-  grep -E '^[0-9]+,.+,.+$' "$METRICS" 2>/dev/null | tail -n 10 | awk '{a[NR]=$0} END {for (i=NR; i>0; i--) print a[i]}' | while IFS=',' read -r ts wr pnl rest; do
-    if [[ "$wr" == "null" ]]; then wr_disp="null"; else wr_disp="${wr}%"; fi
-    if [[ "$pnl" == "null" ]]; then pnl_disp="null"; else pnl_disp="$pnl"; fi
-    echo "<tr><td>$(date -r "$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$ts")</td><td>${wr_disp}</td><td>${pnl_disp}</td></tr>"
-  done
-  echo "</table>"
-  echo "<h2>Series leaderboard (${OLLAMA_LEADERBOARD_HOURS}h lookback)</h2>"
-  echo "<p>Open <a href=\"series_leaderboard.html\">series_leaderboard.html</a> (same folder). Sorted by PnL, then win rate; iframe below.</p>"
-  if [[ -f "$LB_HTML" ]]; then
-    echo "<iframe src=\"series_leaderboard.html\" title=\"Series leaderboard\" width=\"100%\" height=\"360\" style=\"border:1px solid #ccc\"></iframe>"
-  else
-    echo "<p><em>series_leaderboard.html not found — export_series_leaderboard.py may have failed.</em></p>"
-  fi
-  echo "<h2>Blacklist suggestions (WR &lt;30%, n≥${OLLAMA_BLACKLIST_MIN_TRADES} — manual review only)</h2>"
-  echo -n "<pre style=\"white-space:pre-wrap\">"
-  sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$SUGGEST_TMP" 2>/dev/null || true
-  echo "</pre>"
-  echo "</body></html>"
-} > "$HTML"
-_log "wrote dashboard HTML $HTML (metrics rows + leaderboard iframe)"
+# --- 3) HTML metrics table + embedded leaderboard (Python: CSV-safe, escaped, UTC timestamps) ---
+if ! "$PYTHON" "$REPO/scripts/render_ollama_dashboard_html.py" \
+  --metrics-csv "$METRICS" \
+  --out "$HTML" \
+  --leaderboard "$LB_HTML" \
+  --blacklist-suggest "$SUGGEST_TMP" \
+  --log-label "$METRICS_LOG_LABEL" \
+  --leaderboard-hours "$OLLAMA_LEADERBOARD_HOURS" \
+  --blacklist-min-trades "$OLLAMA_BLACKLIST_MIN_TRADES" \
+  --max-metric-rows 10; then
+  echo "⚠️  render_ollama_dashboard_html.py failed — $HTML may be stale." >&2
+  _log "render_ollama_dashboard_html FAILED out=$HTML"
+else
+  _log "wrote dashboard HTML $HTML (metrics rows + leaderboard iframe)"
+fi
 
 # --- 4) Metrics gate: skip Ollama when recent PnL is not stressed (reduces over-tweaking) ---
 # Python exit 0 = proceed (insufficient samples in window OR drop ≥ threshold). Exit 1 = skip run.

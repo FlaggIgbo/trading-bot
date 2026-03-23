@@ -1,0 +1,96 @@
+# =============================================================================
+# Minimal baseline — merged on top of config.yaml by config.get_config() by default.
+# Disable: TRADING_BOT_MINIMAL_OVERLAY=0  (or false / no / off)
+# Goal: simpler P stack, single edge gate, conservative Kelly, fewer filters.
+# =============================================================================
+
+execution:
+  price_strategy: aggressive
+  limit_offset_cents: 1
+  resting_cancel_if_market_bid_above_limit_by: 0.03
+
+recovery:
+  # Align with simple_ev min_edge so recovery merge does not re-tighten hurdles.
+  min_edge: 0.08
+  uncertainty_edge_mult: 0.0
+  vol_disagree_extra_edge: 0.0
+  ultra_short_min_edge_mult: 1.2
+
+strategy:
+  strategy_engine: vol_regime
+  # --- Probability (empirical + vol blend; drop extra smoothing layers) ---
+  vol_blend_weight: 0.25
+  use_intraday_empirical: true
+  empirical_recent_days: 60
+  empirical_recent_weight: 2.0
+  # 1.0 = no shrink toward 0.5 (0.0 would collapse P to 50% when simple_ev is off)
+  model_probability_shrinkage: 1.0
+  enable_model_prob_hard_cap: true
+  model_prob_hard_lo: 0.05
+  model_prob_hard_hi: 0.90
+  use_bucket_penalty: false
+  use_calibration: false
+  use_sklearn_calibration: false
+  enable_signal_model: false
+  enable_auto_signal_weight_fit: false
+
+  anti_hallucination:
+    bayesian_enabled: false
+    ewma_prob_enabled: false
+    vol_zscore_enabled: false
+    adaptive_edge_enabled: false
+    regime_filter_enabled: false
+
+  simple_ev_decision:
+    enabled: true
+    min_edge: 0.08
+    skip_p_win_mid_band_enabled: true
+    skip_p_win_mid_lo: 0.58
+    skip_p_win_mid_hi: 0.78
+    kelly_dampen: 0.20
+    max_bankroll_fraction: 0.015
+    spread_wide_fraction: 0.05
+    spread_wide_size_mult: 0.5
+    ultra_short_size_mult: 0.6
+
+  log_effective_min_edge: true
+  log_decision_diagnostics: true
+  min_edge: 0.08
+  min_edge_easy_win: 0.08
+  enable_easy_win: false
+  consensus_sniper_enabled: false
+  consensus_sniper_min_edge: 0.0
+  barbell_enabled: false
+  barbell_soften_strict_intraday: false
+
+  uncertainty_edge_mult: 0.0
+  vol_disagree_extra_edge: 0.0
+  yes_overconfidence_extra_edge: 0.0
+  parity_penalty_enabled: false
+  adaptive_learning_enabled: false
+
+  enable_vol_regime_scaling: false
+  enable_vol_spike_safety: false
+  enable_defensive_mode: false
+  dte_edge_scaling_enabled: false
+  ultra_short_min_edge_mult: 1.2
+  ultra_short_late_min_edge_mult: 1.1
+
+  limit_order_mode: layered
+  layered_order_levels: 2
+  limit_dip_pct: 0.03
+  max_dip_cap: 0.10
+
+  max_pct_of_book_volume: 0.25
+  min_order_book_depth: 10
+  stop_loss_pct: 0.20
+  adaptive_loss_block_max_balance_loss_pct: 0.25
+  adaptive_loss_block_lookback_hours: 12.0
+
+  enable_disagreement_dip: false
+  enable_lottery_limits: false
+
+  alpha_engine:
+    obi_enabled: false
+    markout_enabled: false
+    lead_lag_enabled: false

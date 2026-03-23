@@ -28,18 +28,59 @@ def _as_int(v: Any, default: int = 0) -> int:
 
 
 def _kalshi_fill_price(fill: dict[str, Any], side: str) -> float:
+    """Kalshi v2 Fill uses dollar strings (e.g. yes_price_dollars); legacy int cents also supported."""
     side_l = (side or "").lower()
     if side_l == "yes":
-        for k in ("yes_price_dollars", "yes_price", "price_dollars", "price"):
+        for k in ("yes_price_dollars", "yes_price_fixed", "yes_price", "price_dollars", "price"):
             p = _as_float(fill.get(k), 0.0)
             if p > 0:
                 return p if p <= 1.0 else (p / 100.0)
     if side_l == "no":
-        for k in ("no_price_dollars", "no_price", "price_dollars", "price"):
+        for k in ("no_price_dollars", "no_price_fixed", "no_price", "price_dollars", "price"):
             p = _as_float(fill.get(k), 0.0)
             if p > 0:
                 return p if p <= 1.0 else (p / 100.0)
     return 0.0
+
+
+def _normalize_kalshi_fill(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    merged: dict[str, Any] = dict(raw)
+    for nest_key in ("fill", "data", "execution", "result"):
+        nested = raw.get(nest_key)
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                if merged.get(k) in (None, ""):
+                    merged[k] = v
+    return merged
+
+
+def _kalshi_fill_qty(fill: dict[str, Any]) -> int:
+    """Prefer count_fp (v2 fixed-point string, e.g. '10.00') over legacy integer count."""
+    cf = fill.get("count_fp")
+    if cf is not None and str(cf).strip():
+        try:
+            q = int(float(str(cf).strip()))
+            if q > 0:
+                return q
+        except (TypeError, ValueError):
+            pass
+    for k in ("count", "quantity", "filled_count", "size", "filled_qty"):
+        q = _as_int(fill.get(k), 0)
+        if q > 0:
+            return q
+    return 0
+
+
+def _kalshi_fill_timestamp(fill: dict[str, Any]) -> float:
+    """Kalshi v2 uses ISO8601 created_time; legacy ts is unix seconds."""
+    return _parse_unix_ts(
+        fill.get("created_time")
+        or fill.get("ts")
+        or fill.get("timestamp")
+        or fill.get("created_at")
+    )
 
 
 def _gemini_fill_price(fill: dict[str, Any]) -> float:
@@ -104,11 +145,18 @@ def _gemini_execution_side(fill: dict[str, Any]) -> str:
         fill.get("side")
         or fill.get("orderSide")
         or fill.get("order_side")
+        or fill.get("executionSide")
+        or fill.get("execution_side")
         or fill.get("action")
         or fill.get("type")
         or ""
     )
-    return str(s).lower().strip()
+    sl = str(s).lower().strip()
+    if sl in ("buy", "bid", "b", "purchase", "long"):
+        return "buy"
+    if sl in ("sell", "ask", "s", "short"):
+        return "sell"
+    return sl
 
 
 def _gemini_contract_outcome(fill: dict[str, Any]) -> str:
@@ -117,10 +165,23 @@ def _gemini_contract_outcome(fill: dict[str, Any]) -> str:
         or fill.get("label")
         or fill.get("contractOutcome")
         or fill.get("contract_outcome")
+        or fill.get("contractSide")
+        or fill.get("contract_side")
+        or fill.get("legOutcome")
+        or fill.get("leg_outcome")
         or fill.get("position")
         or ""
     )
-    return str(o).lower().strip()
+    s = str(o).lower().strip()
+    if s in ("yes", "no"):
+        return s
+    if s in ("y", "n"):
+        return "yes" if s == "y" else "no"
+    for k in ("isYes", "is_yes", "yesLeg", "yes_leg"):
+        v = fill.get(k)
+        if isinstance(v, bool):
+            return "yes" if v else "no"
+    return ""
 
 
 def _gemini_symbol(fill: dict[str, Any]) -> str:
@@ -129,8 +190,53 @@ def _gemini_symbol(fill: dict[str, Any]) -> str:
         or fill.get("instrumentSymbol")
         or fill.get("instrument_symbol")
         or fill.get("marketSymbol")
+        or fill.get("market_symbol")
+        or fill.get("instrument")
         or ""
     ).strip()
+
+
+def _merge_gemini_fill_nested(raw: dict[str, Any]) -> dict[str, Any]:
+    """Flatten nested fill/trade objects so price/outcome live on one dict."""
+    if not isinstance(raw, dict):
+        return {}
+    merged: dict[str, Any] = dict(raw)
+    for nest_key in ("fill", "execution", "trade", "data", "details", "result"):
+        nested = raw.get(nest_key)
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                cur = merged.get(k)
+                if cur is None or cur == "":
+                    merged[k] = v
+    return merged
+
+
+def _get_limit_order_hints(platform: str, order_id: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
+    if not order_id:
+        return None
+    try:
+        from storage import get_limit_order_hints_by_order_id
+
+        return get_limit_order_hints_by_order_id(platform, order_id, cfg)
+    except ImportError:
+        return None
+
+
+def _ticker_from_gemini_symbol(
+    sym_to_ticker: dict[tuple[str, str], str],
+    symbol: str,
+    outcome: str,
+) -> str:
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    o = outcome.lower()
+    return (
+        sym_to_ticker.get((s, o), "")
+        or sym_to_ticker.get((s.upper(), o), "")
+        or sym_to_ticker.get((s.lower(), o), "")
+        or s
+    )
 
 
 def _collect_gemini_fill_rows(gemini_trading: Any) -> tuple[list[dict[str, Any]], str | None]:
@@ -157,13 +263,16 @@ def _symbol_to_ticker_map(
     out: dict[tuple[str, str], str] = {}
     for events in (gemini_events_by_asset or {}).values():
         for evt in events or []:
-            tkr = str(evt.get("ticker") or "")
+            tkr = str(evt.get("ticker") or "").strip()
             if not tkr:
                 continue
             for side in ("yes", "no"):
                 sym = get_instrument_symbol(evt, side)
-                if sym:
-                    out[(str(sym), side)] = tkr
+                if not sym:
+                    continue
+                raw = str(sym).strip()
+                for sk in {raw, raw.upper(), raw.lower()}:
+                    out[(sk, side)] = tkr
     return out
 
 
@@ -204,24 +313,37 @@ def reconcile_confirmed_fills(
     min_ts = int(time.time() - max(1, int(lookback_hours)) * 3600)
 
     kalshi_seen = kalshi_dup = kalshi_skip = 0
+    kalshi_raw_rows = 0
     gemini_seen = gemini_dup = gemini_skip = 0
 
-    # Kalshi fills
+    # Kalshi fills (Trade API v2: market_ticker alias, count_fp string, ISO created_time)
     try:
         cursor = ""
         while True:
             page = kalshi.get_fills(limit=200, min_ts=min_ts, **({"cursor": cursor} if cursor else {}))
-            for f in page.get("fills") or []:
-                action = (f.get("action") or "").lower()
+            rows = page.get("fills") or []
+            kalshi_raw_rows += len(rows)
+            for raw in rows:
+                f = _normalize_kalshi_fill(raw if isinstance(raw, dict) else {})
+                action = str(f.get("action") or "").lower()
                 if action != "buy":
                     continue
                 kalshi_seen += 1
-                ticker = str(f.get("ticker") or "")
-                side = str((f.get("side") or "").lower())
+                ticker = str(f.get("ticker") or f.get("market_ticker") or "").strip()
+                side = str(f.get("side") or "").lower().strip()
+                oid = str(f.get("order_id") or "")
+                if not ticker and oid:
+                    kh = _get_limit_order_hints(platform_kalshi, oid, cfg)
+                    if kh and kh.get("ticker"):
+                        ticker = str(kh["ticker"]).strip()
                 if not ticker or side not in ("yes", "no"):
                     kalshi_skip += 1
                     continue
-                qty = _as_int(f.get("count") or f.get("count_fp") or f.get("quantity") or f.get("filled_count"), 0)
+                fill_ts = _kalshi_fill_timestamp(f)
+                if fill_ts < float(min_ts):
+                    kalshi_skip += 1
+                    continue
+                qty = _kalshi_fill_qty(f)
                 if qty <= 0:
                     kalshi_skip += 1
                     continue
@@ -231,12 +353,10 @@ def reconcile_confirmed_fills(
                     continue
                 fill_id = str(
                     f.get("fill_id")
-                    or f.get("id")
                     or f.get("trade_id")
-                    or f"{f.get('order_id','')}-{f.get('created_time') or f.get('ts') or f.get('timestamp')}-{side}-{qty}-{price:.4f}"
+                    or f.get("id")
+                    or f"{oid}-{fill_ts}-{side}-{qty}-{price:.4f}"
                 )
-                oid = str(f.get("order_id") or "")
-                fill_ts = _as_float(f.get("created_time") or f.get("ts") or f.get("timestamp"), time.time())
                 rec = record_prediction_from_fill(
                     platform=platform_kalshi,
                     ticker=ticker,
@@ -259,6 +379,24 @@ def reconcile_confirmed_fills(
             cursor = page.get("cursor") or ""
             if not cursor:
                 break
+        if kalshi_raw_rows > 0 and kalshi_seen == 0:
+            _log.warning(
+                "Kalshi fill reconciliation: %d raw fill row(s) but 0 BUY legs in window — check action filter or payload",
+                kalshi_raw_rows,
+            )
+            logger(
+                "[Reconcile] Kalshi: received fills but parsed 0 BUY rows in lookback "
+                "(all sells or empty pages?)."
+            )
+        elif kalshi_seen > 0 and created_k == 0 and kalshi_dup == 0 and kalshi_skip >= kalshi_seen:
+            _log.warning(
+                "Kalshi fill reconciliation: %d BUY fill(s) seen but none inserted (all skipped/errors); check ticker/price/qty parsing",
+                kalshi_seen,
+            )
+            logger(
+                "[Reconcile] Kalshi: BUY fills seen=%d but inserted=0 dup=0 — inspect fill payload vs parsers."
+                % kalshi_seen
+            )
     except Exception as exc:
         _log.warning("Kalshi fill reconciliation failed: %s", exc, exc_info=True)
         logger(f"[Reconcile] Kalshi fills error: {exc}")
@@ -276,7 +414,8 @@ def reconcile_confirmed_fills(
                     f"[Reconcile] Gemini: fetched {len(fills)} raw fill row(s)"
                     f"{f' via {gemini_path_used}' if gemini_path_used else ''}"
                 )
-            for f in fills:
+            for raw_row in fills:
+                f = _merge_gemini_fill_nested(raw_row)
                 fill_ts = _parse_unix_ts(
                     f.get("timestamp")
                     or f.get("createdAt")
@@ -287,14 +426,20 @@ def reconcile_confirmed_fills(
                 if fill_ts < float(min_ts):
                     continue
                 side_exec = _gemini_execution_side(f)
-                # Only record opening buys; skip sells and unknown sides unless API omits side on buy-only feed.
-                if side_exec in ("sell", "ask"):
+                # Only record opening buys; skip sells; allow empty side on buy-only feeds.
+                if side_exec in ("sell", "ask", "short"):
                     continue
                 if side_exec not in ("buy", ""):
                     gemini_skip += 1
                     continue
                 gemini_seen += 1
                 outcome = _gemini_contract_outcome(f)
+                oid = str(f.get("orderId") or f.get("order_id") or "")
+                hints = _get_limit_order_hints(platform_gemini, oid, cfg) if oid else None
+                if outcome not in ("yes", "no") and hints:
+                    hs = str(hints.get("side") or "").lower().strip()
+                    if hs in ("yes", "no"):
+                        outcome = hs
                 if outcome not in ("yes", "no"):
                     gemini_skip += 1
                     continue
@@ -310,7 +455,11 @@ def reconcile_confirmed_fills(
                 if price <= 0:
                     gemini_skip += 1
                     continue
-                ticker = sym_to_ticker.get((symbol, outcome), symbol)
+                ticker = _ticker_from_gemini_symbol(sym_to_ticker, symbol, outcome)
+                if hints and hints.get("ticker"):
+                    ht = str(hints["ticker"]).strip()
+                    if ht:
+                        ticker = ht
                 fill_id = str(
                     f.get("fillId")
                     or f.get("fill_id")
@@ -320,7 +469,6 @@ def reconcile_confirmed_fills(
                     or f.get("id")
                     or f"{f.get('orderId') or f.get('order_id')}-{fill_ts}-{outcome}-{qty}-{price:.4f}"
                 )
-                oid = str(f.get("orderId") or f.get("order_id") or "")
                 rec = record_prediction_from_fill(
                     platform=platform_gemini,
                     ticker=ticker,
@@ -340,6 +488,16 @@ def reconcile_confirmed_fills(
                     gemini_dup += 1
                 else:
                     gemini_skip += 1
+            if gemini_raw_rows > 0 and gemini_seen == 0:
+                _log.warning(
+                    "Gemini fill reconciliation: %d raw row(s) from API but 0 matched as buy+YES/NO in lookback — "
+                    "check response shape or extend parsers",
+                    gemini_raw_rows,
+                )
+                logger(
+                    "[Reconcile] Gemini: received raw fills but parsed 0 eligible buy legs in window; "
+                    "try --reconcile-diagnostics or inspect API payload."
+                )
         except Exception as exc:
             _log.warning("Gemini fill reconciliation failed: %s", exc, exc_info=True)
             logger(f"[Reconcile] Gemini fills error: {exc}")
@@ -349,6 +507,7 @@ def reconcile_confirmed_fills(
         "kalshi_inserted": created_k,
         "kalshi_duplicate": kalshi_dup,
         "kalshi_skipped": kalshi_skip,
+        "kalshi_raw_rows": kalshi_raw_rows,
         "gemini_seen": gemini_seen,
         "gemini_inserted": created_g,
         "gemini_duplicate": gemini_dup,
@@ -358,14 +517,17 @@ def reconcile_confirmed_fills(
         "gemini_raw_rows": gemini_raw_rows,
         "gemini_fills_endpoint": gemini_path_used,
     }
-    if diagnostics or created_k or created_g or gemini_raw_rows > 0:
-        extra = ""
+    if diagnostics or created_k or created_g or kalshi_raw_rows > 0 or gemini_raw_rows > 0:
+        extra_k = f" raw_rows={kalshi_raw_rows}" if diagnostics and kalshi_raw_rows else ""
+        extra_g = ""
         if diagnostics and gemini_path_used is not None:
-            extra = f" | Gemini path={gemini_path_used} raw_rows={gemini_raw_rows}"
+            extra_g = f" | Gemini path={gemini_path_used} raw_rows={gemini_raw_rows}"
+        elif diagnostics and gemini_raw_rows:
+            extra_g = f" | Gemini raw_rows={gemini_raw_rows}"
         logger(
             "[Reconcile] "
-            f"Kalshi seen={kalshi_seen} inserted={created_k} dup={kalshi_dup} skipped={kalshi_skip} | "
+            f"Kalshi seen={kalshi_seen} inserted={created_k} dup={kalshi_dup} skipped={kalshi_skip}{extra_k} | "
             f"Gemini seen={gemini_seen} inserted={created_g} dup={gemini_dup} skipped={gemini_skip}"
-            f"{extra}"
+            f"{extra_g}"
         )
     return stats

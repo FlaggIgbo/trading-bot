@@ -20,7 +20,7 @@ class AlphaEngineConfig:
 
     # --- Order Book Imbalance (OBI) ---
     obi_enabled: bool = True
-    obi_edge_bonus_max: float = 0.04
+    obi_edge_bonus_max: float = 0.02
     obi_strong_threshold: float = 0.40
     obi_min_total_size: float = 5.0
 
@@ -61,7 +61,7 @@ def load_alpha_engine_config(strategy: dict) -> AlphaEngineConfig:
     windows = list(windows_raw) if isinstance(windows_raw, (list, tuple)) else list(_DEFAULT_MARKOUT_WINDOWS)
     return AlphaEngineConfig(
         obi_enabled=bool(ae.get("obi_enabled", True)),
-        obi_edge_bonus_max=float(ae.get("obi_edge_bonus_max", 0.04)),
+        obi_edge_bonus_max=float(ae.get("obi_edge_bonus_max", 0.02)),
         obi_strong_threshold=float(ae.get("obi_strong_threshold", 0.40)),
         obi_min_total_size=float(ae.get("obi_min_total_size", 5.0)),
         markout_enabled=bool(ae.get("markout_enabled", True)),
@@ -116,7 +116,7 @@ def obi_edge_adjustment(
     rec: str,
     *,
     strong_threshold: float = 0.40,
-    max_bonus: float = 0.04,
+    max_bonus: float = 0.02,
 ) -> float:
     """
     Adjust effective edge requirement based on order book imbalance.

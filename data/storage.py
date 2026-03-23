@@ -13,7 +13,7 @@ import sqlite3
 import time
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 _log = logging.getLogger(__name__)
 
@@ -649,124 +649,6 @@ def record_resolved(
         conn.close()
 
 
-def record_limit_order(
-    platform: str,
-    ticker: str,
-    order_id: str,
-    side: str,
-    action: str,
-    limit_price: float,
-    bid_at_place: float | None = None,
-    dip_pct_used: float | None = None,
-    hist_p: float | None = None,
-    vol_p: float | None = None,
-    edge: float | None = None,
-    rec: str | None = None,
-    count: int | None = None,
-    yf_ticker: str | None = None,
-    threshold: float | None = None,
-    direction: str | None = None,
-    config: dict | None = None,
-) -> None:
-    """
-    Record a limit order we placed. Used to learn from unfilled orders:
-    "limit at 38¢, market never dipped → we could relax dip" or "limit at 38¢,
-    we cancelled (no_longer_rec) but price dipped to 35¢ → we would have filled."
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return
-    ts = time.time()
-    try:
-        conn.execute(
-            """INSERT INTO limit_orders
-               (platform, ticker, order_id, side, action, limit_price, bid_at_place, dip_pct_used,
-                hist_p, vol_p, edge, rec, count, ts, yf_ticker, threshold, direction, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'placed')""",
-            (
-                platform,
-                ticker,
-                order_id,
-                side,
-                action,
-                limit_price,
-                bid_at_place,
-                dip_pct_used,
-                hist_p,
-                vol_p,
-                edge,
-                rec or "",
-                count,
-                ts,
-                yf_ticker or "",
-                threshold,
-                direction or "",
-            ),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-    finally:
-        conn.close()
-
-
-def record_order_cancel(
-    platform: str,
-    order_id: str,
-    cancel_reason: str,
-    config: dict | None = None,
-) -> bool:
-    """
-    Mark a limit order as cancelled when we cancel it. cancel_reason: no_longer_rec,
-    want_better_price. Returns True if updated.
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return False
-    ts = time.time()
-    try:
-        cur = conn.execute(
-            "UPDATE limit_orders SET status='cancelled', cancel_reason=?, cancel_ts=? WHERE platform=? AND order_id=? AND status='placed'",
-            (cancel_reason, ts, platform, order_id),
-        )
-        conn.commit()
-        return cur.rowcount > 0
-    except Exception:
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-
-def get_unfilled_limit_orders_for_analysis(
-    config: dict | None = None,
-    days: int = 90,
-) -> list[dict]:
-    """
-    Return limit orders that were placed and either cancelled or still resting,
-    for analysis. Joins with resolved_outcomes and market_snapshots to compute:
-    - min_price_during_order: did price ever hit our limit? (would have filled)
-    - yes_settled: outcome when market resolved (for learning)
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return []
-    cutoff = time.time() - days * 86400
-    try:
-        rows = conn.execute(
-            """SELECT id, platform, ticker, order_id, side, action, limit_price, bid_at_place,
-                      dip_pct_used, hist_p, edge, rec, ts, cancel_reason, status
-               FROM limit_orders WHERE ts > ? AND status IN ('placed','cancelled')
-               ORDER BY ts DESC""",
-            (cutoff,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-    finally:
-        conn.close()
-
-
 def update_limit_order_filled(platform: str, order_id: str, config: dict | None = None) -> bool:
     """Mark a limit order as filled when we detect it filled (e.g. via settlements)."""
     conn = _get_conn(config)
@@ -782,123 +664,6 @@ def update_limit_order_filled(platform: str, order_id: str, config: dict | None 
     except Exception:
         conn.rollback()
         return False
-    finally:
-        conn.close()
-
-
-def record_limit_order(
-    platform: str,
-    ticker: str,
-    order_id: str,
-    side: str,
-    action: str,
-    limit_price: float,
-    bid_at_place: float | None = None,
-    dip_pct_used: float | None = None,
-    hist_p: float | None = None,
-    vol_p: float | None = None,
-    edge: float | None = None,
-    rec: str | None = None,
-    count: int | None = None,
-    yf_ticker: str | None = None,
-    threshold: float | None = None,
-    direction: str | None = None,
-    config: dict | None = None,
-) -> int | None:
-    """
-    Record a placed limit order. Used to learn from unfilled orders (why they didn't hit).
-    Returns row id or None.
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return None
-    ts = time.time()
-    try:
-        cur = conn.execute(
-            """INSERT INTO limit_orders
-               (platform, ticker, order_id, side, action, limit_price, bid_at_place, dip_pct_used,
-                hist_p, vol_p, edge, rec, count, ts, yf_ticker, threshold, direction, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                platform,
-                ticker,
-                order_id,
-                side,
-                action,
-                limit_price,
-                bid_at_place,
-                dip_pct_used,
-                hist_p,
-                vol_p,
-                edge,
-                rec or "",
-                count,
-                ts,
-                yf_ticker or "",
-                threshold,
-                direction or "",
-                "placed",
-            ),
-        )
-        conn.commit()
-        return cur.lastrowid
-    except Exception:
-        conn.rollback()
-        return None
-    finally:
-        conn.close()
-
-
-def record_order_cancel(
-    platform: str,
-    order_id: str,
-    cancel_reason: str,
-    config: dict | None = None,
-) -> bool:
-    """Mark a limit order as cancelled with reason. cancel_reason: no_longer_rec | want_better_price."""
-    conn = _get_conn(config)
-    if not conn:
-        return False
-    try:
-        conn.execute(
-            """UPDATE limit_orders SET status='cancelled', cancel_reason=?, cancel_ts=? 
-               WHERE platform=? AND order_id=? AND status='placed'""",
-            (cancel_reason, time.time(), platform, order_id),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-
-def get_unfilled_limit_orders_for_analysis(
-    config: dict | None = None,
-    days: int = 90,
-) -> list[dict]:
-    """
-    Return limit orders that were cancelled or never filled (status=cancelled or placed for resolved markets).
-    Joins with resolved_outcomes to enable learning: "limit at X, market resolved; did price ever hit X?"
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return []
-    since_ts = time.time() - (days * 86400)
-    try:
-        rows = conn.execute(
-            """SELECT l.id, l.platform, l.ticker, l.order_id, l.side, l.action, l.limit_price,
-                      l.bid_at_place, l.dip_pct_used, l.hist_p, l.rec, l.ts, l.status, l.cancel_reason,
-                      r.yes_settled, r.resolution_ts
-               FROM limit_orders l
-               LEFT JOIN resolved_outcomes r ON l.ticker = r.ticker AND l.platform = r.platform
-               WHERE l.ts >= ? AND (l.status IN ('cancelled', 'placed') OR l.status IS NULL)""",
-            (since_ts,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
     finally:
         conn.close()
 
@@ -959,6 +724,36 @@ def get_limit_order_analysis(config: dict | None = None, days: int = 90) -> dict
         conn.close()
 
 
+def get_limit_order_hints_by_order_id(
+    platform: str,
+    order_id: str,
+    config: dict | None = None,
+) -> dict[str, Any] | None:
+    """
+    Latest limit_orders row for (platform, order_id). Used when exchange fill payloads omit
+    event ticker / YES-NO leg so reconciliation can still join to our placed-order record.
+    """
+    if not order_id:
+        return None
+    conn = _get_conn(config)
+    if not conn:
+        return None
+    try:
+        row = conn.execute(
+            """SELECT ticker, side, hist_p, vol_p, yf_ticker, threshold, direction, rec,
+                      theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps, limit_price
+               FROM limit_orders
+               WHERE platform=? AND order_id=?
+               ORDER BY ts DESC LIMIT 1""",
+            (platform, str(order_id)),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def record_limit_order(
     platform: str,
     ticker: str,
@@ -977,180 +772,21 @@ def record_limit_order(
     threshold: float | None = None,
     direction: str | None = None,
     config: dict | None = None,
-) -> None:
+) -> int | None:
     """
-    Record a limit order we placed. Used to learn from unfilled orders:
-    when we cancel or when market resolves unfilled, we can analyze whether
-    our limit was too aggressive (never touched) or we cancelled too soon.
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return
-    ts = time.time()
-    try:
-        conn.execute(
-            """INSERT INTO limit_orders
-               (platform, ticker, order_id, side, action, limit_price, bid_at_place, dip_pct_used,
-                hist_p, vol_p, edge, rec, count, ts, yf_ticker, threshold, direction)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                platform,
-                ticker,
-                order_id,
-                side,
-                action,
-                limit_price,
-                bid_at_place,
-                dip_pct_used,
-                hist_p,
-                vol_p,
-                edge,
-                rec or "",
-                count,
-                ts,
-                yf_ticker or "",
-                threshold,
-                direction or "",
-            ),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-    finally:
-        conn.close()
-
-
-def record_order_cancel(
-    platform: str,
-    order_id: str,
-    cancel_reason: str,
-    config: dict | None = None,
-    *,
-    ticker: str | None = None,
-    side: str | None = None,
-    limit_price: float | None = None,
-) -> None:
-    """
-    Mark a limit order as cancelled. cancel_reason: no_longer_rec | want_better_price.
-    If we have a row (by platform+order_id), update it. Else insert a minimal row
-    so we have a record of cancelled orders even from before limit-order tracking.
+    Record a limit order we placed (status=placed). Used for fill attribution and unfilled analysis.
+    Returns SQLite row id or None if storage disabled / insert failed.
     """
     conn = _get_conn(config)
     if not conn:
-        return
+        return None
     ts = time.time()
     try:
         cur = conn.execute(
-            "UPDATE limit_orders SET status='cancelled', cancel_reason=?, cancel_ts=? WHERE platform=? AND order_id=?",
-            (cancel_reason, ts, platform, order_id),
-        )
-        if cur.rowcount == 0 and ticker and side and limit_price is not None:
-            conn.execute(
-                """INSERT INTO limit_orders
-                   (platform, ticker, order_id, side, action, limit_price, ts, status, cancel_reason, cancel_ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (platform, ticker, order_id, side, "buy", limit_price, ts, "cancelled", cancel_reason, ts),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-    finally:
-        conn.close()
-
-
-def get_unfilled_limit_orders_for_analysis(
-    config: dict | None = None,
-    days: int = 90,
-) -> list[dict]:
-    """
-    Return limit orders that were cancelled or never filled, joined with
-    resolved_outcomes when available. Enables learning: did our limit ever touch?
-    Would a smaller dip have filled? Used to tune limit_dip_pct.
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return []
-    since = time.time() - (days * 86400)
-    try:
-        rows = conn.execute(
-            """SELECT lo.*, ro.yes_settled, ro.resolution_ts
-               FROM limit_orders lo
-               LEFT JOIN resolved_outcomes ro ON lo.ticker = ro.ticker
-               WHERE lo.status IN ('cancelled', 'placed') AND lo.ts >= ?
-               ORDER BY lo.ts DESC""",
-            (since,),
-        ).fetchall()
-        result = []
-        for r in rows:
-            d = dict(r)
-            # Get min price during order lifetime from market_snapshots (for "would we have filled?")
-            snap_rows = conn.execute(
-                """SELECT yes_bid, no_bid FROM market_snapshots
-                   WHERE ticker=? AND platform=? AND ts>=? AND ts<=?
-                   ORDER BY ts""",
-                (
-                    d["ticker"],
-                    d["platform"],
-                    d["ts"],
-                    d["resolution_ts"] or time.time(),
-                ),
-            ).fetchall()
-            min_price = None
-            if snap_rows and d["side"]:
-                prices = [
-                    (row["yes_bid"] or 0) if d["side"].lower() == "yes" else (row["no_bid"] or (1.0 - (row["yes_bid"] or 0)))
-                    for row in snap_rows
-                ]
-                prices = [p for p in prices if p > 0]
-                if prices:
-                    min_price = min(prices)
-            d["min_price_during_order"] = min_price
-            d["would_have_filled"] = (
-                min_price is not None
-                and d.get("limit_price") is not None
-                and min_price <= float(d["limit_price"]) + 0.001
-            )
-            result.append(d)
-        return result
-    except Exception:
-        return []
-    finally:
-        conn.close()
-
-
-def record_limit_order(
-    platform: str,
-    ticker: str,
-    order_id: str,
-    side: str,
-    action: str,
-    limit_price: float,
-    bid_at_place: float | None = None,
-    dip_pct_used: float | None = None,
-    hist_p: float | None = None,
-    vol_p: float | None = None,
-    edge: float | None = None,
-    rec: str | None = None,
-    count: int | None = None,
-    yf_ticker: str | None = None,
-    threshold: float | None = None,
-    direction: str | None = None,
-    config: dict | None = None,
-) -> None:
-    """
-    Record a limit order we placed. Used to learn from unfilled orders: why they didn't hit,
-    whether our dip was too aggressive, etc. Status starts as 'placed'; update via record_order_cancel.
-    """
-    conn = _get_conn(config)
-    if not conn:
-        return
-    ts = time.time()
-    try:
-        conn.execute(
             """INSERT INTO limit_orders
                (platform, ticker, order_id, side, action, limit_price, bid_at_place, dip_pct_used,
                 hist_p, vol_p, edge, rec, count, ts, yf_ticker, threshold, direction, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'placed')""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 platform,
                 ticker,
@@ -1169,11 +805,14 @@ def record_limit_order(
                 yf_ticker or "",
                 threshold,
                 direction or "",
+                "placed",
             ),
         )
         conn.commit()
+        return cur.lastrowid
     except Exception:
         conn.rollback()
+        return None
     finally:
         conn.close()
 
@@ -1222,7 +861,7 @@ def record_order_cancel(
 
 def get_unfilled_limit_orders_for_analysis(
     config: dict | None = None,
-    status_filter: str | str | None = None,
+    status_filter: str | Sequence[str] | None = None,
 ) -> list[dict]:
     """
     Return limit orders that didn't fill (cancelled or placed and never filled) for calibration.
@@ -1348,6 +987,7 @@ def record_prediction_from_fill(
     conn = _get_conn(config)
     if not conn:
         return {"status": "error", "id": None}
+    resolved_for_log = ticker
     try:
         # Idempotency: skip if this fill was already recorded.
         existing = conn.execute(
@@ -1361,7 +1001,7 @@ def record_prediction_from_fill(
         if order_id:
             try:
                 ctx = conn.execute(
-                    """SELECT hist_p, vol_p, yf_ticker, threshold, direction, rec,
+                    """SELECT ticker, side, hist_p, vol_p, yf_ticker, threshold, direction, rec,
                               theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps
                        FROM limit_orders
                        WHERE platform=? AND order_id=?
@@ -1371,6 +1011,21 @@ def record_prediction_from_fill(
             except Exception:
                 ctx = None
 
+        row_ticker = (ticker or "").strip()
+        if not row_ticker and ctx and ctx["ticker"]:
+            row_ticker = str(ctx["ticker"]).strip()
+        if not row_ticker:
+            return {"status": "error", "id": None}
+
+        side_l = str(side or "").lower().strip()
+        if side_l not in ("yes", "no") and ctx and ctx["side"]:
+            cts = str(ctx["side"] or "").lower().strip()
+            if cts in ("yes", "no"):
+                side_l = cts
+        if side_l not in ("yes", "no"):
+            return {"status": "error", "id": None}
+
+        resolved_for_log = row_ticker
         hist_p = float(ctx["hist_p"]) if ctx and ctx["hist_p"] is not None else 0.5
         vol_p = float(ctx["vol_p"]) if ctx and ctx["vol_p"] is not None else None
         yf_ticker = str(ctx["yf_ticker"] or "") if ctx else ""
@@ -1390,10 +1045,10 @@ def record_prediction_from_fill(
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 platform,
-                ticker,
+                row_ticker,
                 order_id or "",
                 str(fill_id),
-                side,
+                side_l,
                 hist_p,
                 vol_p,
                 price,
@@ -1411,6 +1066,11 @@ def record_prediction_from_fill(
                 fill_slippage_bps,
             ),
         )
+        if order_id:
+            conn.execute(
+                "UPDATE limit_orders SET status='filled' WHERE platform=? AND order_id=? AND status='placed'",
+                (platform, str(order_id)),
+            )
         conn.commit()
         return {"status": "inserted", "id": int(cur.lastrowid)}
     except Exception as exc:
@@ -1419,7 +1079,7 @@ def record_prediction_from_fill(
             "record_prediction_from_fill failed platform=%s fill_id=%s ticker=%s: %s",
             platform,
             fill_id,
-            ticker,
+            resolved_for_log,
             exc,
             exc_info=True,
         )
@@ -1457,6 +1117,36 @@ def get_ticker_entry_counts(config: dict | None = None) -> dict[str, int]:
             "GROUP BY ticker"
         ).fetchall()
         return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def get_unresolved_contract_sums_by_platform_yf(config: dict | None = None) -> dict[tuple[str, str], int]:
+    """
+    Sum prediction `count` for open positions grouped by (platform, yf_ticker).
+    Used to cap total directional exposure per underlying (e.g. BTC-USD) per venue.
+    Rows with empty yf_ticker are excluded from aggregation.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return {}
+    try:
+        rows = conn.execute(
+            """SELECT platform, yf_ticker, SUM(count) as total
+               FROM predictions
+               WHERE (outcome IS NULL OR outcome NOT IN ('cancelled'))
+                 AND yf_ticker IS NOT NULL AND TRIM(yf_ticker) != ''
+               GROUP BY platform, yf_ticker"""
+        ).fetchall()
+        out: dict[tuple[str, str], int] = {}
+        for r in rows:
+            plat = str(r["platform"] or "")
+            yf = str(r["yf_ticker"] or "").strip()
+            if plat and yf:
+                out[(plat, yf)] = int(r["total"] or 0)
+        return out
     except Exception:
         return {}
     finally:

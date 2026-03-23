@@ -19,8 +19,10 @@ sys.path.insert(0, str(_ROOT))
 from config import get_config  # noqa: E402
 
 try:
-    from storage import get_recent_performance_by_series
+    # _get_data_dir is not re-exported by root storage.py (import * omits leading-underscore names).
+    from data.storage import _get_data_dir, get_recent_performance_by_series
 except ImportError:
+    _get_data_dir = None  # type: ignore[misc,assignment]
     get_recent_performance_by_series = None  # type: ignore[misc,assignment]
 
 
@@ -36,6 +38,12 @@ def main() -> int:
 
     cfg = get_config()
     perf = get_recent_performance_by_series(lookback_hours=args.hours, config=cfg) or {}
+    data_dir_note = ""
+    if _get_data_dir:
+        try:
+            data_dir_note = str(_get_data_dir(cfg).resolve())
+        except Exception:
+            data_dir_note = str(_get_data_dir(cfg))
     # PnL-first matches a trading leaderboard; tie-breaker higher win rate.
     rows = sorted(
         perf.items(),
@@ -51,27 +59,33 @@ def main() -> int:
         ".num{text-align:right;font-variant-numeric:tabular-nums;}</style>",
         "</head><body>",
         f"<h1>Series leaderboard ({args.hours:g}h lookback)</h1>",
-        "<p>From SQLite <code>predictions</code> (resolved: win / lose / sold). "
+        "<p>From SQLite <code>predictions</code> (resolved: win / lose / sold), <strong>all platforms</strong> "
+        "(Kalshi + Gemini). Series key = ticker substring before the first hyphen (e.g. <code>KXBTCD-…</code> → "
+        "<code>KXBTCD</code>; compact Gemini tickers often stay a single token). "
         "Sorted by <strong>PnL (¢)</strong> desc, then win rate. "
         "Consecutive losses = streak from the <em>most recent</em> resolved trade backward per series.</p>",
         f"<p><small>Generated {html.escape(gen_utc)}</small></p>",
+        f"<p><small>SQLite data dir: {html.escape(data_dir_note) if data_dir_note else '(unknown)'} · DB: trading_bot.db</small></p>",
         "<table><tr><th>Series</th><th class='num'>Trades</th><th class='num'>Win rate</th>"
-        "<th class='num'>PnL (¢)</th><th class='num'>Consec. losses</th></tr>",
+        "<th class='num'>PnL (¢)</th><th class='num'>PnL ($)</th><th class='num'>Consec. losses</th></tr>",
     ]
     for series, p in rows:
         wr = p.get("win_rate")
         wr_s = f"{wr:.1%}" if wr is not None else "—"
+        pnl_c = int(p.get("pnl_cents", 0))
+        pnl_usd = f"{pnl_c / 100.0:.2f}"
         lines.append(
             "<tr>"
             f"<td>{html.escape(str(series))}</td>"
             f"<td class='num'>{int(p.get('total', 0))}</td>"
             f"<td class='num'>{wr_s}</td>"
-            f"<td class='num'>{int(p.get('pnl_cents', 0))}</td>"
+            f"<td class='num'>{pnl_c}</td>"
+            f"<td class='num'>{pnl_usd}</td>"
             f"<td class='num'>{int(p.get('consecutive_losses', 0))}</td>"
             "</tr>"
         )
     if not rows:
-        lines.append("<tr><td colspan='5'>No resolved trades in window.</td></tr>")
+        lines.append("<tr><td colspan='6'>No resolved trades in window.</td></tr>")
     lines.append("</table></body></html>")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text("\n".join(lines), encoding="utf-8")

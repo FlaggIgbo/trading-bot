@@ -1,6 +1,8 @@
 # =============================================================================
 # Kalshi Trading Bot Configuration
 # =============================================================================
+# After this file loads, config/strategy_minimal_overlay.yaml is deep-merged by default
+# (see config.get_config). Disable: TRADING_BOT_MINIMAL_OVERLAY=0
 # Override with env vars: MARKETS (comma-separated), POLL_INTERVAL_SECONDS
 
 # Markets to watch: list of market tickers or series tickers
@@ -133,6 +135,8 @@ strategy:
     min_bid_size: 0 # Hard skip when visible bid size below this; 0 = use min_order_book_depth only
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
+  # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
+  log_decision_diagnostics: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
   min_edge: 0.10
@@ -227,6 +231,8 @@ strategy:
   passive_bid_chase_refresh_minutes: 3 # PnL: re-quote resting buys sooner when book moves (was 5)
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
+  # Sum of unresolved contract count per (platform, Yahoo underlying), e.g. all BTC-USD Gemini legs share one bucket. 0 = off.
+  max_open_contracts_per_underlying: 10
   layered_order_levels: 4 # PnL: one extra level vs 3 for smoother VWAP when size > 1
   limit_dip_pct_high_confidence: 0.02 # High P(win): bid close to tape (was 0.08) so consensus sniper / near-expiry orders actually fill
   limit_dip_pct_price_decline: 0.06 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg
@@ -465,7 +471,7 @@ strategy:
   # Alpha engine: OBI, markout PnL, vol-adjusted Kelly, lead-lag signal
   alpha_engine:
     obi_enabled: true # Order Book Imbalance: directional signal from bid/ask depth
-    obi_edge_bonus_max: 0.04 # Max edge reduction when OBI strongly favors our trade direction
+    obi_edge_bonus_max: 0.02 # Max edge reduction when OBI strongly favors our direction (was 0.04; PM books are thin)
     obi_strong_threshold: 0.40 # OBI magnitude above which signal is actionable
     obi_min_total_size: 5.0 # Minimum combined bid+ask size for OBI to be valid
     markout_enabled: true # Toxic flow detection: track post-fill adverse selection

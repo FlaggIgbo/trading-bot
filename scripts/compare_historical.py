@@ -94,6 +94,12 @@ from models.alpha_engine import (
     toxic_flow_edge_penalty,
     vol_adjusted_kelly,
 )
+from models.decision_diagnostics import print_decision_diagnostics_line
+from models.trading_edges import (
+    maker_fee_per_contract as _fee_per_contract,
+    net_edges_buy_legs as _net_edges_buy_legs,
+    simple_ev_spend_fraction,
+)
 
 try:
     from storage import (
@@ -114,6 +120,7 @@ try:
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
         get_ticker_entry_counts,
+        get_unresolved_contract_sums_by_platform_yf,
         mark_prediction_cancelled,
         record_position_evaluation,
         record_prediction_from_fill,
@@ -128,7 +135,7 @@ try:
     )
 except ImportError:
     expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
-    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = None
+    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_unresolved_contract_sums_by_platform_yf = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
@@ -483,6 +490,7 @@ class _StrategyParams:
     simple_ev_cheap_band_hi: float
     simple_ev_cheap_band_min_net_edge: float
     log_effective_min_edge: bool
+    log_decision_diagnostics: bool
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
@@ -773,6 +781,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
             min(0.5, float((strategy.get("simple_ev_decision") or {}).get("cheap_band_min_net_edge", 0.0))),
         ),
         log_effective_min_edge=bool(strategy.get("log_effective_min_edge", True)),
+        log_decision_diagnostics=bool(strategy.get("log_decision_diagnostics", False)),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
     )
@@ -2920,22 +2929,6 @@ def _simple_ev_net_min_edge_bundle(
     return eff, detail
 
 
-def _simple_ev_spend_fraction(
-    ev_net: float,
-    price: float,
-    sp: _StrategyParams,
-) -> float:
-    """
-    Fraction of bankroll to allocate: min(cap, dampen * EV / (p*(1-p))).
-    ev_net and price are for the bought contract (YES or NO).
-    """
-    p = max(1e-6, min(1.0 - 1e-6, float(price)))
-    denom = p * (1.0 - p)
-    k_raw = float(ev_net) / denom if denom > 0 else 0.0
-    k_raw = max(0.0, k_raw)
-    return min(float(sp.simple_ev_max_bankroll_fraction), k_raw * float(sp.simple_ev_kelly_dampen))
-
-
 def _simple_ev_calibration_size_mult(calibration: dict[str, Any] | None, sp: _StrategyParams) -> float:
     if not sp.use_calibration or not calibration:
         return 1.0
@@ -3074,26 +3067,6 @@ def _dynamic_stability_seconds(sp: "_StrategyParams", vol_ratio: float) -> int:
     return int(round(base * mult))
 
 
-def _vol_regime_scalars(
-    sp: "_StrategyParams",
-    vol_ratio: float,
-) -> tuple[float, float, float]:
-    """
-    Return (edge_mult, dip_mult, size_mult) from continuous volatility ratio.
-    Higher vol raises edge thresholds, deepens limits, and reduces size.
-    """
-    if not sp.enable_vol_regime_scaling:
-        return 1.0, 1.0, 1.0
-    excess = max(0.0, float(vol_ratio) - 1.0)
-    edge_mult = 1.0 + max(0.0, sp.vol_regime_edge_mult_per_x) * excess
-    edge_mult = min(max(1.0, edge_mult), max(1.0, sp.vol_regime_max_edge_mult))
-    dip_mult = 1.0 + max(0.0, sp.vol_regime_dip_mult_per_x) * excess
-    dip_mult = min(max(1.0, dip_mult), max(1.0, sp.vol_regime_max_dip_mult))
-    size_mult = 1.0 / (1.0 + max(0.0, sp.vol_regime_size_mult_per_x) * excess)
-    size_mult = max(min(1.0, size_mult), max(0.01, sp.vol_regime_min_size_mult))
-    return edge_mult, dip_mult, size_mult
-
-
 def _cross_exchange_sanity_block_side(
     sp: "_StrategyParams",
     *,
@@ -3205,42 +3178,6 @@ def _should_downgrade_buy_yes_above(
     required = min_edge + sp.calibration_extra_edge_above_yes
     net_edge = hist_p - yes_bid - fee
     return net_edge < required
-
-
-def _fee_per_contract(price: float, maker_rate: float, min_fee_per_order: float = 0.01) -> float:
-    """
-    Maker fee per contract: rate × P × (1−P). Kalshi & Gemini use this formula.
-    Rounded up to next cent per exchange docs. Returns 0 if rate=0 or invalid price.
-    """
-    if maker_rate <= 0 or price <= 0 or price >= 1:
-        return 0.0
-    fee = maker_rate * price * (1.0 - price)
-    if fee <= 0:
-        return 0.0
-    rounded = math.ceil(fee * 100) / 100
-    return max(rounded, max(0.0, float(min_fee_per_order)))
-
-
-def _net_edges_buy_legs(
-    p_yes: float,
-    yes_bid: float,
-    no_bid: float,
-    maker_fee_rate: float,
-    min_fee_per_order: float,
-) -> tuple[float, float]:
-    """
-    Fee-adjusted edge for each leg (single source of truth for BUY YES vs BUY NO symmetry):
-      edge_yes = P(YES) − yes_bid − fee_yes
-      edge_no  = P(NO) − no_bid − fee_no  with P(NO) = 1 − P(YES)
-    Use each leg's own top-of-book bid — do not price NO using (1 − yes_bid) unless the venue
-    does not publish a NO bid (then caller should pass parity fallback).
-    """
-    yb = max(0.0, min(0.99, float(yes_bid)))
-    nb = max(1e-6, min(0.99, float(no_bid)))
-    p = max(0.0, min(1.0, float(p_yes)))
-    fy = _fee_per_contract(yb, maker_fee_rate, min_fee_per_order)
-    fn = _fee_per_contract(nb, maker_fee_rate, min_fee_per_order)
-    return (p - yb - fy, (1.0 - p) - nb - fn)
 
 
 def _gemini_no_bid_from_event(event: dict, yes_bid_fallback: float) -> float:
@@ -4573,6 +4510,55 @@ def _filter_pending_buys_by_min_payout_ratio(
         pending_orders[:] = kept
 
 
+def _apply_max_open_contracts_per_underlying(
+    pending_orders: list[dict],
+    cfg: dict,
+    cap: int,
+    get_sums: Any,
+    logger: Any = print,
+) -> None:
+    """
+    Drop pending BUYs that would push unresolved contract count for (platform, yf_ticker)
+    above `cap`. Orders without yf_ticker pass through (caller should set yf on normal paths).
+    """
+    if cap <= 0 or not pending_orders or not get_sums:
+        return
+    try:
+        sums: dict[tuple[str, str], int] = dict(get_sums(cfg) or {})
+    except Exception:
+        return
+    kept: list[dict] = []
+    blocked_keys: set[tuple[str, str]] = set()
+    for o in pending_orders:
+        yf = (o.get("yf_ticker") or "").strip()
+        plat = str(o.get("platform") or "")
+        if not yf or not plat:
+            kept.append(o)
+            continue
+        cnt = int(o.get("count", 0) or 0)
+        if cnt <= 0:
+            kept.append(o)
+            continue
+        key = (plat, yf)
+        cur = int(sums.get(key, 0) or 0)
+        if cur + cnt > cap:
+            blocked_keys.add(key)
+            continue
+        sums[key] = cur + cnt
+        kept.append(o)
+    if blocked_keys:
+        pending_orders[:] = kept
+        logger(
+            f"[Risk] Per-underlying open-contract cap ({cap}): blocked order(s) for "
+            f"{len(blocked_keys)} (platform, yf_ticker) bucket(s) already at or over limit."
+        )
+        for plat, yf in sorted(blocked_keys):
+            logger(f"         {plat} + {yf}")
+        logger("")
+    else:
+        pending_orders[:] = kept
+
+
 def _cap_cross_platform_exposure(
     pending_orders: list[dict],
     total_balance_cents: int,
@@ -5454,6 +5440,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 f"  Gemini: seen={recon_stats.get('gemini_seen', 0)}, inserted={recon_stats.get('gemini_inserted', 0)}, "
                 f"dup={recon_stats.get('gemini_duplicate', 0)}, skipped={recon_stats.get('gemini_skipped', 0)}"
             )
+            kr = recon_stats.get("kalshi_raw_rows")
+            if kr is not None:
+                print(f"  Kalshi raw fill rows fetched: {kr}")
             gr = recon_stats.get("gemini_raw_rows")
             gp = recon_stats.get("gemini_fills_endpoint")
             if gr is not None:
@@ -5856,7 +5845,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             any_momentum_crash = True
         curr_vol, base_vol = _volatility_spike_metrics(closes)
         vol_ratio = _vol_ratio(curr_vol, base_vol)
-        edge_regime_mult, dip_regime_mult, size_regime_mult = _vol_regime_scalars(sp, vol_ratio)
+        edge_regime_mult, dip_regime_mult, size_regime_mult = VolRegimeStrategy.volatility_regime_mults(
+            sp, vol_ratio
+        )
         dynamic_stability_seconds = _dynamic_stability_seconds(sp, vol_ratio)
         vol_spike_active = (
             sp.enable_vol_spike_safety
@@ -6522,6 +6513,35 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     f"    ├─ Leg edges:     YES net {_eys:+.1%}  |  NO net {_ens:+.1%}  "
                     f"(bids {yes_bid:.1%} / {no_bid_early:.1%})"
                 )
+            if sp.log_decision_diagnostics:
+                _edy, _edn = _net_edges_buy_legs(
+                    hist_p, yes_bid, no_bid_early, maker_fee_rate, sp.min_fee_per_order
+                )
+                print_decision_diagnostics_line(
+                    {
+                        "ticker": ticker,
+                        "platform": "kalshi",
+                        "simple_ev": bool(sp.simple_ev_decision_enabled),
+                        "p": {
+                            "emp": float(emp),
+                            "vol": float(vol_p) if vol_p is not None else None,
+                            "joint_pre": float(joint_blend_pre) if joint_blend_pre is not None else None,
+                            "joint_post": float(joint_blend_post) if joint_blend_post is not None else None,
+                            "hist_p_raw": float(hist_p_raw),
+                            "hist_p": float(hist_p),
+                        },
+                        "market": {"yes_bid": float(yes_bid), "no_bid": float(no_bid_early)},
+                        "net_edge": {"yes": float(_edy), "no": float(_edn)},
+                        "required": {
+                            "min_p_win": float(min_p_win),
+                            "eff_min": float(effective_min),
+                            "eff_yes": float(effective_min_yes),
+                            "eff_no": float(effective_min_no),
+                        },
+                        "regime": {"vol_ratio": float(vol_ratio), "edge_mult": float(edge_regime_mult)},
+                        "verdict": rec,
+                    }
+                )
             if sp.barbell_enabled:
                 if sp.simple_ev_decision_enabled:
                     print("    ├─ Barbell:      gating off (simple EV mode)")
@@ -6727,7 +6747,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 if sp.simple_ev_decision_enabled:
                     _ev_n = _chosen_net_k
-                    _sf = _simple_ev_spend_fraction(_ev_n, bid, sp)
+                    _sf = simple_ev_spend_fraction(
+                        _ev_n,
+                        bid,
+                        kelly_dampen=sp.simple_ev_kelly_dampen,
+                        max_bankroll_fraction=sp.simple_ev_max_bankroll_fraction,
+                    )
                     if _is_ultra_short_horizon(m, yf_ticker, sp):
                         _sf *= float(sp.simple_ev_ultra_short_size_mult)
                     _sf *= _simple_ev_calibration_size_mult(calibration, sp)
@@ -7397,6 +7422,35 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         f"    ├─ Leg edges:     YES net {_eys_g:+.1%}  |  NO net {_ens_g:+.1%}  "
                         f"(bids {impl:.1%} / {no_bid_gem_early:.1%})"
                     )
+                if sp.log_decision_diagnostics:
+                    _edyg, _edng = _net_edges_buy_legs(
+                        hist_p_gem, impl, no_bid_gem_early, maker_fee_rate_gem, sp.min_fee_per_order
+                    )
+                    print_decision_diagnostics_line(
+                        {
+                            "ticker": evt.get("ticker", "?"),
+                            "platform": "gemini",
+                            "simple_ev": bool(sp.simple_ev_decision_enabled),
+                            "p": {
+                                "emp": float(emp),
+                                "vol": float(vol_p_gem) if vol_p_gem is not None else None,
+                                "joint_pre": float(joint_blend_pre_g) if joint_blend_pre_g is not None else None,
+                                "joint_post": float(joint_blend_post_g) if joint_blend_post_g is not None else None,
+                                "hist_p_raw": float(hist_p_gem_raw),
+                                "hist_p": float(hist_p_gem),
+                            },
+                            "market": {"yes_bid": float(impl), "no_bid": float(no_bid_gem_early)},
+                            "net_edge": {"yes": float(_edyg), "no": float(_edng)},
+                            "required": {
+                                "min_p_win": float(min_p_win_gem),
+                                "eff_min": float(effective_min_gem),
+                                "eff_yes": float(effective_min_yes_g),
+                                "eff_no": float(effective_min_no_g),
+                            },
+                            "regime": {"vol_ratio": float(vol_ratio), "edge_mult": float(edge_regime_mult)},
+                            "verdict": rec,
+                        }
+                    )
                 if sp.barbell_enabled:
                     if sp.simple_ev_decision_enabled:
                         print("    ├─ Barbell:      gating off (simple EV mode)")
@@ -7613,7 +7667,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         )
                     if sp.simple_ev_decision_enabled:
                         _ev_ng = _chosen_net_g
-                        _sf_g = _simple_ev_spend_fraction(_ev_ng, bid, sp)
+                        _sf_g = simple_ev_spend_fraction(
+                            _ev_ng,
+                            bid,
+                            kelly_dampen=sp.simple_ev_kelly_dampen,
+                            max_bankroll_fraction=sp.simple_ev_max_bankroll_fraction,
+                        )
                         if _is_ultra_short_horizon(evt, yf_ticker, sp):
                             _sf_g *= float(sp.simple_ev_ultra_short_size_mult)
                         _sf_g *= _simple_ev_calibration_size_mult(calibration, sp)
@@ -8937,6 +8996,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             for t in sorted(unique_capped):
                 print(f"         {t} ({ticker_counts.get(t, 0)} existing entries)")
             print()
+
+    max_open_cu = int(strategy.get("max_open_contracts_per_underlying", 0) or 0)
+    _apply_max_open_contracts_per_underlying(
+        pending_orders,
+        cfg,
+        max_open_cu,
+        get_unresolved_contract_sums_by_platform_yf,
+        logger=print,
+    )
 
     loss_cb_pct = float(sp.adaptive_loss_block_max_balance_loss_pct)
     block_hours = float(sp.adaptive_loss_block_lookback_hours)

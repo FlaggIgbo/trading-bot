@@ -126,6 +126,9 @@ def main() -> int:
         errors.append("`strategy.tick_offset` must be >= 1.")
     if not (0.0 <= max_inventory_skew_pct <= 1.0):
         errors.append("`strategy.max_inventory_skew_pct` must be in [0, 1].")
+    max_open_contracts_per_underlying = _as_int(strategy.get("max_open_contracts_per_underlying"), 0)
+    if max_open_contracts_per_underlying < 0:
+        errors.append("`strategy.max_open_contracts_per_underlying` must be >= 0 (0 disables per-underlying cap).")
     if min_stability_duration_seconds < 0:
         errors.append("`strategy.min_stability_duration_seconds` must be >= 0.")
     if min_order_book_depth < 0:
@@ -146,6 +149,9 @@ def main() -> int:
         errors.append("`strategy.inter_arb_balance_aware_routing` must be true or false.")
     if not isinstance(arb_inter_allow_single_leg_fallback, bool):
         errors.append("`strategy.arb_inter_allow_single_leg_fallback` must be true or false.")
+    log_decision_diagnostics = strategy.get("log_decision_diagnostics", False)
+    if not isinstance(log_decision_diagnostics, bool):
+        errors.append("`strategy.log_decision_diagnostics` must be true or false.")
     if vol_model not in {"auto", "ewma", "garch", "sample"}:
         errors.append("`strategy.vol_model` must be one of: auto, ewma, garch, sample.")
     if garch_min_returns < 30:
