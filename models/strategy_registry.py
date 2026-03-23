@@ -10,7 +10,9 @@ from models.strategies.vol_regime import VolRegimeStrategy
 
 # Canonical CLI / config names -> strategy class
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
+    # vol_regime_threshold: clearer alias (threshold logic = DefaultThreshold; regime = mults in compare_historical)
     "vol_regime": VolRegimeStrategy,
+    "vol_regime_threshold": VolRegimeStrategy,
     "default_threshold": DefaultThresholdStrategy,
     "default": DefaultThresholdStrategy,
     "threshold": DefaultThresholdStrategy,
@@ -39,7 +41,7 @@ def build_strategy_engine_by_name(name: str) -> BaseStrategy:
 
 def list_strategies() -> list[str]:
     """Distinct public names for UI / CLI."""
-    return sorted({"vol_regime", "default_threshold", "strict_threshold"})
+    return sorted({"vol_regime", "vol_regime_threshold", "default_threshold", "strict_threshold"})
 
 
 def parse_strategy_list(s: str) -> list[str]:

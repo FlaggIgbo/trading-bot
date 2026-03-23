@@ -94,7 +94,7 @@ from models.alpha_engine import (
     toxic_flow_edge_penalty,
     vol_adjusted_kelly,
 )
-from models.decision_diagnostics import print_decision_diagnostics_line
+from models.decision_diagnostics import build_required_edge_breakdown, print_decision_diagnostics_line
 from models.trading_edges import (
     maker_fee_per_contract as _fee_per_contract,
     net_edges_buy_legs as _net_edges_buy_legs,
@@ -834,8 +834,9 @@ def _build_strategy_engine(strategy_cfg: dict) -> BaseStrategy:
     """
     Build pluggable recommendation strategy.
 
-    Default remains the production path ("vol_regime"), so callers do not need
-    to switch strategies unless explicitly testing alternatives.
+    Default remains the production path (``vol_regime`` or alias ``vol_regime_threshold``).
+    Both use VolRegimeStrategy: same threshold logic as DefaultThresholdStrategy; vol
+    regime scaling is applied in compare_historical, not inside recommend().
     """
     from models.strategy_registry import build_strategy_engine_by_name
 
@@ -6128,12 +6129,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
             no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
+            effective_min_core_trace: float | None = None
+            _us_edge_detail: dict[str, Any] | None = None
+            _eff_after_simple_bundle: float | None = None
+            _proxy_edge_simple = 0.0
             if sp.simple_ev_decision_enabled:
-                effective_min, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker)
-                _proxy_edge = proxy_basis_extra_min_edge(cfg, series)
-                if _proxy_edge > 0.0:
-                    effective_min += _proxy_edge
-                    _us_edge_detail = {**_us_edge_detail, "proxy_basis_extra_min_edge": _proxy_edge}
+                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker)
+                _proxy_edge_simple = float(proxy_basis_extra_min_edge(cfg, series))
+                effective_min = float(_eff_after_simple_bundle) + _proxy_edge_simple
+                if _proxy_edge_simple > 0.0 and _us_edge_detail is not None:
+                    _us_edge_detail = {**_us_edge_detail, "proxy_basis_extra_min_edge": _proxy_edge_simple}
                 effective_min_yes = effective_min
                 effective_min_no = effective_min
                 obi_adj_yes = obi_adj_no = 0.0
@@ -6239,7 +6244,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     effective_min *= _dte_edge_scale_factor(float(dte), sp)
                 if _is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
                     effective_min *= float(sp.ultra_short_min_edge_mult)
-                effective_min_core_trace = effective_min
+                effective_min_core_trace = float(effective_min)
                 effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
                 effective_min_no = effective_min + no_parity_penalty + obi_adj_no + ll_adj_no
                 _print_effective_edge_trace(
@@ -6521,6 +6526,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     {
                         "ticker": ticker,
                         "platform": "kalshi",
+                        "strategy_engine": str(strategy.get("strategy_engine", "vol_regime")),
                         "simple_ev": bool(sp.simple_ev_decision_enabled),
                         "p": {
                             "emp": float(emp),
@@ -6532,12 +6538,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         },
                         "market": {"yes_bid": float(yes_bid), "no_bid": float(no_bid_early)},
                         "net_edge": {"yes": float(_edy), "no": float(_edn)},
-                        "required": {
-                            "min_p_win": float(min_p_win),
-                            "eff_min": float(effective_min),
-                            "eff_yes": float(effective_min_yes),
-                            "eff_no": float(effective_min_no),
-                        },
+                        "required": build_required_edge_breakdown(
+                            simple_ev=bool(sp.simple_ev_decision_enabled),
+                            effective_min_final=float(effective_min),
+                            effective_min_yes=float(effective_min_yes),
+                            effective_min_no=float(effective_min_no),
+                            min_p_win=float(min_p_win),
+                            us_detail=_us_edge_detail,
+                            eff_after_simple_ev_bundle=_eff_after_simple_bundle,
+                            proxy_basis_add=float(_proxy_edge_simple),
+                            legacy_core_before_parity_obi=effective_min_core_trace,
+                        ),
                         "regime": {"vol_ratio": float(vol_ratio), "edge_mult": float(edge_regime_mult)},
                         "verdict": rec,
                     }
@@ -7081,8 +7092,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
                 no_bid_gem_early = _gemini_no_bid_from_event(evt, impl)
+                effective_min_core_trace_g: float | None = None
+                _us_edge_detail_g: dict[str, Any] | None = None
+                _eff_after_simple_bundle_g: float | None = None
+                _proxy_edge_simple_g = 0.0
                 if sp.simple_ev_decision_enabled:
-                    effective_min_gem, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(sp, evt, yf_ticker)
+                    _eff_after_simple_bundle_g, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(
+                        sp, evt, yf_ticker
+                    )
+                    _proxy_edge_simple_g = float(proxy_basis_extra_min_edge(cfg, series))
+                    effective_min_gem = float(_eff_after_simple_bundle_g) + _proxy_edge_simple_g
+                    if _proxy_edge_simple_g > 0.0 and _us_edge_detail_g is not None:
+                        _us_edge_detail_g = {
+                            **_us_edge_detail_g,
+                            "proxy_basis_extra_min_edge": _proxy_edge_simple_g,
+                        }
                     effective_min_yes_g = effective_min_gem
                     effective_min_no_g = effective_min_gem
                     obi_adj_yes_g = obi_adj_no_g = 0.0
@@ -7162,7 +7186,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
                     if _is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
                         effective_min_gem *= float(sp.ultra_short_min_edge_mult)
-                    effective_min_core_trace_g = effective_min_gem
+                    effective_min_core_trace_g = float(effective_min_gem)
                     effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
                     effective_min_no_g = effective_min_gem + no_parity_penalty + obi_adj_no_g
                     _print_effective_edge_trace(
@@ -7430,6 +7454,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         {
                             "ticker": evt.get("ticker", "?"),
                             "platform": "gemini",
+                            "strategy_engine": str(strategy.get("strategy_engine", "vol_regime")),
                             "simple_ev": bool(sp.simple_ev_decision_enabled),
                             "p": {
                                 "emp": float(emp),
@@ -7441,12 +7466,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             },
                             "market": {"yes_bid": float(impl), "no_bid": float(no_bid_gem_early)},
                             "net_edge": {"yes": float(_edyg), "no": float(_edng)},
-                            "required": {
-                                "min_p_win": float(min_p_win_gem),
-                                "eff_min": float(effective_min_gem),
-                                "eff_yes": float(effective_min_yes_g),
-                                "eff_no": float(effective_min_no_g),
-                            },
+                            "required": build_required_edge_breakdown(
+                                simple_ev=bool(sp.simple_ev_decision_enabled),
+                                effective_min_final=float(effective_min_gem),
+                                effective_min_yes=float(effective_min_yes_g),
+                                effective_min_no=float(effective_min_no_g),
+                                min_p_win=float(min_p_win_gem),
+                                us_detail=_us_edge_detail_g,
+                                eff_after_simple_ev_bundle=_eff_after_simple_bundle_g,
+                                proxy_basis_add=float(_proxy_edge_simple_g),
+                                legacy_core_before_parity_obi=effective_min_core_trace_g,
+                            ),
                             "regime": {"vol_ratio": float(vol_ratio), "edge_mult": float(edge_regime_mult)},
                             "verdict": rec,
                         }

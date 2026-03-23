@@ -17,7 +17,8 @@ recovery:
   ultra_short_min_edge_mult: 1.2
 
 strategy:
-  strategy_engine: vol_regime
+  # Alias of vol_regime; documents that BUY/NO gates match default_threshold
+  strategy_engine: vol_regime_threshold
   # --- Probability (empirical + vol blend; drop extra smoothing layers) ---
   vol_blend_weight: 0.25
   use_intraday_empirical: true

@@ -10,12 +10,14 @@ from models.trading_edges import vol_regime_edge_dip_size_mults
 @dataclass
 class VolRegimeStrategy(DefaultThresholdStrategy):
     """
-    Regime-aware strategy facade.
+    Production default engine: same BUY YES / NO / SKIP math as DefaultThresholdStrategy.
 
-    BUY/SELL threshold logic matches DefaultThresholdStrategy. Volatility-regime
-    *scaling* (edge / dip / size multipliers from short-vs-long vol) lives here and
-    is invoked from compare_historical once per series so behavior is traceable to
-    this class rather than a loose helper.
+    The name reflects *volatility-regime scaling elsewhere in the pipeline*, not a
+    different recommend() formula. In compare_historical, per-series
+    ``VolRegimeStrategy.volatility_regime_mults(sp, vol_ratio)`` supplies
+    (edge_mult, dip_mult, size_mult) from realized vol; those feed execution sizing
+    and (in legacy mode) stacked min_edge. Config aliases: ``vol_regime``,
+    ``vol_regime_threshold`` (identical class).
     """
 
     @classmethod
