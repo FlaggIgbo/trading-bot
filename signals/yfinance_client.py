@@ -380,7 +380,7 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     mn = min(tail)
     if mn <= 0:
         return False
-    if t in ("RB=F", "CL=F"):
+    if t in ("RB=F", "CL=F", "BZ=F"):
         return mx < 500.0  # $/gal or $/bbl — not index scale
     if t == "SI=F":
         return mx < 500.0  # silver $/oz

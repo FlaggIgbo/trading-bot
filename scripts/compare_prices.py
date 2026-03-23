@@ -38,7 +38,7 @@ from ollama_analysis import capture_and_analyze
 from underlying_adjust import apply_underlying_price
 from yfinance_client import get_snapshot as yf_get_snapshot
 
-# Underlyings we match to Gemini events for snapshot lines (crypto + WTI = CL=F, same as Kalshi KXWTI).
+# Underlyings we match to Gemini events for snapshot lines (crypto + WTI CL=F + Gemini Brent BZ=F).
 GEMINI_CRYPTO_YF = {
     "BTC-USD",
     "ETH-USD",
@@ -50,6 +50,7 @@ GEMINI_CRYPTO_YF = {
     "HYPE-USD",
     "HYPE32196-USD",
     "CL=F",
+    "BZ=F",
 }
 
 

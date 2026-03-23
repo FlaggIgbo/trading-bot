@@ -178,7 +178,7 @@ except (ImportError, OSError):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-# Yahoo underlyings we fetch Gemini events for and evaluate (crypto + WTI crude = same CL=F as Kalshi KXWTI).
+# Yahoo underlyings we fetch Gemini events for and evaluate (crypto + WTI CL=F + Brent BZ=F on Gemini commodities).
 GEMINI_CRYPTO_YF = {
     "BTC-USD",
     "ETH-USD",
@@ -190,6 +190,7 @@ GEMINI_CRYPTO_YF = {
     "HYPE-USD",
     "HYPE32196-USD",  # Yahoo symbol for Hyperliquid; Gemini buckets still use HYPE-USD from _event_to_asset
     "CL=F",  # WTI — Gemini KK_RFR_WTIUSDC / WTIOIL-USDC; Kalshi KXWTI uses same Yahoo continuous future
+    "BZ=F",  # Brent — Gemini KK_RFR_BRENTOILUSDC; Yahoo ICE continuous — https://finance.yahoo.com/quote/BZ=F/
 }
 # When Yahoo ticker ≠ Gemini _event_to_asset key, map here for inter-arb / sanity / Gemini loop lookups.
 GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
@@ -199,7 +200,7 @@ GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
 # US equity indices: same 4pm ET “regular close” intraday rules as ^GSPC (e.g. Kalshi Nasdaq-100).
 _US_EQUITY_INDEX_YF_TICKERS = frozenset({"^GSPC", "GSPC", "^NDX", "NDX"})
 # Yahoo continuous futures for Kalshi WTI / metals / RBOB (gas proxy) — allow titled intraday times.
-_COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "GC=F", "SI=F", "RB=F"})
+_COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "BZ=F", "GC=F", "SI=F", "RB=F"})
 # Kalshi maker fee override (index-like); match _maker_fee_rate_for_market.
 _KALSHI_INDEX_MAKER_FEE_YF = frozenset({"^GSPC", "GSPC", "^NDX", "NDX", "SPY", "QQQ"})
 
@@ -1627,7 +1628,7 @@ def _compute_macro_signal_24h(cfg: dict, sp: _StrategyParams) -> float:
 # We only evaluate intraday markets that match our supported times:
 # - Crypto (BTC, ETH, SOL, …): 5pm ET (typical crypto settlement)
 # - US equity indices (^GSPC, ^NDX): 4pm ET (regular session close)
-# - Listed commodity futures (CL=F, GC=F, SI=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
+# - Listed commodity futures (CL=F, BZ=F, GC=F, SI=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
 # All other intraday times on unsupported underlyings (e.g. 7pm EDT) are skipped.
 _RESOLUTION_HOUR_PATTERN = re.compile(
     r"(?:(?:today|tomorrow)\s+at|@|\bat)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)\b",

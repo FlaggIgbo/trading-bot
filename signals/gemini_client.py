@@ -126,6 +126,10 @@ _CRYPTO_ASSET_KEYS = {
     # Oil / WTI — Yahoo CL=F (Kalshi KXWTI); Gemini terms cite KK_RFR_WTIUSDC / WTIOIL-USDC
     "wtioil": "CL=F",
     "wti": "CL=F",
+    # Brent — Yahoo BZ=F (ICE continuous); Gemini KK_RFR_BRENTOILUSDC / BRENT* tickers (daily/weekly)
+    "brent crude": "BZ=F",
+    "oil (brent)": "BZ=F",
+    "brent": "BZ=F",
 }
 
 
@@ -206,7 +210,7 @@ class GeminiPredictionClient:
         return resp.json() if resp.text else {"data": [], "pagination": {}}
 
     def get_crypto_events(self, limit: int = 100) -> list[dict]:
-        """Fetch active prediction events: crypto (daily/weekly/hourly/15m), ZEC, WTI commodities. Returns events with contracts."""
+        """Fetch active prediction events: crypto (daily/weekly/hourly/15m), ZEC, WTI/Brent commodities. Returns events with contracts."""
         seen: set[str] = set()
         out: list[dict] = []
 
@@ -264,13 +268,23 @@ class GeminiPredictionClient:
                     out.append(evt)
         except Exception as e:
             log.debug("Gemini WTI search fetch failed: %s", e)
+        # Brent daily/weekly (e.g. BRENT2603232100) — commodities; Yahoo underlying BZ=F
+        try:
+            r = self.get_events(category="commodities", status="active", search="BRENT", limit=100, offset=0)
+            for evt in r.get("data") or []:
+                eid = evt.get("id") or evt.get("ticker") or ""
+                if eid and eid not in seen:
+                    seen.add(eid)
+                    out.append(evt)
+        except Exception as e:
+            log.debug("Gemini BRENT search fetch failed: %s", e)
         return out
 
     def get_events_by_asset(
         self, asset: str, limit_per_asset: int = 10
     ) -> list[dict]:
         """
-        Fetch prediction events grouped by yfinance-style asset (BTC-USD, ETH-USD, …, CL=F, …).
+        Fetch prediction events grouped by yfinance-style asset (BTC-USD, ETH-USD, …, CL=F, BZ=F, …).
         Returns events that match the asset, up to limit_per_asset each.
         """
         events = self.get_crypto_events(limit=200)
