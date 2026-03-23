@@ -76,7 +76,10 @@ When **`strategy.simple_ev_decision.enabled`** is true, barbell and many stacked
 
 ### D. Sell Logic (Holding Losers Too Long)
 
-- Optional **edge floor:** `execution.position_exit_min_net_edge` queues a sell when held-side **net** edge (model − bid − fee) drops below that value — independent of entry `min_edge`, so you can exit fading trades without waiting for P(lose) to spike.
+- Optional **edge floor:** `execution.position_exit_min_net_edge` queues a sell when held-side **net** edge (model − bid − fee) drops below that value — independent of entry `min_edge`. The floor supports **negative** values (repo default **-0.02**) for **hysteresis:** the edge must clearly **reverse** (fall through the floor), not merely fade from a still-positive level.
+- **Min hold gate:** `execution.position_min_hold_minutes: 10` blocks discretionary exits for **young** positions until they have been held at least that many minutes.
+- **Conviction-based hold:** `execution.position_exit_strong_entry_edge: 0.15` and `execution.position_exit_strong_entry_floor: -0.04` widen the exit floor when the entry had **strong** edge, so high-conviction entries are less likely to be sold on a shallow dip.
+- **Diagnostics:** With verbose logging, position evaluation emits **`[PosEval]`** lines for inspection.
 - Dynamic EV-optimal sell threshold: `P(lose) > 1 - (bid - exit_fee)`. High bids → low threshold (sell sooner); low bids → high threshold (hold longer).
 - **Check:** Position eval stats: if SELL win rate is much lower than KEEP, we may be selling winners and keeping losers.
 

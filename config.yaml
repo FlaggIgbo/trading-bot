@@ -69,8 +69,15 @@ execution:
   near_expiry_aggressive_hours: 1.0
   # Cancel resting BUY when live bid has risen this far above our limit (frees capital; reprices next cycle).
   resting_cancel_if_market_bid_above_limit_by: 0.02
-  # Sell held side when net edge (model − bid − maker fee) falls below this floor; 0 = off. Entry hurdle can stay higher.
-  position_exit_min_net_edge: 0.01
+  # Sell held side when net edge (model − bid − maker fee) falls below this floor; 0 = off.
+  # Negative value = require clear reversal before exiting (hysteresis buffer).
+  position_exit_min_net_edge: -0.02
+  # Minimum minutes to hold a position before discretionary exits (edge-exit, likely-loser, flip).
+  # Stop-loss and rule-violation still fire immediately. 0 = off.
+  position_min_hold_minutes: 10
+  # Conviction-based hold: if entry edge was >= this, use the stronger (more negative) exit floor below.
+  position_exit_strong_entry_edge: 0.15
+  position_exit_strong_entry_floor: -0.04
   # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
   limit_buy_edge_aggression_enabled: true
   # Tiered aggression: cross spread only on strong edge; thin edge stays passive (saves spread tax).

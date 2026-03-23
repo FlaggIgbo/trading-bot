@@ -467,6 +467,9 @@ class _StrategyParams:
     model_prob_hard_hi: float
     # Execution / exits (optional; many merged from execution: in config)
     position_exit_min_net_edge: float
+    position_min_hold_minutes: float
+    position_exit_strong_entry_edge: float
+    position_exit_strong_entry_floor: float
     skip_new_buy_when_unresolved_same_side: bool
     limit_buy_edge_aggression_enabled: bool
     limit_buy_cross_spread_min_edge: float
@@ -756,7 +759,10 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_model_prob_hard_cap=bool(strategy.get("enable_model_prob_hard_cap", True)),
         model_prob_hard_lo=max(1e-6, float(strategy.get("model_prob_hard_lo", 0.02))),
         model_prob_hard_hi=min(0.999, float(strategy.get("model_prob_hard_hi", 0.98))),
-        position_exit_min_net_edge=max(0.0, min(0.5, float(strategy.get("position_exit_min_net_edge", 0.0)))),
+        position_exit_min_net_edge=max(-0.5, min(0.5, float(strategy.get("position_exit_min_net_edge", 0.0)))),
+        position_min_hold_minutes=max(0.0, float(strategy.get("position_min_hold_minutes", 0.0))),
+        position_exit_strong_entry_edge=max(0.0, min(1.0, float(strategy.get("position_exit_strong_entry_edge", 0.0)))),
+        position_exit_strong_entry_floor=max(-0.5, min(0.0, float(strategy.get("position_exit_strong_entry_floor", 0.0)))),
         skip_new_buy_when_unresolved_same_side=bool(strategy.get("skip_new_buy_when_unresolved_same_side", False)),
         limit_buy_edge_aggression_enabled=bool(strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
@@ -1232,6 +1238,9 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
     _ex_float = (
         "resting_cancel_if_market_bid_above_limit_by",
         "position_exit_min_net_edge",
+        "position_min_hold_minutes",
+        "position_exit_strong_entry_edge",
+        "position_exit_strong_entry_floor",
         "limit_buy_cross_spread_min_edge",
         "limit_buy_near_market_min_edge",
         "limit_buy_passive_only_below_edge",
@@ -3434,6 +3443,34 @@ def _hold_winner_skip_discretionary_sells(
     return False
 
 
+def _min_hold_blocks_exit(
+    sp: _StrategyParams,
+    entry_ts: float | None,
+    now_ts: float,
+) -> bool:
+    """Return True if position is too young for discretionary exits."""
+    if sp.position_min_hold_minutes <= 0 or entry_ts is None:
+        return False
+    age_minutes = (now_ts - entry_ts) / 60.0
+    return age_minutes < sp.position_min_hold_minutes
+
+
+def _effective_edge_exit_floor(
+    sp: _StrategyParams,
+    entry_edge: float | None,
+) -> float:
+    """Return the edge-exit floor, widened for high-conviction entries."""
+    base = sp.position_exit_min_net_edge
+    if (
+        entry_edge is not None
+        and sp.position_exit_strong_entry_edge > 0
+        and entry_edge >= sp.position_exit_strong_entry_edge
+        and sp.position_exit_strong_entry_floor < base
+    ):
+        return sp.position_exit_strong_entry_floor
+    return base
+
+
 def _maybe_add_reentry_order(
     sp: _StrategyParams,
     min_edge: float,
@@ -5425,7 +5462,9 @@ def _show_config(args) -> int:
               "ultra_short_dte_hours", "ultra_short_min_p_win", "ultra_short_min_p_win_with_vol",
               "ultra_short_min_edge_mult",
               "ultra_short_late_minutes_threshold", "ultra_short_late_min_edge_mult",
-              "position_exit_min_net_edge", "resting_cancel_if_market_bid_above_limit_by",
+              "position_exit_min_net_edge", "position_min_hold_minutes",
+              "position_exit_strong_entry_edge", "position_exit_strong_entry_floor",
+              "resting_cancel_if_market_bid_above_limit_by",
               "limit_buy_edge_aggression_enabled", "limit_buy_cross_spread_min_edge",
               "limit_buy_near_market_min_edge", "limit_buy_passive_only_below_edge",
               "max_bankroll_fraction_per_underlying", "max_bankroll_fraction_per_direction",
@@ -8217,6 +8256,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     # Latest unresolved entries for dynamic stop-loss checks: (platform, ticker, side) -> entry_price
     latest_entry_by_key: dict[tuple[str, str, str], float] = {}
     latest_entry_ts_by_key: dict[tuple[str, str, str], float] = {}
+    latest_entry_edge_by_key: dict[tuple[str, str, str], float] = {}
     if get_unresolved_predictions:
         try:
             for p in get_unresolved_predictions(cfg) or []:
@@ -8233,6 +8273,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if prev_ts is None or ts >= prev_ts:
                     latest_entry_by_key[key] = ep
                     latest_entry_ts_by_key[key] = ts
+                    hp = float(p.get("hist_p") or 0)
+                    if hp > 0:
+                        s = str(p.get("side") or "").lower()
+                        latest_entry_edge_by_key[key] = (hp - ep) if s == "yes" else ((1.0 - hp) - (1.0 - ep))
         except Exception:
             pass
 
@@ -8488,6 +8532,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "rec": "STOP_LOSS",
                                         })
                                         continue
+                                    _k_key_pe = (PLATFORM_KALSHI, ticker, side)
+                                    _entry_ts_pe = latest_entry_ts_by_key.get(_k_key_pe)
+                                    _entry_edge_pe = latest_entry_edge_by_key.get(_k_key_pe)
+                                    _now_ts_pe = time.time()
+                                    _min_hold_pe = _min_hold_blocks_exit(sp, _entry_ts_pe, _now_ts_pe)
+                                    _hold_age_pe = ((_now_ts_pe - _entry_ts_pe) / 60.0) if _entry_ts_pe else None
                                     _fee_hy_pe = _fee_per_contract(yes_bid, maker_fee_pos, sp.min_fee_per_order)
                                     _fee_hn_pe = _fee_per_contract(no_bid, maker_fee_pos, sp.min_fee_per_order)
                                     _held_ne_pe = (
@@ -8495,7 +8545,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         if side == "yes"
                                         else ((1.0 - hist_p) - no_bid - _fee_hn_pe)
                                     )
-                                    if sp.position_exit_min_net_edge > 0 and _held_ne_pe < sp.position_exit_min_net_edge:
+                                    _exit_floor_pe = _effective_edge_exit_floor(sp, _entry_edge_pe)
+                                    if getattr(args, "verbose", False):
+                                        _age_str = f"{_hold_age_pe:.1f}min" if _hold_age_pe is not None else "?"
+                                        _ee_str = f"{_entry_edge_pe:+.3f}" if _entry_edge_pe is not None else "?"
+                                        print(
+                                            f"    [PosEval] {ticker} {side.upper()} | held_edge={_held_ne_pe:+.3f} "
+                                            f"floor={_exit_floor_pe:+.3f} entry_edge={_ee_str} "
+                                            f"age={_age_str} min_hold={'BLOCK' if _min_hold_pe else 'ok'}"
+                                        )
+                                    if not _min_hold_pe and _exit_floor_pe != 0 and _held_ne_pe < _exit_floor_pe:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -8545,7 +8604,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         maker_fee_rate=maker_fee_pos,
                                         min_fee_per_order=sp.min_fee_per_order,
                                     )
-                                    if not hold_skip and p_lose >= eff_sell_thresh:
+                                    if not hold_skip and not _min_hold_pe and p_lose >= eff_sell_thresh:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -8562,7 +8621,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             maker_fee_pos, position_count,
                                             current_price=current_price_pos, dte_days=dte_pos,
                                         )
-                                    elif not hold_skip and flip_ok:
+                                    elif not hold_skip and not _min_hold_pe and flip_ok:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -8738,6 +8797,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "rec": "STOP_LOSS",
                     })
                     continue
+                _k_key_pc = (PLATFORM_KALSHI, ticker, side)
+                _entry_ts_pc = latest_entry_ts_by_key.get(_k_key_pc)
+                _entry_edge_pc = latest_entry_edge_by_key.get(_k_key_pc)
+                _now_ts_pc = time.time()
+                _min_hold_pc = _min_hold_blocks_exit(sp, _entry_ts_pc, _now_ts_pc)
+                _hold_age_pc = ((_now_ts_pc - _entry_ts_pc) / 60.0) if _entry_ts_pc else None
                 _fee_hy_pc = _fee_per_contract(yes_bid, maker_fee_cached, sp.min_fee_per_order)
                 _fee_hn_pc = _fee_per_contract(no_bid, maker_fee_cached, sp.min_fee_per_order)
                 _held_ne_pc = (
@@ -8745,7 +8810,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if side == "yes"
                     else ((1.0 - hist_p) - no_bid - _fee_hn_pc)
                 )
-                if sp.position_exit_min_net_edge > 0 and _held_ne_pc < sp.position_exit_min_net_edge:
+                _exit_floor_pc = _effective_edge_exit_floor(sp, _entry_edge_pc)
+                if getattr(args, "verbose", False):
+                    _age_str = f"{_hold_age_pc:.1f}min" if _hold_age_pc is not None else "?"
+                    _ee_str = f"{_entry_edge_pc:+.3f}" if _entry_edge_pc is not None else "?"
+                    print(
+                        f"    [PosEval] {ticker} {side.upper()} | held_edge={_held_ne_pc:+.3f} "
+                        f"floor={_exit_floor_pc:+.3f} entry_edge={_ee_str} "
+                        f"age={_age_str} min_hold={'BLOCK' if _min_hold_pc else 'ok'}"
+                    )
+                if not _min_hold_pc and _exit_floor_pc != 0 and _held_ne_pc < _exit_floor_pc:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -8791,7 +8865,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     maker_fee_rate=maker_fee_cached,
                     min_fee_per_order=sp.min_fee_per_order,
                 )
-                if not hold_skip and p_lose >= eff_sell_thresh:
+                if not hold_skip and not _min_hold_pc and p_lose >= eff_sell_thresh:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -8809,7 +8883,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         current_price=current_price_pos, dte_days=dte_cached,
                     )
                 # SELL YES when we'd now recommend BUY NO; SELL NO when we'd recommend BUY YES
-                elif not hold_skip and flip_ok:
+                elif not hold_skip and not _min_hold_pc and flip_ok:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -9068,6 +9142,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 "gemini_evt": evt,
                             })
                             continue
+                        _g_key_pg = (PLATFORM_GEMINI, ticker_g, side)
+                        _entry_ts_pg = latest_entry_ts_by_key.get(_g_key_pg)
+                        _entry_edge_pg = latest_entry_edge_by_key.get(_g_key_pg)
+                        _now_ts_pg = time.time()
+                        _min_hold_pg = _min_hold_blocks_exit(sp, _entry_ts_pg, _now_ts_pg)
+                        _hold_age_pg = ((_now_ts_pg - _entry_ts_pg) / 60.0) if _entry_ts_pg else None
                         _fee_hy_pg = _fee_per_contract(impl, maker_fee_pos_g, sp.min_fee_per_order)
                         _fee_hn_pg = _fee_per_contract(no_price_g, maker_fee_pos_g, sp.min_fee_per_order)
                         _held_ne_pg = (
@@ -9075,7 +9155,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if side == "yes"
                             else ((1.0 - hist_p_g) - no_price_g - _fee_hn_pg)
                         )
-                        if sp.position_exit_min_net_edge > 0 and _held_ne_pg < sp.position_exit_min_net_edge:
+                        _exit_floor_pg = _effective_edge_exit_floor(sp, _entry_edge_pg)
+                        if getattr(args, "verbose", False):
+                            _age_str = f"{_hold_age_pg:.1f}min" if _hold_age_pg is not None else "?"
+                            _ee_str = f"{_entry_edge_pg:+.3f}" if _entry_edge_pg is not None else "?"
+                            print(
+                                f"    [PosEval] (Gemini) {ticker_g} {side.upper()} | held_edge={_held_ne_pg:+.3f} "
+                                f"floor={_exit_floor_pg:+.3f} entry_edge={_ee_str} "
+                                f"age={_age_str} min_hold={'BLOCK' if _min_hold_pg else 'ok'}"
+                            )
+                        if not _min_hold_pg and _exit_floor_pg != 0 and _held_ne_pg < _exit_floor_pg:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,
@@ -9124,7 +9213,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             maker_fee_rate=maker_fee_pos_g,
                             min_fee_per_order=sp.min_fee_per_order,
                         )
-                        if not hold_skip and p_lose >= eff_sell_thresh:
+                        if not hold_skip and not _min_hold_pg and p_lose >= eff_sell_thresh:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,
@@ -9144,7 +9233,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 extra={"instrument_symbol": sym, "gemini_evt": evt},
                                 current_price=current_price_g, dte_days=dte_g,
                             )
-                        elif not hold_skip and flip_ok:
+                        elif not hold_skip and not _min_hold_pg and flip_ok:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,
@@ -9444,7 +9533,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  SELL {i}. [{s['platform'].upper()}] {s['ticker']}")
             print(f"         {s.get('title', '')[:65]}")
             print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Gross: ~${_sell_total:.2f}{_pnl_str}")
-            print(f"         Trigger: {s.get('rec', 'unknown')}")
+            _s_key = (s['platform'], s['ticker'], s['side'])
+            _s_entry_edge = latest_entry_edge_by_key.get(_s_key)
+            _s_entry_ts = latest_entry_ts_by_key.get(_s_key)
+            _s_age = f"{(time.time() - _s_entry_ts) / 60.0:.1f}min" if _s_entry_ts else "?"
+            _s_ee = f"{_s_entry_edge:+.3f}" if _s_entry_edge is not None else "?"
+            print(f"         Trigger: {s.get('rec', 'unknown')}  |  Entry edge: {_s_ee}  |  Hold age: {_s_age}")
             if use_llm:
                 analysis = analyze_single_trade(s, "sell")
                 if analysis:
@@ -9767,7 +9861,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  SELL {i}. [{s['platform'].upper()}] {s['ticker']}")
             print(f"         {s['title']}")
             print(f"         Side: {s['side'].upper()}  |  Count: {s['count']}  |  Price: ${s['price']:.2f}  |  Gross: ~${_sell_total:.2f}{_pnl_str}")
-            print(f"         Trigger: {s['rec']}")
+            _sx_key = (s['platform'], s['ticker'], s['side'])
+            _sx_entry_edge = latest_entry_edge_by_key.get(_sx_key)
+            _sx_entry_ts = latest_entry_ts_by_key.get(_sx_key)
+            _sx_age = f"{(time.time() - _sx_entry_ts) / 60.0:.1f}min" if _sx_entry_ts else "?"
+            _sx_ee = f"{_sx_entry_edge:+.3f}" if _sx_entry_edge is not None else "?"
+            print(f"         Trigger: {s['rec']}  |  Entry edge: {_sx_ee}  |  Hold age: {_sx_age}")
             if s["platform"] == PLATFORM_KALSHI:
                 payload = {
                     "ticker": s["ticker"],
