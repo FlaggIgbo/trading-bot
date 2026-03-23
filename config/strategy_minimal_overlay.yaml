@@ -14,7 +14,7 @@ execution:
 
 recovery:
   # Align with simple_ev min_edge so recovery merge does not re-tighten hurdles.
-  min_edge: 0.08
+  min_edge: 0.10
   uncertainty_edge_mult: 0.0
   vol_disagree_extra_edge: 0.0
   ultra_short_min_edge_mult: 1.2
@@ -47,12 +47,12 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.08
+    min_edge: 0.10
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.58
     skip_p_win_mid_hi: 0.78
     kelly_dampen: 0.28
-    max_bankroll_fraction: 0.018
+    max_bankroll_fraction: 0.024
     edge_size_boost_edge: 0.14
     edge_size_boost_mult: 1.18
     spread_wide_fraction: 0.05
@@ -64,8 +64,8 @@ strategy:
   filter_disjoint_underlying_buys: false
   max_bankroll_fraction_per_underlying: 0.30
   max_bankroll_fraction_per_direction: 0.24
-  min_edge: 0.08
-  min_edge_easy_win: 0.08
+  min_edge: 0.10
+  min_edge_easy_win: 0.10
   enable_easy_win: false
   consensus_sniper_enabled: false
   consensus_sniper_min_edge: 0.0

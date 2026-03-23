@@ -4324,6 +4324,35 @@ def _format_trades_for_ollama(
     return "\n".join(lines).strip()
 
 
+def _ensure_min_buy_count_if_affordable(
+    count: int,
+    *,
+    rec: str,
+    venue_balance_cents: int,
+    price: float,
+    min_contracts: int,
+) -> int:
+    """
+    When Kelly/simple_ev rounds down to zero contracts but the venue balance can
+    afford at least min_contracts at the limit price, promote to min_contracts.
+    (Separately, per-venue budget allocation still applies downstream.)
+    """
+    if count > 0:
+        return count
+    if str(rec) not in (REC_BUY_YES, REC_BUY_NO):
+        return count
+    if venue_balance_cents <= 0:
+        return count
+    try:
+        pc = int(max(1, round(float(price) * 100)))
+    except (TypeError, ValueError):
+        return count
+    mc = max(1, int(min_contracts))
+    if venue_balance_cents >= pc * mc:
+        return mc
+    return count
+
+
 def _allocate_budget_to_orders(
     pending_orders: list[dict],
     balance_cents: int,
@@ -7069,6 +7098,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     except (TypeError, ValueError):
                         _bdv_k = None
                 count = _cap_buy_count_by_book_pct(count, _bdv_k, sp.max_pct_of_book_volume)
+                count = _ensure_min_buy_count_if_affordable(
+                    count,
+                    rec=rec,
+                    venue_balance_cents=int(balance_cents),
+                    price=float(price),
+                    min_contracts=min_contracts,
+                )
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
                     "ticker": ticker,
@@ -7990,7 +8026,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if sp.simple_ev_edge_size_boost_edge > 0 and _ev_ng >= float(sp.simple_ev_edge_size_boost_edge):
                             _sf_g *= float(sp.simple_ev_edge_size_boost_mult)
                         _cost_cg = max(bid * 100.0, 1.0)
-                        count_base = int(balance_cents * _sf_g / _cost_cg)
+                        _gem_sz_bal = max(0, int(gemini_balance_for_arb))
+                        count_base = int(_gem_sz_bal * _sf_g / _cost_cg)
                         count_base = max(min_contracts, count_base) if count_base > 0 else 0
                         liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                         liq_mult = 1.0
@@ -7998,7 +8035,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         liq_mult *= size_regime_mult
                     else:
                         count_base = _compute_buy_count(
-                            p_win, price, balance_cents, sp, use_kelly, _kelly_frac_gem, min_contracts
+                            p_win,
+                            price,
+                            max(0, int(gemini_balance_for_arb)),
+                            sp,
+                            use_kelly,
+                            _kelly_frac_gem,
+                            min_contracts,
                         )
                         liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                         liq_mult *= depth_mult
@@ -8011,6 +8054,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         except (TypeError, ValueError):
                             _bdv_g = None
                     count = _cap_buy_count_by_book_pct(count, _bdv_g, sp.max_pct_of_book_volume)
+                    count = _ensure_min_buy_count_if_affordable(
+                        count,
+                        rec=rec,
+                        venue_balance_cents=max(0, int(gemini_balance_for_arb)),
+                        price=float(price),
+                        min_contracts=min_contracts,
+                    )
                     order_entry = {
                         "platform": PLATFORM_GEMINI,
                         "ticker": evt.get("ticker", "?"),
