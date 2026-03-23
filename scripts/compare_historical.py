@@ -470,6 +470,7 @@ class _StrategyParams:
     simple_ev_calibration_wr_threshold: float
     simple_ev_calibration_poor_size_mult: float
     simple_ev_min_bid_size: float
+    simple_ev_ultra_short_size_mult: float
     log_effective_min_edge: bool
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
@@ -734,6 +735,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         simple_ev_calibration_wr_threshold=max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("calibration_win_rate_threshold", 0.40)))),
         simple_ev_calibration_poor_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("calibration_poor_size_mult", 0.7)))),
         simple_ev_min_bid_size=max(0.0, float((strategy.get("simple_ev_decision") or {}).get("min_bid_size", 0.0))),
+        simple_ev_ultra_short_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("ultra_short_size_mult", 1.0)))),
         log_effective_min_edge=bool(strategy.get("log_effective_min_edge", True)),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
@@ -6571,6 +6573,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if sp.simple_ev_decision_enabled:
                     _ev_n = _chosen_net_k
                     _sf = _simple_ev_spend_fraction(_ev_n, bid, sp)
+                    if _is_ultra_short_horizon(m, yf_ticker, sp):
+                        _sf *= float(sp.simple_ev_ultra_short_size_mult)
                     _sf *= _simple_ev_calibration_size_mult(calibration, sp)
                     if vol_p is not None and abs(float(emp) - float(vol_p)) > float(
                         sp.simple_ev_emp_vol_disagree_threshold
@@ -7448,6 +7452,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if sp.simple_ev_decision_enabled:
                         _ev_ng = _chosen_net_g
                         _sf_g = _simple_ev_spend_fraction(_ev_ng, bid, sp)
+                        if _is_ultra_short_horizon(evt, yf_ticker, sp):
+                            _sf_g *= float(sp.simple_ev_ultra_short_size_mult)
                         _sf_g *= _simple_ev_calibration_size_mult(calibration, sp)
                         if vol_p_gem is not None and abs(float(emp) - float(vol_p_gem)) > float(
                             sp.simple_ev_emp_vol_disagree_threshold
