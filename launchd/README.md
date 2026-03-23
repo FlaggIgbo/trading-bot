@@ -89,7 +89,7 @@ launchctl kickstart -k gui/$(id -u)/com.user.compare_historical
 | View compare stderr | `tail -f /tmp/compare_historical.err.log` |
 | View report stdout | `tail -f /tmp/daily_performance_report.out.log` |
 | View report stderr | `tail -f /tmp/daily_performance_report.err.log` |
-| View ollama loop stdout | `tail -f /tmp/ollama_codex_loop.out.log` |
+| View ollama loop stdout | `tail -f /tmp/ollama_codex_loop.out.log` (`ollama_loop` timestamped steps: source log path/size, excerpt chars, metrics append, exports, HTML, backtest, prompt size, Ollama/validate) |
 | View ollama loop stderr | `tail -f /tmp/ollama_codex_loop.err.log` |
 
 ## Live orders vs preview (troubleshooting “silent” bot)

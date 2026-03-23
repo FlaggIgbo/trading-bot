@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Validated Ollama → patch loop (no blind YOLO to production).
-# launchd: runs this file from disk each StartInterval; git pull + kickstart picks up edits.
+# launchd: runs this file from disk on each StartCalendarInterval; git pull + kickstart picks up edits.
 set -euo pipefail
+
+_ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+_log() { echo "[$(_ts)] ollama_loop $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${OLLAMA_REPO:-$SCRIPT_DIR}"
@@ -88,6 +91,8 @@ mkdir -p "$(dirname "$METRICS")"
 mkdir -p "$(dirname "$JOURNAL")"
 touch "$JOURNAL"
 
+_log "start repo=$REPO python=$PYTHON ollama_host=${OLLMAPATH} model=${OLLAMA_MODEL} log_dir=$LOG_DIR metrics_gate=${OLLAMA_METRICS_GATE}"
+
 # --- 1) Resolve latest compare_historical log (prefer newest mtime among last_run.log + eval_*.log) ---
 LOG_CANDIDATES=()
 [[ -f "$LOG_DIR/last_run.log" ]] && LOG_CANDIDATES+=("$LOG_DIR/last_run.log")
@@ -107,14 +112,27 @@ fi
 
 # Path shown in ollama_runs.html (before we fall back to empty TMP_TAIL for parsing)
 METRICS_LOG_LABEL="$LOG_FILE"
+if [[ -f "$METRICS_LOG_LABEL" ]]; then
+  _llines=$(wc -l <"$METRICS_LOG_LABEL" | tr -d ' ' || echo 0)
+  _lsize=$(wc -c <"$METRICS_LOG_LABEL" | tr -d ' ' || echo 0)
+  _log "compare_log path=$METRICS_LOG_LABEL lines=${_llines} bytes=${_lsize}"
+else
+  _log "compare_log missing path=$METRICS_LOG_LABEL (will use empty/fallback context)"
+fi
 
 # Token-efficient prompt context: errors, calibration/adaptive/risk lines, losses (+ short tail fallback)
 if [[ -f "$LOG_FILE" ]]; then
-  "$PYTHON" "$REPO/scripts/extract_ollama_log_context.py" "$LOG_FILE" \
-    --max-chars "$OLLAMA_LOG_CONTEXT_MAX_CHARS" >"$TMP_TAIL" 2>/dev/null || tail -n 200 "$LOG_FILE" >"$TMP_TAIL"
+  if ! "$PYTHON" "$REPO/scripts/extract_ollama_log_context.py" "$LOG_FILE" \
+    --max-chars "$OLLAMA_LOG_CONTEXT_MAX_CHARS" >"$TMP_TAIL" 2>/tmp/ollama_extract_ctx.err; then
+    _log "extract_ollama_log_context failed; stderr:" && cat /tmp/ollama_extract_ctx.err >&2 || true
+    tail -n 200 "$LOG_FILE" >"$TMP_TAIL"
+    _log "fallback tail -n 200 from log"
+  fi
 else
   touch "$TMP_TAIL"
 fi
+_ctx_chars=$(wc -c <"$TMP_TAIL" | tr -d ' ' || echo 0)
+_log "prompt_log_excerpt chars=${_ctx_chars} max_chars=${OLLAMA_LOG_CONTEXT_MAX_CHARS}"
 [[ ! -f "$LOG_FILE" ]] && LOG_FILE="$TMP_TAIL"
 
 # Per-loop interval: position_evaluations resolved in (prev_csv_ts, now] (SQLite)
@@ -131,14 +149,21 @@ if [[ -z "${WIN_RATE:-}" ]]; then
 fi
 
 echo "$NOW_TS,$WIN_RATE,$PNL" >> "$METRICS"
+_log "metrics_row ts=$NOW_TS win_rate=${WIN_RATE} pnl_usd=${PNL} -> append $METRICS"
 
 # --- 2) Per-series leaderboard + blacklist hints (SQLite; does not edit config) ---
 if ! "$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --out "$LB_HTML"; then
   echo "⚠️  export_series_leaderboard.py failed — $LB_HTML may be stale or missing." >&2
+  _log "export_series_leaderboard FAILED hours=$OLLAMA_LEADERBOARD_HOURS out=$LB_HTML"
+else
+  _log "export_series_leaderboard ok hours=$OLLAMA_LEADERBOARD_HOURS out=$LB_HTML"
 fi
 "$PYTHON" "$REPO/scripts/suggest_series_blacklist.py" --hours "$OLLAMA_LEADERBOARD_HOURS" --min-trades "$OLLAMA_BLACKLIST_MIN_TRADES" >"$SUGGEST_TMP" 2>/dev/null || true
 if ! "$PYTHON" "$REPO/scripts/export_series_leaderboard.py" --hours "$OLLAMA_PROMPT_LB_HOURS" --out "$SERIES_SUMMARY_HTML"; then
   echo "⚠️  export_series_leaderboard.py (prompt summary) failed — $SERIES_SUMMARY_HTML may be stale." >&2
+  _log "export_series_leaderboard prompt summary FAILED hours=$OLLAMA_PROMPT_LB_HOURS"
+else
+  _log "export_series_leaderboard prompt summary ok -> $SERIES_SUMMARY_HTML"
 fi
 if [[ "$OLLAMA_AUTO_BLACKLIST" == "1" ]]; then
   mkdir -p "$(dirname "$BLACKLIST_EXTRA_FILE")"
@@ -182,6 +207,7 @@ GEN_HTML_UTC=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
   echo "</pre>"
   echo "</body></html>"
 } > "$HTML"
+_log "wrote dashboard HTML $HTML (metrics rows + leaderboard iframe)"
 
 # --- 4) Metrics gate: skip Ollama when recent PnL is not stressed (reduces over-tweaking) ---
 # Python exit 0 = proceed (insufficient samples in window OR drop ≥ threshold). Exit 1 = skip run.
@@ -218,6 +244,7 @@ first, last = rows[0][1], rows[-1][1]
 sys.exit(0 if (last - first) <= -drop else 1)
 "; then
     echo "⏭️  Skipping Ollama/backtest: no PnL drop ≥ \$${OLLAMA_METRICS_GATE_DROP} in last ${OLLAMA_METRICS_GATE_HOURS}h (set OLLAMA_METRICS_GATE=0 to always run)."
+    _log "metrics_gate SKIP drop>=${OLLAMA_METRICS_GATE_DROP} in ${OLLAMA_METRICS_GATE_HOURS}h not met — dashboard commit only"
     echo "{\"ts\":$(date +%s),\"event\":\"metrics_gate_skip\",\"model\":\"$OLLAMA_MODEL\",\"drop\":${OLLAMA_METRICS_GATE_DROP},\"hours\":${OLLAMA_METRICS_GATE_HOURS}}" >>"$JOURNAL"
     _commit_dashboard_if_changed || true
     exit 0
@@ -232,7 +259,10 @@ set -e
 if [[ $BT_EC -ne 0 ]]; then
   echo "⚠️  backtest baseline failed (exit $BT_EC); continuing without baseline compare. stderr:" >&2
   cat /tmp/ollama_backtest_err.txt >&2 || true
+  _log "backtest baseline FAILED exit=$BT_EC mode=$OLLAMA_BT_MODE days=$OLLAMA_BT_DAYS"
   BASELINE_JSON=""
+else
+  _log "backtest baseline ok mode=$OLLAMA_BT_MODE days=$OLLAMA_BT_DAYS -> $BASELINE_JSON"
 fi
 
 # --- 6) Prompt: template + strategy context + logs + metrics + journal ---
@@ -277,6 +307,8 @@ _strategy_slice() {
   printf "\n### OPTIMIZATION JOURNAL (last 8 lines)\n"
   tail -n 8 "$JOURNAL" 2>/dev/null || true
 } > "$TMP_PROMPT"
+_prompt_chars=$(wc -c <"$TMP_PROMPT" | tr -d ' ' || echo 0)
+_log "assembled prompt chars=${_prompt_chars} -> $TMP_PROMPT"
 
 # --- 7) Ollama: generate → apply → validate (up to OLLAMA_MAX_PATCH_ATTEMPTS per tick; revert between tries) ---
 VALID_ARGS=(--repo "$REPO" --smoke-markets "${OLLAMA_SMOKE_MARKETS:-2}" --backtest-mode "$OLLAMA_BT_MODE" --backtest-days "$OLLAMA_BT_DAYS")
@@ -289,9 +321,11 @@ while (( PATCH_ATTEMPT <= OLLAMA_MAX_PATCH_ATTEMPTS )); do
   if (( PATCH_ATTEMPT > 1 )); then
     echo "↻ Ollama patch attempt ${PATCH_ATTEMPT}/${OLLAMA_MAX_PATCH_ATTEMPTS} (previous apply/validate failed)…"
   fi
+  _log "ollama_codex_generate attempt ${PATCH_ATTEMPT}/${OLLAMA_MAX_PATCH_ATTEMPTS} model=$OLLAMA_MODEL temp=$OLLAMA_TEMPERATURE"
   if ! OLLAMA_HOST="$OLLMAPATH" OLLAMA_TEMPERATURE="$OLLAMA_TEMPERATURE" \
     "$PYTHON" "$REPO/scripts/ollama_codex_generate.py" "$OLLAMA_MODEL" "$TMP_PROMPT" > "$TMP_OUTPUT"; then
     echo "❌ ollama_codex_generate.py failed (host=$OLLMAPATH model=$OLLAMA_MODEL temp=$OLLAMA_TEMPERATURE)" >&2
+    _log "ollama_codex_generate FAILED"
     _commit_dashboard_if_changed || true
     exit 1
   fi
@@ -302,6 +336,7 @@ while (( PATCH_ATTEMPT <= OLLAMA_MAX_PATCH_ATTEMPTS )); do
   if [[ -z "$PATCH" ]]; then
     if (( PATCH_ATTEMPT == 1 )); then
       echo "ℹ️  No fenced diff block (markdown \`\`\`diff) in model output; nothing to apply."
+      _log "no_patch (no fenced diff in model output)"
       _wr_json=$([[ "${WIN_RATE:-}" == "null" ]] && echo null || echo "$WIN_RATE")
       echo "{\"ts\":$(date +%s),\"event\":\"no_patch\",\"model\":\"$OLLAMA_MODEL\",\"win_rate\":${_wr_json}}" >>"$JOURNAL"
       _commit_dashboard_if_changed || true
@@ -324,6 +359,7 @@ while (( PATCH_ATTEMPT <= OLLAMA_MAX_PATCH_ATTEMPTS )); do
 
   if "$PYTHON" "$REPO/scripts/ollama_patch_validate.py" "${VALID_ARGS[@]}"; then
     echo "✅ Validation passed."
+    _log "validate OK attempt ${PATCH_ATTEMPT}"
     VALIDATED_OK=1
     "$PYTHON" -m py_compile signals/yfinance_client.py 2>/dev/null || true
     git add "$HTML" "$LB_HTML" "$JOURNAL" 2>/dev/null || true
@@ -339,17 +375,21 @@ while (( PATCH_ATTEMPT <= OLLAMA_MAX_PATCH_ATTEMPTS )); do
   fi
 
   echo "❌ Validation failed — reverting applied patch (attempt ${PATCH_ATTEMPT})."
+  _log "validate FAILED revert attempt ${PATCH_ATTEMPT}"
   git apply -R --whitespace=fix "$PATCH_FILE" 2>/dev/null || git checkout -- .
   echo "{\"ts\":$(date +%s),\"event\":\"reverted_retry\",\"model\":\"$OLLAMA_MODEL\",\"attempt\":${PATCH_ATTEMPT}}" >>"$JOURNAL"
   ((PATCH_ATTEMPT++)) || true
 done
 
 if [[ "$VALIDATED_OK" == "1" ]]; then
+  _log "done success (patch committed)"
   exit 0
 fi
 if [[ "$HAD_ANY_PATCH" == "1" ]]; then
   echo "❌ Exhausted ${OLLAMA_MAX_PATCH_ATTEMPTS} patch attempt(s) without passing validation." >&2
+  _log "done FAILURE exhausted_patch_attempts=${OLLAMA_MAX_PATCH_ATTEMPTS}"
   _commit_dashboard_if_changed || true
   exit 1
 fi
+_log "done (no patch to apply)"
 exit 0

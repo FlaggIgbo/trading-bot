@@ -16,6 +16,9 @@ INTERESTING_PREFIXES = (
     "[Empirical]",
     "[Risk]",
     "[Position Eval",
+    "[Reconcile]",
+    "[Fill Attribution]",
+    "[Strategy]",
     "Traceback",
     "ERROR",
     "WARNING",
@@ -49,6 +52,9 @@ def main() -> None:
         if LOSS_RE.search(line):
             picked.append(line)
             continue
+        if "leg edges" in low or "edge trace" in low:
+            picked.append(line)
+            continue
         if any(
             x in low
             for x in (
@@ -58,6 +64,11 @@ def main() -> None:
                 "failed",
                 "circuit breaker",
                 "blocking ",
+                "want_better_price",
+                "market_bid_lifted",
+                "edge_exit",
+                "insufficient book depth",
+                "thin book for",
             )
         ):
             picked.append(line)
