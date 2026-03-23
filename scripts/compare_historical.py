@@ -2815,6 +2815,14 @@ def _simple_ev_recommend(
     return REC_SKIP
 
 
+def _simple_ev_net_min_edge(sp: _StrategyParams, market_or_event: dict | str, yf_ticker: str) -> float:
+    """Base simple_ev min_edge; multiply by ultra_short_min_edge_mult on 15m / sub-hour horizons."""
+    base = float(sp.simple_ev_min_edge)
+    if _is_ultra_short_horizon(market_or_event, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+        return base * float(sp.ultra_short_min_edge_mult)
+    return base
+
+
 def _simple_ev_spend_fraction(
     ev_net: float,
     price: float,
@@ -2848,6 +2856,7 @@ def _print_effective_edge_trace(
     min_edge_cfg: float,
     *,
     simple_mode: bool,
+    simple_ev_effective: float | None = None,
     em0: float | None = None,
     effective_min_core: float | None = None,
     effective_min_yes: float | None = None,
@@ -2856,10 +2865,18 @@ def _print_effective_edge_trace(
     if not sp.log_effective_min_edge:
         return
     if simple_mode:
-        print(
-            f"    ├─ Edge trace: simple_ev net_min={sp.simple_ev_min_edge:.2%} "
-            f"(single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)"
-        )
+        eff = float(simple_ev_effective) if simple_ev_effective is not None else float(sp.simple_ev_min_edge)
+        if abs(eff - float(sp.simple_ev_min_edge)) > 1e-9:
+            print(
+                f"    ├─ Edge trace: simple_ev net_min={eff:.2%} "
+                f"(base={sp.simple_ev_min_edge:.2%} × ultra_short_min_edge_mult on this horizon; "
+                f"single gate; YES/NO net edges use each leg bid + fee)"
+            )
+        else:
+            print(
+                f"    ├─ Edge trace: simple_ev net_min={sp.simple_ev_min_edge:.2%} "
+                f"(single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)"
+            )
         return
     if (
         em0 is not None
@@ -5983,13 +6000,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
             no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             if sp.simple_ev_decision_enabled:
-                effective_min = float(sp.simple_ev_min_edge)
+                effective_min = _simple_ev_net_min_edge(sp, m, yf_ticker)
                 effective_min_yes = effective_min
                 effective_min_no = effective_min
                 obi_adj_yes = obi_adj_no = 0.0
                 obi_val = None
                 ll_adj_yes = ll_adj_no = 0.0
-                _print_effective_edge_trace(sp, min_edge, simple_mode=True)
+                _print_effective_edge_trace(sp, min_edge, simple_mode=True, simple_ev_effective=effective_min)
             else:
                 effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
                 em0_trace = effective_min
@@ -6126,7 +6143,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hist_p,
                     yes_bid,
                     no_bid_early,
-                    float(sp.simple_ev_min_edge),
+                    effective_min,
                     maker_fee_rate,
                     sp.min_fee_per_order,
                 )
@@ -6881,12 +6898,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
                 no_bid_gem_early = _gemini_no_bid_from_event(evt, impl)
                 if sp.simple_ev_decision_enabled:
-                    effective_min_gem = float(sp.simple_ev_min_edge)
+                    effective_min_gem = _simple_ev_net_min_edge(sp, evt, yf_ticker)
                     effective_min_yes_g = effective_min_gem
                     effective_min_no_g = effective_min_gem
                     obi_adj_yes_g = obi_adj_no_g = 0.0
                     obi_val_g = None
-                    _print_effective_edge_trace(sp, min_edge, simple_mode=True)
+                    _print_effective_edge_trace(sp, min_edge, simple_mode=True, simple_ev_effective=effective_min_gem)
                 else:
                     effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                     em0_trace_g = effective_min_gem
@@ -7011,7 +7028,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         hist_p_gem,
                         impl,
                         no_bid_gem_early,
-                        float(sp.simple_ev_min_edge),
+                        effective_min_gem,
                         maker_fee_rate_gem,
                         sp.min_fee_per_order,
                     )

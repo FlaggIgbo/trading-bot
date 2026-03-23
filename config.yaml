@@ -74,10 +74,10 @@ execution:
   skip_new_buy_when_unresolved_same_side: true
 
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
-# Short test window: recovery.min_edge overrides strategy.min_edge — lower hurdle to surface fills (tighten again after review).
+# recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
-  # Merged into strategy.min_edge — keep aligned with base 4% hurdle unless you intentionally want a looser recovery window
-  min_edge: 0.04
+  # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
+  min_edge: 0.07
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -93,7 +93,8 @@ recovery:
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
   enable_vol_regime_scaling: false
   dte_edge_scaling_enabled: false
-  ultra_short_min_edge_mult: 1.0 # No extra × on KXBTC15M / 15m; strategy default 1.04 stacks on min_edge when recovery off
+  # >1.0 stacks on simple_ev and legacy min_edge for 15m / sub-hour (simple_ev path applies this in compare_historical)
+  ultra_short_min_edge_mult: 1.15
   # Hourly / non–5pm crypto (and non–4pm S&P) use strict mode: model P(win) must exceed these AND edge — funding wallets does not change that.
   intraday_other_min_p_win: 0.75 # Loosened with global circuit breaker as backstop
   intraday_other_min_p_win_with_vol: 0.67 # Paired with vol path
@@ -106,7 +107,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    min_edge: 0.03 # Net edge after maker fee: P − bid − fee must clear this (one threshold)
+    # Net edge after maker fee; ~7% base, ~8.05% on 15m (× ultra_short_min_edge_mult). Was 3% — too thin vs fees/spread.
+    min_edge: 0.07
     kelly_dampen: 0.25 # Fraction of raw Kelly: EV / (p*(1-p))
     max_bankroll_fraction: 0.02 # Hard cap on bankroll fraction per trade
     spread_wide_fraction: 0.05 # (ask−bid)/bid above this → multiply size by spread_wide_size_mult
@@ -120,7 +122,7 @@ strategy:
   log_effective_min_edge: true
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.040
+  min_edge: 0.07
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   barbell_enabled: true
   barbell_base_min_market_yes: 0.70 # Market bid on the side we buy must be ≥ this (YES bid for BUY YES, NO bid for BUY NO)
@@ -257,8 +259,8 @@ strategy:
   ultra_short_dte_hours: 1.0
   ultra_short_min_p_win: 0.88 # 15m BTC; circuit breaker limits damage if edge is illusory
   ultra_short_min_p_win_with_vol: 0.82
-  # 15m / sub-hour: small extra hurdle on top of scaled min_edge (logs show active mult). Recovery often sets 1.0 to disable.
-  ultra_short_min_edge_mult: 1.04
+  # 15m / sub-hour: extra × on required min_edge (simple_ev path uses this; recovery can override)
+  ultra_short_min_edge_mult: 1.15
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
   kalshi_sp500_maker_fee_rate: 0.00875 # Lower maker fee assumption for S&P 500-style index markets
