@@ -110,7 +110,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Alpha engine signals | OBI edge adjustment from bid/ask depth, toxic flow penalty from markout history, lead-lag edge bonus from correlated assets, vol-adjusted Kelly for position sizing | `models/alpha_engine.py` → `compute_obi()`, `obi_edge_adjustment()`, `toxic_flow_edge_penalty()`, `lead_lag_signal()`, `vol_adjusted_kelly()` |
 | Recommend                   | Compare hist_p vs market price → BUY YES / BUY NO / SKIP    | `compare_historical.py:535` → `_recommend()`                  |
 | Apply safety rules          | Skip BUY NO when price above strike; skip BUY YES when < 5¢; DTE-aware strike guard scales `max_buy_yes_strike_above_pct` with `sqrt(DTE)` | `compare_historical.py:1232-1258`                             |
-| Add limit order             | Price = bid × (1−dip) for "dip catching"; DTE-confidence dip; **disagreement dip** and **lottery limits** on SKIPs when enabled; `_is_midprice_stable()` (skipped in `--preview` via `skip_in_preview`) | `compare_historical.py` → `pending_orders.append()`, `_dte_confidence_dip()`, `_is_midprice_stable()` |
+| Add limit order             | Price = bid × (1−dip) for "dip catching"; DTE-confidence dip; optional **edge-tiered aggression** in `_compute_limit_price` (`limit_buy_*` + **`limit_buy_passive_only_below_edge`**); **disagreement dip** and **lottery limits** on SKIPs when enabled; `_is_midprice_stable()` (skipped in `--preview` via `skip_in_preview`) | `compare_historical.py` → `pending_orders.append()`, `_dte_confidence_dip()`, `_compute_limit_price()`, `_is_midprice_stable()` |
 
 ---
 
@@ -148,8 +148,8 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 
 | Mode               | What happens                                    | Code pointer                               |
 | ------------------ | ----------------------------------------------- | ------------------------------------------ |
-| Filter contradictory | Skip BUYs that conflict with existing or other pending BUYs (same underlying + resolution); Kalshi + Gemini; arb YES+NO allowed | `compare_historical.py:951` → `_filter_contradictory_buys()` |
-| Budget per platform | Kalshi balance for Kalshi orders; Gemini balance for Gemini orders (separate `_allocate_budget_to_orders` calls). Under budget pressure, ranking is capital-efficiency first (expected net return per dollar per hour). | `compare_historical.py:1861` → per-platform allocation |
+| Filter contradictory | Optional disjoint win-range filter when `strategy.filter_disjoint_underlying_buys` is true; otherwise only true conflicts are dropped. Same underlying + resolution; Kalshi + Gemini; arb YES+NO allowed | `compare_historical.py` → `_filter_contradictory_buys()` |
+| Budget + exposure caps | Kalshi balance for Kalshi orders; Gemini for Gemini (`_allocate_budget_to_orders`). Under pressure, ranking is capital-efficiency first. **`max_cross_platform_exposure`** trims per (yf, resolution); **`max_bankroll_fraction_per_direction`** / **`max_bankroll_fraction_per_underlying`** trim pending BUY notionals vs combined balance (`_cap_bankroll_exposure_buckets`). | `compare_historical.py` → allocation + `_cap_cross_platform_exposure`, `_cap_bankroll_exposure_buckets` |
 | `--preview`        | Print planned orders, no API calls              | `compare_historical.py:1927-1975`          |
 | `--execute`        | `sync_and_cancel_resting_orders` (TTL, rec change, bid chase, bid-lift past limit, …) → SELL first → BUY | `compare_historical.py` → `sync_and_cancel_resting_orders`, execution block |
 | Place Kalshi order | `create_order_safe()` with balance caps         | `signals/kalshi_client.py` → `create_order_safe()` |

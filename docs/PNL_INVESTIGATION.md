@@ -70,7 +70,8 @@ When **`strategy.simple_ev_decision.enabled`** is true, barbell and many stacked
 ### C. Limit Order Execution
 
 - Layered mode places limits below bid using dip stack (`limit_dip_pct`, etc.). If fills happen at worse prices (slippage, thin book), realized edge is lower than expected.
-- **Stale resting bids:** If limits never fill, review **`execution.resting_cancel_if_market_bid_above_limit_by`** (cancels when the tape has moved up past your price) and **`execution.limit_buy_edge_aggression_enabled`** / edge thresholds (tighter quotes when model edge is large).
+- **Stale resting bids:** If limits never fill, review **`execution.resting_cancel_if_market_bid_above_limit_by`** (cancels when the tape has moved up past your price) and **`execution.limit_buy_edge_aggression_enabled`** / cross vs near-market thresholds (cross should require **stronger** edge than near-market). **`limit_buy_passive_only_below_edge`** forces passive/layered quotes when net edge is thin so you do not overpay spread on marginal trades.
+- **Stacking / concentration:** With **`filter_disjoint_underlying_buys: false`**, use **`strategy.max_bankroll_fraction_per_underlying`** and **`max_bankroll_fraction_per_direction`** to cap notionals per Yahoo underlying (and per YES/NO side) instead of rejecting valid multi-strike ladders.
 - **Check:** `get_limit_order_analysis` and price-after-buy calibration. If "would have filled" is high but we're still losing, execution quality is an issue.
 
 ### D. Sell Logic (Holding Losers Too Long)

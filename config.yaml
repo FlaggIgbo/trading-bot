@@ -73,8 +73,11 @@ execution:
   position_exit_min_net_edge: 0.01
   # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
   limit_buy_edge_aggression_enabled: true
-  limit_buy_cross_spread_min_edge: 0.10
-  limit_buy_near_market_min_edge: 0.10
+  # Tiered aggression: cross spread only on strong edge; thin edge stays passive (saves spread tax).
+  limit_buy_cross_spread_min_edge: 0.12
+  limit_buy_near_market_min_edge: 0.08
+  # Below this net edge, skip cross/near-market paths entirely (maker-style limits only). 0 = off.
+  limit_buy_passive_only_below_edge: 0.075
   # Avoid stacking another same-side BUY while an unresolved position exists for that market (platform+ticker+side).
   skip_new_buy_when_unresolved_same_side: true
 
@@ -123,8 +126,11 @@ strategy:
     cheap_band_price_lo: 0.05
     cheap_band_price_hi: 0.10
     cheap_band_min_net_edge: 0.15
-    kelly_dampen: 0.25 # Fraction of raw Kelly: EV / (p*(1-p))
-    max_bankroll_fraction: 0.01 # Hard cap on bankroll fraction per trade (smaller clips; ultra_short_size_mult shrinks 15m further)
+    kelly_dampen: 0.32 # Fraction of raw Kelly — modestly higher for PnL vs prior 0.25 (still capped per trade)
+    max_bankroll_fraction: 0.018 # Hard cap on bankroll fraction per trade (was 0.01; scales +EV clips)
+    # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
+    edge_size_boost_edge: 0.16
+    edge_size_boost_mult: 1.22
     spread_wide_fraction: 0.03 # (ask−bid)/bid above this → multiply size by spread_wide_size_mult
     spread_wide_size_mult: 0.3
     # Multiply simple-EV spend fraction on 15m / sub-hour (1.0 = unchanged). Compensates for same Kelly path on fast markets.
@@ -360,6 +366,9 @@ strategy:
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
   momentum_crash_threshold_pct: -0.04 # PnL: block knives a bit earlier than -5% (still allows normal dips)
   max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
+  # Bankroll-% caps on this batch’s pending BUY notionals (Kalshi+Gemini combined); trims worst edge/efficiency first.
+  max_bankroll_fraction_per_underlying: 0.28 # Per Yahoo underlying (all strikes/resolutions); 0 = off
+  max_bankroll_fraction_per_direction: 0.22 # Per (underlying × YES vs NO); 0 = off
   max_daily_loss_pct: 0 # Disabled: was blocking all buys with low balance ($3.40 loss = 155% of ~$2). Re-enable when balance recovers (e.g. 0.25)
   max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
   enable_vol_spike_safety: true # Safety mode on volatility regime break

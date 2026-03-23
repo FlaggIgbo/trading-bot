@@ -164,7 +164,9 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 
 ### Recent changes (2026-03-23)
 
-- **Execution layer (limits + exits):** Top-level **`execution:`** merges into effective strategy — **resting BUY cancel** when the market bid moves up past your limit by `resting_cancel_if_market_bid_above_limit_by` (vs bid at placement), **held-position sell** when net edge falls below `position_exit_min_net_edge` (`REC_EDGE_EXIT`, independent of entry hurdle), **limit aggression** from net edge (`limit_buy_edge_aggression_enabled` + thresholds), and **skip duplicate same-side BUY** while a position is open (`skip_new_buy_when_unresolved_same_side`). See `docs/CODE_EXPLAINER.md` (`execution/engine.py`, `_merge_execution_into_strategy`, `_compute_limit_price`).
+- **Execution layer (limits + exits):** Top-level **`execution:`** merges into effective strategy — **resting BUY cancel** when the market bid moves up past your limit by `resting_cancel_if_market_bid_above_limit_by` (vs bid at placement), **held-position sell** when net edge falls below `position_exit_min_net_edge` (`REC_EDGE_EXIT`, independent of entry hurdle), **tiered limit aggression** (`limit_buy_edge_aggression_enabled` + `limit_buy_cross_spread_min_edge` / `limit_buy_near_market_min_edge` + **`limit_buy_passive_only_below_edge`** so thin-edge trades stay passive and avoid spread tax), and **skip duplicate same-side BUY** while a position is open (`skip_new_buy_when_unresolved_same_side`). See `docs/CODE_EXPLAINER.md` (`execution/engine.py`, `_merge_execution_into_strategy`, `_compute_limit_price`).
+- **PnL-oriented risk buckets (post-filter stacking):** After `max_cross_platform_exposure`, pending BUY notionals are trimmed vs **combined** Kalshi+Gemini balance using **`strategy.max_bankroll_fraction_per_direction`** (per Yahoo underlying × YES/NO) and **`strategy.max_bankroll_fraction_per_underlying`** (per underlying, all strikes). Worst capital-efficiency lines shrink first (`_cap_bankroll_exposure_buckets`). Set either to **0** to disable.
+- **Simple-EV sizing boost:** When **`strategy.simple_ev_decision.edge_size_boost_edge`** is **> 0** and net edge clears it, spend fraction is multiplied by **`edge_size_boost_mult`** (still capped by **`max_bankroll_fraction`**).
 
 ### Recent changes (2026-03-19)
 
@@ -422,7 +424,10 @@ Stronger coding models (if your machine can handle them): `ollama pull phi4` or 
 - **`execution.near_expiry_aggressive_hours`**: when time-to-resolution is **at or under** this many hours (inclusive), limit quotes switch to **dip** style so ultra-short markets still get fill-friendly prices (even if `price_strategy` is passive).
 - **`execution.resting_cancel_if_market_bid_above_limit_by`**: cancel resting **BUY** when the live bid has risen this far **above** your limit (compared to `bid_at_place` when the order was placed) so capital is not stuck on stale “wish” bids; next cycle can reprice.
 - **`execution.position_exit_min_net_edge`**: if **> 0**, sell the held side when **net edge** (model P − bid − estimated maker fee) drops **below** this floor — a **lower** bar than entry `min_edge`, so you can exit when edge fades without waiting for P(lose) logic. Set **0** to disable.
-- **`execution.limit_buy_edge_aggression_enabled`** + **`limit_buy_cross_spread_min_edge`** / **`limit_buy_near_market_min_edge`**: when enabled, large net edge tightens limit quotes (toward ask or bid+tick) via `_compute_limit_price` for better fills.
+- **`execution.limit_buy_edge_aggression_enabled`** + **`limit_buy_cross_spread_min_edge`** / **`limit_buy_near_market_min_edge`**: when enabled, larger net edge tightens limit quotes (toward ask or bid+tick) via `_compute_limit_price` for better fills; **cross** threshold should be **≥** **near-market** so marginal edges do not pay full spread.
+- **`execution.limit_buy_passive_only_below_edge`**: if **> 0**, net edge **below** this skips cross/near-market aggression entirely (dip/layered maker quotes only)—reduces edge leakage on small gaps.
+- **`strategy.max_bankroll_fraction_per_underlying`** / **`max_bankroll_fraction_per_direction`**: bankroll-% caps on **this run’s** pending BUY notionals (after cross-platform cap); **0** disables each cap.
+- **`strategy.simple_ev_decision.edge_size_boost_edge`** / **`edge_size_boost_mult`**: optional larger clips when net edge is strong (simple-EV path only).
 - **`execution.skip_new_buy_when_unresolved_same_side`**: avoid posting another **BUY** on the same platform/ticker/side while a position for that key is still open (unless you intentionally scale in elsewhere).
 - **`strategy.max_pct_of_book_volume`**: cap each BUY clip to at most this fraction of visible same-side bid depth (reduces adverse selection / book impact); **0** disables.
 - **`blacklist_extra_file`**: newline-separated series merged into the runtime blacklist; `ollama_codex_loop.sh` can refresh it via **`apply_series_blacklist.py`** (avoids corrupting `config.yaml`).
@@ -462,6 +467,7 @@ python3 scripts/compare_historical.py --execute --no-llm    # Live run, skip LLM
 python3 scripts/compare_historical.py --use-volatility      # Add option-style probability (log-normal model)
 python3 scripts/compare_historical.py --reconcile-only      # Fill reconciliation diagnostics only (no eval/order placement)
 python3 scripts/compare_historical.py --reconcile-diagnostics --preview --no-llm  # Include reconciliation counters in normal run logs
+python3 scripts/compare_historical.py --preview --no-llm --days 1 --markets 2  # Fast smoke: short history + few markets per series
 ```
 
 **Single production live run** — Evaluate markets and place real orders if the bot finds opportunities:

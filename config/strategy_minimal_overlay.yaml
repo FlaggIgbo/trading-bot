@@ -8,6 +8,9 @@ execution:
   price_strategy: aggressive
   limit_offset_cents: 1
   resting_cancel_if_market_bid_above_limit_by: 0.03
+  limit_buy_cross_spread_min_edge: 0.12
+  limit_buy_near_market_min_edge: 0.08
+  limit_buy_passive_only_below_edge: 0.08
 
 recovery:
   # Align with simple_ev min_edge so recovery merge does not re-tighten hurdles.
@@ -48,8 +51,10 @@ strategy:
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.58
     skip_p_win_mid_hi: 0.78
-    kelly_dampen: 0.20
-    max_bankroll_fraction: 0.015
+    kelly_dampen: 0.28
+    max_bankroll_fraction: 0.018
+    edge_size_boost_edge: 0.14
+    edge_size_boost_mult: 1.18
     spread_wide_fraction: 0.05
     spread_wide_size_mult: 0.5
     ultra_short_size_mult: 0.6
@@ -57,6 +62,8 @@ strategy:
   log_effective_min_edge: true
   log_decision_diagnostics: true
   filter_disjoint_underlying_buys: false
+  max_bankroll_fraction_per_underlying: 0.30
+  max_bankroll_fraction_per_direction: 0.24
   min_edge: 0.08
   min_edge_easy_win: 0.08
   enable_easy_win: false

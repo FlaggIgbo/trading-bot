@@ -340,6 +340,9 @@ class _StrategyParams:
     enable_momentum_protection: bool
     momentum_crash_threshold_pct: float
     max_cross_platform_exposure: float
+    # Combined Kalshi+Gemini notionals in one batch: cap stacking without disjoint logical filters.
+    max_bankroll_fraction_per_underlying: float
+    max_bankroll_fraction_per_direction: float
     max_daily_loss_pct: float
     max_daily_loss_cents: int
     enable_vol_spike_safety: bool
@@ -468,6 +471,8 @@ class _StrategyParams:
     limit_buy_edge_aggression_enabled: bool
     limit_buy_cross_spread_min_edge: float
     limit_buy_near_market_min_edge: float
+    # Below this net edge, skip cross/near-market aggression (passive/layered only). 0 = off.
+    limit_buy_passive_only_below_edge: float
     resting_cancel_if_market_bid_above_limit_by: float
     # Simple EV mode: single net-edge gate, Kelly sizing, uncertainty/calibration → size only.
     simple_ev_decision_enabled: bool
@@ -482,6 +487,9 @@ class _StrategyParams:
     simple_ev_calibration_poor_size_mult: float
     simple_ev_min_bid_size: float
     simple_ev_ultra_short_size_mult: float
+    # When net edge >= edge_size_boost_edge, multiply spend fraction by this (still capped by max_bankroll_fraction).
+    simple_ev_edge_size_boost_edge: float
+    simple_ev_edge_size_boost_mult: float
     # Simple-EV only: skip ambiguous model P(win) band; stricter net edge on 5–10¢ legs.
     simple_ev_skip_p_win_mid_enabled: bool
     simple_ev_skip_p_win_mid_lo: float
@@ -617,6 +625,12 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_momentum_protection=bool(strategy.get("enable_momentum_protection", False)),
         momentum_crash_threshold_pct=float(strategy.get("momentum_crash_threshold_pct", -0.02)),
         max_cross_platform_exposure=float(strategy.get("max_cross_platform_exposure", 0.30)),
+        max_bankroll_fraction_per_underlying=max(
+            0.0, min(1.0, float(strategy.get("max_bankroll_fraction_per_underlying", 0.0)))
+        ),
+        max_bankroll_fraction_per_direction=max(
+            0.0, min(1.0, float(strategy.get("max_bankroll_fraction_per_direction", 0.0)))
+        ),
         max_daily_loss_pct=float(strategy.get("max_daily_loss_pct", 0.10)),
         max_daily_loss_cents=int(strategy.get("max_daily_loss_cents", 0)),
         enable_vol_spike_safety=bool(strategy.get("enable_vol_spike_safety", True)),
@@ -747,6 +761,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_buy_edge_aggression_enabled=bool(strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
         limit_buy_near_market_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_near_market_min_edge", 0.05)))),
+        limit_buy_passive_only_below_edge=max(
+            0.0, min(0.95, float(strategy.get("limit_buy_passive_only_below_edge", 0.0)))
+        ),
         resting_cancel_if_market_bid_above_limit_by=max(0.0, min(0.5, float(strategy.get("resting_cancel_if_market_bid_above_limit_by", 0.0)))),
         simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
         simple_ev_min_edge=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge", 0.03)))),
@@ -760,6 +777,14 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         simple_ev_calibration_poor_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("calibration_poor_size_mult", 0.7)))),
         simple_ev_min_bid_size=max(0.0, float((strategy.get("simple_ev_decision") or {}).get("min_bid_size", 0.0))),
         simple_ev_ultra_short_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("ultra_short_size_mult", 1.0)))),
+        simple_ev_edge_size_boost_edge=max(
+            0.0,
+            min(0.5, float((strategy.get("simple_ev_decision") or {}).get("edge_size_boost_edge", 0.0))),
+        ),
+        simple_ev_edge_size_boost_mult=max(
+            1.0,
+            min(2.5, float((strategy.get("simple_ev_decision") or {}).get("edge_size_boost_mult", 1.0))),
+        ),
         simple_ev_skip_p_win_mid_enabled=bool(
             (strategy.get("simple_ev_decision") or {}).get("skip_p_win_mid_band_enabled", False)
         ),
@@ -1209,6 +1234,7 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
         "position_exit_min_net_edge",
         "limit_buy_cross_spread_min_edge",
         "limit_buy_near_market_min_edge",
+        "limit_buy_passive_only_below_edge",
     )
     for k in _ex_float:
         if ex.get(k) is not None:
@@ -1372,12 +1398,14 @@ def _compute_limit_price(
     edge_aggression_enabled: bool = False,
     cross_spread_min_edge: float = 0.10,
     near_market_min_edge: float = 0.05,
+    passive_only_below_edge: float = 0.0,
 ) -> tuple[float, float]:
     """
     Returns (limit_price, dip_used_proxy).
     dip_used_proxy is for logging/analysis; dynamic modes may return 0.
     When edge_aggression_enabled and net_edge is set, quote closer to the market for large edge
     (near bid+tick, or just inside ask) instead of only deep dip bids.
+    If passive_only_below_edge > 0 and net_edge is below it, aggression is skipped (maker-style limits).
     """
     mode_norm = (mode or "fixed_pct").strip().lower()
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
@@ -1385,10 +1413,13 @@ def _compute_limit_price(
 
     fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
 
+    _po = max(0.0, float(passive_only_below_edge or 0.0))
+    _ne_ok = net_edge is not None and float(net_edge) > 0
+    if _po > 0 and _ne_ok and float(net_edge) < _po:
+        _ne_ok = False
     if (
         edge_aggression_enabled
-        and net_edge is not None
-        and float(net_edge) > 0
+        and _ne_ok
         and fair_cap > 0
     ):
         ne = float(net_edge)
@@ -4571,6 +4602,115 @@ def _apply_max_open_contracts_per_underlying(
         pending_orders[:] = kept
 
 
+def _capital_efficiency_score_order(o: dict) -> float:
+    """Score pending BUY lines for PnL-aware trimming: edge/price, faster resolution preferred."""
+    edge = max(0.0, float(o.get("edge", 0.0)))
+    price = max(0.01, float(o.get("price", 0.01)))
+    ttl_h = o.get("expected_hours_to_resolution")
+    if ttl_h is None:
+        title = str(o.get("title") or "")
+        yf = str(o.get("yf_ticker") or "")
+        parsed = _hours_until_resolution(title, yf) if title else None
+        ttl_h = parsed
+    ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
+    return (edge / price) / ttl_h
+
+
+def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> bool:
+    """Shrink counts so sum(price*count) <= cap_cents. Returns True if any count changed."""
+    if cap_cents <= 0 or not orders:
+        return False
+    total_cost = sum(
+        int(float(o.get("price", 0)) * 100) * max(0, int(o.get("count", 0)))
+        for o in orders
+    )
+    if total_cost <= cap_cents:
+        return False
+    ranked = sorted(
+        orders,
+        key=lambda x: (
+            -_capital_efficiency_score_order(x),
+            -float(x.get("edge", 0)),
+        ),
+    )
+    used = 0
+    changed = False
+    for o in ranked:
+        price_c = max(1, int(float(o.get("price", 0)) * 100))
+        curr = max(0, int(o.get("count", 0)))
+        if curr <= 0:
+            continue
+        room = max(0, cap_cents - used)
+        max_count = room // price_c
+        if curr > max_count:
+            o["count"] = max_count
+            changed = True
+        used += price_c * max(0, int(o.get("count", 0)))
+    return changed
+
+
+def _cap_bankroll_exposure_buckets(
+    pending_orders: list[dict],
+    total_balance_cents: int,
+    *,
+    max_frac_per_direction: float,
+    max_frac_per_underlying: float,
+    logger=print,
+) -> None:
+    """
+    Bankroll-% risk buckets (Kalshi+Gemini combined notionals in this batch).
+    - Per (yf_ticker, YES|NO): cap stacked directional exposure.
+    - Per yf_ticker: cap total new exposure across strikes/resolutions.
+    Direction caps run first, then underlying caps (EV-friendly vs disjoint logical filters).
+    """
+    if not pending_orders or total_balance_cents <= 0:
+        return
+    fd = max(0.0, min(1.0, float(max_frac_per_direction)))
+    fu = max(0.0, min(1.0, float(max_frac_per_underlying)))
+    if fd <= 0 and fu <= 0:
+        return
+
+    def _risk_orders() -> list[dict]:
+        out: list[dict] = []
+        for o in pending_orders:
+            if o.get("rec") not in (REC_BUY_YES, REC_BUY_NO):
+                continue
+            if not str(o.get("yf_ticker") or "").strip():
+                continue
+            if int(o.get("count", 0) or 0) <= 0:
+                continue
+            out.append(o)
+        return out
+
+    touched = False
+    if fd > 0:
+        cap_d = int(total_balance_cents * fd)
+        if cap_d > 0:
+            by_dir: dict[tuple[str, str], list[dict]] = {}
+            for o in _risk_orders():
+                yf = str(o.get("yf_ticker")).strip()
+                side = "yes" if o.get("rec") == REC_BUY_YES else "no"
+                by_dir.setdefault((yf, side), []).append(o)
+            for grp in by_dir.values():
+                if _trim_order_group_to_notional_cap(grp, cap_d):
+                    touched = True
+    if fu > 0:
+        cap_u = int(total_balance_cents * fu)
+        if cap_u > 0:
+            by_yf: dict[str, list[dict]] = {}
+            for o in _risk_orders():
+                yf = str(o.get("yf_ticker")).strip()
+                by_yf.setdefault(yf, []).append(o)
+            for grp in by_yf.values():
+                if _trim_order_group_to_notional_cap(grp, cap_u):
+                    touched = True
+    if touched:
+        logger(
+            "[Risk] Bankroll exposure buckets: trimmed pending BUY notionals "
+            f"(per-direction cap={fd:.0%}, per-underlying cap={fu:.0%} of combined balance)."
+        )
+
+
 def _cap_cross_platform_exposure(
     pending_orders: list[dict],
     total_balance_cents: int,
@@ -4597,41 +4737,8 @@ def _cap_cross_platform_exposure(
             continue
         grouped.setdefault((str(yf), str(res_key)), []).append(o)
 
-    def _capital_efficiency_score(o: dict) -> float:
-        edge = max(0.0, float(o.get("edge", 0.0)))
-        price = max(0.01, float(o.get("price", 0.01)))
-        ttl_h = o.get("expected_hours_to_resolution")
-        if ttl_h is None:
-            title = str(o.get("title") or "")
-            yf = str(o.get("yf_ticker") or "")
-            parsed = _hours_until_resolution(title, yf) if title else None
-            ttl_h = parsed
-        ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
-        return (edge / price) / ttl_h
-
     for _, orders in grouped.items():
-        total_cost = sum(
-            int(float(o.get("price", 0)) * 100) * int(o.get("count", 0))
-            for o in orders
-        )
-        if total_cost <= cap_cents:
-            continue
-        # Keep highest capital-efficiency orders/count first within this grouped thesis.
-        ranked = sorted(
-            orders,
-            key=lambda x: (
-                -_capital_efficiency_score(x),
-                -float(x.get("edge", 0)),
-            ),
-        )
-        used = 0
-        for o in ranked:
-            price_c = max(1, int(float(o.get("price", 0)) * 100))
-            max_count = max(0, (cap_cents - used) // price_c)
-            curr = int(o.get("count", 0))
-            if curr > max_count:
-                o["count"] = max_count
-            used += price_c * int(o.get("count", 0))
+        _trim_order_group_to_notional_cap(orders, cap_cents)
 
 
 def _apply_inter_arb_group_preflight(
@@ -5158,7 +5265,9 @@ def _show_config(args) -> int:
               "ultra_short_late_minutes_threshold", "ultra_short_late_min_edge_mult",
               "position_exit_min_net_edge", "resting_cancel_if_market_bid_above_limit_by",
               "limit_buy_edge_aggression_enabled", "limit_buy_cross_spread_min_edge",
-              "limit_buy_near_market_min_edge", "skip_new_buy_when_unresolved_same_side"):
+              "limit_buy_near_market_min_edge", "limit_buy_passive_only_below_edge",
+              "max_bankroll_fraction_per_underlying", "max_bankroll_fraction_per_direction",
+              "skip_new_buy_when_unresolved_same_side"):
         v = strategy.get(k)
         if v is not None:
             print(f"  {k}: {v}")
@@ -6751,6 +6860,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     edge_aggression_enabled=sp.limit_buy_edge_aggression_enabled,
                     cross_spread_min_edge=sp.limit_buy_cross_spread_min_edge,
                     near_market_min_edge=sp.limit_buy_near_market_min_edge,
+                    passive_only_below_edge=sp.limit_buy_passive_only_below_edge,
                 )
                 _bb_k = 1.0
                 if sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket == "base":
@@ -6787,6 +6897,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _spr_f = (float(ask_side) - bid) / bid
                     if _spr_f > float(sp.simple_ev_spread_wide_fraction):
                         _sf *= float(sp.simple_ev_spread_wide_size_mult)
+                    if sp.simple_ev_edge_size_boost_edge > 0 and _ev_n >= float(sp.simple_ev_edge_size_boost_edge):
+                        _sf *= float(sp.simple_ev_edge_size_boost_mult)
                     _cost_c = max(bid * 100.0, 1.0)
                     count_base = int(balance_cents * _sf / _cost_c)
                     count_base = max(min_contracts, count_base) if count_base > 0 else 0
@@ -7690,6 +7802,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         edge_aggression_enabled=sp.limit_buy_edge_aggression_enabled,
                         cross_spread_min_edge=sp.limit_buy_cross_spread_min_edge,
                         near_market_min_edge=sp.limit_buy_near_market_min_edge,
+                        passive_only_below_edge=sp.limit_buy_passive_only_below_edge,
                     )
                     _bb_kg = 1.0
                     if sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket_g == "base":
@@ -7726,6 +7839,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             _spr_fg = (float(ask_side) - bid) / bid
                         if _spr_fg > float(sp.simple_ev_spread_wide_fraction):
                             _sf_g *= float(sp.simple_ev_spread_wide_size_mult)
+                        if sp.simple_ev_edge_size_boost_edge > 0 and _ev_ng >= float(sp.simple_ev_edge_size_boost_edge):
+                            _sf_g *= float(sp.simple_ev_edge_size_boost_mult)
                         _cost_cg = max(bid * 100.0, 1.0)
                         count_base = int(balance_cents * _sf_g / _cost_cg)
                         count_base = max(min_contracts, count_base) if count_base > 0 else 0
@@ -9018,6 +9133,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         int(balance_cents) + int(gemini_balance_cents),
         sp.max_cross_platform_exposure,
     )
+    _cap_bankroll_exposure_buckets(
+        pending_orders,
+        int(balance_cents) + int(gemini_balance_cents),
+        max_frac_per_direction=sp.max_bankroll_fraction_per_direction,
+        max_frac_per_underlying=sp.max_bankroll_fraction_per_underlying,
+        logger=print,
+    )
 
     max_entries_per_ticker = int(strategy.get("max_entries_per_ticker", 3))
     if max_entries_per_ticker > 0 and get_ticker_entry_counts and pending_orders:
@@ -9300,6 +9422,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     pending_orders,
                     int(balance_cents) + int(gemini_balance_after),
                     sp.max_cross_platform_exposure,
+                )
+                _cap_bankroll_exposure_buckets(
+                    pending_orders,
+                    int(balance_cents) + int(gemini_balance_after),
+                    max_frac_per_direction=sp.max_bankroll_fraction_per_direction,
+                    max_frac_per_underlying=sp.max_bankroll_fraction_per_underlying,
+                    logger=print,
                 )
             except Exception:
                 pass

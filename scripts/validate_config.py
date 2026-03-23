@@ -227,6 +227,28 @@ def main() -> int:
 
     if not (0.0 <= max_cross_platform_exposure <= 1.0):
         errors.append("`strategy.max_cross_platform_exposure` must be in [0, 1].")
+
+    max_bankroll_frac_ul = _as_float(strategy.get("max_bankroll_fraction_per_underlying"), 0.0)
+    max_bankroll_frac_dir = _as_float(strategy.get("max_bankroll_fraction_per_direction"), 0.0)
+    if max_bankroll_frac_ul < 0 or max_bankroll_frac_ul > 1.0:
+        errors.append("`strategy.max_bankroll_fraction_per_underlying` must be in [0, 1] (0 disables).")
+    if max_bankroll_frac_dir < 0 or max_bankroll_frac_dir > 1.0:
+        errors.append("`strategy.max_bankroll_fraction_per_direction` must be in [0, 1] (0 disables).")
+
+    _lb_raw = strategy.get("limit_buy_passive_only_below_edge")
+    if _lb_raw is None:
+        _lb_raw = execution_cfg.get("limit_buy_passive_only_below_edge")
+    lb_passive = _as_float(_lb_raw, 0.0)
+    if lb_passive < 0 or lb_passive > 0.95:
+        errors.append("`strategy.limit_buy_passive_only_below_edge` / `execution.limit_buy_passive_only_below_edge` must be in [0, 0.95].")
+
+    simple_ev = strategy.get("simple_ev_decision") or {}
+    ev_boost_edge = _as_float(simple_ev.get("edge_size_boost_edge"), 0.0)
+    ev_boost_mult = _as_float(simple_ev.get("edge_size_boost_mult"), 1.0)
+    if ev_boost_edge < 0 or ev_boost_edge > 0.5:
+        errors.append("`strategy.simple_ev_decision.edge_size_boost_edge` must be in [0, 0.5] (0 disables).")
+    if ev_boost_mult < 1.0 or ev_boost_mult > 2.5:
+        errors.append("`strategy.simple_ev_decision.edge_size_boost_mult` must be in [1.0, 2.5].")
     if not (0.0 <= max_daily_loss_pct <= 1.0):
         errors.append("`strategy.max_daily_loss_pct` must be in [0, 1].")
 
