@@ -2792,14 +2792,17 @@ def _simple_ev_recommend(
     maker_fee_rate: float,
     min_fee_per_order: float,
 ) -> str:
-    """Single-threshold BUY YES / NO / SKIP from net edge after maker fee."""
+    """Single-threshold BUY YES / NO / SKIP from net edge after maker fee (symmetric legs)."""
     if yes_bid <= 0:
         return REC_SKIP
-    nb = float(no_bid) if no_bid is not None else (1.0 - yes_bid)
-    fy = _fee_per_contract(yes_bid, maker_fee_rate, min_fee_per_order)
-    fn = _fee_per_contract(nb, maker_fee_rate, min_fee_per_order)
-    edge_yes = float(p_yes) - float(yes_bid) - fy
-    edge_no = (1.0 - float(p_yes)) - float(nb) - fn
+    nb = (
+        float(no_bid)
+        if no_bid is not None and float(no_bid) > 0
+        else max(1e-6, min(0.99, 1.0 - float(yes_bid)))
+    )
+    edge_yes, edge_no = _net_edges_buy_legs(
+        float(p_yes), float(yes_bid), nb, maker_fee_rate, min_fee_per_order
+    )
     req = float(min_edge_net)
     hy = edge_yes >= req
     hn = edge_no >= req
@@ -2855,7 +2858,7 @@ def _print_effective_edge_trace(
     if simple_mode:
         print(
             f"    ├─ Edge trace: simple_ev net_min={sp.simple_ev_min_edge:.2%} "
-            f"(single gate; no stacked penalties)"
+            f"(single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)"
         )
         return
     if (
@@ -3076,6 +3079,40 @@ def _fee_per_contract(price: float, maker_rate: float, min_fee_per_order: float 
     return max(rounded, max(0.0, float(min_fee_per_order)))
 
 
+def _net_edges_buy_legs(
+    p_yes: float,
+    yes_bid: float,
+    no_bid: float,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+) -> tuple[float, float]:
+    """
+    Fee-adjusted edge for each leg (single source of truth for BUY YES vs BUY NO symmetry):
+      edge_yes = P(YES) − yes_bid − fee_yes
+      edge_no  = P(NO) − no_bid − fee_no  with P(NO) = 1 − P(YES)
+    Use each leg's own top-of-book bid — do not price NO using (1 − yes_bid) unless the venue
+    does not publish a NO bid (then caller should pass parity fallback).
+    """
+    yb = max(0.0, min(0.99, float(yes_bid)))
+    nb = max(1e-6, min(0.99, float(no_bid)))
+    p = max(0.0, min(1.0, float(p_yes)))
+    fy = _fee_per_contract(yb, maker_fee_rate, min_fee_per_order)
+    fn = _fee_per_contract(nb, maker_fee_rate, min_fee_per_order)
+    return (p - yb - fy, (1.0 - p) - nb - fn)
+
+
+def _gemini_no_bid_from_event(event: dict, yes_bid_fallback: float) -> float:
+    """
+    Prefer explicit NO-contract bestBid when Gemini exposes a separate NO leg; else 1 − YES bid.
+    """
+    no_c = _get_no_contract(event) or {}
+    raw = float(get_yes_price(no_c)) if no_c else 0.0
+    if raw > 0:
+        return max(1e-6, min(0.99, raw))
+    y = float(yes_bid_fallback)
+    return max(1e-6, min(0.99, 1.0 - y))
+
+
 def _barbell_yes_bucket(
     hist_p: float,
     yes_bid: float,
@@ -3211,18 +3248,16 @@ def _position_held_side_model_edge(
     min_fee_per_order: float,
 ) -> float:
     """
-    Signed edge for the *held* leg (same convention as buy-side edge):
-      YES: P_yes - yes_bid - fee_yes
-      NO:  (1 - P_yes) - no_bid - fee_no
+    Signed edge for the *held* leg (same convention as _net_edges_buy_legs / BUY logic).
     """
-    my = max(0.0, min(0.99, float(yes_bid)))
-    mn = max(0.0, min(0.99, float(no_bid)))
-    p = float(hist_p)
-    if str(side).lower() == "yes":
-        fee = _fee_per_contract(my, maker_fee_rate, min_fee_per_order)
-        return p - my - fee
-    fee = _fee_per_contract(mn, maker_fee_rate, min_fee_per_order)
-    return (1.0 - p) - mn - fee
+    ey, en = _net_edges_buy_legs(
+        float(hist_p),
+        max(0.0, min(0.99, float(yes_bid))),
+        max(1e-6, min(0.99, float(no_bid))),
+        maker_fee_rate,
+        min_fee_per_order,
+    )
+    return ey if str(side).lower() == "yes" else en
 
 
 def _position_flip_sell_allowed(
@@ -3492,25 +3527,30 @@ def _compute_edge_diff(
     violates_no_above: bool,
     maker_fee_rate: float = 0.0,
     min_fee_per_order: float = 0.01,
+    no_bid: float | None = None,
 ) -> float:
     """
-    Net edge after fees (per $1 contract). For BUY YES: hist_p - market_yes - fee.
-    For BUY NO: (1-hist_p) - (1-market_yes) - fee. Returns 0 for SKIP.
-    Caller uses abs(diff) for display.
+    Net edge after fees on the *chosen* leg. For BUY NO uses explicit no_bid when provided
+    (Kalshi no_bid_dollars / Gemini NO book); otherwise falls back to parity 1 − market_yes.
+    Returns 0 for SKIP. Caller may use abs(diff) for display legacy; prefer _net_edges_buy_legs for truth.
     """
     if rec == REC_SKIP:
         return 0.0
-    no_price = 1.0 - market_yes
+    no_px = (
+        float(no_bid)
+        if no_bid is not None and float(no_bid) > 0
+        else max(1e-6, min(0.99, 1.0 - float(market_yes)))
+    )
     fee_yes = _fee_per_contract(market_yes, maker_fee_rate, min_fee_per_order)
-    fee_no = _fee_per_contract(no_price, maker_fee_rate, min_fee_per_order)
+    fee_no = _fee_per_contract(no_px, maker_fee_rate, min_fee_per_order)
     if rec == REC_BUY_YES:
         if violates_no_above:
             raw = 1.0 - market_yes  # favor YES when price above strike
         else:
             raw = hist_p_yes - market_yes
         return raw - fee_yes
-    # REC_BUY_NO
-    raw = (1.0 - hist_p_yes) - no_price
+    # REC_BUY_NO — must use NO leg bid, not (1 − yes) unless that is all we have
+    raw = (1.0 - hist_p_yes) - no_px
     return raw - fee_no
 
 
@@ -6214,6 +6254,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 violates_rule,
                 maker_fee_rate,
                 min_fee_per_order=sp.min_fee_per_order,
+                no_bid=no_bid_early,
             )
             no_bid_for_quote = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             fee_yes_q = _fee_per_contract(yes_bid, maker_fee_rate, sp.min_fee_per_order)
@@ -6299,6 +6340,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if _alpha_tags:
                 print(f"    ├─ Alpha:        {' | '.join(_alpha_tags)}")
             print(f"    ├─ Verdict:      {rec}")
+            if sp.log_effective_min_edge:
+                _eys, _ens = _net_edges_buy_legs(
+                    hist_p, yes_bid, no_bid_early, maker_fee_rate, sp.min_fee_per_order
+                )
+                print(
+                    f"    ├─ Leg edges:     YES net {_eys:+.1%}  |  NO net {_ens:+.1%}  "
+                    f"(bids {yes_bid:.1%} / {no_bid_early:.1%})"
+                )
             if sp.barbell_enabled:
                 if sp.simple_ev_decision_enabled:
                     print("    ├─ Barbell:      gating off (simple EV mode)")
@@ -6400,7 +6449,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print()
                     continue
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
-                print(f"       Edge: {abs(diff):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
+                _ey_o, _en_o = _net_edges_buy_legs(
+                    hist_p, yes_bid, no_bid, maker_fee_rate, sp.min_fee_per_order
+                )
+                _chosen_net_k = _ey_o if rec == REC_BUY_YES else _en_o
+                print(
+                    f"       Edge: {_chosen_net_k:.1%}  |  P(win): {p_win:.1%}  |  "
+                    f"Side: {side.upper()}  |  Cost/contract: ${bid:.2f}"
+                )
                 dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp, cap=sp.max_dip_cap)
                 dip = min(sp.max_dip_cap, dip * dip_regime_mult)
                 price_might_decline = (use_vol and vol_p is not None) or (dte is not None and dte >= 2)
@@ -6458,7 +6514,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 held_opp = inventory_by_key.get((PLATFORM_KALSHI, ticker, "no" if side == "yes" else "yes"), 0)
                 ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
                 _fee_le = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
-                _net_edge_le = float(p_win) - float(bid) - _fee_le
+                _net_edge_le = _chosen_net_k
                 price, dip_used = _compute_limit_price(
                     bid=bid,
                     ask=ask_side,
@@ -6496,8 +6552,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
                     )
                 if sp.simple_ev_decision_enabled:
-                    _fee_s = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
-                    _ev_n = (hist_p - bid - _fee_s) if rec == REC_BUY_YES else ((1.0 - hist_p) - bid - _fee_s)
+                    _ev_n = _chosen_net_k
                     _sf = _simple_ev_spend_fraction(_ev_n, bid, sp)
                     _sf *= _simple_ev_calibration_size_mult(calibration, sp)
                     if vol_p is not None and abs(float(emp) - float(vol_p)) > float(
@@ -6543,7 +6598,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "spread_bps_at_place": spread_bps,
                     "liquidity_mult": liq_mult,
                     "dip_pct_used": dip_used,
-                    "edge": abs(diff),
+                    "edge": _chosen_net_k,
                     "count": count,
                     "hist_p": hist_p,
                     "vol_p": vol_p,
@@ -6824,7 +6879,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     enabled=sp.enable_model_prob_hard_cap,
                 )
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
-                no_bid_gem_early = max(1e-6, min(0.99, 1.0 - float(impl)))
+                no_bid_gem_early = _gemini_no_bid_from_event(evt, impl)
                 if sp.simple_ev_decision_enabled:
                     effective_min_gem = float(sp.simple_ev_min_edge)
                     effective_min_yes_g = effective_min_gem
@@ -7083,6 +7138,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     violates_rule_g,
                     maker_fee_rate_gem,
                     min_fee_per_order=sp.min_fee_per_order,
+                    no_bid=no_bid_gem_early,
                 )
                 no_price_gem_q = no_bid_gem_early
                 fee_yes_gq = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
@@ -7150,6 +7206,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         f"(ultra_short_min_edge_mult){_us_note_g}"
                     )
                 print(f"    ├─ Verdict:      {rec}")
+                if sp.log_effective_min_edge:
+                    _eys_g, _ens_g = _net_edges_buy_legs(
+                        hist_p_gem, impl, no_bid_gem_early, maker_fee_rate_gem, sp.min_fee_per_order
+                    )
+                    print(
+                        f"    ├─ Leg edges:     YES net {_eys_g:+.1%}  |  NO net {_ens_g:+.1%}  "
+                        f"(bids {impl:.1%} / {no_bid_gem_early:.1%})"
+                    )
                 if sp.barbell_enabled:
                     if sp.simple_ev_decision_enabled:
                         print("    ├─ Barbell:      gating off (simple EV mode)")
@@ -7193,7 +7257,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "(cheap leg + large net edge) bucket"
                     )
                 elif rec == REC_SKIP:
-                    _fq_r = 1.0 - impl
+                    _fq_r = no_bid_gem_early
                     _fy_r = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
                     _fn_r = _fee_per_contract(_fq_r, maker_fee_rate_gem, sp.min_fee_per_order)
                     _reason_g = _format_reason(
@@ -7221,12 +7285,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 try:
                     from storage import record_market_snapshot
                     market_for_book = contract if isinstance(contract, dict) else evt
-                    book = _extract_book_fields(market_for_book or {}, impl, 1.0 - impl)
+                    book = _extract_book_fields(market_for_book or {}, impl, no_bid_gem_early)
                     record_market_snapshot(
                         PLATFORM_GEMINI,
                         evt.get("ticker", "?"),
                         impl,
-                        1.0 - impl,
+                        no_bid_gem_early,
                         hist_p_gem,
                         rec,
                         threshold_g,
@@ -7247,8 +7311,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     pass
                 added_dip = False
                 if rec != REC_SKIP:
-                    no_price = 1.0 - impl
-                    bid = impl if rec == REC_BUY_YES else no_price
+                    bid = impl if rec == REC_BUY_YES else no_bid_gem_early
                     side = "yes" if rec == REC_BUY_YES else "no"
                     _gt = evt.get("ticker", "?")
                     if sp.skip_new_buy_when_unresolved_same_side and inventory_by_key.get(
@@ -7261,7 +7324,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print()
                         continue
                     p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
-                    print(f"       Edge: {abs(diff_gem):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
+                    _ey_go, _en_go = _net_edges_buy_legs(
+                        hist_p_gem, impl, no_bid_gem_early, maker_fee_rate_gem, sp.min_fee_per_order
+                    )
+                    _chosen_net_g = _ey_go if rec == REC_BUY_YES else _en_go
+                    print(
+                        f"       Edge: {_chosen_net_g:.1%}  |  P(win): {p_win:.1%}  |  "
+                        f"Side: {side.upper()}  |  Cost/contract: ${bid:.2f}"
+                    )
                     dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g, cap=sp.max_dip_cap)
                     dip = min(sp.max_dip_cap, dip * dip_regime_mult)
                     price_might_decline = (use_vol and vol_p_gem is not None) or (dte_g is not None and dte_g >= 2)
@@ -7273,7 +7343,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rsi_val_g = _compute_rsi(closes)
                     dip = _rsi_dip_adjustment(dip, rsi_val_g, sp.max_dip_cap)
                     market_for_book = contract if isinstance(contract, dict) else evt
-                    book = _extract_book_fields(market_for_book or {}, impl, no_price)
+                    book = _extract_book_fields(market_for_book or {}, impl, no_bid_gem_early)
                     bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
                     if sp.simple_ev_decision_enabled and sp.simple_ev_min_bid_size > 0:
                         _dv_ev_g = float(bid_size_side) if bid_size_side is not None else 0.0
@@ -7321,7 +7391,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                     ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
                     _fee_leg = _fee_per_contract(bid, maker_fee_rate_gem, sp.min_fee_per_order)
-                    _net_edge_leg = float(p_win) - float(bid) - _fee_leg
+                    _net_edge_leg = _chosen_net_g
                     price, dip_used = _compute_limit_price(
                         bid=bid,
                         ask=ask_side,
@@ -7359,10 +7429,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
                         )
                     if sp.simple_ev_decision_enabled:
-                        _fee_sg = _fee_per_contract(bid, maker_fee_rate_gem, sp.min_fee_per_order)
-                        _ev_ng = (hist_p_gem - bid - _fee_sg) if rec == REC_BUY_YES else (
-                            (1.0 - hist_p_gem) - bid - _fee_sg
-                        )
+                        _ev_ng = _chosen_net_g
                         _sf_g = _simple_ev_spend_fraction(_ev_ng, bid, sp)
                         _sf_g *= _simple_ev_calibration_size_mult(calibration, sp)
                         if vol_p_gem is not None and abs(float(emp) - float(vol_p_gem)) > float(
@@ -7408,7 +7475,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "spread_bps_at_place": spread_bps,
                         "liquidity_mult": liq_mult,
                         "dip_pct_used": dip_used,
-                        "edge": abs(diff_gem),
+                        "edge": _chosen_net_g,
                         "count": count,
                         "hist_p": hist_p_gem,
                         "vol_p": vol_p_gem,
