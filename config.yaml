@@ -22,7 +22,7 @@ markets:
   - KXNASDAQ100U # Nasdaq-100 above/below — https://kalshi.com/markets/kxnasdaq100u/nasdaq-abovebelow
   - KXSILVERW # Silver weekly — https://kalshi.com/markets/kxsilverw/silver-weekly-price
   - KXGOLDW # Gold weekly — https://kalshi.com/markets/kxgoldw/gold-weekly-price-
-  - KXAAAGASW # US gas price weekly (RBOB proxy) — https://kalshi.com/markets/kxaaagasw/us-gas-price-up
+  # KXAAAGASW — disabled (see strategy.blacklist); re-add here when you want gas weekly again
 
 # How often to poll markets (seconds)
 poll_interval_seconds: 60
@@ -488,6 +488,8 @@ strategy:
   # Runtime merge: one series ticker per line (# comments ok). Updated by ollama_codex_loop + apply_series_blacklist.py
   blacklist_extra_file: ~/.trading-bot-data/series_blacklist_auto.txt
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
+  # Excluded from evaluation (new buys) even if listed under markets: or MARKETS= env
+  blacklist: ["KXAAAGASW"] # US gas weekly — off until RBOB/AAA proxy is acceptable
   # blacklist: ["KXINXU"]   # Exclude these series (optional); also union blacklist_extra_file
   # strategy_engine options: vol_regime (default), default_threshold, strict_threshold (1.25× min edge — research / A/B)
 
