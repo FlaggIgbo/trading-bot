@@ -80,6 +80,7 @@ When **`strategy.simple_ev_decision.enabled`** is true, barbell and many stacked
 - **Min hold gate:** `execution.position_min_hold_minutes: 10` blocks discretionary exits for **young** positions until they have been held at least that many minutes.
 - **Conviction-based hold:** `execution.position_exit_strong_entry_edge: 0.15` and `execution.position_exit_strong_entry_floor: -0.04` widen the exit floor when the entry had **strong** edge, so high-conviction entries are less likely to be sold on a shallow dip.
 - **Diagnostics:** With verbose logging, position evaluation emits **`[PosEval]`** lines for inspection.
+- **Stale exit (time-decay):** `execution.position_exit_stale_minutes: 60` and `position_exit_stale_edge_floor: 0` — after the stale age, if held net edge is still below the floor (default **0** = any negative edge), **`STALE_EXIT`** fires to avoid indefinite bag-holds; not blocked by min-hold. Set **`position_exit_stale_minutes: 0`** to disable.
 - Dynamic EV-optimal sell threshold: `P(lose) > 1 - (bid - exit_fee)`. High bids → low threshold (sell sooner); low bids → high threshold (hold longer).
 - **Check:** Position eval stats: if SELL win rate is much lower than KEEP, we may be selling winners and keeping losers.
 

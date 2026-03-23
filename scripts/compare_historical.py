@@ -55,6 +55,7 @@ from constants import (
     REC_BUY_NO,
     REC_BUY_YES,
     REC_EDGE_EXIT,
+    REC_STALE_EXIT,
     REC_LIKELY_LOSE,
     REC_RULE_VIOLATION,
     REC_SKIP,
@@ -470,6 +471,8 @@ class _StrategyParams:
     position_min_hold_minutes: float
     position_exit_strong_entry_edge: float
     position_exit_strong_entry_floor: float
+    position_exit_stale_minutes: float
+    position_exit_stale_edge_floor: float
     skip_new_buy_when_unresolved_same_side: bool
     limit_buy_edge_aggression_enabled: bool
     limit_buy_cross_spread_min_edge: float
@@ -763,6 +766,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         position_min_hold_minutes=max(0.0, float(strategy.get("position_min_hold_minutes", 0.0))),
         position_exit_strong_entry_edge=max(0.0, min(1.0, float(strategy.get("position_exit_strong_entry_edge", 0.0)))),
         position_exit_strong_entry_floor=max(-0.5, min(0.0, float(strategy.get("position_exit_strong_entry_floor", 0.0)))),
+        position_exit_stale_minutes=max(0.0, float(strategy.get("position_exit_stale_minutes", 0.0))),
+        position_exit_stale_edge_floor=max(-0.5, min(0.5, float(strategy.get("position_exit_stale_edge_floor", 0.0)))),
         skip_new_buy_when_unresolved_same_side=bool(strategy.get("skip_new_buy_when_unresolved_same_side", False)),
         limit_buy_edge_aggression_enabled=bool(strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
@@ -1241,6 +1246,8 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
         "position_min_hold_minutes",
         "position_exit_strong_entry_edge",
         "position_exit_strong_entry_floor",
+        "position_exit_stale_minutes",
+        "position_exit_stale_edge_floor",
         "limit_buy_cross_spread_min_edge",
         "limit_buy_near_market_min_edge",
         "limit_buy_passive_only_below_edge",
@@ -3471,6 +3478,25 @@ def _effective_edge_exit_floor(
     return base
 
 
+def _stale_position_should_exit(
+    sp: _StrategyParams,
+    entry_ts: float | None,
+    now_ts: float,
+    held_net_edge: float,
+) -> bool:
+    """
+    Time-decay forced exit: after position_exit_stale_minutes, if held net edge is still
+    below position_exit_stale_edge_floor (default 0 = any negative edge), cut slow bleeds.
+    Not blocked by min-hold. 0 stale minutes = off.
+    """
+    if sp.position_exit_stale_minutes <= 0 or entry_ts is None:
+        return False
+    age_minutes = (now_ts - entry_ts) / 60.0
+    if age_minutes < sp.position_exit_stale_minutes:
+        return False
+    return float(held_net_edge) < float(sp.position_exit_stale_edge_floor)
+
+
 def _maybe_add_reentry_order(
     sp: _StrategyParams,
     min_edge: float,
@@ -5464,6 +5490,7 @@ def _show_config(args) -> int:
               "ultra_short_late_minutes_threshold", "ultra_short_late_min_edge_mult",
               "position_exit_min_net_edge", "position_min_hold_minutes",
               "position_exit_strong_entry_edge", "position_exit_strong_entry_floor",
+              "position_exit_stale_minutes", "position_exit_stale_edge_floor",
               "resting_cancel_if_market_bid_above_limit_by",
               "limit_buy_edge_aggression_enabled", "limit_buy_cross_spread_min_edge",
               "limit_buy_near_market_min_edge", "limit_buy_passive_only_below_edge",
@@ -8536,7 +8563,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     _entry_ts_pe = latest_entry_ts_by_key.get(_k_key_pe)
                                     _entry_edge_pe = latest_entry_edge_by_key.get(_k_key_pe)
                                     _now_ts_pe = time.time()
-                                    _min_hold_pe = _min_hold_blocks_exit(sp, _entry_ts_pe, _now_ts_pe)
                                     _hold_age_pe = ((_now_ts_pe - _entry_ts_pe) / 60.0) if _entry_ts_pe else None
                                     _fee_hy_pe = _fee_per_contract(yes_bid, maker_fee_pos, sp.min_fee_per_order)
                                     _fee_hn_pe = _fee_per_contract(no_bid, maker_fee_pos, sp.min_fee_per_order)
@@ -8545,6 +8571,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         if side == "yes"
                                         else ((1.0 - hist_p) - no_bid - _fee_hn_pe)
                                     )
+                                    _stale_hit_pe = _stale_position_should_exit(
+                                        sp, _entry_ts_pe, _now_ts_pe, _held_ne_pe
+                                    )
+                                    _min_hold_pe = _min_hold_blocks_exit(sp, _entry_ts_pe, _now_ts_pe)
                                     _exit_floor_pe = _effective_edge_exit_floor(sp, _entry_edge_pe)
                                     if getattr(args, "verbose", False):
                                         _age_str = f"{_hold_age_pe:.1f}min" if _hold_age_pe is not None else "?"
@@ -8552,8 +8582,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         print(
                                             f"    [PosEval] {ticker} {side.upper()} | held_edge={_held_ne_pe:+.3f} "
                                             f"floor={_exit_floor_pe:+.3f} entry_edge={_ee_str} "
-                                            f"age={_age_str} min_hold={'BLOCK' if _min_hold_pe else 'ok'}"
+                                            f"age={_age_str} min_hold={'BLOCK' if _min_hold_pe else 'ok'} "
+                                            f"stale={'HIT' if _stale_hit_pe else 'ok'}"
                                         )
+                                    if _stale_hit_pe:
+                                        pending_sells.append({
+                                            "platform": PLATFORM_KALSHI,
+                                            "ticker": ticker,
+                                            "title": (m.get("title") or "")[:55],
+                                            "side": side,
+                                            "action": "sell",
+                                            "count": position_count,
+                                            "price": sell_price,
+                                            "rec": REC_STALE_EXIT,
+                                        })
+                                        continue
                                     if not _min_hold_pe and _exit_floor_pe != 0 and _held_ne_pe < _exit_floor_pe:
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -8801,7 +8844,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _entry_ts_pc = latest_entry_ts_by_key.get(_k_key_pc)
                 _entry_edge_pc = latest_entry_edge_by_key.get(_k_key_pc)
                 _now_ts_pc = time.time()
-                _min_hold_pc = _min_hold_blocks_exit(sp, _entry_ts_pc, _now_ts_pc)
                 _hold_age_pc = ((_now_ts_pc - _entry_ts_pc) / 60.0) if _entry_ts_pc else None
                 _fee_hy_pc = _fee_per_contract(yes_bid, maker_fee_cached, sp.min_fee_per_order)
                 _fee_hn_pc = _fee_per_contract(no_bid, maker_fee_cached, sp.min_fee_per_order)
@@ -8810,6 +8852,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if side == "yes"
                     else ((1.0 - hist_p) - no_bid - _fee_hn_pc)
                 )
+                _stale_hit_pc = _stale_position_should_exit(
+                    sp, _entry_ts_pc, _now_ts_pc, _held_ne_pc
+                )
+                _min_hold_pc = _min_hold_blocks_exit(sp, _entry_ts_pc, _now_ts_pc)
                 _exit_floor_pc = _effective_edge_exit_floor(sp, _entry_edge_pc)
                 if getattr(args, "verbose", False):
                     _age_str = f"{_hold_age_pc:.1f}min" if _hold_age_pc is not None else "?"
@@ -8817,8 +8863,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(
                         f"    [PosEval] {ticker} {side.upper()} | held_edge={_held_ne_pc:+.3f} "
                         f"floor={_exit_floor_pc:+.3f} entry_edge={_ee_str} "
-                        f"age={_age_str} min_hold={'BLOCK' if _min_hold_pc else 'ok'}"
+                        f"age={_age_str} min_hold={'BLOCK' if _min_hold_pc else 'ok'} "
+                        f"stale={'HIT' if _stale_hit_pc else 'ok'}"
                     )
+                if _stale_hit_pc:
+                    pending_sells.append({
+                        "platform": PLATFORM_KALSHI,
+                        "ticker": ticker,
+                        "title": (m.get("title") or "")[:55],
+                        "side": side,
+                        "action": "sell",
+                        "count": position_count,
+                        "price": sell_price,
+                        "rec": REC_STALE_EXIT,
+                    })
+                    continue
                 if not _min_hold_pc and _exit_floor_pc != 0 and _held_ne_pc < _exit_floor_pc:
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
@@ -9146,7 +9205,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _entry_ts_pg = latest_entry_ts_by_key.get(_g_key_pg)
                         _entry_edge_pg = latest_entry_edge_by_key.get(_g_key_pg)
                         _now_ts_pg = time.time()
-                        _min_hold_pg = _min_hold_blocks_exit(sp, _entry_ts_pg, _now_ts_pg)
                         _hold_age_pg = ((_now_ts_pg - _entry_ts_pg) / 60.0) if _entry_ts_pg else None
                         _fee_hy_pg = _fee_per_contract(impl, maker_fee_pos_g, sp.min_fee_per_order)
                         _fee_hn_pg = _fee_per_contract(no_price_g, maker_fee_pos_g, sp.min_fee_per_order)
@@ -9155,6 +9213,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if side == "yes"
                             else ((1.0 - hist_p_g) - no_price_g - _fee_hn_pg)
                         )
+                        _stale_hit_pg = _stale_position_should_exit(
+                            sp, _entry_ts_pg, _now_ts_pg, _held_ne_pg
+                        )
+                        _min_hold_pg = _min_hold_blocks_exit(sp, _entry_ts_pg, _now_ts_pg)
                         _exit_floor_pg = _effective_edge_exit_floor(sp, _entry_edge_pg)
                         if getattr(args, "verbose", False):
                             _age_str = f"{_hold_age_pg:.1f}min" if _hold_age_pg is not None else "?"
@@ -9162,8 +9224,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             print(
                                 f"    [PosEval] (Gemini) {ticker_g} {side.upper()} | held_edge={_held_ne_pg:+.3f} "
                                 f"floor={_exit_floor_pg:+.3f} entry_edge={_ee_str} "
-                                f"age={_age_str} min_hold={'BLOCK' if _min_hold_pg else 'ok'}"
+                                f"age={_age_str} min_hold={'BLOCK' if _min_hold_pg else 'ok'} "
+                                f"stale={'HIT' if _stale_hit_pg else 'ok'}"
                             )
+                        if _stale_hit_pg:
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": sell_price,
+                                "rec": REC_STALE_EXIT,
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                            continue
                         if not _min_hold_pg and _exit_floor_pg != 0 and _held_ne_pg < _exit_floor_pg:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,

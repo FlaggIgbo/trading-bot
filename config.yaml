@@ -78,6 +78,11 @@ execution:
   # Conviction-based hold: if entry edge was >= this, use the stronger (more negative) exit floor below.
   position_exit_strong_entry_edge: 0.15
   position_exit_strong_entry_floor: -0.04
+  # After this many minutes, if held net edge is still below position_exit_stale_edge_floor, exit (slow bleed / bag-hold).
+  # Not blocked by min-hold. 0 = off.
+  position_exit_stale_minutes: 60
+  # Stale exit when held_edge < this (default 0 = any negative edge after stale_minutes).
+  position_exit_stale_edge_floor: 0.0
   # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
   limit_buy_edge_aggression_enabled: true
   # Tiered aggression: cross spread only on strong edge; thin edge stays passive (saves spread tax).

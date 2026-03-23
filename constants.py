@@ -18,3 +18,4 @@ REC_ARB_INTER = "ARB_INTER"
 REC_LIKELY_LOSE = "LIKELY_LOSE"
 REC_RULE_VIOLATION = "RULE_VIOLATION"
 REC_EDGE_EXIT = "EDGE_EXIT"  # Held-side net edge vs bid fell below exit floor
+REC_STALE_EXIT = "STALE_EXIT"  # Held long enough with edge still below stale threshold (slow bleed / bag-hold cut)
