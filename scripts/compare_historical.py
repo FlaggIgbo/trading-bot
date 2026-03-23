@@ -199,7 +199,7 @@ GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
 
 # US equity indices: same 4pm ET “regular close” intraday rules as ^GSPC (e.g. Kalshi Nasdaq-100).
 _US_EQUITY_INDEX_YF_TICKERS = frozenset({"^GSPC", "GSPC", "^NDX", "NDX"})
-# Yahoo continuous futures for Kalshi WTI / metals / RBOB (gas proxy) — allow titled intraday times.
+# Yahoo continuous futures for Kalshi WTI / Brent / metals / RBOB (gas proxy) — allow titled intraday times.
 _COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "BZ=F", "GC=F", "SI=F", "RB=F"})
 # Kalshi maker fee override (index-like); match _maker_fee_rate_for_market.
 _KALSHI_INDEX_MAKER_FEE_YF = frozenset({"^GSPC", "GSPC", "^NDX", "NDX", "SPY", "QQQ"})
