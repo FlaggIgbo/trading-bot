@@ -152,6 +152,9 @@ def main() -> int:
     log_decision_diagnostics = strategy.get("log_decision_diagnostics", False)
     if not isinstance(log_decision_diagnostics, bool):
         errors.append("`strategy.log_decision_diagnostics` must be true or false.")
+    filter_disjoint = strategy.get("filter_disjoint_underlying_buys", False)
+    if not isinstance(filter_disjoint, bool):
+        errors.append("`strategy.filter_disjoint_underlying_buys` must be true or false.")
     if vol_model not in {"auto", "ewma", "garch", "sample"}:
         errors.append("`strategy.vol_model` must be one of: auto, ewma, garch, sample.")
     if garch_min_returns < 30:

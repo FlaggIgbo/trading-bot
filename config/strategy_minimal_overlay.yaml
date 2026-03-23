@@ -56,6 +56,7 @@ strategy:
 
   log_effective_min_edge: true
   log_decision_diagnostics: true
+  filter_disjoint_underlying_buys: false
   min_edge: 0.08
   min_edge_easy_win: 0.08
   enable_easy_win: false

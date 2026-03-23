@@ -491,6 +491,9 @@ class _StrategyParams:
     simple_ev_cheap_band_min_net_edge: float
     log_effective_min_edge: bool
     log_decision_diagnostics: bool
+    # When True: drop BUYs whose win range is disjoint from already-kept bets (same yf+resolution+platform).
+    # Default False — the disjoint rule blocked many valid multi-strike edges (e.g. INXU hourly ladder).
+    filter_disjoint_underlying_buys: bool
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
@@ -782,6 +785,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         ),
         log_effective_min_edge=bool(strategy.get("log_effective_min_edge", True)),
         log_decision_diagnostics=bool(strategy.get("log_decision_diagnostics", False)),
+        filter_disjoint_underlying_buys=bool(strategy.get("filter_disjoint_underlying_buys", False)),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
     )
@@ -4174,10 +4178,14 @@ def _filter_contradictory_buys(
     existing_by_underlying: dict[tuple[str, str, str], list[tuple[float, str, str]]],
 ) -> None:
     """
-    Remove BUYs that contradict positions we're keeping OR other pending BUYs (same underlying + resolution + platform).
-    Contradiction check is per-platform only: NO on SOL>87 (Kalshi) + YES on SOL>93 (Gemini) is allowed.
-    existing_by_underlying: (yf_ticker, res_key, platform) -> [(threshold, direction, side), ...]
-    Process in descending edge order so we keep the best bet when there's a conflict.
+    Legacy "disjoint win-range" filter (gated by strategy.filter_disjoint_underlying_buys).
+
+    Removes BUYs whose underlying win range does *not* overlap an already-accepted bet in the same
+    (yf_ticker, resolution_key, platform) bucket. That blocks many valid multi-strike books (e.g. several
+    YES-above lines for the same hourly event) and is **off by default** for PnL.
+
+    Per-platform only: cross-platform bets are not compared. Arb: same threshold+direction YES+NO allowed.
+    Process in descending edge order when enabled.
     """
     # Deep-copy existing; we'll add accepted orders as we go
     accepted: dict[tuple[str, str, str], list[tuple[float, str, str]]] = {
@@ -4216,7 +4224,10 @@ def _filter_contradictory_buys(
         if conflicts:
             to_remove.add(i)
             ticker = o.get("ticker", "?")
-            print(f"  (skip BUY {ticker} — contradicts existing or other BUY on same underlying)")
+            print(
+                f"  (skip BUY {ticker} — disjoint win range vs kept BUY/position "
+                f"same underlying+resolution; set strategy.filter_disjoint_underlying_buys: false to allow)"
+            )
         else:
             accepted.setdefault(key, []).append((th, direction, side))
 
@@ -8921,9 +8932,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"[Strategy] Added {added} paired YES/NO quote orders around inferred fair levels.")
             print()
 
-    # Skip BUYs that contradict kept positions or other pending BUYs (e.g. NO on SOL>$87 + YES on SOL>$93).
-    # Per-platform only: cross-platform bets are allowed (e.g. NO Kalshi + YES Gemini on same underlying).
-    _filter_contradictory_buys(pending_orders, existing_by_underlying)
+    # Optional: skip BUYs whose win range is disjoint from already-kept bets (same yf+resolution+platform).
+    # Default off — was blocking multi-strike +EV lines; enable only if you want a single "co-winnable" book per slice.
+    if sp.filter_disjoint_underlying_buys:
+        _filter_contradictory_buys(pending_orders, existing_by_underlying)
 
     # Micro-balance: never place 99¢-style limits; wait for cheaper tail bids (set max_buy_limit_price: 0 in config to disable)
     _filter_pending_buys_by_max_limit_price(

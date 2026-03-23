@@ -138,6 +138,9 @@ strategy:
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
   log_decision_diagnostics: false
+  # When true: drop pending BUYs whose win range does not overlap an already-kept bet (same yf+resolution+platform).
+  # Default false — true blocked many valid multi-strike edges (e.g. INXU hourly ladder) for disjoint ranges.
+  filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
   min_edge: 0.10
