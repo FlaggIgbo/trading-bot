@@ -200,7 +200,7 @@ GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
 # US equity indices: same 4pm ET “regular close” intraday rules as ^GSPC (e.g. Kalshi Nasdaq-100).
 _US_EQUITY_INDEX_YF_TICKERS = frozenset({"^GSPC", "GSPC", "^NDX", "NDX"})
 # Yahoo continuous futures for Kalshi WTI / Brent / metals / RBOB (gas proxy) — allow titled intraday times.
-_COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "BZ=F", "GC=F", "SI=F", "RB=F"})
+_COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "BZ=F", "GC=F", "SI=F", "HG=F", "RB=F"})
 # Kalshi maker fee override (index-like); match _maker_fee_rate_for_market.
 _KALSHI_INDEX_MAKER_FEE_YF = frozenset({"^GSPC", "GSPC", "^NDX", "NDX", "SPY", "QQQ"})
 
@@ -1628,7 +1628,7 @@ def _compute_macro_signal_24h(cfg: dict, sp: _StrategyParams) -> float:
 # We only evaluate intraday markets that match our supported times:
 # - Crypto (BTC, ETH, SOL, …): 5pm ET (typical crypto settlement)
 # - US equity indices (^GSPC, ^NDX): 4pm ET (regular session close)
-# - Listed commodity futures (CL=F, BZ=F, GC=F, SI=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
+# - Listed commodity futures (CL=F, BZ=F, GC=F, SI=F, HG=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
 # All other intraday times on unsupported underlyings (e.g. 7pm EDT) are skipped.
 _RESOLUTION_HOUR_PATTERN = re.compile(
     r"(?:(?:today|tomorrow)\s+at|@|\bat)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)\b",

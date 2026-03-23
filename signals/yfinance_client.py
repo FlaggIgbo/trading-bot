@@ -384,6 +384,8 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
         return mx < 500.0  # $/gal or $/bbl — not index scale
     if t == "SI=F":
         return mx < 500.0  # silver $/oz
+    if t == "HG=F":
+        return mx < 500.0  # copper $/lb — not index scale
     if t == "GC=F":
         return mx < 50_000.0  # gold $/oz
     return True

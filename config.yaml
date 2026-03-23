@@ -26,6 +26,7 @@ markets:
   - KXNASDAQ100U # Nasdaq-100 above/below — https://kalshi.com/markets/kxnasdaq100u/nasdaq-abovebelow
   - KXSILVERW # Silver weekly — https://kalshi.com/markets/kxsilverw/silver-weekly-price
   - KXGOLDW # Gold weekly — https://kalshi.com/markets/kxgoldw/gold-weekly-price-
+  - KXCOPPERD # Daily copper — https://kalshi.com/markets/kxcopperd/daily-copper
   # KXAAAGASW — disabled (see strategy.blacklist); re-add here when you want gas weekly again
 
 # How often to poll markets (seconds)
@@ -51,6 +52,7 @@ yfinance_tickers:
   KXNASDAQ100U: "^NDX" # NASDAQ-100 — https://finance.yahoo.com/quote/%5ENDX/
   KXSILVERW: "SI=F" # Silver futures — https://finance.yahoo.com/quote/SI=F/
   KXGOLDW: "GC=F" # Gold futures — https://finance.yahoo.com/quote/GC=F/
+  KXCOPPERD: "HG=F" # COMEX copper continuous — https://finance.yahoo.com/quote/HG=F/
   KXAAAGASW: "RB=F" # RBOB gasoline futures (proxy for retail gas) — https://finance.yahoo.com/quote/RB=F/
 
 # Shift Yahoo wholesale RBOB ($/gal) toward retail (e.g. AAA national) for model vs Kalshi strikes.
