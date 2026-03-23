@@ -53,6 +53,9 @@ yfinance_underlying_adjust:
   KXAAAGASW:
     multiply: 1.0
     add: 0.90 # mid of ~$0.70–$1.10 retail premium over RB=F; not a fixed Kalshi settlement guarantee
+    # Residual error vs gasprices.aaa.com (Kalshi source): wider strike sanity + higher edge hurdle
+    extra_min_edge: 0.025
+    strike_validation_tolerance_pct: 0.09
 
 # Optional execution overrides (merged into strategy in compare_historical.py)
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢
@@ -69,7 +72,7 @@ execution:
   # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
   limit_buy_edge_aggression_enabled: true
   limit_buy_cross_spread_min_edge: 0.10
-  limit_buy_near_market_min_edge: 0.05
+  limit_buy_near_market_min_edge: 0.10
   # Avoid stacking another same-side BUY while an unresolved position exists for that market (platform+ticker+side).
   skip_new_buy_when_unresolved_same_side: true
 
@@ -77,7 +80,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.08
+  min_edge: 0.10
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -107,8 +110,16 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 8% base, 12% on 15m (× ultra_short_min_edge_mult). Tighter spread haircut on wide books.
-    min_edge: 0.08
+    # Net edge after maker fee; 10% base, 15% on 15m (× ultra_short_min_edge_mult). Tighter spread haircut on wide books.
+    min_edge: 0.10
+    # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
+    skip_p_win_mid_band_enabled: true
+    skip_p_win_mid_lo: 0.60
+    skip_p_win_mid_hi: 0.80
+    # 5–10¢ legs must clear this net edge (blocks weak edge at penny prices; 0 = off).
+    cheap_band_price_lo: 0.05
+    cheap_band_price_hi: 0.10
+    cheap_band_min_net_edge: 0.15
     kelly_dampen: 0.25 # Fraction of raw Kelly: EV / (p*(1-p))
     max_bankroll_fraction: 0.01 # Hard cap on bankroll fraction per trade (smaller clips; ultra_short_size_mult shrinks 15m further)
     spread_wide_fraction: 0.03 # (ask−bid)/bid above this → multiply size by spread_wide_size_mult
@@ -124,9 +135,10 @@ strategy:
   log_effective_min_edge: true
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.08
+  min_edge: 0.10
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
-  barbell_enabled: true
+  # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
+  barbell_enabled: false
   barbell_base_min_market_yes: 0.70 # Market bid on the side we buy must be ≥ this (YES bid for BUY YES, NO bid for BUY NO)
   barbell_base_min_model_p: 0.78 # Model P(win) on that side must be ≥ this
   barbell_base_max_model_vs_market_gap: 0.10 # Require model P ≥ market bid − gap (consensus / not fighting tape)
@@ -139,7 +151,7 @@ strategy:
   barbell_alpha_kelly_mult: 0.12 # Much smaller sizing for lottery / mispricing tail
   # Easy win: helps base-layer high-P trades clear edge after fees (paired with barbell base)
   enable_easy_win: true
-  min_edge_easy_win: 0.03 # If re-enabled, keep above fee floor; must stay <= min_edge
+  min_edge_easy_win: 0.10 # Must stay <= strategy.min_edge (validate_config)
   easy_win_min_p_win: 0.91 # Slightly below 0.93 so rare “aligned very high” lines can clear; consensus sniper handles barbell-base tape agreement
   easy_win_min_market_p: 0.75 # Easier easy-win gate → more high-confidence tape clears min_edge_easy_win path
   # Consensus sniper: when barbell is on, trades matching barbell_base_* use this net-edge hurdle (can be slightly negative to absorb maker fee when p≈bid)
@@ -233,7 +245,7 @@ strategy:
   disagreement_dip_min_gap: 0.25 # Need 25% disagreement to place dip order (lower = more speculative dip-fishing)
   disagreement_dip_min_p_win: 0.25 # Require model P(win) >= 25% for dip orders — avoid lottery-ticket limit orders
   disagreement_dip_pct_of_bid: 0.50 # Place limit at 50% of current bid (aggressive dip)
-  disagreement_dip_min_price: 0.02 # Floor 2¢ (min valid price)
+  disagreement_dip_min_price: 0.05 # Aligned with min_yes/min_no — no sub-5¢ dip fishing
   disagreement_dip_max_price: 0.15 # Cap 15¢ so we don't overpay on dips
   disagreement_dip_contracts: 2 # Small size for speculative dip-fishing
   # Lottery limits on SKIP + very high model P(win): use penny_jump so bid is best_bid+1¢ (cheap legs capped)
@@ -263,6 +275,9 @@ strategy:
   ultra_short_min_p_win_with_vol: 0.85
   # 15m / sub-hour: extra × on required min_edge (simple_ev path uses this; recovery can override)
   ultra_short_min_edge_mult: 1.5
+  # When time-to-resolution is under this many minutes, multiply required net edge again (late books more efficient).
+  ultra_short_late_minutes_threshold: 3.0
+  ultra_short_late_min_edge_mult: 1.3
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
   kalshi_sp500_maker_fee_rate: 0.00875 # Lower maker fee assumption for S&P 500-style index markets
@@ -315,7 +330,7 @@ strategy:
   adaptive_loss_block_lookback_hours: 8.0 # Window for summing realized_pnl on resolved predictions (per platform)
   adaptive_loss_block_min_trades: 5 # Min resolutions on that platform in the window before breaker can fire
   enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
-  two_sided_quote_min_edge: 0.03 # Aligned with higher min_edge; still must be <= min_edge
+  two_sided_quote_min_edge: 0.10 # Aligned with min_edge; still must be <= min_edge
   macro_signal_enabled: true # Include macro cross-asset context in signal model
   macro_signal_tickers: ["SPY", "UUP"] # More reliable intraday proxy tickers for risk-on/risk-off macro signal
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)

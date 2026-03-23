@@ -137,6 +137,8 @@ from yfinance_client import (
 from underlying_adjust import (
     apply_underlying_closes,
     apply_underlying_price,
+    proxy_basis_extra_min_edge,
+    proxy_strike_validation_tolerance_pct,
     underlying_adjust_params,
 )
 
@@ -299,6 +301,8 @@ class _StrategyParams:
     ultra_short_min_p_win: float
     ultra_short_min_p_win_with_vol: float
     ultra_short_min_edge_mult: float
+    ultra_short_late_minutes_threshold: float
+    ultra_short_late_min_edge_mult: float
     use_intraday_empirical: bool
     dynamic_kelly_enabled: bool
     dynamic_kelly_floor: float
@@ -471,6 +475,13 @@ class _StrategyParams:
     simple_ev_calibration_poor_size_mult: float
     simple_ev_min_bid_size: float
     simple_ev_ultra_short_size_mult: float
+    # Simple-EV only: skip ambiguous model P(win) band; stricter net edge on 5–10¢ legs.
+    simple_ev_skip_p_win_mid_enabled: bool
+    simple_ev_skip_p_win_mid_lo: float
+    simple_ev_skip_p_win_mid_hi: float
+    simple_ev_cheap_band_lo: float
+    simple_ev_cheap_band_hi: float
+    simple_ev_cheap_band_min_net_edge: float
     log_effective_min_edge: bool
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
@@ -563,6 +574,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         ultra_short_min_p_win=float(strategy.get("ultra_short_min_p_win", 0.92)),
         ultra_short_min_p_win_with_vol=float(strategy.get("ultra_short_min_p_win_with_vol", 0.86)),
         ultra_short_min_edge_mult=float(strategy.get("ultra_short_min_edge_mult", 1.0)),
+        ultra_short_late_minutes_threshold=max(0.0, float(strategy.get("ultra_short_late_minutes_threshold", 0.0))),
+        ultra_short_late_min_edge_mult=max(1.0, float(strategy.get("ultra_short_late_min_edge_mult", 1.0))),
         use_intraday_empirical=bool(strategy.get("use_intraday_empirical", True)),
         dynamic_kelly_enabled=bool(strategy.get("dynamic_kelly_enabled", True)),
         dynamic_kelly_floor=float(strategy.get("dynamic_kelly_floor", 0.10)),
@@ -736,6 +749,29 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         simple_ev_calibration_poor_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("calibration_poor_size_mult", 0.7)))),
         simple_ev_min_bid_size=max(0.0, float((strategy.get("simple_ev_decision") or {}).get("min_bid_size", 0.0))),
         simple_ev_ultra_short_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("ultra_short_size_mult", 1.0)))),
+        simple_ev_skip_p_win_mid_enabled=bool(
+            (strategy.get("simple_ev_decision") or {}).get("skip_p_win_mid_band_enabled", False)
+        ),
+        simple_ev_skip_p_win_mid_lo=min(
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("skip_p_win_mid_lo", 0.60)))),
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("skip_p_win_mid_hi", 0.80)))),
+        ),
+        simple_ev_skip_p_win_mid_hi=max(
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("skip_p_win_mid_lo", 0.60)))),
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("skip_p_win_mid_hi", 0.80)))),
+        ),
+        simple_ev_cheap_band_lo=min(
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("cheap_band_price_lo", 0.05)))),
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("cheap_band_price_hi", 0.10)))),
+        ),
+        simple_ev_cheap_band_hi=max(
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("cheap_band_price_lo", 0.05)))),
+            max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("cheap_band_price_hi", 0.10)))),
+        ),
+        simple_ev_cheap_band_min_net_edge=max(
+            0.0,
+            min(0.5, float((strategy.get("simple_ev_decision") or {}).get("cheap_band_min_net_edge", 0.0))),
+        ),
         log_effective_min_edge=bool(strategy.get("log_effective_min_edge", True)),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
@@ -1088,7 +1124,11 @@ def _strategy_with_recovery_overrides(cfg: dict) -> dict:
     if not r:
         return s
     if r.get("min_edge") is not None:
-        s["min_edge"] = float(r["min_edge"])
+        v = float(r["min_edge"])
+        s["min_edge"] = v
+        sed = s.get("simple_ev_decision")
+        if isinstance(sed, dict):
+            s["simple_ev_decision"] = {**sed, "min_edge": v}
     if r.get("adaptive_edge_max_extra") is not None:
         s["adaptive_edge_max_extra"] = float(r["adaptive_edge_max_extra"])
     if r.get("loss_streak_max_extra") is not None:
@@ -1554,6 +1594,14 @@ def _hours_until_resolution_unified(market_or_title: dict | str, yf_ticker: str)
     if res_dt.tzinfo is None:
         res_dt = res_dt.replace(tzinfo=ET)
     return (res_dt.astimezone(UTC) - datetime.now(UTC)).total_seconds() / 3600.0
+
+
+def _minutes_until_resolution_unified(market_or_title: dict | str, yf_ticker: str) -> float | None:
+    """Minutes until resolution; None if unknown."""
+    h = _hours_until_resolution_unified(market_or_title, yf_ticker)
+    if h is None:
+        return None
+    return max(0.0, h * 60.0)
 
 
 def _is_ultra_short_horizon(
@@ -2793,6 +2841,7 @@ def _simple_ev_recommend(
     min_edge_net: float,
     maker_fee_rate: float,
     min_fee_per_order: float,
+    sp: _StrategyParams,
 ) -> str:
     """Single-threshold BUY YES / NO / SKIP from net edge after maker fee (symmetric legs)."""
     if yes_bid <= 0:
@@ -2805,9 +2854,28 @@ def _simple_ev_recommend(
     edge_yes, edge_no = _net_edges_buy_legs(
         float(p_yes), float(yes_bid), nb, maker_fee_rate, min_fee_per_order
     )
-    req = float(min_edge_net)
-    hy = edge_yes >= req
-    hn = edge_no >= req
+    req_base = float(min_edge_net)
+    req_yes = req_base
+    req_no = req_base
+    c_lo = min(sp.simple_ev_cheap_band_lo, sp.simple_ev_cheap_band_hi)
+    c_hi = max(sp.simple_ev_cheap_band_lo, sp.simple_ev_cheap_band_hi)
+    cheap_floor = float(sp.simple_ev_cheap_band_min_net_edge)
+    if cheap_floor > 0.0:
+        if c_lo <= float(yes_bid) <= c_hi:
+            req_yes = max(req_yes, cheap_floor)
+        if c_lo <= float(nb) <= c_hi:
+            req_no = max(req_no, cheap_floor)
+    hy = edge_yes >= req_yes
+    hn = edge_no >= req_no
+    if sp.simple_ev_skip_p_win_mid_enabled:
+        m_lo = min(sp.simple_ev_skip_p_win_mid_lo, sp.simple_ev_skip_p_win_mid_hi)
+        m_hi = max(sp.simple_ev_skip_p_win_mid_lo, sp.simple_ev_skip_p_win_mid_hi)
+        py = float(p_yes)
+        p_no = 1.0 - py
+        if hy and m_lo <= py <= m_hi:
+            hy = False
+        if hn and m_lo <= p_no <= m_hi:
+            hn = False
     if hy and hn:
         return REC_BUY_YES if edge_yes >= edge_no else REC_BUY_NO
     if hy:
@@ -2817,12 +2885,39 @@ def _simple_ev_recommend(
     return REC_SKIP
 
 
-def _simple_ev_net_min_edge(sp: _StrategyParams, market_or_event: dict | str, yf_ticker: str) -> float:
-    """Base simple_ev min_edge; multiply by ultra_short_min_edge_mult on 15m / sub-hour horizons."""
+def _simple_ev_net_min_edge_bundle(
+    sp: _StrategyParams, market_or_event: dict | str, yf_ticker: str
+) -> tuple[float, dict[str, Any]]:
+    """
+    Base simple_ev min_edge; extra × on ultra-short horizons; optional × when very close to resolution.
+    Returns (effective_min, detail) for logging.
+    """
     base = float(sp.simple_ev_min_edge)
-    if _is_ultra_short_horizon(market_or_event, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
-        return base * float(sp.ultra_short_min_edge_mult)
-    return base
+    detail: dict[str, Any] = {
+        "ultra_short": False,
+        "horizon_mult": 1.0,
+        "late_mult": 1.0,
+        "minutes_left": None,
+        "base": base,
+    }
+    eff = base
+    us = _is_ultra_short_horizon(market_or_event, yf_ticker, sp)
+    detail["ultra_short"] = us
+    if us and sp.ultra_short_min_edge_mult > 1.0:
+        eff *= float(sp.ultra_short_min_edge_mult)
+        detail["horizon_mult"] = float(sp.ultra_short_min_edge_mult)
+    mins = _minutes_until_resolution_unified(market_or_event, yf_ticker)
+    detail["minutes_left"] = mins
+    if (
+        us
+        and float(sp.ultra_short_late_minutes_threshold) > 0.0
+        and mins is not None
+        and mins < float(sp.ultra_short_late_minutes_threshold)
+        and float(sp.ultra_short_late_min_edge_mult) > 1.0
+    ):
+        eff *= float(sp.ultra_short_late_min_edge_mult)
+        detail["late_mult"] = float(sp.ultra_short_late_min_edge_mult)
+    return eff, detail
 
 
 def _simple_ev_spend_fraction(
@@ -2859,26 +2954,54 @@ def _print_effective_edge_trace(
     *,
     simple_mode: bool,
     simple_ev_effective: float | None = None,
+    ultra_short_detail: dict[str, Any] | None = None,
     em0: float | None = None,
     effective_min_core: float | None = None,
     effective_min_yes: float | None = None,
     effective_min_no: float | None = None,
 ) -> None:
-    if not sp.log_effective_min_edge:
+    usd0 = ultra_short_detail or {}
+    always_ultra_short_line = bool(simple_mode and usd0.get("ultra_short"))
+    if not sp.log_effective_min_edge and not always_ultra_short_line:
         return
     if simple_mode:
         eff = float(simple_ev_effective) if simple_ev_effective is not None else float(sp.simple_ev_min_edge)
-        if abs(eff - float(sp.simple_ev_min_edge)) > 1e-9:
+        usd = ultra_short_detail or {}
+        if usd.get("ultra_short"):
+            mins = usd.get("minutes_left")
+            mins_s = f"{float(mins):.1f}m" if mins is not None else "?"
+            hm = float(usd.get("horizon_mult", 1.0))
+            late = float(usd.get("late_mult", 1.0))
+            late_part = ""
+            if late > 1.0 + 1e-9:
+                late_part = (
+                    f" late_edge_mult={late:.2f} (t<{float(sp.ultra_short_late_minutes_threshold):g}m)"
+                )
+            sz = float(sp.simple_ev_ultra_short_size_mult)
             print(
-                f"    ├─ Edge trace: simple_ev net_min={eff:.2%} "
-                f"(base={sp.simple_ev_min_edge:.2%} × ultra_short_min_edge_mult on this horizon; "
-                f"single gate; YES/NO net edges use each leg bid + fee)"
+                f"    ├─ ultra_short: horizon_edge_mult={hm:.2f}{late_part} "
+                f"min_left={mins_s} size_mult={sz:.2f} → net_min={eff:.2%} "
+                f"(base={sp.simple_ev_min_edge:.2%}; YES/NO net edges vs bid+fee)"
             )
-        else:
-            print(
-                f"    ├─ Edge trace: simple_ev net_min={sp.simple_ev_min_edge:.2%} "
-                f"(single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)"
-            )
+        elif sp.log_effective_min_edge:
+            if abs(eff - float(sp.simple_ev_min_edge)) > 1e-9:
+                print(
+                    f"    ├─ Edge trace: simple_ev net_min={eff:.2%} "
+                    f"(base={sp.simple_ev_min_edge:.2%} × ultra_short_min_edge_mult on this horizon; "
+                    f"single gate; YES/NO net edges use each leg bid + fee)"
+                )
+            else:
+                print(
+                    f"    ├─ Edge trace: simple_ev net_min={sp.simple_ev_min_edge:.2%} "
+                    f"(single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)"
+                )
+        if sp.log_effective_min_edge:
+            _px = float((ultra_short_detail or {}).get("proxy_basis_extra_min_edge") or 0.0)
+            if _px > 0.0:
+                print(
+                    f"    ├─ proxy_basis_extra_min_edge: +{_px:.2%} "
+                    f"(underlying proxy vs Kalshi settlement index; e.g. RBOB vs AAA retail)"
+                )
         return
     if (
         em0 is not None
@@ -5034,6 +5157,7 @@ def _show_config(args) -> int:
               "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
               "ultra_short_dte_hours", "ultra_short_min_p_win", "ultra_short_min_p_win_with_vol",
               "ultra_short_min_edge_mult",
+              "ultra_short_late_minutes_threshold", "ultra_short_late_min_edge_mult",
               "position_exit_min_net_edge", "resting_cancel_if_market_bid_above_limit_by",
               "limit_buy_edge_aggression_enabled", "limit_buy_cross_spread_min_edge",
               "limit_buy_near_market_min_edge", "skip_new_buy_when_unresolved_same_side"):
@@ -5757,9 +5881,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print(f"  {series} ({yf_ticker})")
         _adj_m, _adj_a = underlying_adjust_params(cfg, series)
         if _adj_a != 0.0 or _adj_m != 1.0:
+            _gas_note = (
+                "; Kalshi settles on AAA national retail (gasprices.aaa.com), not RBOB"
+                if series.upper() == "KXAAAGASW"
+                else ""
+            )
             print(
                 f"  Underlying adjust: Yahoo × {_adj_m:.4f} + {_adj_a:.2f} $/gal "
-                f"(align wholesale proxy to retail-style Kalshi thresholds)"
+                f"(align wholesale proxy to retail-style Kalshi thresholds){_gas_note}"
+            )
+        _px_cfg = proxy_basis_extra_min_edge(cfg, series)
+        if _px_cfg > 0.0:
+            print(
+                f"  Proxy basis: +{_px_cfg:.2%} extra min edge (model vs settlement source)"
             )
         print(f"  Current Price:  ${current_price:,.2f}{live_note}  ({_chg_sign}{_daily_chg:.2f}% vs last close)")
         print(f"  20-Day Range:   ${_lo:,.2f} – ${_hi:,.2f}")
@@ -5820,7 +5954,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 direction=direction,
                 current_price=current_price,
                 yes_bid=yes_bid,
-                tolerance_pct=sp.strike_validation_tolerance_pct,
+                tolerance_pct=proxy_strike_validation_tolerance_pct(
+                    cfg, series, sp.strike_validation_tolerance_pct
+                ),
             ):
                 print(f"  {ticker}: SKIP (threshold validation failed) | {title}")
                 continue
@@ -6002,19 +6138,37 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
             no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             if sp.simple_ev_decision_enabled:
-                effective_min = _simple_ev_net_min_edge(sp, m, yf_ticker)
+                effective_min, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker)
+                _proxy_edge = proxy_basis_extra_min_edge(cfg, series)
+                if _proxy_edge > 0.0:
+                    effective_min += _proxy_edge
+                    _us_edge_detail = {**_us_edge_detail, "proxy_basis_extra_min_edge": _proxy_edge}
                 effective_min_yes = effective_min
                 effective_min_no = effective_min
                 obi_adj_yes = obi_adj_no = 0.0
                 obi_val = None
                 ll_adj_yes = ll_adj_no = 0.0
-                _print_effective_edge_trace(sp, min_edge, simple_mode=True, simple_ev_effective=effective_min)
+                _print_effective_edge_trace(
+                    sp,
+                    min_edge,
+                    simple_mode=True,
+                    simple_ev_effective=effective_min,
+                    ultra_short_detail=_us_edge_detail,
+                )
             else:
                 effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
                 em0_trace = effective_min
                 emp_n = min(sp.empirical_recent_days, len(closes_for_emp)) if sp.empirical_use_rolling_window else len(closes_for_emp)
                 ci_half = _empirical_ci_halfwidth(emp, emp_n)
                 effective_min += sp.uncertainty_edge_mult * ci_half
+                _proxy_edge_leg = proxy_basis_extra_min_edge(cfg, series)
+                if _proxy_edge_leg > 0.0:
+                    effective_min += _proxy_edge_leg
+                    if sp.log_effective_min_edge:
+                        print(
+                            f"    ├─ proxy_basis_extra_min_edge: +{_proxy_edge_leg:.2%} "
+                            f"(underlying proxy vs settlement index)"
+                        )
                 effective_min *= edge_regime_mult
                 if vol_spike_active:
                     effective_min *= max(1.0, sp.vol_spike_edge_multiplier)
@@ -6148,6 +6302,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     effective_min,
                     maker_fee_rate,
                     sp.min_fee_per_order,
+                    sp,
                 )
             else:
                 rec = (
@@ -6902,12 +7057,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
                 no_bid_gem_early = _gemini_no_bid_from_event(evt, impl)
                 if sp.simple_ev_decision_enabled:
-                    effective_min_gem = _simple_ev_net_min_edge(sp, evt, yf_ticker)
+                    effective_min_gem, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(sp, evt, yf_ticker)
                     effective_min_yes_g = effective_min_gem
                     effective_min_no_g = effective_min_gem
                     obi_adj_yes_g = obi_adj_no_g = 0.0
                     obi_val_g = None
-                    _print_effective_edge_trace(sp, min_edge, simple_mode=True, simple_ev_effective=effective_min_gem)
+                    _print_effective_edge_trace(
+                        sp,
+                        min_edge,
+                        simple_mode=True,
+                        simple_ev_effective=effective_min_gem,
+                        ultra_short_detail=_us_edge_detail_g,
+                    )
                 else:
                     effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                     em0_trace_g = effective_min_gem
@@ -7035,6 +7196,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         effective_min_gem,
                         maker_fee_rate_gem,
                         sp.min_fee_per_order,
+                        sp,
                     )
                 else:
                     rec = (
@@ -7719,6 +7881,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     ("KXSOL", "KXSOLD"),
                                     ("KXXRP", "KXXRPD"),
                                     ("KXINX", "KXINXU"),
+                                    # US gas weekly — RB=F proxy + yfinance_underlying_adjust vs AAA settlement
                                     ("KXAAAGASW", "KXAAAGASW"),
                                 ]:
                                     if prefix in t:
@@ -7833,6 +7996,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     )
                                     maker_fee_pos = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
+                                    eff_pos += proxy_basis_extra_min_edge(cfg, series or "")
                                     if sp.dte_edge_scaling_enabled and dte_pos is not None:
                                         eff_pos *= _dte_edge_scale_factor(float(dte_pos), sp)
                                     if _is_ultra_short_horizon(m, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
