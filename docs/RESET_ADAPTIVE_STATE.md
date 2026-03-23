@@ -11,7 +11,7 @@ The bot does **not** use a `calibration_data.json` file. Learning signals come f
 ## Safer options (prefer these)
 
 - Set **`strategy.adaptive_learning_enabled: false`** (already the defensive preset) so loss streak / EWMA bumps do not stack on `min_edge`.
-- Use **`--show-config`** to confirm effective flags after edits.
+- Use **`--show-config`** to confirm effective flags after edits (includes merged **`execution:`** keys such as `position_exit_min_net_edge` and `resting_cancel_if_market_bid_above_limit_by` when set in `config.yaml`).
 
 ## Nuclear option (loses trade history for analytics)
 

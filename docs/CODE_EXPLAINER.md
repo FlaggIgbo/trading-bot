@@ -138,7 +138,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Parse position           | Kalshi: `position_fp` positive = YES, negative = NO; Gemini: `outcome`, `totalQuantity` | `compare_historical.py:1668-1676`, `1878-1886`     |
 | Use cached or fresh data | Market data from earlier loop or fresh fetch (Kalshi); Gemini uses events  | `compare_historical.py:1672`, `1887`                    |
 | Compute P(lose)          | Blends model (hist_p) with market odds (yes_bid/no_bid); market weight increases near resolution via `_compute_p_lose()` | `compare_historical.py` → `_compute_p_lose()`           |
-| SELL triggers            | LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` via `_ev_sell_threshold()` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip, RULE_VIOLATION, unsupported resolution | `compare_historical.py` → `pending_sells.append()`, `_ev_sell_threshold()` |
+| SELL triggers            | **EDGE_EXIT** (`REC_EDGE_EXIT`) when held-side net edge &lt; `position_exit_min_net_edge` (optional); LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` via `_ev_sell_threshold()` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip, RULE_VIOLATION, unsupported resolution | `compare_historical.py` → `pending_sells.append()`, `_ev_sell_threshold()` |
 | Re-entry (optional)      | If `enable_sell_and_rebuy` (default off in defensive preset): when selling loser, add BUY at current price if edge ≥ min_edge; bypasses min 5¢ | `_maybe_add_reentry_order()`                      |
 | Add to pending_sells     | List of orders to place (platform=KALSHI or GEMINI)                       | `pending_sells.append()`                               |
 
@@ -151,7 +151,7 @@ Look at what you already hold (Kalshi + Gemini) and decide whether to sell:
 | Filter contradictory | Skip BUYs that conflict with existing or other pending BUYs (same underlying + resolution); Kalshi + Gemini; arb YES+NO allowed | `compare_historical.py:951` → `_filter_contradictory_buys()` |
 | Budget per platform | Kalshi balance for Kalshi orders; Gemini balance for Gemini orders (separate `_allocate_budget_to_orders` calls). Under budget pressure, ranking is capital-efficiency first (expected net return per dollar per hour). | `compare_historical.py:1861` → per-platform allocation |
 | `--preview`        | Print planned orders, no API calls              | `compare_historical.py:1927-1975`          |
-| `--execute`        | Review orders → cancel stale → SELL first → BUY | `compare_historical.py:1671-1925`          |
+| `--execute`        | `sync_and_cancel_resting_orders` (TTL, rec change, bid chase, bid-lift past limit, …) → SELL first → BUY | `compare_historical.py` → `sync_and_cancel_resting_orders`, execution block |
 | Place Kalshi order | `create_order_safe()` with balance caps         | `signals/kalshi_client.py` → `create_order_safe()` |
 | Place Gemini order | `place_order_safe()`                            | `signals/gemini_client.py` → `place_order_safe()`  |
 
@@ -209,10 +209,10 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 
 | File                              | Purpose                | Key functions                                                                                                                                |
 | --------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`constants.py`**                 | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`                           |
+| **`constants.py`**                 | Recommendation strings | `REC_SKIP`, `REC_BUY_YES`, `REC_BUY_NO`, `REC_ARB_INTRA`, `REC_ARB_INTER`, `REC_LIKELY_LOSE`, `REC_RULE_VIOLATION`, `REC_EDGE_EXIT` (held-side net edge below exit floor) |
 | **`data/storage.py`**              | SQLite persistence     | `get_yf_closes()`, `set_yf_closes()`, `get_yf_intraday_at_hour()`, `set_yf_intraday_at_hour()`, `record_market_snapshot()`, `record_prediction()`, `record_prediction_outcome()`, `record_resolved()`, `record_limit_order()`, `record_order_cancel()`, `get_limit_order_analysis()`, `get_last_snapshot_for_ticker()`, `get_market_snapshots_for_backtest()`, `get_resolved_outcomes()`, `get_predictions_for_backtest()`, `get_bet_accuracy_stats()`, `_init_schema()` L58. Root `storage.py` shim re-exports. |
 | **`signals/ollama_analysis.py`**   | Local LLM analysis     | `capture_and_analyze()`, `run_analysis()`, `analyze_single_trade()` L117, `_get_analysis()` L78. Root `ollama_analysis.py` shim re-exports.                                              |
-| **`execution/engine.py`**          | Order lifecycle sync   | `sync_and_cancel_resting_orders()`. Root `execution_engine.py` shim re-exports. |
+| **`execution/engine.py`**          | Order lifecycle sync   | `sync_and_cancel_resting_orders()` (TTL, no-longer-rec, want_better_price, regime shift, passive bid chase, **`resting_cancel_if_market_bid_above_limit_by`** → `market_bid_lifted_past_limit`). Root `execution_engine.py` shim re-exports. |
 | **`execution/fill_reconciliation.py`** | Confirmed fill ingestion | `reconcile_confirmed_fills()`. Root `fill_reconciliation.py` shim re-exports. |
 
 ### Scheduling & Dev Tools
@@ -264,18 +264,21 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
      - Recommend: `_recommend(hist_p, yes_bid, min_edge)` or `_recommend_strict()` for non-standard intraday.
      - Safety rules: skip BUY NO when price above strike; skip BUY YES when yes_bid < min_yes_price (unless vol override); steamroller cap on expensive YES with **barbell base** exception (`_barbell_yes_bucket == "base"`); skip BUY YES when strike far above current — DTE-aware via `_dte_adjusted_strike_pct()` (unless vol ≥ 97%); skip BUY NO when no_bid < min_no_price; calibration downgrade for "above+yes" underperformers.
      - **Barbell** (`strategy.barbell_enabled`): after safety filters, directional BUY YES/NO must match **`_barbell_yes_bucket` / `_barbell_no_bucket`** — **base** (high market bid + model P + consensus gap) or **alpha** (cheap bid + min model P + large net edge after fees); otherwise **SKIP**. Kelly fraction is scaled by `barbell_base_kelly_mult` / `barbell_alpha_kelly_mult` before vol-adjusted Kelly. Logs **`├─ Barbell:`**; `quote_candidates` / orders may include `"barbell"` key. Arb / disagreement-dip / lottery paths bypass this gate.
-     - Compute limit price: bid × (1−dip); use larger dip when P(win)≥90% or when vol/decline regime.
+     - Compute limit price: `_compute_limit_price` — base dip/layered/mid paths; optional **edge aggression** (`limit_buy_edge_aggression_enabled`): large net edge can quote just inside ask or bid+tick; otherwise bid × (1−dip) with high-confidence / vol / DTE scaling.
+     - Optional **skip duplicate same-side BUY** (`skip_new_buy_when_unresolved_same_side`): no new BUY for `(platform, ticker, side)` while an unresolved position exists for that key.
      - Add to `pending_orders` and `market_data_cache`.
    - **Gemini loop:** Expand events to markets via `expand_gemini_events_to_markets()`. For each Gemini market whose Yahoo ticker is in `GEMINI_CRYPTO_YF` (crypto **and** **`CL=F`** WTI): same flow — arb, P(YES), recommend, safety rules. Add to pending_orders.
 5. **Position evaluation:** Fetch Kalshi positions (`get_positions()`), Gemini positions (`GeminiTradingClient.get_positions()`). For each position:
    - If ticker in `market_data_cache`, use cached closes/market. Else fetch market + closes for orphan positions.
    - Compute P(lose) via `_compute_p_lose()` — blends model with market odds; more weight on market near resolution.
-   - SELL triggers: LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip (we now say BUY NO but we hold YES), RULE_VIOLATION (hold NO on "above X" but price > X×(1+cushion)), INTRADAY_MARKET (unsupported resolution).
+   - SELL triggers: **EDGE_EXIT** when `position_exit_min_net_edge > 0` and held-side net edge (model P − bid − maker fee) falls below that floor (stricter than entry: exit can fire while entry hurdle is higher); LIKELY_LOSE (EV-optimal: `P(lose) > 1 − (bid − fee)` when `dynamic_sell_threshold` enabled; fixed 55% fallback), rec flip (we now say BUY NO but we hold YES), RULE_VIOLATION (hold NO on "above X" but price > X×(1+cushion)), INTRADAY_MARKET (unsupported resolution).
    - Optional re-entry: `_maybe_add_reentry_order()` — when selling loser, add BUY at current price if edge ≥ min_edge (bypasses min 5¢).
 6. **Filter contradictory buys:** `_filter_contradictory_buys()` — skip BUYs that conflict with kept positions or other pending BUYs (same underlying + resolution). Arb YES+NO allowed.
 7. **Budget allocation:** `_allocate_budget_to_orders()` per platform (Kalshi balance for Kalshi; Gemini balance for Gemini). Scale down order counts to fit budget.
 8. **Per-ticker entry cap** (`max_entries_per_ticker`, default 3): Before execution, `get_ticker_entry_counts()` loads non-cancelled entry counts per ticker from the predictions table. Orders for tickers that already have ≥ cap entries are blocked. Prevents the bot from re-entering the same losing contract every cycle (e.g. 54 entries on one BTC ticker with 0 wins).
-9. **Execute (if --execute):** Review open orders via `execution.engine.sync_and_cancel_resting_orders()` → cancel stale or needing higher price (and mark canceled intents as `cancelled`; near-expiry orders kept) → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
+9. **Execute (if --execute):** Review open orders via `execution.engine.sync_and_cancel_resting_orders()` → cancel stale, no-longer-recommended, want_better_price, regime-shift, passive bid-chase refresh, or when **live bid has risen** `resting_cancel_if_market_bid_above_limit_by` above the resting limit (vs `bid_at_place` at order time); mark canceled intents as `cancelled`; near-expiry BUY protection unchanged → SELL first (Kalshi + Gemini, record FIFO early-exit PnL as `sold`) → inter-arb preflight (paired check; optional single-leg fallback keeps funded highest-likelihood leg when pair funding fails) → BUY. Predictions are created from confirmed fills via reconciliation pass, not from order-accepted responses.
+
+**Config merge:** Top-level **`execution:`** in `config.yaml` is merged into the effective `strategy` dict (`_merge_execution_into_strategy`) so pricing and lifecycle knobs live beside `recovery:` — e.g. `price_strategy`, `position_exit_min_net_edge`, `limit_buy_edge_aggression_enabled`, `limit_buy_cross_spread_min_edge`, `limit_buy_near_market_min_edge`, `resting_cancel_if_market_bid_above_limit_by`, `skip_new_buy_when_unresolved_same_side`. `--show-config` prints the merged values among strategy key params.
 
 **Key data structures:**
 - `pending_orders`: list of dicts with platform, ticker, title, rec, side, price, edge, count, hist_p, vol_p, threshold, direction, `barbell` (optional: `base` / `alpha` when `barbell_enabled`), etc.
@@ -319,7 +322,7 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 - Builds pending buy/sell lookups for Kalshi + Gemini.
 - Reads active resting orders from both venues.
 - Keeps orders already at same/better price.
-- Cancels orders for `stale_ttl`, `no_longer_rec`, `want_better_price`, and `regime_shift_guard`.
+- Cancels orders for `stale_ttl`, `no_longer_rec`, `want_better_price`, `regime_shift_guard`, optional **`bid_chase_refresh`** (passive bid chase), and **`market_bid_lifted_past_limit`** when `resting_cancel_if_market_bid_above_limit_by > 0` and the bid at order placement (`bid_at_place` on the pending intent) has risen to at least **limit + delta** (Kalshi + Gemini BUY legs).
 - **Near-expiry protection**: when a pending order's DTE < `near_expiry_keep_dte` (default 0.02 ≈ 30 min), `want_better_price` cancellations are suppressed — the existing resting BUY order is kept to avoid losing a winning ITM position by chasing pennies near resolution.
 - Records cancel reason to storage through `record_order_cancel(...)` and marks linked unresolved prediction intents as `cancelled`.
 
@@ -643,7 +646,7 @@ No arguments. Checks Ollama server, models, chat, and `ollama_analysis.run_analy
 | `get_fill_attribution_stats(...)` | compare_historical startup diagnostics | Summarizes actual-vs-theoretical fill quality (avg slippage/spread) |
 | `record_resolved(...)` | `_sync_kalshi_settlements()` | Upserts `resolved_outcomes` (yes_settled, our_last_rec, etc.) |
 | `record_limit_order(...)` | When placing BUY limit order | Inserts `limit_orders` (limit_price, bid_at_place, dip_pct_used, hist_p, etc.) |
-| `record_order_cancel(...)` | When cancelling resting order | Updates `limit_orders` with status=cancelled, cancel_reason (no_longer_rec|want_better_price) |
+| `record_order_cancel(...)` | When cancelling resting order | Updates `limit_orders` with status=cancelled, cancel_reason (`no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `bid_chase_refresh`, `market_bid_lifted_past_limit`, …) |
 | `get_limit_order_analysis(config, days)` | `--limit-analysis` | Returns unfilled orders + would_have_filled from market_snapshots (inform limit_dip_pct) |
 | `get_last_snapshot_for_ticker(ticker)` | Position eval, orphan positions | Last snapshot for a ticker |
 | `get_market_snapshots_for_backtest(...)` | backtest.py synthetic | Snapshots in time range with rec filter |
@@ -858,7 +861,7 @@ limit_orders
 ├── vol_p            REAL
 ├── ts               REAL
 ├── status           TEXT      (placed | filled | cancelled)
-└── cancel_reason    TEXT      (no_longer_rec | want_better_price | stale_ttl | regime_shift_guard | expired_unfilled)
+└── cancel_reason    TEXT      (no_longer_rec | want_better_price | stale_ttl | regime_shift_guard | expired_unfilled | bid_chase_refresh | market_bid_lifted_past_limit)
 
 position_evaluations
 ├── id               INTEGER   (auto-increment)
@@ -866,7 +869,7 @@ position_evaluations
 ├── ticker           TEXT
 ├── side             TEXT      (yes | no)
 ├── action           TEXT      (keep | sell)
-├── sell_reason      TEXT      (NULL for keep; LIKELY_LOSE, STOP_LOSS, etc. for sell)
+├── sell_reason      TEXT      (NULL for keep; LIKELY_LOSE, EDGE_EXIT, STOP_LOSS, etc. for sell)
 ├── hist_p           REAL      (model P(YES) at eval time)
 ├── vol_p            REAL
 ├── p_lose           REAL      (computed P(lose) at eval time)

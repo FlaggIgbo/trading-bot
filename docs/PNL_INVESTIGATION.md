@@ -38,6 +38,8 @@ min_edge + calibration + adaptive learning + vol regime scaling
 pending_orders / pending_sells → execution
 ```
 
+When **`strategy.simple_ev_decision.enabled`** is true, barbell and many stacked edge penalties do not apply as separate gates; sizing still uses calibration/disagreement multipliers — see `config.yaml` and `README.md`.
+
 **Weak spots:**
 - **Empirical P**: 90-day rolling window; if regime changed recently, empirical is stale.
 - **Vol model**: Can be overconfident on intraday; `intraday_vol_cap` (repo default **0.85**) caps vol-model probability—tune if tails still look hot.
@@ -67,11 +69,13 @@ pending_orders / pending_sells → execution
 
 ### C. Limit Order Execution
 
-- Layered mode places limits below bid using `limit_dip_pct: 0.08`. If fills happen at worse prices (slippage, thin book), realized edge is lower than expected.
+- Layered mode places limits below bid using dip stack (`limit_dip_pct`, etc.). If fills happen at worse prices (slippage, thin book), realized edge is lower than expected.
+- **Stale resting bids:** If limits never fill, review **`execution.resting_cancel_if_market_bid_above_limit_by`** (cancels when the tape has moved up past your price) and **`execution.limit_buy_edge_aggression_enabled`** / edge thresholds (tighter quotes when model edge is large).
 - **Check:** `get_limit_order_analysis` and price-after-buy calibration. If "would have filled" is high but we're still losing, execution quality is an issue.
 
 ### D. Sell Logic (Holding Losers Too Long)
 
+- Optional **edge floor:** `execution.position_exit_min_net_edge` queues a sell when held-side **net** edge (model − bid − fee) drops below that value — independent of entry `min_edge`, so you can exit fading trades without waiting for P(lose) to spike.
 - Dynamic EV-optimal sell threshold: `P(lose) > 1 - (bid - exit_fee)`. High bids → low threshold (sell sooner); low bids → high threshold (hold longer).
 - **Check:** Position eval stats: if SELL win rate is much lower than KEEP, we may be selling winners and keeping losers.
 

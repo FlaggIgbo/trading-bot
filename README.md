@@ -162,6 +162,10 @@ See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implement
 
 - **Gemini Exchange spot for crypto underlying prices:** `signals/yfinance_client.py` calls [Gemini public market data](https://docs.gemini.com/rest-api/market-data) first for BTC/ETH/SOL/XRP (`v2/ticker` for live snapshot, `v2/candles` for daily/hourly history) when `YFINANCE_CRYPTO_GEMINI` is on (default). **S&P 500** (`^GSPC` / `SPY`) now uses the SPY ETF as a proxy (converted ×10) and averages it with the index when `YFINANCE_SPY_AS_SP500` is enabled (default **on**). Disable the SPY proxy by setting `YFINANCE_SPY_AS_SP500=0` — the bot then relies on Yahoo’s `^GSPC` only. Order after Gemini fails: yfinance, then CoinGecko (BTC/ETH/SOL only). `get_aggs_as_of()` uses one candle request with a UTC end-of-day cutoff (no double-fetch). Disable Gemini spot with `YFINANCE_CRYPTO_GEMINI=0`; override base URL with `GEMINI_SPOT_API_BASE`; debug logs via `YFINANCE_DEBUG=1`.
 
+### Recent changes (2026-03-23)
+
+- **Execution layer (limits + exits):** Top-level **`execution:`** merges into effective strategy — **resting BUY cancel** when the market bid moves up past your limit by `resting_cancel_if_market_bid_above_limit_by` (vs bid at placement), **held-position sell** when net edge falls below `position_exit_min_net_edge` (`REC_EDGE_EXIT`, independent of entry hurdle), **limit aggression** from net edge (`limit_buy_edge_aggression_enabled` + thresholds), and **skip duplicate same-side BUY** while a position is open (`skip_new_buy_when_unresolved_same_side`). See `docs/CODE_EXPLAINER.md` (`execution/engine.py`, `_merge_execution_into_strategy`, `_compute_limit_price`).
+
 ### Recent changes (2026-03-19)
 
 - **Layered limit order fix — passive dip pricing**: The `layered` limit order mode was penny-jumping ABOVE the bid (`bid + tick`), completely ignoring the carefully computed dip depth (`limit_dip_pct`, `limit_dip_pct_high_confidence`, `_adaptive_limit_dip`, `_dte_confidence_dip`). Rewritten to place passive limits BELOW the bid using the full dip stack (`bid × (1 − dip)`), with staggered depth on re-buys (additional same-side orders target even cheaper levels for better avg cost). Fair-value cap prevents overpaying. This is the single largest fix for recent losing trades — entries now fill at better prices instead of fighting for best bid.
@@ -250,7 +254,8 @@ flowchart TB
         M --> N{Cached or fetch market}
         N --> O[Compute P lose, rec with vol blend]
         O --> P{Sell trigger?}
-        P -->|EV-optimal sell threshold| Q[pending_sells]
+        P -->|Net edge below exit floor| Q[pending_sells]
+        P -->|EV-optimal sell threshold| Q
         P -->|Edge flip| Q
         P -->|RULE_VIOLATION| Q
         P -->|INTRADAY unsupported| Q
@@ -313,6 +318,7 @@ flowchart TB
   │   • Parse position_fp (positive=YES, negative=NO) for each position          │
   │   • Cached? Use market_data_cache. Uncached? Fetch market + closes           │
   │   • Sell triggers (when we recommend selling a position you hold):            │
+  │       - EDGE_EXIT:       Held-side net edge (model − bid − fee) below position_exit_min_net_edge │
   │       - LIKELY_LOSE:     EV-optimal: sell when P(lose) > 1 − (bid − fee)     │
   │       - Edge flip:       We used to say BUY YES; now we say BUY NO (or vice versa) — cut losses, don't double down
   │       - RULE_VIOLATION:  You hold NO on "price above X" but price already > X — the bet is going against you
@@ -330,7 +336,7 @@ flowchart TB
            ▼                                                                      │
   ┌─────────────────────────────────────────────────────────────────────────────┐
   │ EXECUTE order: Review → SELL → BUY                                          │
-  │   0. Review: cancel orders no longer wanted or needing higher price          │
+  │   0. Review: cancel stale / wrong-rec / bid-chase / bid-lift-past-limit      │
   │   1. SELL: Kalshi + Gemini limit sells at bid (skip if kept)                 │
   │   2. BUY:  Kalshi + Gemini limit buys (skip if kept; else place/replace)    │
   │            Price = bid × (1−dip); 15% dip when P(win)≥90%                     │
@@ -414,6 +420,10 @@ Stronger coding models (if your machine can handle them): `ollama pull phi4` or 
 - **`enable_model_prob_hard_cap`** / **`model_prob_hard_lo`** / **`model_prob_hard_hi`**: clip blended P (e.g. **0.02–0.98**) before edge/Kelly and early in the vol/emp blend path.
 - **`execution.price_strategy`** / **`limit_offset_cents`**: optional spread squeeze (`passive` + `0` → **mid**; `1` → **bid+1¢**), merged into effective `passive_limit_quote`.
 - **`execution.near_expiry_aggressive_hours`**: when time-to-resolution is **at or under** this many hours (inclusive), limit quotes switch to **dip** style so ultra-short markets still get fill-friendly prices (even if `price_strategy` is passive).
+- **`execution.resting_cancel_if_market_bid_above_limit_by`**: cancel resting **BUY** when the live bid has risen this far **above** your limit (compared to `bid_at_place` when the order was placed) so capital is not stuck on stale “wish” bids; next cycle can reprice.
+- **`execution.position_exit_min_net_edge`**: if **> 0**, sell the held side when **net edge** (model P − bid − estimated maker fee) drops **below** this floor — a **lower** bar than entry `min_edge`, so you can exit when edge fades without waiting for P(lose) logic. Set **0** to disable.
+- **`execution.limit_buy_edge_aggression_enabled`** + **`limit_buy_cross_spread_min_edge`** / **`limit_buy_near_market_min_edge`**: when enabled, large net edge tightens limit quotes (toward ask or bid+tick) via `_compute_limit_price` for better fills.
+- **`execution.skip_new_buy_when_unresolved_same_side`**: avoid posting another **BUY** on the same platform/ticker/side while a position for that key is still open (unless you intentionally scale in elsewhere).
 - **`strategy.max_pct_of_book_volume`**: cap each BUY clip to at most this fraction of visible same-side bid depth (reduces adverse selection / book impact); **0** disables.
 - **`blacklist_extra_file`**: newline-separated series merged into the runtime blacklist; `ollama_codex_loop.sh` can refresh it via **`apply_series_blacklist.py`** (avoids corrupting `config.yaml`).
 - **Lottery / fills:** **`lottery_limit_price_mode: penny_jump`** places **best bid + 1¢** (capped vs ask) on the traded side; **`lottery_limit_max_price`** + **`lottery_penny_jump_apply_cap_bid_below`** keep cheap-leg tickets small while leaving expensive legs uncapped. Optional **`lottery_market_yes_band_*`** restricts lottery to an ATM YES band (40–60%) for churn-heavy books.
@@ -553,7 +563,7 @@ Both platforms place **limit orders** (good-til-cancel) so orders rest on the bo
 - **`cancel_on_vol_spike`**: When vol-spike safety triggers, cancel resting BUY limits and block new BUYs until regime normalizes.
 - **`limit_order_ttl_minutes`**: Cancel and refresh stale resting BUY limits so order prices are based on current model state.
 - **`cancel_all_on_regime_shift`**: On strong momentum/volatility regime shifts, cancel risky resting BUY limits before re-quoting.
-- **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. This lifecycle now lives in `execution_engine.py` (called by `compare_historical.py`) so execution sync is isolated from probability math. If we no longer recommend a trade, it cancels the order. If we still recommend it but at a higher limit price, it cancels and replaces — **except** within `near_expiry_keep_dte` (~30 min) of resolution, where existing resting BUY orders are kept to avoid losing a winning position by chasing pennies. If the existing order is same or better, it keeps it and skips placing a duplicate.
+- **Order review (cancel/update/keep)**: Before placing new orders, the bot reviews existing resting orders on Kalshi and Gemini. This lifecycle lives in `execution/engine.py` (shim `execution_engine.py`; called by `compare_historical.py`). Cancels include: no longer recommended, want better price, TTL stale, vol-spike / regime-shift guards, passive **bid chase** refresh, and optional **bid lifted past limit** (`execution.resting_cancel_if_market_bid_above_limit_by`). Replaces when a higher limit is needed — **except** within `near_expiry_keep_dte` (~30 min) of resolution, where existing resting BUY orders are kept to avoid losing a winning ITM position by chasing pennies. If the existing order is same or better, it keeps it and skips placing a duplicate.
 - **Intent vs execution accounting**: canceled buy intents are marked `cancelled` (excluded from realized PnL), and successful early sells are recorded as `sold` with FIFO realized PnL so performance stats better match exchange balance movement.
 - **Fee-aware realized PnL**: settlement/early-exit PnL now applies maker-fee estimates (`*_maker_fee_rate`, `min_fee_per_order`) instead of reporting gross-only outcomes.
 - **Confirmed-fill reconciliation**: a dedicated reconciliation pass ingests exchange fills (Kalshi + Gemini) and creates `predictions` from confirmed fills, rather than from order-accepted responses.
@@ -622,7 +632,7 @@ Data is stored in SQLite at `~/.trading-bot-data/trading_bot.db` (configurable v
 | **market_snapshots** | Per-evaluation snapshot (yes/no bids/asks/sizes, hist_p, rec)| None     | `id` (auto-increment)                          |
 | **resolved_outcomes**| Contract settlements (for calibration)            | None     | `ticker`                                      |
 | **predictions**      | Placed orders + outcomes + resolution prices (backtest, calibration, accuracy tracking) | None     | `id` (auto-increment)                          |
-| **limit_orders**    | Limit orders placed + cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled` | None | `id` (auto-increment)                          |
+| **limit_orders**    | Limit orders placed + cancel reasons: `no_longer_rec`, `want_better_price`, `stale_ttl`, `regime_shift_guard`, `expired_unfilled`, `bid_chase_refresh`, `market_bid_lifted_past_limit` | None | `id` (auto-increment)                          |
 | **markout_snapshots** | Post-fill price tracking for toxic flow detection (1/5/15 min markout) | None | `id` (auto-increment) |
 
 #### Table structures (columns)
