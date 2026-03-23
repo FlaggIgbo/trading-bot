@@ -4338,13 +4338,22 @@ def _allocate_budget_to_orders(
     if not pending_orders:
         return
 
+    def _trace(stage: str, o: dict, before: int, after: int, note: str = "") -> None:
+        if before == after:
+            return
+        traces = o.setdefault("_sizing_trace", [])
+        traces.append({
+            "stage": stage,
+            "before": int(before),
+            "after": int(after),
+            "note": note,
+        })
+
     def _capital_efficiency_score(o: dict) -> float:
-        """
-        Prioritize expected net return per dollar-at-risk per hour until resolution.
-        This lifts account-level capital efficiency over simple edge-only ranking.
-        """
+        """Edge-first ranking with soft liquidity/time modifiers."""
         edge = max(0.0, float(o.get("edge", 0.0)))
-        price = max(0.01, float(o.get("price", 0.01)))
+        spread_bps = float(o.get("spread_bps_at_place", 100.0) or 100.0)
+        liquidity_score = max(0.25, min(1.0, 1.0 - (max(0.0, spread_bps) / 10000.0)))
         ttl_h = o.get("expected_hours_to_resolution")
         if ttl_h is None:
             title = str(o.get("title") or "")
@@ -4352,7 +4361,8 @@ def _allocate_budget_to_orders(
             parsed = _hours_until_resolution(title, yf) if title else None
             ttl_h = parsed
         ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
-        return (edge / price) / ttl_h
+        time_decay = 1.0 / (1.0 + (ttl_h / 24.0))
+        return edge * liquidity_score * time_decay
 
     available_cents = int(balance_cents * max_pct)
     total_cost_cents = sum(
@@ -4365,7 +4375,9 @@ def _allocate_budget_to_orders(
     cost_if_1_each = sum(int(float(o.get("price", 0)) * 100) for o in pending_orders)
     if cost_if_1_each <= available_cents:
         for o in pending_orders:
+            before = int(o.get("count", 0) or 0)
             o["count"] = 1
+            _trace("budget_one_each", o, before, 1, "force diversification under budget")
         return
     # Can't afford 1 of each: keep highest capital-efficiency trades first
     by_edge = sorted(
@@ -4378,11 +4390,14 @@ def _allocate_budget_to_orders(
     running_cents = 0
     for o in by_edge:
         cost_1 = int(float(o.get("price", 0)) * 100)
+        before = int(o.get("count", 0) or 0)
         if running_cents + cost_1 <= available_cents:
             o["count"] = 1
             running_cents += cost_1
+            _trace("budget_rank_trim", o, before, 1, "ranked keep under max_total_buy_pct")
         else:
             o["count"] = 0
+            _trace("budget_rank_trim", o, before, 0, "ranked out by budget")
     if filter_zero:
         pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
 
@@ -4603,9 +4618,10 @@ def _apply_max_open_contracts_per_underlying(
 
 
 def _capital_efficiency_score_order(o: dict) -> float:
-    """Score pending BUY lines for PnL-aware trimming: edge/price, faster resolution preferred."""
+    """Edge-first order score with soft liquidity/time modifiers."""
     edge = max(0.0, float(o.get("edge", 0.0)))
-    price = max(0.01, float(o.get("price", 0.01)))
+    spread_bps = float(o.get("spread_bps_at_place", 100.0) or 100.0)
+    liquidity_score = max(0.25, min(1.0, 1.0 - (max(0.0, spread_bps) / 10000.0)))
     ttl_h = o.get("expected_hours_to_resolution")
     if ttl_h is None:
         title = str(o.get("title") or "")
@@ -4613,7 +4629,8 @@ def _capital_efficiency_score_order(o: dict) -> float:
         parsed = _hours_until_resolution(title, yf) if title else None
         ttl_h = parsed
     ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
-    return (edge / price) / ttl_h
+    time_decay = 1.0 / (1.0 + (ttl_h / 24.0))
+    return edge * liquidity_score * time_decay
 
 
 def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> bool:
@@ -4645,8 +4662,124 @@ def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> boo
         if curr > max_count:
             o["count"] = max_count
             changed = True
+            traces = o.setdefault("_sizing_trace", [])
+            traces.append({
+                "stage": "notional_cap_trim",
+                "before": int(curr),
+                "after": int(max_count),
+                "note": f"group cap ${cap_cents/100:.2f}",
+            })
         used += price_c * max(0, int(o.get("count", 0)))
     return changed
+
+
+def _print_sizing_trace(pending_orders: list[dict], *, logger=print, max_rows: int = 20) -> None:
+    rows: list[dict] = []
+    for o in pending_orders:
+        tr = o.get("_sizing_trace") or []
+        if tr:
+            rows.append(o)
+    if not rows:
+        return
+    logger("[Sizing Trace] Count changes through allocation/caps:")
+    shown = 0
+    for o in rows:
+        if shown >= max_rows:
+            break
+        ticker = str(o.get("ticker") or "?")
+        platform = str(o.get("platform") or "?")
+        edge = float(o.get("edge", 0.0) or 0.0)
+        final_count = int(o.get("count", 0) or 0)
+        stage_bits = []
+        for t in o.get("_sizing_trace", []):
+            stage_bits.append(
+                f"{t.get('stage')}:{int(t.get('before', 0))}->{int(t.get('after', 0))}"
+            )
+        logger(
+            f"  {platform} {ticker} edge={edge:.1%} final={final_count} | "
+            + " | ".join(stage_bits)
+        )
+        shown += 1
+    if len(rows) > shown:
+        logger(f"  ... {len(rows) - shown} more traced order(s)")
+    logger("")
+
+
+def _adaptive_execution_thresholds(
+    sp: _StrategyParams,
+    fill_stats: dict[str, Any] | None,
+) -> tuple[float, float]:
+    """
+    Adapt buy aggression thresholds from recent fill/slippage diagnostics.
+    Keeps values bounded to avoid oscillation.
+    """
+    cross_live = float(sp.limit_buy_cross_spread_min_edge)
+    near_live = float(sp.limit_buy_near_market_min_edge)
+    if not fill_stats:
+        return cross_live, near_live
+    try:
+        n = int(fill_stats.get("count", 0) or 0)
+        with_theoretical = int(fill_stats.get("with_theoretical", 0) or 0)
+        avg_slip = fill_stats.get("avg_fill_slippage_bps")
+        if n < 20:
+            return cross_live, near_live
+        fill_rate = (with_theoretical / float(max(1, n)))
+        step = 0.005
+        if fill_rate < 0.30:
+            cross_live -= step
+            near_live -= step
+        if avg_slip is not None and float(avg_slip) > 20.0:
+            cross_live += step
+            near_live += step
+        cross_live = max(0.05, min(0.10, cross_live))
+        near_live = max(0.05, min(0.10, near_live))
+        return cross_live, near_live
+    except Exception:
+        return cross_live, near_live
+
+
+def _edge_bucket_label(edge_val: float) -> str:
+    if edge_val < 0.08:
+        return "<0.08"
+    if edge_val < 0.10:
+        return "0.08-0.10"
+    if edge_val < 0.15:
+        return "0.10-0.15"
+    return "0.15+"
+
+
+def _print_edge_bucket_kpis(cfg: dict, *, lookback_days: int = 30) -> None:
+    if not get_predictions_for_backtest:
+        return
+    try:
+        since_ts = time.time() - (lookback_days * 86400)
+        settled = get_predictions_for_backtest(start_ts=since_ts, resolved_only=True, config=cfg) or []
+        if not settled:
+            return
+        by_bucket: dict[str, dict[str, float]] = {}
+        for r in settled:
+            hist_p = float(r.get("hist_p", 0.5) or 0.5)
+            entry = max(0.0, min(1.0, float(r.get("entry_price", 0.0) or 0.0)))
+            side = str(r.get("side") or "yes").lower()
+            p_win = hist_p if side == "yes" else (1.0 - hist_p)
+            edge_proxy = max(0.0, p_win - entry)
+            b = _edge_bucket_label(edge_proxy)
+            st = by_bucket.setdefault(b, {"count": 0.0, "wins": 0.0, "pnl_cents": 0.0})
+            st["count"] += 1
+            st["wins"] += 1 if str(r.get("outcome")) == "win" else 0
+            st["pnl_cents"] += float(r.get("realized_pnl_cents", r.get("pnl_cents", 0)) or 0)
+        print(f"[Telemetry] Settled PnL by edge bucket (proxy, {lookback_days}d):")
+        for b in ("<0.08", "0.08-0.10", "0.10-0.15", "0.15+"):
+            st = by_bucket.get(b)
+            if not st:
+                continue
+            cnt = int(st["count"])
+            wr = (st["wins"] / max(1.0, st["count"]))
+            pnl = int(st["pnl_cents"])
+            print(f"  {b}: n={cnt} | win_rate={wr:.0%} | pnl={pnl:+d}¢")
+        print("")
+    except Exception:
+        pass
 
 
 def _cap_bankroll_exposure_buckets(
@@ -5813,9 +5946,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print()
 
     # Fill attribution diagnostics (actual vs theoretical execution quality)
+    fill_stats_runtime: dict[str, Any] = {}
     if get_fill_attribution_stats:
         try:
             fill_stats = get_fill_attribution_stats(cfg)
+            fill_stats_runtime = dict(fill_stats or {})
             if fill_stats.get("enabled") and fill_stats.get("count", 0) > 0:
                 avg_slip = fill_stats.get("avg_fill_slippage_bps")
                 avg_spread = fill_stats.get("avg_spread_bps_at_place")
@@ -5830,6 +5965,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
         except Exception:
             pass
+    cross_spread_min_edge_live, near_market_min_edge_live = _adaptive_execution_thresholds(
+        sp, fill_stats_runtime
+    )
+    if sp.limit_buy_edge_aggression_enabled and (
+        abs(cross_spread_min_edge_live - float(sp.limit_buy_cross_spread_min_edge)) > 1e-9
+        or abs(near_market_min_edge_live - float(sp.limit_buy_near_market_min_edge)) > 1e-9
+    ):
+        print(
+            "[Adaptive Execution] edge aggression thresholds adjusted: "
+            f"cross_spread {sp.limit_buy_cross_spread_min_edge:.3f} -> {cross_spread_min_edge_live:.3f}, "
+            f"near_market {sp.limit_buy_near_market_min_edge:.3f} -> {near_market_min_edge_live:.3f}"
+        )
+        print()
 
     yes_parity_penalty, no_parity_penalty = _compute_directional_parity_penalty(sp, cfg)
     if yes_parity_penalty > 0 or no_parity_penalty > 0:
@@ -6858,8 +7006,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     passive_quote=_effective_passive_limit_quote(sp, dte),
                     net_edge=_net_edge_le,
                     edge_aggression_enabled=sp.limit_buy_edge_aggression_enabled,
-                    cross_spread_min_edge=sp.limit_buy_cross_spread_min_edge,
-                    near_market_min_edge=sp.limit_buy_near_market_min_edge,
+                    cross_spread_min_edge=cross_spread_min_edge_live,
+                    near_market_min_edge=near_market_min_edge_live,
                     passive_only_below_edge=sp.limit_buy_passive_only_below_edge,
                 )
                 _bb_k = 1.0
@@ -7800,8 +7948,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         passive_quote=_effective_passive_limit_quote(sp, dte_g),
                         net_edge=_net_edge_leg,
                         edge_aggression_enabled=sp.limit_buy_edge_aggression_enabled,
-                        cross_spread_min_edge=sp.limit_buy_cross_spread_min_edge,
-                        near_market_min_edge=sp.limit_buy_near_market_min_edge,
+                        cross_spread_min_edge=cross_spread_min_edge_live,
+                        near_market_min_edge=near_market_min_edge_live,
                         passive_only_below_edge=sp.limit_buy_passive_only_below_edge,
                     )
                     _bb_kg = 1.0
@@ -9140,6 +9288,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         max_frac_per_underlying=sp.max_bankroll_fraction_per_underlying,
         logger=print,
     )
+    _print_sizing_trace(pending_orders, logger=print)
 
     max_entries_per_ticker = int(strategy.get("max_entries_per_ticker", 3))
     if max_entries_per_ticker > 0 and get_ticker_entry_counts and pending_orders:
@@ -9634,6 +9783,24 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     print(f"  Recommendations:     {_eval_count_buy} BUY  |  {_eval_count_skip} SKIP")
     print(f"  Proposed buys:       {len(pending_orders)}")
     print(f"  Proposed sells:      {len(pending_sells)}")
+    funded_buys = [o for o in pending_orders if int(o.get("count", 0) or 0) > 0]
+    print(
+        f"  Funnel (this run):   recommended={_eval_count_buy} -> proposed={len(pending_orders)} "
+        f"-> funded={len(funded_buys)}"
+        + (f" -> placed={buys_placed}" if getattr(args, "execute", False) else "")
+    )
+    by_platform_bucket: dict[tuple[str, str], int] = {}
+    for o in funded_buys:
+        key = (
+            str(o.get("platform") or "?"),
+            _edge_bucket_label(float(o.get("edge", 0.0) or 0.0)),
+        )
+        by_platform_bucket[key] = by_platform_bucket.get(key, 0) + 1
+    if by_platform_bucket:
+        print("  Funnel breakdown (platform x edge bucket):")
+        for (plat, bucket), cnt in sorted(by_platform_bucket.items()):
+            print(f"    {plat} {bucket}: {cnt}")
+    _print_edge_bucket_kpis(cfg, lookback_days=30)
     if pending_sells and not (getattr(args, "preview", False) or getattr(args, "execute", False)):
         print(f"\n  Note: {len(pending_sells)} position(s) look like losers.")
         print("  Run with --preview to see details, --execute to sell.")
