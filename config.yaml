@@ -62,6 +62,16 @@ execution:
   limit_offset_cents: 1 # 0 = mid; >=1 = bid_plus_tick (better fills on tight DTE)
   # PnL: if passive/mid, force dip-style limits when time-to-resolution ≤ this many hours (inclusive at boundary)
   near_expiry_aggressive_hours: 1.0
+  # Cancel resting BUY when live bid has risen this far above our limit (frees capital; reprices next cycle).
+  resting_cancel_if_market_bid_above_limit_by: 0.02
+  # Sell held side when net edge (model − bid − maker fee) falls below this floor; 0 = off. Entry hurdle can stay higher.
+  position_exit_min_net_edge: 0.01
+  # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
+  limit_buy_edge_aggression_enabled: true
+  limit_buy_cross_spread_min_edge: 0.10
+  limit_buy_near_market_min_edge: 0.05
+  # Avoid stacking another same-side BUY while an unresolved position exists for that market (platform+ticker+side).
+  skip_new_buy_when_unresolved_same_side: true
 
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
 # Short test window: recovery.min_edge overrides strategy.min_edge — lower hurdle to surface fills (tighten again after review).
@@ -93,8 +103,23 @@ recovery:
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
   strategy_engine: vol_regime # Default production strategy engine; compare_historical routes rec decisions through this interface
+  # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
+  simple_ev_decision:
+    enabled: true
+    min_edge: 0.03 # Net edge after maker fee: P − bid − fee must clear this (one threshold)
+    kelly_dampen: 0.25 # Fraction of raw Kelly: EV / (p*(1-p))
+    max_bankroll_fraction: 0.02 # Hard cap on bankroll fraction per trade
+    spread_wide_fraction: 0.05 # (ask−bid)/bid above this → multiply size by spread_wide_size_mult
+    spread_wide_size_mult: 0.5
+    emp_vol_disagree_threshold: 0.15 # |emp_p − vol_p| above this → multiply size by disagree_size_mult
+    disagree_size_mult: 0.5
+    calibration_win_rate_threshold: 0.40 # Resolved WR below this (with min samples) → multiply size by calibration_poor_size_mult
+    calibration_poor_size_mult: 0.7
+    min_bid_size: 0 # Hard skip when visible bid size below this; 0 = use min_order_book_depth only
+  # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
+  log_effective_min_edge: true
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
-  # Was 6–8% effective in logs; lowered to 4% as requested. launchd loads this from WorkingDirectory each compare_historical run.
+  # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
   min_edge: 0.040
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   barbell_enabled: true
@@ -120,13 +145,14 @@ strategy:
   barbell_soften_strict_intraday: true # false = legacy strict path (full intraday min_p_win + edge only)
   barbell_strict_relaxed_min_p_win: 0.72 # When barbell-base-shaped, min() with strict min_p_win (e.g. 0.85 → 0.72)
   min_yes_price: 0.01 # Skip BUY YES when market YES < 1¢; allow high-probability trades with low balance
-  max_yes_price_for_buy: 0.90 # Skip BUY YES when market YES > 90¢; worst risk-reward for small balance (steamroller)
+  # Steamroller guard: above this YES bid, only barbell-base (or skip). Raised with max_buy_limit_price so near-the-money limits can fill.
+  max_yes_price_for_buy: 0.95
   # Hard cap on limit price for any proposed BUY (YES or NO). Blocks 99¢ NO "nickels in front of steamroller" on micro balance. 0 = off
   # Cap on bought-leg limit; 0 = disabled. Use max_yes_price_for_buy + min_payout_ratio for steamroller control.
   # 0.22 blocked nearly all real markets (any YES/NO quote above 22¢); too aggressive for normal execution.
-  max_buy_limit_price: 0.85 # Aligns with max_yes_price_for_buy; recovery.max_buy_limit_price: 0 disables while testing
-  # Min (profit if win / stake) on limit price = (1−price)/price; blocks thin steamrollers even under cap. 0 = off
-  min_payout_ratio: 0.12 # Slightly looser than 0.15; still filters worst risk/reward
+  max_buy_limit_price: 0.95 # Was 0.85 — allow aggressive/near-expiry bids to reach high-90s tape (still below min_payout_ratio steamroller)
+  # Min (profit if win / stake) on limit price = (1−price)/price. Must be ≤ (1−max_buy_limit_price)/max_buy_limit_price or high-price fills are dropped.
+  min_payout_ratio: 0.052 # ~floor for 95¢ limits (5.3% ROI if win); was 0.12 which blocked every BUY ≥88¢
   # Scale required edge by DTE: easier <~24h, harder >~3d (prioritize “hot” zone)
   dte_edge_scaling_enabled: true
   dte_edge_short_threshold_days: 1.0
@@ -186,7 +212,7 @@ strategy:
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   layered_order_levels: 4 # PnL: one extra level vs 3 for smoother VWAP when size > 1
-  limit_dip_pct_high_confidence: 0.08 # High P(win): still shallow dip so 90%+ ideas can fill before theta eats the book
+  limit_dip_pct_high_confidence: 0.02 # High P(win): bid close to tape (was 0.08) so consensus sniper / near-expiry orders actually fill
   limit_dip_pct_price_decline: 0.06 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg
   # DTE-confidence dip scaling: when resolution is far out AND model is confident,
   # place deeper limit orders to catch uncertainty-driven price dips.
@@ -208,7 +234,7 @@ strategy:
   disagreement_dip_contracts: 2 # Small size for speculative dip-fishing
   # Lottery limits on SKIP + very high model P(win): use penny_jump so bid is best_bid+1¢ (cheap legs capped)
   enable_lottery_limits: true
-  lottery_limit_min_p_win: 0.90 # Lowered for micro test — more lottery-style limits on high-P(skip) names
+  lottery_limit_min_p_win: 0.99 # Fewer 90–98% “model vs 99% market” penny NO tickets; keeps cheap convexity only when model is extreme
   lottery_limit_price_mode: penny_jump # fixed | penny_jump — jump beats 1¢ stink bids when the book is 3–7¢
   lottery_limit_price: 0.01 # used when mode=fixed
   lottery_limit_max_price: 0.10 # when working bid < lottery_penny_jump_apply_cap_bid_below, cap absolute limit (micro bankroll)

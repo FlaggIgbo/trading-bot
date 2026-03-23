@@ -54,6 +54,7 @@ from constants import (
     REC_ARB_INTRA,
     REC_BUY_NO,
     REC_BUY_YES,
+    REC_EDGE_EXIT,
     REC_LIKELY_LOSE,
     REC_RULE_VIOLATION,
     REC_SKIP,
@@ -450,6 +451,26 @@ class _StrategyParams:
     enable_model_prob_hard_cap: bool
     model_prob_hard_lo: float
     model_prob_hard_hi: float
+    # Execution / exits (optional; many merged from execution: in config)
+    position_exit_min_net_edge: float
+    skip_new_buy_when_unresolved_same_side: bool
+    limit_buy_edge_aggression_enabled: bool
+    limit_buy_cross_spread_min_edge: float
+    limit_buy_near_market_min_edge: float
+    resting_cancel_if_market_bid_above_limit_by: float
+    # Simple EV mode: single net-edge gate, Kelly sizing, uncertainty/calibration → size only.
+    simple_ev_decision_enabled: bool
+    simple_ev_min_edge: float
+    simple_ev_kelly_dampen: float
+    simple_ev_max_bankroll_fraction: float
+    simple_ev_spread_wide_fraction: float
+    simple_ev_spread_wide_size_mult: float
+    simple_ev_emp_vol_disagree_threshold: float
+    simple_ev_disagree_size_mult: float
+    simple_ev_calibration_wr_threshold: float
+    simple_ev_calibration_poor_size_mult: float
+    simple_ev_min_bid_size: float
+    log_effective_min_edge: bool
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
@@ -696,6 +717,24 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_model_prob_hard_cap=bool(strategy.get("enable_model_prob_hard_cap", True)),
         model_prob_hard_lo=max(1e-6, float(strategy.get("model_prob_hard_lo", 0.02))),
         model_prob_hard_hi=min(0.999, float(strategy.get("model_prob_hard_hi", 0.98))),
+        position_exit_min_net_edge=max(0.0, min(0.5, float(strategy.get("position_exit_min_net_edge", 0.0)))),
+        skip_new_buy_when_unresolved_same_side=bool(strategy.get("skip_new_buy_when_unresolved_same_side", False)),
+        limit_buy_edge_aggression_enabled=bool(strategy.get("limit_buy_edge_aggression_enabled", False)),
+        limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
+        limit_buy_near_market_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_near_market_min_edge", 0.05)))),
+        resting_cancel_if_market_bid_above_limit_by=max(0.0, min(0.5, float(strategy.get("resting_cancel_if_market_bid_above_limit_by", 0.0)))),
+        simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
+        simple_ev_min_edge=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge", 0.03)))),
+        simple_ev_kelly_dampen=max(0.001, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("kelly_dampen", 0.25)))),
+        simple_ev_max_bankroll_fraction=max(0.001, min(0.25, float((strategy.get("simple_ev_decision") or {}).get("max_bankroll_fraction", 0.02)))),
+        simple_ev_spread_wide_fraction=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("spread_wide_fraction", 0.05)))),
+        simple_ev_spread_wide_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("spread_wide_size_mult", 0.5)))),
+        simple_ev_emp_vol_disagree_threshold=max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("emp_vol_disagree_threshold", 0.15)))),
+        simple_ev_disagree_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("disagree_size_mult", 0.5)))),
+        simple_ev_calibration_wr_threshold=max(0.0, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("calibration_win_rate_threshold", 0.40)))),
+        simple_ev_calibration_poor_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("calibration_poor_size_mult", 0.7)))),
+        simple_ev_min_bid_size=max(0.0, float((strategy.get("simple_ev_decision") or {}).get("min_bid_size", 0.0))),
+        log_effective_min_edge=bool(strategy.get("log_effective_min_edge", True)),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
     )
@@ -703,6 +742,16 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
 
 def _strategy_recommend_extras(sp: _StrategyParams) -> dict[str, Any]:
     """Forwarded to strategy_engine.recommend; consensus sniper only active when barbell is on."""
+    if sp.simple_ev_decision_enabled:
+        return {
+            "consensus_sniper_enabled": False,
+            "consensus_sniper_min_edge": None,
+            "barbell_base_min_market_yes": sp.barbell_base_min_market_yes,
+            "barbell_base_min_model_p": sp.barbell_base_min_model_p,
+            "barbell_base_max_model_vs_market_gap": sp.barbell_base_max_model_vs_market_gap,
+            "barbell_base_max_yes_price": sp.barbell_base_max_yes_price,
+            "barbell_base_max_no_price": sp.barbell_base_max_no_price,
+        }
     _on = bool(sp.barbell_enabled and sp.consensus_sniper_enabled)
     return {
         "consensus_sniper_enabled": _on,
@@ -720,6 +769,8 @@ def _strategy_recommend_strict_extras(sp: _StrategyParams) -> dict[str, Any]:
     When barbell_soften_strict_intraday: apply easy-win + consensus sniper edge floors and
     relaxed min P(win) for barbell-base-shaped lines on strict intraday / ultra-short path.
     """
+    if sp.simple_ev_decision_enabled:
+        return {}
     if not sp.barbell_soften_strict_intraday or not sp.barbell_enabled:
         return {}
     out: dict[str, Any] = {
@@ -1096,6 +1147,22 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
     ex = cfg.get("execution") or {}
     if not ex:
         return strategy
+    # Optional numeric/bool execution knobs merged into strategy for _load_strategy_params
+    _ex_float = (
+        "resting_cancel_if_market_bid_above_limit_by",
+        "position_exit_min_net_edge",
+        "limit_buy_cross_spread_min_edge",
+        "limit_buy_near_market_min_edge",
+    )
+    for k in _ex_float:
+        if ex.get(k) is not None:
+            try:
+                strategy[k] = float(ex[k])
+            except (TypeError, ValueError):
+                pass
+    for k in ("limit_buy_edge_aggression_enabled", "skip_new_buy_when_unresolved_same_side"):
+        if ex.get(k) is not None:
+            strategy[k] = bool(ex[k])
     ps = str(ex.get("price_strategy") or "").strip().lower()
     if ps == "passive":
         try:
@@ -1245,16 +1312,40 @@ def _compute_limit_price(
     order_count: int,
     max_dip_cap: float = 0.25,
     passive_quote: str = "dip",
+    net_edge: float | None = None,
+    edge_aggression_enabled: bool = False,
+    cross_spread_min_edge: float = 0.10,
+    near_market_min_edge: float = 0.05,
 ) -> tuple[float, float]:
     """
     Returns (limit_price, dip_used_proxy).
     dip_used_proxy is for logging/analysis; dynamic modes may return 0.
+    When edge_aggression_enabled and net_edge is set, quote closer to the market for large edge
+    (near bid+tick, or just inside ask) instead of only deep dip bids.
     """
     mode_norm = (mode or "fixed_pct").strip().lower()
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
         mode_norm = "fixed_pct"
 
     fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
+
+    if (
+        edge_aggression_enabled
+        and net_edge is not None
+        and float(net_edge) > 0
+        and fair_cap > 0
+    ):
+        ne = float(net_edge)
+        tick = max(1, int(tick_offset)) * 0.01
+        if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
+            aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
+            return _clip_price(aggressive), 0.0
+        if ne >= float(near_market_min_edge):
+            jump = float(bid) + tick
+            if ask is not None and ask > 0:
+                jump = min(jump, max(0.01, float(ask) - 0.01))
+            near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
+            return _clip_price(near_px), 0.0
 
     if mode_norm == "fixed_pct":
         dip = max(0.0, min(max_dip_cap, float(base_dip)))
@@ -2691,6 +2782,93 @@ def _get_effective_min_edge(
         if now_et.weekday() >= 5:  # Sat/Sun ET
             effective *= sp.weekend_edge_multiplier
     return effective
+
+
+def _simple_ev_recommend(
+    p_yes: float,
+    yes_bid: float,
+    no_bid: float | None,
+    min_edge_net: float,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+) -> str:
+    """Single-threshold BUY YES / NO / SKIP from net edge after maker fee."""
+    if yes_bid <= 0:
+        return REC_SKIP
+    nb = float(no_bid) if no_bid is not None else (1.0 - yes_bid)
+    fy = _fee_per_contract(yes_bid, maker_fee_rate, min_fee_per_order)
+    fn = _fee_per_contract(nb, maker_fee_rate, min_fee_per_order)
+    edge_yes = float(p_yes) - float(yes_bid) - fy
+    edge_no = (1.0 - float(p_yes)) - float(nb) - fn
+    req = float(min_edge_net)
+    hy = edge_yes >= req
+    hn = edge_no >= req
+    if hy and hn:
+        return REC_BUY_YES if edge_yes >= edge_no else REC_BUY_NO
+    if hy:
+        return REC_BUY_YES
+    if hn:
+        return REC_BUY_NO
+    return REC_SKIP
+
+
+def _simple_ev_spend_fraction(
+    ev_net: float,
+    price: float,
+    sp: _StrategyParams,
+) -> float:
+    """
+    Fraction of bankroll to allocate: min(cap, dampen * EV / (p*(1-p))).
+    ev_net and price are for the bought contract (YES or NO).
+    """
+    p = max(1e-6, min(1.0 - 1e-6, float(price)))
+    denom = p * (1.0 - p)
+    k_raw = float(ev_net) / denom if denom > 0 else 0.0
+    k_raw = max(0.0, k_raw)
+    return min(float(sp.simple_ev_max_bankroll_fraction), k_raw * float(sp.simple_ev_kelly_dampen))
+
+
+def _simple_ev_calibration_size_mult(calibration: dict[str, Any] | None, sp: _StrategyParams) -> float:
+    if not sp.use_calibration or not calibration:
+        return 1.0
+    resolved = int(calibration.get("resolved_count", 0) or 0)
+    wr = calibration.get("win_rate")
+    if resolved < sp.min_calibration_samples_overall or wr is None:
+        return 1.0
+    if float(wr) < float(sp.simple_ev_calibration_wr_threshold):
+        return float(sp.simple_ev_calibration_poor_size_mult)
+    return 1.0
+
+
+def _print_effective_edge_trace(
+    sp: _StrategyParams,
+    min_edge_cfg: float,
+    *,
+    simple_mode: bool,
+    em0: float | None = None,
+    effective_min_core: float | None = None,
+    effective_min_yes: float | None = None,
+    effective_min_no: float | None = None,
+) -> None:
+    if not sp.log_effective_min_edge:
+        return
+    if simple_mode:
+        print(
+            f"    ├─ Edge trace: simple_ev net_min={sp.simple_ev_min_edge:.2%} "
+            f"(single gate; no stacked penalties)"
+        )
+        return
+    if (
+        em0 is not None
+        and effective_min_core is not None
+        and effective_min_yes is not None
+        and effective_min_no is not None
+    ):
+        print(
+            f"    ├─ Edge trace: cfg_min={min_edge_cfg:.2%} "
+            f"after_calib_weekend={em0:.2%} → stacked_core={effective_min_core:.2%} "
+            f"→ req_yes={effective_min_yes:.2%} req_no={effective_min_no:.2%}"
+        )
 
 
 def _dte_edge_scale_factor(dte_days: float, sp: _StrategyParams) -> float:
@@ -4796,7 +4974,10 @@ def _show_config(args) -> int:
               "position_loser_sell_p_lose_margin", "hold_winner_to_expiry_enabled",
               "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
               "ultra_short_dte_hours", "ultra_short_min_p_win", "ultra_short_min_p_win_with_vol",
-              "ultra_short_min_edge_mult"):
+              "ultra_short_min_edge_mult",
+              "position_exit_min_net_edge", "resting_cancel_if_market_bid_above_limit_by",
+              "limit_buy_edge_aggression_enabled", "limit_buy_cross_spread_min_edge",
+              "limit_buy_near_market_min_edge", "skip_new_buy_when_unresolved_same_side"):
         v = strategy.get(k)
         if v is not None:
             print(f"  {k}: {v}")
@@ -5709,13 +5890,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             hist_p = strategy_engine.apply_bucket_penalty(
                 hist_p=hist_p,
                 calibration=calibration,
-                use_bucket_penalty=sp.use_bucket_penalty,
+                use_bucket_penalty=sp.use_bucket_penalty and not sp.simple_ev_decision_enabled,
                 use_calibration=sp.use_calibration,
                 min_bucket_samples=sp.min_bucket_samples,
             )
             if probability_calibrator:
                 hist_p = probability_calibrator(hist_p)
-            if sp.model_probability_shrinkage < 1.0:
+            if not sp.simple_ev_decision_enabled and sp.model_probability_shrinkage < 1.0:
                 hist_p = 0.5 + sp.model_probability_shrinkage * (hist_p - 0.5)
             no_bid_signal = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             yes_ask_signal = float(m.get("yes_ask_dollars") or 0) or None
@@ -5742,107 +5923,130 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
-            hist_p = apply_anti_hallucination_pipeline(
-                model_p=hist_p,
-                market_p=yes_bid,
-                closes=closes,
-                threshold=threshold,
-                direction=direction,
-                current_price=current_price,
-                momentum_ret=momentum_ret,
-                cfg=sp.ah_cfg,
-            )
+            if not sp.simple_ev_decision_enabled:
+                hist_p = apply_anti_hallucination_pipeline(
+                    model_p=hist_p,
+                    market_p=yes_bid,
+                    closes=closes,
+                    threshold=threshold,
+                    direction=direction,
+                    current_price=current_price,
+                    momentum_ret=momentum_ret,
+                    cfg=sp.ah_cfg,
+                )
             hist_p = _sanitize_model_probability(
                 hist_p,
                 lo=sp.model_prob_hard_lo,
                 hi=sp.model_prob_hard_hi,
                 enabled=sp.enable_model_prob_hard_cap,
             )
-            effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
-            emp_n = min(sp.empirical_recent_days, len(closes_for_emp)) if sp.empirical_use_rolling_window else len(closes_for_emp)
-            ci_half = _empirical_ci_halfwidth(emp, emp_n)
-            effective_min += sp.uncertainty_edge_mult * ci_half
-            effective_min *= edge_regime_mult
-            if vol_spike_active:
-                effective_min *= max(1.0, sp.vol_spike_edge_multiplier)
-            if vol_p is not None and abs(emp - vol_p) > sp.vol_disagree_threshold:
-                effective_min += sp.vol_disagree_extra_edge
-            # --- Adaptive edge: scale required edge with contract price and trend ---
-            if sp.ah_cfg.adaptive_edge_enabled:
-                effective_min = adaptive_min_edge(
-                    effective_min,
-                    yes_bid,
-                    current_price=current_price,
-                    threshold=threshold,
-                    direction=direction,
-                    momentum_ret=momentum_ret,
-                    cheap_threshold=sp.ah_cfg.adaptive_edge_cheap_threshold,
-                    expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
-                    otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
-                    trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
-                    strike_dist_mult=sp.ah_cfg.adaptive_edge_strike_dist_mult,
-                )
-            # --- Alpha engine: toxic flow penalty ---
-            if sp.ae_cfg.markout_enabled and get_markout_history:
-                _markout_hist = get_markout_history(PLATFORM_KALSHI, ticker, window_minutes=5, config=cfg)
-                _toxic_penalty = toxic_flow_edge_penalty(
-                    _markout_hist,
-                    threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
-                    min_samples=sp.ae_cfg.markout_min_samples,
-                    penalty=sp.ae_cfg.markout_edge_penalty,
-                )
-                effective_min += _toxic_penalty
-            # --- Alpha engine: OBI edge adjustment ---
-            obi_val = None
-            if sp.ae_cfg.obi_enabled:
-                _book_obi = _extract_book_fields(m, yes_bid, float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
-                obi_val = compute_obi(
-                    _book_obi.get("yes_bid_size"), _book_obi.get("yes_ask_size"),
-                    min_total_size=sp.ae_cfg.obi_min_total_size,
-                )
-                if obi_val is not None:
-                    obi_adj_yes = obi_edge_adjustment(
-                        obi_val, "BUY YES",
-                        strong_threshold=sp.ae_cfg.obi_strong_threshold,
-                        max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+            maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
+            no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
+            if sp.simple_ev_decision_enabled:
+                effective_min = float(sp.simple_ev_min_edge)
+                effective_min_yes = effective_min
+                effective_min_no = effective_min
+                obi_adj_yes = obi_adj_no = 0.0
+                obi_val = None
+                ll_adj_yes = ll_adj_no = 0.0
+                _print_effective_edge_trace(sp, min_edge, simple_mode=True)
+            else:
+                effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
+                em0_trace = effective_min
+                emp_n = min(sp.empirical_recent_days, len(closes_for_emp)) if sp.empirical_use_rolling_window else len(closes_for_emp)
+                ci_half = _empirical_ci_halfwidth(emp, emp_n)
+                effective_min += sp.uncertainty_edge_mult * ci_half
+                effective_min *= edge_regime_mult
+                if vol_spike_active:
+                    effective_min *= max(1.0, sp.vol_spike_edge_multiplier)
+                if vol_p is not None and abs(emp - vol_p) > sp.vol_disagree_threshold:
+                    effective_min += sp.vol_disagree_extra_edge
+                # --- Adaptive edge: scale required edge with contract price and trend ---
+                if sp.ah_cfg.adaptive_edge_enabled:
+                    effective_min = adaptive_min_edge(
+                        effective_min,
+                        yes_bid,
+                        current_price=current_price,
+                        threshold=threshold,
+                        direction=direction,
+                        momentum_ret=momentum_ret,
+                        cheap_threshold=sp.ah_cfg.adaptive_edge_cheap_threshold,
+                        expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
+                        otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
+                        trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
+                        strike_dist_mult=sp.ah_cfg.adaptive_edge_strike_dist_mult,
                     )
-                    obi_adj_no = obi_edge_adjustment(
-                        obi_val, "BUY NO",
-                        strong_threshold=sp.ae_cfg.obi_strong_threshold,
-                        max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                # --- Alpha engine: toxic flow penalty ---
+                if sp.ae_cfg.markout_enabled and get_markout_history:
+                    _markout_hist = get_markout_history(PLATFORM_KALSHI, ticker, window_minutes=5, config=cfg)
+                    _toxic_penalty = toxic_flow_edge_penalty(
+                        _markout_hist,
+                        threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
+                        min_samples=sp.ae_cfg.markout_min_samples,
+                        penalty=sp.ae_cfg.markout_edge_penalty,
                     )
+                    effective_min += _toxic_penalty
+                # --- Alpha engine: OBI edge adjustment ---
+                obi_val = None
+                if sp.ae_cfg.obi_enabled:
+                    _book_obi = _extract_book_fields(m, yes_bid, float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
+                    obi_val = compute_obi(
+                        _book_obi.get("yes_bid_size"), _book_obi.get("yes_ask_size"),
+                        min_total_size=sp.ae_cfg.obi_min_total_size,
+                    )
+                    if obi_val is not None:
+                        obi_adj_yes = obi_edge_adjustment(
+                            obi_val, "BUY YES",
+                            strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                            max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                        )
+                        obi_adj_no = obi_edge_adjustment(
+                            obi_val, "BUY NO",
+                            strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                            max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                        )
+                    else:
+                        obi_adj_yes = obi_adj_no = 0.0
                 else:
                     obi_adj_yes = obi_adj_no = 0.0
-            else:
-                obi_adj_yes = obi_adj_no = 0.0
-            # --- Alpha engine: lead-lag edge adjustment ---
-            ll_adj_yes = ll_adj_no = 0.0
-            if sp.ae_cfg.lead_lag_enabled:
-                for _ll_prefix, _ll_sig in lead_lag_signals.items():
-                    if ticker.startswith(_ll_prefix):
-                        ll_adj_yes = lead_lag_edge_adjustment(
-                            _ll_sig, direction, "BUY YES",
-                            edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
-                        )
-                        ll_adj_no = lead_lag_edge_adjustment(
-                            _ll_sig, direction, "BUY NO",
-                            edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
-                        )
-                        break
-            # --- Adaptive learning: bump edge from recent performance & loss streaks ---
-            if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
-                effective_min += adaptive_edge_bump
-            if sp.adaptive_learning_enabled and series_performance:
-                _series_prefix = ticker.split("-")[0] if ticker else ""
-                _sp_info = series_performance.get(_series_prefix)
-                if _sp_info and _sp_info.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
-                    effective_min += sp.series_cooldown_extra_edge
-            if sp.dte_edge_scaling_enabled and dte is not None:
-                effective_min *= _dte_edge_scale_factor(float(dte), sp)
-            if _is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
-                effective_min *= float(sp.ultra_short_min_edge_mult)
-            effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
-            effective_min_no = effective_min + no_parity_penalty + obi_adj_no + ll_adj_no
+                # --- Alpha engine: lead-lag edge adjustment ---
+                ll_adj_yes = ll_adj_no = 0.0
+                if sp.ae_cfg.lead_lag_enabled:
+                    for _ll_prefix, _ll_sig in lead_lag_signals.items():
+                        if ticker.startswith(_ll_prefix):
+                            ll_adj_yes = lead_lag_edge_adjustment(
+                                _ll_sig, direction, "BUY YES",
+                                edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
+                            )
+                            ll_adj_no = lead_lag_edge_adjustment(
+                                _ll_sig, direction, "BUY NO",
+                                edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
+                            )
+                            break
+                # --- Adaptive learning: bump edge from recent performance & loss streaks ---
+                if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
+                    effective_min += adaptive_edge_bump
+                if sp.adaptive_learning_enabled and series_performance:
+                    _series_prefix = ticker.split("-")[0] if ticker else ""
+                    _sp_info = series_performance.get(_series_prefix)
+                    if _sp_info and _sp_info.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
+                        effective_min += sp.series_cooldown_extra_edge
+                if sp.dte_edge_scaling_enabled and dte is not None:
+                    effective_min *= _dte_edge_scale_factor(float(dte), sp)
+                if _is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                    effective_min *= float(sp.ultra_short_min_edge_mult)
+                effective_min_core_trace = effective_min
+                effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
+                effective_min_no = effective_min + no_parity_penalty + obi_adj_no + ll_adj_no
+                _print_effective_edge_trace(
+                    sp,
+                    min_edge,
+                    simple_mode=False,
+                    em0=em0_trace,
+                    effective_min_core=effective_min_core_trace,
+                    effective_min_yes=effective_min_yes,
+                    effective_min_no=effective_min_no,
+                )
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
             if _is_ultra_short_horizon(m, yf_ticker, sp):
@@ -5852,8 +6056,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     else sp.ultra_short_min_p_win
                 )
                 min_p_win = max(min_p_win, _up)
-            maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
-            no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             cross_sanity_block_side = None
             cross_sanity_reason = ""
             if sp.enable_cross_exchange_sanity_gate and yf_ticker in GEMINI_CRYPTO_YF:
@@ -5879,33 +6081,43 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             )
                 except Exception:
                     pass
-            rec = (
-                strategy_engine.recommend_strict(
-                    p_yes=hist_p,
-                    market_yes=yes_bid,
-                    min_p_win=min_p_win,
-                    min_edge=effective_min,
-                    maker_fee_rate=maker_fee_rate,
-                    min_fee_per_order=sp.min_fee_per_order,
-                    min_edge_yes=effective_min_yes,
-                    min_edge_no=effective_min_no,
-                    **_strategy_recommend_strict_extras(sp),
+            if sp.simple_ev_decision_enabled:
+                rec = _simple_ev_recommend(
+                    hist_p,
+                    yes_bid,
+                    no_bid_early,
+                    float(sp.simple_ev_min_edge),
+                    maker_fee_rate,
+                    sp.min_fee_per_order,
                 )
-                if _strict_intraday_evaluation(m, yf_ticker, sp)
-                else strategy_engine.recommend(
-                    p_yes=hist_p,
-                    market_yes=yes_bid,
-                    min_edge=effective_min,
-                    maker_fee_rate=maker_fee_rate,
-                    min_fee_per_order=sp.min_fee_per_order,
-                    min_edge_yes=effective_min_yes,
-                    min_edge_no=effective_min_no,
-                    min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
-                    easy_win_min_p_win=sp.easy_win_min_p_win,
-                    easy_win_min_market_p=sp.easy_win_min_market_p,
-                    **_strategy_recommend_extras(sp),
+            else:
+                rec = (
+                    strategy_engine.recommend_strict(
+                        p_yes=hist_p,
+                        market_yes=yes_bid,
+                        min_p_win=min_p_win,
+                        min_edge=effective_min,
+                        maker_fee_rate=maker_fee_rate,
+                        min_fee_per_order=sp.min_fee_per_order,
+                        min_edge_yes=effective_min_yes,
+                        min_edge_no=effective_min_no,
+                        **_strategy_recommend_strict_extras(sp),
+                    )
+                    if _strict_intraday_evaluation(m, yf_ticker, sp)
+                    else strategy_engine.recommend(
+                        p_yes=hist_p,
+                        market_yes=yes_bid,
+                        min_edge=effective_min,
+                        maker_fee_rate=maker_fee_rate,
+                        min_fee_per_order=sp.min_fee_per_order,
+                        min_edge_yes=effective_min_yes,
+                        min_edge_no=effective_min_no,
+                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                        easy_win_min_p_win=sp.easy_win_min_p_win,
+                        easy_win_min_market_p=sp.easy_win_min_market_p,
+                        **_strategy_recommend_extras(sp),
+                    )
                 )
-            )
             if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte is not None and float(dte) > sp.max_new_buy_dte_days:
                 rec = REC_SKIP
             # Skip BUY NO when price already above strike (risky to bet NO)
@@ -5930,11 +6142,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 rec = REC_SKIP
             # Steamroller: skip expensive YES unless barbell base layer (high-P consensus up to barbell_base_max_yes_price)
             if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and yes_bid > sp.max_yes_price_for_buy:
-                if sp.barbell_enabled:
+                if sp.simple_ev_decision_enabled or not sp.barbell_enabled:
+                    rec = REC_SKIP
+                elif sp.barbell_enabled:
                     if _barbell_yes_bucket(hist_p, yes_bid, maker_fee_rate, sp) != "base":
                         rec = REC_SKIP
-                else:
-                    rec = REC_SKIP
             # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
             # DTE-aware: tighten allowed gap for short-dated contracts (price can't move far in minutes)
             # When DTE < 0.1 days (~2.4h), vol override is blocked — not enough time for large moves
@@ -5956,15 +6168,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     vol_override_no = use_vol and vol_p is not None and (1 - hist_p) >= 0.95 and not _dte_too_short
                     if not vol_override_no:
                         rec = REC_SKIP
-            if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(
-                rec, direction, hist_p, yes_bid, min_edge, calibration, sp, maker_fee_rate
+            if (
+                not sp.simple_ev_decision_enabled
+                and rec == REC_BUY_YES
+                and _should_downgrade_buy_yes_above(
+                    rec, direction, hist_p, yes_bid, min_edge, calibration, sp, maker_fee_rate
+                )
             ):
                 rec = REC_SKIP
             if rec == REC_BUY_YES and momentum_crash:
                 rec = REC_SKIP
             # --- Regime filter: block BUY YES when EMA trend opposes trade direction ---
-            if sp.ah_cfg.regime_filter_enabled and regime_filter(
-                closes, current_price, direction, rec, ema_period=sp.ah_cfg.regime_ema_period,
+            if (
+                not sp.simple_ev_decision_enabled
+                and sp.ah_cfg.regime_filter_enabled
+                and regime_filter(
+                    closes, current_price, direction, rec, ema_period=sp.ah_cfg.regime_ema_period,
+                )
             ):
                 rec = REC_SKIP
             if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
@@ -5974,7 +6194,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rec = REC_SKIP
                 elif rec == REC_BUY_NO and cross_sanity_block_side == "no":
                     rec = REC_SKIP
-            if sp.barbell_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+            if sp.barbell_enabled and not sp.simple_ev_decision_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
                 _bb = (
                     _barbell_yes_bucket(hist_p, yes_bid, maker_fee_rate, sp)
                     if rec == REC_BUY_YES
@@ -5985,6 +6205,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     barbell_blocked = True
                 else:
                     barbell_bucket = _bb
+            elif sp.simple_ev_decision_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                barbell_bucket = "simple_ev"
             diff = _compute_edge_diff(
                 yes_bid,
                 hist_p,
@@ -6078,10 +6300,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"    ├─ Alpha:        {' | '.join(_alpha_tags)}")
             print(f"    ├─ Verdict:      {rec}")
             if sp.barbell_enabled:
-                print(
-                    f"    ├─ Barbell:      "
-                    f"{_barbell_status_for_log(barbell_bucket, barbell_blocked, rec)}"
-                )
+                if sp.simple_ev_decision_enabled:
+                    print("    ├─ Barbell:      gating off (simple EV mode)")
+                else:
+                    print(
+                        f"    ├─ Barbell:      "
+                        f"{_barbell_status_for_log(barbell_bucket, barbell_blocked, rec)}"
+                    )
             print(f"    │    → {_rec_plain}")
             _print_multi_strategy_compare_line(
                 compare_strategies_arg=getattr(args, "compare_strategies", "") or "",
@@ -6093,7 +6318,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 min_fee_per_order=sp.min_fee_per_order,
                 effective_min_yes=effective_min_yes,
                 effective_min_no=effective_min_no,
-                is_strict_intraday=bool(_strict_intraday_evaluation(m, yf_ticker, sp)),
+                is_strict_intraday=bool(
+                    _strict_intraday_evaluation(m, yf_ticker, sp) and not sp.simple_ev_decision_enabled
+                ),
                 sp=sp,
             )
             _fee_yes_r = _fee_per_contract(yes_bid, maker_fee_rate, sp.min_fee_per_order)
@@ -6163,6 +6390,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 bid = yes_bid if rec == REC_BUY_YES else no_bid
                 side = "yes" if rec == REC_BUY_YES else "no"
+                if sp.skip_new_buy_when_unresolved_same_side and inventory_by_key.get(
+                    (PLATFORM_KALSHI, ticker, side), 0
+                ) > 0:
+                    print(
+                        "       Note: skip new BUY — same-side position already tracked in unresolved predictions "
+                        "(skip_new_buy_when_unresolved_same_side)"
+                    )
+                    print()
+                    continue
                 p_win = hist_p if rec == REC_BUY_YES else (1 - hist_p)
                 print(f"       Edge: {abs(diff):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
                 dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp, cap=sp.max_dip_cap)
@@ -6177,6 +6413,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 dip = _rsi_dip_adjustment(dip, rsi_val, sp.max_dip_cap)
                 book = _extract_book_fields(m, yes_bid, no_bid)
                 bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
+                if sp.simple_ev_decision_enabled and sp.simple_ev_min_bid_size > 0:
+                    _dv_ev = float(bid_size_side) if bid_size_side is not None else 0.0
+                    if _dv_ev < float(sp.simple_ev_min_bid_size):
+                        print(
+                            f"    Why: simple_ev min bid size {sp.simple_ev_min_bid_size:.0f} "
+                            f"not met ({_dv_ev:.0f} on {side.upper()})"
+                        )
+                        print()
+                        continue
                 depth_mult = 1.0
                 if sp.min_order_book_depth > 0:
                     depth_val = float(bid_size_side) if bid_size_side is not None else 0.0
@@ -6212,6 +6457,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 held_same = inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0)
                 held_opp = inventory_by_key.get((PLATFORM_KALSHI, ticker, "no" if side == "yes" else "yes"), 0)
                 ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
+                _fee_le = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
+                _net_edge_le = float(p_win) - float(bid) - _fee_le
                 price, dip_used = _compute_limit_price(
                     bid=bid,
                     ask=ask_side,
@@ -6228,15 +6475,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     order_count=inventory_by_key.get((PLATFORM_KALSHI, ticker, side), 0) + 1,
                     max_dip_cap=sp.max_dip_cap,
                     passive_quote=_effective_passive_limit_quote(sp, dte),
+                    net_edge=_net_edge_le,
+                    edge_aggression_enabled=sp.limit_buy_edge_aggression_enabled,
+                    cross_spread_min_edge=sp.limit_buy_cross_spread_min_edge,
+                    near_market_min_edge=sp.limit_buy_near_market_min_edge,
                 )
                 _bb_k = 1.0
-                if sp.barbell_enabled and barbell_bucket == "base":
+                if sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket == "base":
                     _bb_k = sp.barbell_base_kelly_mult
-                elif sp.barbell_enabled and barbell_bucket == "alpha":
+                elif sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket == "alpha":
                     _bb_k = sp.barbell_alpha_kelly_mult
                 _k0 = kelly_fraction_live * _bb_k
                 _kelly_frac_ticker = _k0
-                if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
+                if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes and not sp.simple_ev_decision_enabled:
                     _kelly_frac_ticker = vol_adjusted_kelly(
                         _k0,
                         closes,
@@ -6244,12 +6495,34 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         baseline_vol=sp.ae_cfg.vol_kelly_baseline_vol,
                         max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
                     )
-                count_base = _compute_buy_count(
-                    p_win, price, balance_cents, sp, use_kelly, _kelly_frac_ticker, min_contracts
-                )
-                liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
-                liq_mult *= depth_mult
-                liq_mult *= size_regime_mult
+                if sp.simple_ev_decision_enabled:
+                    _fee_s = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
+                    _ev_n = (hist_p - bid - _fee_s) if rec == REC_BUY_YES else ((1.0 - hist_p) - bid - _fee_s)
+                    _sf = _simple_ev_spend_fraction(_ev_n, bid, sp)
+                    _sf *= _simple_ev_calibration_size_mult(calibration, sp)
+                    if vol_p is not None and abs(float(emp) - float(vol_p)) > float(
+                        sp.simple_ev_emp_vol_disagree_threshold
+                    ):
+                        _sf *= float(sp.simple_ev_disagree_size_mult)
+                    _spr_f = 0.0
+                    if ask_side is not None and bid > 0 and float(ask_side) >= bid:
+                        _spr_f = (float(ask_side) - bid) / bid
+                    if _spr_f > float(sp.simple_ev_spread_wide_fraction):
+                        _sf *= float(sp.simple_ev_spread_wide_size_mult)
+                    _cost_c = max(bid * 100.0, 1.0)
+                    count_base = int(balance_cents * _sf / _cost_c)
+                    count_base = max(min_contracts, count_base) if count_base > 0 else 0
+                    liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                    liq_mult = 1.0
+                    liq_mult *= depth_mult
+                    liq_mult *= size_regime_mult
+                else:
+                    count_base = _compute_buy_count(
+                        p_win, price, balance_cents, sp, use_kelly, _kelly_frac_ticker, min_contracts
+                    )
+                    liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                    liq_mult *= depth_mult
+                    liq_mult *= size_regime_mult
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                 _bdv_k: float | None = None
                 if bid_size_side is not None:
@@ -6501,13 +6774,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 hist_p_gem = strategy_engine.apply_bucket_penalty(
                     hist_p=hist_p_gem,
                     calibration=calibration,
-                    use_bucket_penalty=sp.use_bucket_penalty,
+                    use_bucket_penalty=sp.use_bucket_penalty and not sp.simple_ev_decision_enabled,
                     use_calibration=sp.use_calibration,
                     min_bucket_samples=sp.min_bucket_samples,
                 )
                 if probability_calibrator:
                     hist_p_gem = probability_calibrator(hist_p_gem)
-                if sp.model_probability_shrinkage < 1.0:
+                if not sp.simple_ev_decision_enabled and sp.model_probability_shrinkage < 1.0:
                     hist_p_gem = 0.5 + sp.model_probability_shrinkage * (hist_p_gem - 0.5)
                 yes_ask_sig_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
                 spread_bps_sig_g = None
@@ -6533,90 +6806,112 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 # --- Anti-hallucination pipeline (Gemini) ---
                 hist_p_gem_raw = hist_p_gem
-                hist_p_gem = apply_anti_hallucination_pipeline(
-                    model_p=hist_p_gem,
-                    market_p=impl,
-                    closes=closes,
-                    threshold=threshold_g,
-                    direction=direction_g,
-                    current_price=current_price,
-                    momentum_ret=momentum_ret,
-                    cfg=sp.ah_cfg,
-                )
+                if not sp.simple_ev_decision_enabled:
+                    hist_p_gem = apply_anti_hallucination_pipeline(
+                        model_p=hist_p_gem,
+                        market_p=impl,
+                        closes=closes,
+                        threshold=threshold_g,
+                        direction=direction_g,
+                        current_price=current_price,
+                        momentum_ret=momentum_ret,
+                        cfg=sp.ah_cfg,
+                    )
                 hist_p_gem = _sanitize_model_probability(
                     hist_p_gem,
                     lo=sp.model_prob_hard_lo,
                     hi=sp.model_prob_hard_hi,
                     enabled=sp.enable_model_prob_hard_cap,
                 )
-                effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
-                emp_n_g = min(sp.empirical_recent_days, len(closes_for_emp_g)) if sp.empirical_use_rolling_window else len(closes_for_emp_g)
-                effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, emp_n_g)
-                effective_min_gem *= edge_regime_mult
-                if vol_spike_active:
-                    effective_min_gem *= max(1.0, sp.vol_spike_edge_multiplier)
-                if vol_p_gem is not None and abs(emp - vol_p_gem) > sp.vol_disagree_threshold:
-                    effective_min_gem += sp.vol_disagree_extra_edge
-                # --- Adaptive edge (Gemini) ---
-                if sp.ah_cfg.adaptive_edge_enabled:
-                    effective_min_gem = adaptive_min_edge(
-                        effective_min_gem,
-                        impl,
-                        current_price=current_price,
-                        threshold=threshold_g,
-                        direction=direction_g,
-                        momentum_ret=momentum_ret,
-                        cheap_threshold=sp.ah_cfg.adaptive_edge_cheap_threshold,
-                        expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
-                        otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
-                        trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
-                        strike_dist_mult=sp.ah_cfg.adaptive_edge_strike_dist_mult,
-                    )
-                # --- Alpha engine: toxic flow penalty (Gemini) ---
-                if sp.ae_cfg.markout_enabled and get_markout_history:
-                    _markout_hist_g = get_markout_history(PLATFORM_GEMINI, evt.get("ticker", "?"), window_minutes=5, config=cfg)
-                    _toxic_penalty_g = toxic_flow_edge_penalty(
-                        _markout_hist_g,
-                        threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
-                        min_samples=sp.ae_cfg.markout_min_samples,
-                        penalty=sp.ae_cfg.markout_edge_penalty,
-                    )
-                    effective_min_gem += _toxic_penalty_g
-                # --- Alpha engine: OBI edge adjustment (Gemini) ---
-                obi_val_g = None
-                obi_adj_yes_g = obi_adj_no_g = 0.0
-                if sp.ae_cfg.obi_enabled:
-                    _market_for_obi_g = contract if isinstance(contract, dict) else evt
-                    _book_obi_g = _extract_book_fields(_market_for_obi_g or {}, impl, 1.0 - impl)
-                    obi_val_g = compute_obi(
-                        _book_obi_g.get("yes_bid_size"), _book_obi_g.get("yes_ask_size"),
-                        min_total_size=sp.ae_cfg.obi_min_total_size,
-                    )
-                    if obi_val_g is not None:
-                        obi_adj_yes_g = obi_edge_adjustment(
-                            obi_val_g, "BUY YES",
-                            strong_threshold=sp.ae_cfg.obi_strong_threshold,
-                            max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
+                no_bid_gem_early = max(1e-6, min(0.99, 1.0 - float(impl)))
+                if sp.simple_ev_decision_enabled:
+                    effective_min_gem = float(sp.simple_ev_min_edge)
+                    effective_min_yes_g = effective_min_gem
+                    effective_min_no_g = effective_min_gem
+                    obi_adj_yes_g = obi_adj_no_g = 0.0
+                    obi_val_g = None
+                    _print_effective_edge_trace(sp, min_edge, simple_mode=True)
+                else:
+                    effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
+                    em0_trace_g = effective_min_gem
+                    emp_n_g = min(sp.empirical_recent_days, len(closes_for_emp_g)) if sp.empirical_use_rolling_window else len(closes_for_emp_g)
+                    effective_min_gem += sp.uncertainty_edge_mult * _empirical_ci_halfwidth(emp, emp_n_g)
+                    effective_min_gem *= edge_regime_mult
+                    if vol_spike_active:
+                        effective_min_gem *= max(1.0, sp.vol_spike_edge_multiplier)
+                    if vol_p_gem is not None and abs(emp - vol_p_gem) > sp.vol_disagree_threshold:
+                        effective_min_gem += sp.vol_disagree_extra_edge
+                    # --- Adaptive edge (Gemini) ---
+                    if sp.ah_cfg.adaptive_edge_enabled:
+                        effective_min_gem = adaptive_min_edge(
+                            effective_min_gem,
+                            impl,
+                            current_price=current_price,
+                            threshold=threshold_g,
+                            direction=direction_g,
+                            momentum_ret=momentum_ret,
+                            cheap_threshold=sp.ah_cfg.adaptive_edge_cheap_threshold,
+                            expensive_threshold=sp.ah_cfg.adaptive_edge_expensive_threshold,
+                            otm_base_mult=sp.ah_cfg.adaptive_edge_otm_base_mult,
+                            trend_opposed_mult=sp.ah_cfg.adaptive_edge_trend_opposed_mult,
+                            strike_dist_mult=sp.ah_cfg.adaptive_edge_strike_dist_mult,
                         )
-                        obi_adj_no_g = obi_edge_adjustment(
-                            obi_val_g, "BUY NO",
-                            strong_threshold=sp.ae_cfg.obi_strong_threshold,
-                            max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                    # --- Alpha engine: toxic flow penalty (Gemini) ---
+                    if sp.ae_cfg.markout_enabled and get_markout_history:
+                        _markout_hist_g = get_markout_history(PLATFORM_GEMINI, evt.get("ticker", "?"), window_minutes=5, config=cfg)
+                        _toxic_penalty_g = toxic_flow_edge_penalty(
+                            _markout_hist_g,
+                            threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
+                            min_samples=sp.ae_cfg.markout_min_samples,
+                            penalty=sp.ae_cfg.markout_edge_penalty,
                         )
-                # --- Adaptive learning: bump edge from recent performance & loss streaks (Gemini) ---
-                if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
-                    effective_min_gem += adaptive_edge_bump
-                if sp.adaptive_learning_enabled and series_performance:
-                    _series_prefix_g = (evt.get("ticker") or "").split("-")[0] if evt else ""
-                    _sp_info_g = series_performance.get(_series_prefix_g)
-                    if _sp_info_g and _sp_info_g.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
-                        effective_min_gem += sp.series_cooldown_extra_edge
-                if sp.dte_edge_scaling_enabled and dte_g is not None:
-                    effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
-                if _is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
-                    effective_min_gem *= float(sp.ultra_short_min_edge_mult)
-                effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
-                effective_min_no_g = effective_min_gem + no_parity_penalty + obi_adj_no_g
+                        effective_min_gem += _toxic_penalty_g
+                    # --- Alpha engine: OBI edge adjustment (Gemini) ---
+                    obi_val_g = None
+                    obi_adj_yes_g = obi_adj_no_g = 0.0
+                    if sp.ae_cfg.obi_enabled:
+                        _market_for_obi_g = contract if isinstance(contract, dict) else evt
+                        _book_obi_g = _extract_book_fields(_market_for_obi_g or {}, impl, 1.0 - impl)
+                        obi_val_g = compute_obi(
+                            _book_obi_g.get("yes_bid_size"), _book_obi_g.get("yes_ask_size"),
+                            min_total_size=sp.ae_cfg.obi_min_total_size,
+                        )
+                        if obi_val_g is not None:
+                            obi_adj_yes_g = obi_edge_adjustment(
+                                obi_val_g, "BUY YES",
+                                strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                                max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                            )
+                            obi_adj_no_g = obi_edge_adjustment(
+                                obi_val_g, "BUY NO",
+                                strong_threshold=sp.ae_cfg.obi_strong_threshold,
+                                max_bonus=sp.ae_cfg.obi_edge_bonus_max,
+                            )
+                    # --- Adaptive learning: bump edge from recent performance & loss streaks (Gemini) ---
+                    if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
+                        effective_min_gem += adaptive_edge_bump
+                    if sp.adaptive_learning_enabled and series_performance:
+                        _series_prefix_g = (evt.get("ticker") or "").split("-")[0] if evt else ""
+                        _sp_info_g = series_performance.get(_series_prefix_g)
+                        if _sp_info_g and _sp_info_g.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
+                            effective_min_gem += sp.series_cooldown_extra_edge
+                    if sp.dte_edge_scaling_enabled and dte_g is not None:
+                        effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
+                    if _is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                        effective_min_gem *= float(sp.ultra_short_min_edge_mult)
+                    effective_min_core_trace_g = effective_min_gem
+                    effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
+                    effective_min_no_g = effective_min_gem + no_parity_penalty + obi_adj_no_g
+                    _print_effective_edge_trace(
+                        sp,
+                        min_edge,
+                        simple_mode=False,
+                        em0=em0_trace_g,
+                        effective_min_core=effective_min_core_trace_g,
+                        effective_min_yes=effective_min_yes_g,
+                        effective_min_no=effective_min_no_g,
+                    )
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
                 if _is_ultra_short_horizon(evt, yf_ticker, sp):
@@ -6626,8 +6921,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         else sp.ultra_short_min_p_win
                     )
                     min_p_win_gem = max(min_p_win_gem, _ug)
-                maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
-                no_bid_gem_early = max(1e-6, min(0.99, 1.0 - float(impl)))
                 cross_sanity_block_side_g = None
                 cross_sanity_reason_g = ""
                 if sp.enable_cross_exchange_sanity_gate:
@@ -6658,33 +6951,43 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 )
                     except Exception:
                         pass
-                rec = (
-                    strategy_engine.recommend_strict(
-                        p_yes=hist_p_gem,
-                        market_yes=impl,
-                        min_p_win=min_p_win_gem,
-                        min_edge=effective_min_gem,
-                        maker_fee_rate=maker_fee_rate_gem,
-                        min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes_g,
-                        min_edge_no=effective_min_no_g,
-                        **_strategy_recommend_strict_extras(sp),
+                if sp.simple_ev_decision_enabled:
+                    rec = _simple_ev_recommend(
+                        hist_p_gem,
+                        impl,
+                        no_bid_gem_early,
+                        float(sp.simple_ev_min_edge),
+                        maker_fee_rate_gem,
+                        sp.min_fee_per_order,
                     )
-                    if _strict_intraday_evaluation(evt, yf_ticker, sp)
-                    else strategy_engine.recommend(
-                        p_yes=hist_p_gem,
-                        market_yes=impl,
-                        min_edge=effective_min_gem,
-                        maker_fee_rate=maker_fee_rate_gem,
-                        min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes_g,
-                        min_edge_no=effective_min_no_g,
-                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
-                        easy_win_min_p_win=sp.easy_win_min_p_win,
-                        easy_win_min_market_p=sp.easy_win_min_market_p,
-                        **_strategy_recommend_extras(sp),
+                else:
+                    rec = (
+                        strategy_engine.recommend_strict(
+                            p_yes=hist_p_gem,
+                            market_yes=impl,
+                            min_p_win=min_p_win_gem,
+                            min_edge=effective_min_gem,
+                            maker_fee_rate=maker_fee_rate_gem,
+                            min_fee_per_order=sp.min_fee_per_order,
+                            min_edge_yes=effective_min_yes_g,
+                            min_edge_no=effective_min_no_g,
+                            **_strategy_recommend_strict_extras(sp),
+                        )
+                        if _strict_intraday_evaluation(evt, yf_ticker, sp)
+                        else strategy_engine.recommend(
+                            p_yes=hist_p_gem,
+                            market_yes=impl,
+                            min_edge=effective_min_gem,
+                            maker_fee_rate=maker_fee_rate_gem,
+                            min_fee_per_order=sp.min_fee_per_order,
+                            min_edge_yes=effective_min_yes_g,
+                            min_edge_no=effective_min_no_g,
+                            min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                            easy_win_min_p_win=sp.easy_win_min_p_win,
+                            easy_win_min_market_p=sp.easy_win_min_market_p,
+                            **_strategy_recommend_extras(sp),
+                        )
                     )
-                )
                 if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte_g is not None and float(dte_g) > sp.max_new_buy_dte_days:
                     rec = REC_SKIP
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, sp.no_above_cushion)
@@ -6707,11 +7010,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if rec == REC_BUY_YES and impl < sp.min_yes_price:
                     rec = REC_SKIP
                 if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and impl > sp.max_yes_price_for_buy:
-                    if sp.barbell_enabled:
+                    if sp.simple_ev_decision_enabled or not sp.barbell_enabled:
+                        rec = REC_SKIP
+                    elif sp.barbell_enabled:
                         if _barbell_yes_bucket(hist_p_gem, impl, maker_fee_rate_gem, sp) != "base":
                             rec = REC_SKIP
-                    else:
-                        rec = REC_SKIP
                 # Skip BUY YES when strike is far above current (far OTM) unless vol model shows min_vol_confidence_far_otm
                 # DTE-aware: tighten allowed gap for short-dated contracts
                 # When DTE < 0.1 days (~2.4h), vol override is blocked
@@ -6734,13 +7037,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         vol_override_no_g = use_vol and vol_p_gem is not None and (1 - hist_p_gem) >= 0.95 and not _dte_too_short_g
                         if not vol_override_no_g:
                             rec = REC_SKIP
-                if rec == REC_BUY_YES and _should_downgrade_buy_yes_above(rec, direction_g, hist_p_gem, impl, min_edge, calibration, sp, maker_fee_rate_gem):
+                if (
+                    not sp.simple_ev_decision_enabled
+                    and rec == REC_BUY_YES
+                    and _should_downgrade_buy_yes_above(
+                        rec, direction_g, hist_p_gem, impl, min_edge, calibration, sp, maker_fee_rate_gem
+                    )
+                ):
                     rec = REC_SKIP
                 if rec == REC_BUY_YES and momentum_crash:
                     rec = REC_SKIP
                 # --- Regime filter (Gemini): block BUY YES when EMA trend opposes direction ---
-                if sp.ah_cfg.regime_filter_enabled and regime_filter(
-                    closes, current_price, direction_g, rec, ema_period=sp.ah_cfg.regime_ema_period,
+                if (
+                    not sp.simple_ev_decision_enabled
+                    and sp.ah_cfg.regime_filter_enabled
+                    and regime_filter(
+                        closes, current_price, direction_g, rec, ema_period=sp.ah_cfg.regime_ema_period,
+                    )
                 ):
                     rec = REC_SKIP
                 if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
@@ -6750,7 +7063,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         rec = REC_SKIP
                     elif rec == REC_BUY_NO and cross_sanity_block_side_g == "no":
                         rec = REC_SKIP
-                if sp.barbell_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                if sp.barbell_enabled and not sp.simple_ev_decision_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
                     _bbg = (
                         _barbell_yes_bucket(hist_p_gem, impl, maker_fee_rate_gem, sp)
                         if rec == REC_BUY_YES
@@ -6761,6 +7074,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         barbell_blocked_g = True
                     else:
                         barbell_bucket_g = _bbg
+                elif sp.simple_ev_decision_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                    barbell_bucket_g = "simple_ev"
                 diff_gem = _compute_edge_diff(
                     impl,
                     hist_p_gem,
@@ -6836,10 +7151,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 print(f"    ├─ Verdict:      {rec}")
                 if sp.barbell_enabled:
-                    print(
-                        f"    ├─ Barbell:      "
-                        f"{_barbell_status_for_log(barbell_bucket_g, barbell_blocked_g, rec)}"
-                    )
+                    if sp.simple_ev_decision_enabled:
+                        print("    ├─ Barbell:      gating off (simple EV mode)")
+                    else:
+                        print(
+                            f"    ├─ Barbell:      "
+                            f"{_barbell_status_for_log(barbell_bucket_g, barbell_blocked_g, rec)}"
+                        )
                 print(f"    │    → {_rec_plain_g}")
                 _print_multi_strategy_compare_line(
                     compare_strategies_arg=getattr(args, "compare_strategies", "") or "",
@@ -6851,7 +7169,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     min_fee_per_order=sp.min_fee_per_order,
                     effective_min_yes=effective_min_yes_g,
                     effective_min_no=effective_min_no_g,
-                    is_strict_intraday=bool(_strict_intraday_evaluation(evt, yf_ticker, sp)),
+                    is_strict_intraday=bool(
+                        _strict_intraday_evaluation(evt, yf_ticker, sp) and not sp.simple_ev_decision_enabled
+                    ),
                     sp=sp,
                 )
                 _reason_g = ""
@@ -6930,6 +7250,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     no_price = 1.0 - impl
                     bid = impl if rec == REC_BUY_YES else no_price
                     side = "yes" if rec == REC_BUY_YES else "no"
+                    _gt = evt.get("ticker", "?")
+                    if sp.skip_new_buy_when_unresolved_same_side and inventory_by_key.get(
+                        (PLATFORM_GEMINI, _gt, side), 0
+                    ) > 0:
+                        print(
+                            "       Note: skip new BUY — same-side position already tracked in unresolved predictions "
+                            "(skip_new_buy_when_unresolved_same_side)"
+                        )
+                        print()
+                        continue
                     p_win = hist_p_gem if rec == REC_BUY_YES else (1 - hist_p_gem)
                     print(f"       Edge: {abs(diff_gem):.1%}  |  P(win): {p_win:.1%}  |  Side: {side.upper()}  |  Cost/contract: ${bid:.2f}")
                     dip = _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp_g, cap=sp.max_dip_cap)
@@ -6945,6 +7275,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     market_for_book = contract if isinstance(contract, dict) else evt
                     book = _extract_book_fields(market_for_book or {}, impl, no_price)
                     bid_size_side = book.get("yes_bid_size") if side == "yes" else book.get("no_bid_size")
+                    if sp.simple_ev_decision_enabled and sp.simple_ev_min_bid_size > 0:
+                        _dv_ev_g = float(bid_size_side) if bid_size_side is not None else 0.0
+                        if _dv_ev_g < float(sp.simple_ev_min_bid_size):
+                            print(
+                                f"    Why: simple_ev min bid size {sp.simple_ev_min_bid_size:.0f} "
+                                f"not met ({_dv_ev_g:.0f} on {side.upper()})"
+                            )
+                            print()
+                            continue
                     depth_mult = 1.0
                     if sp.min_order_book_depth > 0:
                         depth_val = float(bid_size_side) if bid_size_side is not None else 0.0
@@ -6981,6 +7320,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         (PLATFORM_GEMINI, evt.get("ticker", "?"), "no" if side == "yes" else "yes"), 0
                     )
                     ask_side = book.get("yes_ask") if side == "yes" else book.get("no_ask")
+                    _fee_leg = _fee_per_contract(bid, maker_fee_rate_gem, sp.min_fee_per_order)
+                    _net_edge_leg = float(p_win) - float(bid) - _fee_leg
                     price, dip_used = _compute_limit_price(
                         bid=bid,
                         ask=ask_side,
@@ -6997,15 +7338,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         order_count=inventory_by_key.get((PLATFORM_GEMINI, evt.get("ticker", "?"), side), 0) + 1,
                         max_dip_cap=sp.max_dip_cap,
                         passive_quote=_effective_passive_limit_quote(sp, dte_g),
+                        net_edge=_net_edge_leg,
+                        edge_aggression_enabled=sp.limit_buy_edge_aggression_enabled,
+                        cross_spread_min_edge=sp.limit_buy_cross_spread_min_edge,
+                        near_market_min_edge=sp.limit_buy_near_market_min_edge,
                     )
                     _bb_kg = 1.0
-                    if sp.barbell_enabled and barbell_bucket_g == "base":
+                    if sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket_g == "base":
                         _bb_kg = sp.barbell_base_kelly_mult
-                    elif sp.barbell_enabled and barbell_bucket_g == "alpha":
+                    elif sp.barbell_enabled and not sp.simple_ev_decision_enabled and barbell_bucket_g == "alpha":
                         _bb_kg = sp.barbell_alpha_kelly_mult
                     _k0g = kelly_fraction_live * _bb_kg
                     _kelly_frac_gem = _k0g
-                    if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes:
+                    if sp.ae_cfg.vol_kelly_enabled and use_kelly and closes and not sp.simple_ev_decision_enabled:
                         _kelly_frac_gem = vol_adjusted_kelly(
                             _k0g,
                             closes,
@@ -7013,12 +7358,36 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             baseline_vol=sp.ae_cfg.vol_kelly_baseline_vol,
                             max_shrink=sp.ae_cfg.vol_kelly_max_shrink,
                         )
-                    count_base = _compute_buy_count(
-                        p_win, price, balance_cents, sp, use_kelly, _kelly_frac_gem, min_contracts
-                    )
-                    liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
-                    liq_mult *= depth_mult
-                    liq_mult *= size_regime_mult
+                    if sp.simple_ev_decision_enabled:
+                        _fee_sg = _fee_per_contract(bid, maker_fee_rate_gem, sp.min_fee_per_order)
+                        _ev_ng = (hist_p_gem - bid - _fee_sg) if rec == REC_BUY_YES else (
+                            (1.0 - hist_p_gem) - bid - _fee_sg
+                        )
+                        _sf_g = _simple_ev_spend_fraction(_ev_ng, bid, sp)
+                        _sf_g *= _simple_ev_calibration_size_mult(calibration, sp)
+                        if vol_p_gem is not None and abs(float(emp) - float(vol_p_gem)) > float(
+                            sp.simple_ev_emp_vol_disagree_threshold
+                        ):
+                            _sf_g *= float(sp.simple_ev_disagree_size_mult)
+                        _spr_fg = 0.0
+                        if ask_side is not None and bid > 0 and float(ask_side) >= bid:
+                            _spr_fg = (float(ask_side) - bid) / bid
+                        if _spr_fg > float(sp.simple_ev_spread_wide_fraction):
+                            _sf_g *= float(sp.simple_ev_spread_wide_size_mult)
+                        _cost_cg = max(bid * 100.0, 1.0)
+                        count_base = int(balance_cents * _sf_g / _cost_cg)
+                        count_base = max(min_contracts, count_base) if count_base > 0 else 0
+                        liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                        liq_mult = 1.0
+                        liq_mult *= depth_mult
+                        liq_mult *= size_regime_mult
+                    else:
+                        count_base = _compute_buy_count(
+                            p_win, price, balance_cents, sp, use_kelly, _kelly_frac_gem, min_contracts
+                        )
+                        liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                        liq_mult *= depth_mult
+                        liq_mult *= size_regime_mult
                     count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                     _bdv_g: float | None = None
                     if bid_size_side is not None:
@@ -7452,6 +7821,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             "rec": "STOP_LOSS",
                                         })
                                         continue
+                                    _fee_hy_pe = _fee_per_contract(yes_bid, maker_fee_pos, sp.min_fee_per_order)
+                                    _fee_hn_pe = _fee_per_contract(no_bid, maker_fee_pos, sp.min_fee_per_order)
+                                    _held_ne_pe = (
+                                        (hist_p - yes_bid - _fee_hy_pe)
+                                        if side == "yes"
+                                        else ((1.0 - hist_p) - no_bid - _fee_hn_pe)
+                                    )
+                                    if sp.position_exit_min_net_edge > 0 and _held_ne_pe < sp.position_exit_min_net_edge:
+                                        pending_sells.append({
+                                            "platform": PLATFORM_KALSHI,
+                                            "ticker": ticker,
+                                            "title": (m.get("title") or "")[:55],
+                                            "side": side,
+                                            "action": "sell",
+                                            "count": position_count,
+                                            "price": sell_price,
+                                            "rec": REC_EDGE_EXIT,
+                                        })
+                                        continue
                                     # SELL when definitely a loser
                                     p_lose = strategy_engine.compute_p_lose(
                                         hist_p=hist_p,
@@ -7681,6 +8069,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "count": position_count,
                         "price": sell_price,
                         "rec": "STOP_LOSS",
+                    })
+                    continue
+                _fee_hy_pc = _fee_per_contract(yes_bid, maker_fee_cached, sp.min_fee_per_order)
+                _fee_hn_pc = _fee_per_contract(no_bid, maker_fee_cached, sp.min_fee_per_order)
+                _held_ne_pc = (
+                    (hist_p - yes_bid - _fee_hy_pc)
+                    if side == "yes"
+                    else ((1.0 - hist_p) - no_bid - _fee_hn_pc)
+                )
+                if sp.position_exit_min_net_edge > 0 and _held_ne_pc < sp.position_exit_min_net_edge:
+                    pending_sells.append({
+                        "platform": PLATFORM_KALSHI,
+                        "ticker": ticker,
+                        "title": (m.get("title") or "")[:55],
+                        "side": side,
+                        "action": "sell",
+                        "count": position_count,
+                        "price": sell_price,
+                        "rec": REC_EDGE_EXIT,
                     })
                     continue
                 # SELL when EV of holding < net proceeds from selling at current bid
@@ -7990,6 +8397,27 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 "count": position_count,
                                 "price": sell_price,
                                 "rec": "STOP_LOSS",
+                                "instrument_symbol": sym,
+                                "gemini_evt": evt,
+                            })
+                            continue
+                        _fee_hy_pg = _fee_per_contract(impl, maker_fee_pos_g, sp.min_fee_per_order)
+                        _fee_hn_pg = _fee_per_contract(no_price_g, maker_fee_pos_g, sp.min_fee_per_order)
+                        _held_ne_pg = (
+                            (hist_p_g - impl - _fee_hy_pg)
+                            if side == "yes"
+                            else ((1.0 - hist_p_g) - no_price_g - _fee_hn_pg)
+                        )
+                        if sp.position_exit_min_net_edge > 0 and _held_ne_pg < sp.position_exit_min_net_edge:
+                            pending_sells.append({
+                                "platform": PLATFORM_GEMINI,
+                                "ticker": ticker_g,
+                                "title": title,
+                                "side": side,
+                                "action": "sell",
+                                "count": position_count,
+                                "price": sell_price,
+                                "rec": REC_EDGE_EXIT,
                                 "instrument_symbol": sym,
                                 "gemini_evt": evt,
                             })
@@ -8402,6 +8830,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             limit_order_ttl_minutes=sp.limit_order_ttl_minutes,
             passive_bid_chase_enabled=sp.passive_bid_chase_enabled,
             passive_bid_chase_refresh_minutes=sp.passive_bid_chase_refresh_minutes,
+            resting_cancel_if_market_bid_above_limit_by=sp.resting_cancel_if_market_bid_above_limit_by,
             platform_kalshi=PLATFORM_KALSHI,
             platform_gemini=PLATFORM_GEMINI,
             gemini_events_by_asset=gemini_events_by_asset,
