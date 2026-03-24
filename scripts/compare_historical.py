@@ -343,7 +343,14 @@ class _StrategyParams:
     # Book stop gates: underlying context + persistence (does not replace book trigger).
     stop_loss_spot_itm_min_pct: float
     stop_loss_book_persist_seconds: float
-    stop_loss_disable_within_hours: float
+    # Near-expiry: widen book stop + longer persistence (see stop_loss_near_expiry_hard_disable).
+    stop_loss_near_expiry_within_hours: float
+    stop_loss_near_expiry_extra_pct: float
+    stop_loss_near_expiry_persist_mult: float
+    stop_loss_near_expiry_hard_disable: bool
+    # Gradient: widen stop_loss_pct linearly with favorable (spot-strike)/strike edge.
+    stop_loss_gradient_max_extra_pct: float
+    stop_loss_gradient_per_edge: float
     weekend_edge_multiplier: float
     enable_momentum_protection: bool
     momentum_crash_threshold_pct: float
@@ -645,7 +652,19 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         stop_loss_pct=float(strategy.get("stop_loss_pct", 0.5)),
         stop_loss_spot_itm_min_pct=max(0.0, float(strategy.get("stop_loss_spot_itm_min_pct", 0.01))),
         stop_loss_book_persist_seconds=max(0.0, float(strategy.get("stop_loss_book_persist_seconds", 60.0))),
-        stop_loss_disable_within_hours=max(0.0, float(strategy.get("stop_loss_disable_within_hours", 0.0))),
+        stop_loss_near_expiry_within_hours=max(
+            0.0,
+            float(
+                strategy["stop_loss_near_expiry_within_hours"]
+                if "stop_loss_near_expiry_within_hours" in strategy
+                else strategy.get("stop_loss_disable_within_hours", 0.0)
+            ),
+        ),
+        stop_loss_near_expiry_extra_pct=max(0.0, float(strategy.get("stop_loss_near_expiry_extra_pct", 0.12))),
+        stop_loss_near_expiry_persist_mult=max(0.0, float(strategy.get("stop_loss_near_expiry_persist_mult", 2.0))),
+        stop_loss_near_expiry_hard_disable=bool(strategy.get("stop_loss_near_expiry_hard_disable", False)),
+        stop_loss_gradient_max_extra_pct=max(0.0, float(strategy.get("stop_loss_gradient_max_extra_pct", 0.25))),
+        stop_loss_gradient_per_edge=max(0.0, float(strategy.get("stop_loss_gradient_per_edge", 10.0))),
         weekend_edge_multiplier=float(strategy.get("weekend_edge_multiplier", 1.0)),
         enable_momentum_protection=bool(strategy.get("enable_momentum_protection", False)),
         momentum_crash_threshold_pct=float(strategy.get("momentum_crash_threshold_pct", -0.02)),
@@ -3580,11 +3599,39 @@ def _underlying_spot_itm_suppresses_book_stop(
     return False
 
 
-def _stop_loss_blocked_near_expiry(sp: _StrategyParams, dte_days: float | None) -> bool:
-    hlim = max(0.0, float(sp.stop_loss_disable_within_hours))
-    if hlim <= 0 or dte_days is None:
+def _favorable_spot_edge_frac(
+    spot: float | None,
+    threshold: float | None,
+    direction: str | None,
+    side: str,
+) -> float | None:
+    """
+    Continuous (spot - strike) / strike into the winning region for this side; 0 at boundary.
+    None if inputs missing.
+    """
+    if spot is None or threshold is None or direction is None:
+        return None
+    cp, th = float(spot), float(threshold)
+    if cp <= 0 or th <= 0:
+        return None
+    d = str(direction).strip().lower()
+    s = str(side).strip().lower()
+    if d == "above" and s == "yes":
+        return max(0.0, (cp - th) / th)
+    if d == "above" and s == "no":
+        return max(0.0, (th - cp) / th)
+    if d == "below" and s == "yes":
+        return max(0.0, (th - cp) / th)
+    if d == "below" and s == "no":
+        return max(0.0, (cp - th) / th)
+    return None
+
+
+def _stop_loss_near_expiry_active(sp: _StrategyParams, dte_days: float | None) -> bool:
+    win = max(0.0, float(sp.stop_loss_near_expiry_within_hours))
+    if win <= 0 or dte_days is None:
         return False
-    return float(dte_days) * 24.0 < hlim
+    return float(dte_days) * 24.0 < win
 
 
 def _clear_stop_loss_weak_state(platform: str, ticker: str, side: str, sp: _StrategyParams, cfg: dict) -> None:
@@ -3615,26 +3662,52 @@ def _should_fire_book_stop_loss(
     cfg: dict,
 ) -> bool:
     """
-    Kalshi/Gemini book stop: yes_bid/no_bid vs entry. Gated by underlying ITM distance,
-    optional hours-to-expiry cutoff, and optional SQLite-backed persistence.
+    Kalshi/Gemini book stop: bid vs entry with effective stop width = base + gradient(ITM edge)
+    and optional near-expiry extra width + longer persistence. Full veto if deep ITM
+    (stop_loss_spot_itm_min_pct) or near-expiry hard_disable.
     """
     ep = float(entry_price or 0)
     if ep <= 0:
         _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
         return False
-    csp = float(current_side_price)
-    book_weak = csp <= ep * (1.0 - float(sp.stop_loss_pct))
-    if not book_weak:
-        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
-        return False
+
     if _underlying_spot_itm_suppresses_book_stop(
         sp, spot=spot_for_itm_gate, threshold=threshold, direction=direction, side=side
     ):
         _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
         return False
-    if _stop_loss_blocked_near_expiry(sp, dte_days):
+
+    near_exp = _stop_loss_near_expiry_active(sp, dte_days)
+    if near_exp and sp.stop_loss_near_expiry_hard_disable:
         _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
         return False
+
+    edge_frac = _favorable_spot_edge_frac(spot_for_itm_gate, threshold, direction, side)
+    base_stop = float(sp.stop_loss_pct)
+    extra_grad = 0.0
+    if (
+        edge_frac is not None
+        and float(sp.stop_loss_gradient_per_edge) > 0
+        and float(sp.stop_loss_gradient_max_extra_pct) > 0
+    ):
+        extra_grad = min(
+            float(sp.stop_loss_gradient_max_extra_pct),
+            float(sp.stop_loss_gradient_per_edge) * edge_frac,
+        )
+    eff_stop = min(0.95, base_stop + extra_grad)
+    if near_exp and not sp.stop_loss_near_expiry_hard_disable:
+        eff_stop = min(0.95, eff_stop + float(sp.stop_loss_near_expiry_extra_pct))
+
+    persist = max(0.0, float(sp.stop_loss_book_persist_seconds))
+    if near_exp and not sp.stop_loss_near_expiry_hard_disable and float(sp.stop_loss_near_expiry_persist_mult) > 0:
+        persist *= float(sp.stop_loss_near_expiry_persist_mult)
+
+    csp = float(current_side_price)
+    book_weak = csp <= ep * (1.0 - eff_stop)
+    if not book_weak:
+        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
+        return False
+
     if update_stop_loss_book_weak_state is None:
         return True
     return bool(
@@ -3643,7 +3716,7 @@ def _should_fire_book_stop_loss(
             ticker=ticker,
             side=side,
             book_stop_condition=True,
-            persistence_seconds=max(0.0, float(sp.stop_loss_book_persist_seconds)),
+            persistence_seconds=persist,
             entry_anchor=ep,
             config=cfg,
         )
@@ -5686,6 +5759,9 @@ def _show_config(args) -> int:
               "position_loser_sell_p_lose_margin", "hold_winner_to_expiry_enabled",
               "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
               "stop_loss_pct", "stop_loss_spot_itm_min_pct", "stop_loss_book_persist_seconds",
+              "stop_loss_near_expiry_within_hours", "stop_loss_near_expiry_extra_pct",
+              "stop_loss_near_expiry_persist_mult", "stop_loss_near_expiry_hard_disable",
+              "stop_loss_gradient_max_extra_pct", "stop_loss_gradient_per_edge",
               "stop_loss_disable_within_hours",
               "ultra_short_dte_hours", "ultra_short_min_p_win", "ultra_short_min_p_win_with_vol",
               "ultra_short_min_edge_mult",

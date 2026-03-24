@@ -95,7 +95,11 @@ strategy:
   stop_loss_pct: 0.20
   stop_loss_spot_itm_min_pct: 0.01
   stop_loss_book_persist_seconds: 60
-  stop_loss_disable_within_hours: 0
+  stop_loss_near_expiry_extra_pct: 0.12
+  stop_loss_near_expiry_persist_mult: 2.0
+  stop_loss_near_expiry_hard_disable: false
+  stop_loss_gradient_max_extra_pct: 0.25
+  stop_loss_gradient_per_edge: 10.0
   adaptive_loss_block_max_balance_loss_pct: 0.25
   adaptive_loss_block_lookback_hours: 12.0
 

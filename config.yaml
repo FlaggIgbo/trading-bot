@@ -399,7 +399,15 @@ strategy:
   # Book stop is still triggered by Kalshi bid vs entry; these only gate *when* it may fire:
   stop_loss_spot_itm_min_pct: 0.01 # Suppress book stop if underlying is >= this % inside the winning region vs strike (0 = off)
   stop_loss_book_persist_seconds: 60 # Require weak book continuously this long (SQLite, survives cron); 0 = immediate
-  stop_loss_disable_within_hours: 0 # Skip book stop when time-to-resolution is under this many hours (0 = off)
+  # Near-expiry (hours to resolution < window): widen book stop + multiply persistence. Set hard_disable for legacy “no stops”.
+  stop_loss_near_expiry_within_hours: 0 # 0 = off; or use legacy stop_loss_disable_within_hours if this key omitted
+  stop_loss_near_expiry_extra_pct: 0.12 # Added to effective stop width when near expiry
+  stop_loss_near_expiry_persist_mult: 2.0 # Multiply persistence when near expiry
+  stop_loss_near_expiry_hard_disable: false # If true, block all book stops inside window (old behavior)
+  # Linear gradient: effective stop += min(max_extra, per_edge * favorable_spot_edge); 0 max_extra or per_edge = off
+  stop_loss_gradient_max_extra_pct: 0.25
+  stop_loss_gradient_per_edge: 10.0 # e.g. 0.6% ITM edge -> +0.06 stop width before cap
+  stop_loss_disable_within_hours: 0 # Legacy: only used when stop_loss_near_expiry_within_hours is not set in YAML
   weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
   momentum_crash_threshold_pct: -0.04 # PnL: block knives a bit earlier than -5% (still allows normal dips)
