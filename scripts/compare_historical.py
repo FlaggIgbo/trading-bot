@@ -134,10 +134,11 @@ try:
         record_resolved,
         resolve_position_evaluations,
         get_markout_history,
+        update_stop_loss_book_weak_state,
     )
 except ImportError:
     expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_limit_order_fill_rate_stats = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
-    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_unresolved_contract_sums_by_platform_yf = None
+    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_unresolved_contract_sums_by_platform_yf = update_stop_loss_book_weak_state = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
@@ -339,6 +340,10 @@ class _StrategyParams:
     vol_dynamic_n0: float
     uncertainty_edge_mult: float
     stop_loss_pct: float
+    # Book stop gates: underlying context + persistence (does not replace book trigger).
+    stop_loss_spot_itm_min_pct: float
+    stop_loss_book_persist_seconds: float
+    stop_loss_disable_within_hours: float
     weekend_edge_multiplier: float
     enable_momentum_protection: bool
     momentum_crash_threshold_pct: float
@@ -638,6 +643,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         vol_dynamic_n0=float(strategy.get("vol_dynamic_n0", 90.0)),
         uncertainty_edge_mult=float(strategy.get("uncertainty_edge_mult", 0.5)),
         stop_loss_pct=float(strategy.get("stop_loss_pct", 0.5)),
+        stop_loss_spot_itm_min_pct=max(0.0, float(strategy.get("stop_loss_spot_itm_min_pct", 0.01))),
+        stop_loss_book_persist_seconds=max(0.0, float(strategy.get("stop_loss_book_persist_seconds", 60.0))),
+        stop_loss_disable_within_hours=max(0.0, float(strategy.get("stop_loss_disable_within_hours", 0.0))),
         weekend_edge_multiplier=float(strategy.get("weekend_edge_multiplier", 1.0)),
         enable_momentum_protection=bool(strategy.get("enable_momentum_protection", False)),
         momentum_crash_threshold_pct=float(strategy.get("momentum_crash_threshold_pct", -0.02)),
@@ -3518,7 +3526,7 @@ def _hold_winner_skip_discretionary_sells(
 ) -> bool:
     """
     When enabled, skip REC_LIKELY_LOSE and rec-flip sells for deep ITM winners with short DTE.
-    Does not affect STOP_LOSS or REC_RULE_VIOLATION.
+    Does not affect REC_RULE_VIOLATION. Book STOP_LOSS uses separate ITM/persistence gates.
     """
     if not sp.hold_winner_to_expiry_enabled:
         return False
@@ -3539,6 +3547,107 @@ def _hold_winner_skip_discretionary_sells(
     if d == "below" and s == "no":
         return cp >= th * (1.0 + pct)
     return False
+
+
+def _underlying_spot_itm_suppresses_book_stop(
+    sp: _StrategyParams,
+    *,
+    spot: float | None,
+    threshold: float | None,
+    direction: str | None,
+    side: str,
+) -> bool:
+    """
+    True → do not fire book-based STOP_LOSS; spot is deep ITM for the held side vs strike.
+    Same geometry as hold_winner_to_expiry, separate threshold (stop_loss_spot_itm_min_pct).
+    """
+    pct = max(0.0, float(sp.stop_loss_spot_itm_min_pct))
+    if pct <= 0 or spot is None or threshold is None or direction is None:
+        return False
+    cp, th = float(spot), float(threshold)
+    if cp <= 0 or th <= 0:
+        return False
+    d = str(direction).strip().lower()
+    s = str(side).strip().lower()
+    if d == "above" and s == "yes":
+        return cp >= th * (1.0 + pct)
+    if d == "above" and s == "no":
+        return cp <= th * (1.0 - pct)
+    if d == "below" and s == "yes":
+        return cp <= th * (1.0 - pct)
+    if d == "below" and s == "no":
+        return cp >= th * (1.0 + pct)
+    return False
+
+
+def _stop_loss_blocked_near_expiry(sp: _StrategyParams, dte_days: float | None) -> bool:
+    hlim = max(0.0, float(sp.stop_loss_disable_within_hours))
+    if hlim <= 0 or dte_days is None:
+        return False
+    return float(dte_days) * 24.0 < hlim
+
+
+def _clear_stop_loss_weak_state(platform: str, ticker: str, side: str, sp: _StrategyParams, cfg: dict) -> None:
+    if update_stop_loss_book_weak_state is None:
+        return
+    update_stop_loss_book_weak_state(
+        platform=platform,
+        ticker=ticker,
+        side=side,
+        book_stop_condition=False,
+        persistence_seconds=max(0.0, float(sp.stop_loss_book_persist_seconds)),
+        config=cfg,
+    )
+
+
+def _should_fire_book_stop_loss(
+    sp: _StrategyParams,
+    *,
+    platform: str,
+    ticker: str,
+    side: str,
+    entry_price: float | None,
+    current_side_price: float,
+    spot_for_itm_gate: float | None,
+    threshold: float | None,
+    direction: str | None,
+    dte_days: float | None,
+    cfg: dict,
+) -> bool:
+    """
+    Kalshi/Gemini book stop: yes_bid/no_bid vs entry. Gated by underlying ITM distance,
+    optional hours-to-expiry cutoff, and optional SQLite-backed persistence.
+    """
+    ep = float(entry_price or 0)
+    if ep <= 0:
+        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
+        return False
+    csp = float(current_side_price)
+    book_weak = csp <= ep * (1.0 - float(sp.stop_loss_pct))
+    if not book_weak:
+        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
+        return False
+    if _underlying_spot_itm_suppresses_book_stop(
+        sp, spot=spot_for_itm_gate, threshold=threshold, direction=direction, side=side
+    ):
+        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
+        return False
+    if _stop_loss_blocked_near_expiry(sp, dte_days):
+        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
+        return False
+    if update_stop_loss_book_weak_state is None:
+        return True
+    return bool(
+        update_stop_loss_book_weak_state(
+            platform=platform,
+            ticker=ticker,
+            side=side,
+            book_stop_condition=True,
+            persistence_seconds=max(0.0, float(sp.stop_loss_book_persist_seconds)),
+            entry_anchor=ep,
+            config=cfg,
+        )
+    )
 
 
 def _min_hold_blocks_exit(
@@ -5576,6 +5685,8 @@ def _show_config(args) -> int:
               "dynamic_sell_threshold", "position_flip_sell_min_negative_edge",
               "position_loser_sell_p_lose_margin", "hold_winner_to_expiry_enabled",
               "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
+              "stop_loss_pct", "stop_loss_spot_itm_min_pct", "stop_loss_book_persist_seconds",
+              "stop_loss_disable_within_hours",
               "ultra_short_dte_hours", "ultra_short_min_p_win", "ultra_short_min_p_win_with_vol",
               "ultra_short_min_edge_mult",
               "ultra_short_late_minutes_threshold", "ultra_short_late_min_edge_mult",
@@ -8705,10 +8816,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             no_ask_size=book.get("no_ask_size"),
                                             config=cfg,
                                         )
-                                    # Dynamic stop-loss: cut losers before expiry if contract price moves against us.
+                                    # Dynamic stop-loss (book) + underlying ITM gate + optional persistence
                                     entry_price = latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side))
                                     current_side_price = yes_bid if side == "yes" else no_bid
-                                    if entry_price and current_side_price <= entry_price * (1 - sp.stop_loss_pct):
+                                    if _should_fire_book_stop_loss(
+                                        sp,
+                                        platform=PLATFORM_KALSHI,
+                                        ticker=str(ticker),
+                                        side=side,
+                                        entry_price=entry_price,
+                                        current_side_price=current_side_price,
+                                        spot_for_itm_gate=current_price_pos,
+                                        threshold=threshold,
+                                        direction=direction,
+                                        dte_days=dte_pos,
+                                        cfg=cfg,
+                                    ):
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
                                             "ticker": ticker,
@@ -8986,10 +9109,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                 sell_price = yes_bid if side == "yes" else no_bid
 
-                # Dynamic stop-loss: cut losers before expiry if contract price moves against us.
                 entry_price = latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side))
                 current_side_price = yes_bid if side == "yes" else no_bid
-                if entry_price and current_side_price <= entry_price * (1 - sp.stop_loss_pct):
+                if _should_fire_book_stop_loss(
+                    sp,
+                    platform=PLATFORM_KALSHI,
+                    ticker=str(ticker),
+                    side=side,
+                    entry_price=entry_price,
+                    current_side_price=current_side_price,
+                    spot_for_itm_gate=current_price_pos,
+                    threshold=threshold,
+                    direction=direction,
+                    dte_days=dte_cached,
+                    cfg=cfg,
+                ):
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
                         "ticker": ticker,
@@ -9348,7 +9482,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             )
                         entry_price_g = latest_entry_by_key.get((PLATFORM_GEMINI, ticker_g, side))
                         current_side_price_g = impl if side == "yes" else no_price_g
-                        if entry_price_g and current_side_price_g <= entry_price_g * (1 - sp.stop_loss_pct):
+                        if _should_fire_book_stop_loss(
+                            sp,
+                            platform=PLATFORM_GEMINI,
+                            ticker=str(ticker_g),
+                            side=side,
+                            entry_price=entry_price_g,
+                            current_side_price=current_side_price_g,
+                            spot_for_itm_gate=current_price_g,
+                            threshold=float(threshold_g) if threshold_g is not None else None,
+                            direction=str(direction_g) if direction_g is not None else None,
+                            dte_days=dte_g,
+                            cfg=cfg,
+                        ):
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,

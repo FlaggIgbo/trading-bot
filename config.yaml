@@ -396,6 +396,10 @@ strategy:
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
   uncertainty_edge_mult: 0.35 # Recovery can override lower; stacks with min_edge via empirical CI width
   stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
+  # Book stop is still triggered by Kalshi bid vs entry; these only gate *when* it may fire:
+  stop_loss_spot_itm_min_pct: 0.01 # Suppress book stop if underlying is >= this % inside the winning region vs strike (0 = off)
+  stop_loss_book_persist_seconds: 60 # Require weak book continuously this long (SQLite, survives cron); 0 = immediate
+  stop_loss_disable_within_hours: 0 # Skip book stop when time-to-resolution is under this many hours (0 = off)
   weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
   momentum_crash_threshold_pct: -0.04 # PnL: block knives a bit earlier than -5% (still allows normal dips)

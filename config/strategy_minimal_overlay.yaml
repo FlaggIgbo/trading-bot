@@ -93,6 +93,9 @@ strategy:
   max_pct_of_book_volume: 0.25
   min_order_book_depth: 10
   stop_loss_pct: 0.20
+  stop_loss_spot_itm_min_pct: 0.01
+  stop_loss_book_persist_seconds: 60
+  stop_loss_disable_within_hours: 0
   adaptive_loss_block_max_balance_loss_pct: 0.25
   adaptive_loss_block_lookback_hours: 12.0
 

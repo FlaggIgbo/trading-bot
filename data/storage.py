@@ -208,6 +208,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_predictions_resolution_price(conn)
     _migrate_limit_orders_fill_attribution(conn)
     _migrate_markout_table(conn)
+    _migrate_stop_loss_book_state(conn)
 
 
 def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
@@ -318,6 +319,99 @@ def _migrate_limit_orders_fill_attribution(conn: sqlite3.Connection) -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
+
+def _migrate_stop_loss_book_state(conn: sqlite3.Connection) -> None:
+    """Track how long book-based stop-loss conditions have been continuously true (cross-run)."""
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stop_loss_book_weak_state (
+                platform TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                side TEXT NOT NULL,
+                first_weak_ts REAL NOT NULL,
+                entry_anchor REAL NOT NULL,
+                PRIMARY KEY (platform, ticker, side)
+            )
+            """
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE stop_loss_book_weak_state ADD COLUMN entry_anchor REAL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def update_stop_loss_book_weak_state(
+    *,
+    platform: str,
+    ticker: str,
+    side: str,
+    book_stop_condition: bool,
+    persistence_seconds: float,
+    entry_anchor: float | None = None,
+    config: dict | None = None,
+    now_ts: float | None = None,
+) -> bool:
+    """
+    Persist book stop weakness across cron invocations.
+
+    When book_stop_condition is False, clears stored state for this position.
+    When True, returns True only after weakness has persisted for >= persistence_seconds.
+    persistence_seconds <= 0: return True immediately (no persistence / legacy behavior).
+    entry_anchor: position entry price; if it changes vs stored row, the timer resets.
+    """
+    now = float(now_ts if now_ts is not None else time.time())
+    persist = float(persistence_seconds)
+    conn = _get_conn(config)
+    if not conn:
+        return bool(book_stop_condition)
+
+    plat, tk, sd = str(platform), str(ticker), str(side)
+    ep = float(entry_anchor) if entry_anchor is not None else 0.0
+    try:
+        if not book_stop_condition:
+            conn.execute(
+                "DELETE FROM stop_loss_book_weak_state WHERE platform=? AND ticker=? AND side=?",
+                (plat, tk, sd),
+            )
+            conn.commit()
+            return False
+        if persist <= 0:
+            return True
+        if ep <= 0:
+            return False
+        row = conn.execute(
+            "SELECT first_weak_ts, entry_anchor FROM stop_loss_book_weak_state WHERE platform=? AND ticker=? AND side=?",
+            (plat, tk, sd),
+        ).fetchone()
+        if row is not None:
+            prev_e = row["entry_anchor"]
+            if prev_e is None or abs(float(prev_e) - ep) > 1e-6:
+                conn.execute(
+                    "DELETE FROM stop_loss_book_weak_state WHERE platform=? AND ticker=? AND side=?",
+                    (plat, tk, sd),
+                )
+                row = None
+        if row is None:
+            conn.execute(
+                "INSERT INTO stop_loss_book_weak_state (platform, ticker, side, first_weak_ts, entry_anchor) VALUES (?,?,?,?,?)",
+                (plat, tk, sd, now, ep),
+            )
+            conn.commit()
+            return False
+        first = float(row["first_weak_ts"])
+        elapsed = max(0.0, now - first)
+        return elapsed >= persist
+    except Exception:
+        conn.rollback()
+        return bool(book_stop_condition) if persist <= 0 else False
+    finally:
+        conn.close()
 
 
 def _migrate_markout_table(conn: sqlite3.Connection) -> None:
