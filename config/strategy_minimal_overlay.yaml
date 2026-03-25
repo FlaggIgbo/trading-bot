@@ -93,6 +93,7 @@ strategy:
   max_pct_of_book_volume: 0.25
   min_order_book_depth: 10
   stop_loss_pct: 0.20
+  stop_loss_min_model_conf: 0.70
   stop_loss_spot_itm_min_pct: 0.01
   stop_loss_book_persist_seconds: 60
   stop_loss_near_expiry_extra_pct: 0.12

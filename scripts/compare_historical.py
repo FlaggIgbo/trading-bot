@@ -340,6 +340,7 @@ class _StrategyParams:
     vol_dynamic_n0: float
     uncertainty_edge_mult: float
     stop_loss_pct: float
+    stop_loss_min_model_conf: float
     # Book stop gates: underlying context + persistence (does not replace book trigger).
     stop_loss_spot_itm_min_pct: float
     stop_loss_book_persist_seconds: float
@@ -650,6 +651,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         vol_dynamic_n0=float(strategy.get("vol_dynamic_n0", 90.0)),
         uncertainty_edge_mult=float(strategy.get("uncertainty_edge_mult", 0.5)),
         stop_loss_pct=float(strategy.get("stop_loss_pct", 0.5)),
+        stop_loss_min_model_conf=float(strategy.get("stop_loss_min_model_conf", 1.0)),
         stop_loss_spot_itm_min_pct=max(0.0, float(strategy.get("stop_loss_spot_itm_min_pct", 0.01))),
         stop_loss_book_persist_seconds=max(0.0, float(strategy.get("stop_loss_book_persist_seconds", 60.0))),
         stop_loss_near_expiry_within_hours=max(
@@ -3660,23 +3662,35 @@ def _should_fire_book_stop_loss(
     direction: str | None,
     dte_days: float | None,
     cfg: dict,
+    model_conf: float | None = None,
 ) -> bool:
     """
     Kalshi/Gemini book stop: bid vs entry with effective stop width = base + gradient(ITM edge)
     and optional near-expiry extra width + longer persistence. Full veto if deep ITM
-    (stop_loss_spot_itm_min_pct) or near-expiry hard_disable.
+    (stop_loss_spot_itm_min_pct), near-expiry hard_disable, or high model confidence.
     """
     ep = float(entry_price or 0)
     if ep <= 0:
         _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
         return False
 
+    # (1) Underlying context: skip STOP_LOSS if deep ITM vs strike
     if _underlying_spot_itm_suppresses_book_stop(
         sp, spot=spot_for_itm_gate, threshold=threshold, direction=direction, side=side
     ):
         _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
         return False
 
+    # (2) Model confidence context: skip STOP_LOSS if P(win) is very high (conviction hold)
+    if (
+        model_conf is not None
+        and float(sp.stop_loss_min_model_conf) < 1.0
+        and model_conf >= float(sp.stop_loss_min_model_conf)
+    ):
+        _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
+        return False
+
+    # (3) Expiry context: skip if near-expiry hard_disable is on
     near_exp = _stop_loss_near_expiry_active(sp, dte_days)
     if near_exp and sp.stop_loss_near_expiry_hard_disable:
         _clear_stop_loss_weak_state(platform, ticker, side, sp, cfg)
@@ -5758,7 +5772,7 @@ def _show_config(args) -> int:
               "dynamic_sell_threshold", "position_flip_sell_min_negative_edge",
               "position_loser_sell_p_lose_margin", "hold_winner_to_expiry_enabled",
               "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
-              "stop_loss_pct", "stop_loss_spot_itm_min_pct", "stop_loss_book_persist_seconds",
+              "stop_loss_pct", "stop_loss_min_model_conf", "stop_loss_spot_itm_min_pct", "stop_loss_book_persist_seconds",
               "stop_loss_near_expiry_within_hours", "stop_loss_near_expiry_extra_pct",
               "stop_loss_near_expiry_persist_mult", "stop_loss_near_expiry_hard_disable",
               "stop_loss_gradient_max_extra_pct", "stop_loss_gradient_per_edge",
@@ -8895,6 +8909,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     # Dynamic stop-loss (book) + underlying ITM gate + optional persistence
                                     entry_price = latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side))
                                     current_side_price = yes_bid if side == "yes" else no_bid
+                                    _model_conf = hist_p if side == "yes" else (1.0 - hist_p)
                                     if _should_fire_book_stop_loss(
                                         sp,
                                         platform=PLATFORM_KALSHI,
@@ -8907,6 +8922,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         direction=direction,
                                         dte_days=dte_pos,
                                         cfg=cfg,
+                                        model_conf=_model_conf,
                                     ):
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -9045,6 +9061,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         side == "no"
                                         and sp.enforce_no_above_rule
                                         and _violates_no_above_rule(current_price_pos, threshold, direction, sp.no_above_cushion)
+                                        and (hist_p if side == "yes" else (1.0 - hist_p)) < sp.stop_loss_min_model_conf
                                     ):
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -9187,6 +9204,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
                 entry_price = latest_entry_by_key.get((PLATFORM_KALSHI, ticker, side))
                 current_side_price = yes_bid if side == "yes" else no_bid
+                _model_conf = hist_p if side == "yes" else (1.0 - hist_p)
                 if _should_fire_book_stop_loss(
                     sp,
                     platform=PLATFORM_KALSHI,
@@ -9199,6 +9217,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     direction=direction,
                     dte_days=dte_cached,
                     cfg=cfg,
+                    model_conf=_model_conf,
                 ):
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
@@ -9335,6 +9354,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     side == "no"
                     and sp.enforce_no_above_rule
                     and _violates_no_above_rule(current_price_pos, threshold, direction, sp.no_above_cushion)
+                    and (hist_p if side == "yes" else (1.0 - hist_p)) < sp.stop_loss_min_model_conf
                 ):
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
@@ -9558,6 +9578,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             )
                         entry_price_g = latest_entry_by_key.get((PLATFORM_GEMINI, ticker_g, side))
                         current_side_price_g = impl if side == "yes" else no_price_g
+                        _model_conf_g = hist_p_g if side == "yes" else (1.0 - hist_p_g)
                         if _should_fire_book_stop_loss(
                             sp,
                             platform=PLATFORM_GEMINI,
@@ -9570,6 +9591,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             direction=str(direction_g) if direction_g is not None else None,
                             dte_days=dte_g,
                             cfg=cfg,
+                            model_conf=_model_conf_g,
                         ):
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
@@ -9713,7 +9735,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 extra={"instrument_symbol": sym, "gemini_evt": evt},
                                 current_price=current_price_g, dte_days=dte_g,
                             )
-                        elif side == "no" and violates_g:
+                        elif side == "no" and violates_g and (hist_p_g if side == "yes" else (1.0 - hist_p_g)) < sp.stop_loss_min_model_conf:
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,
                                 "ticker": ticker_g,
