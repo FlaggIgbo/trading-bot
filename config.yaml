@@ -461,6 +461,8 @@ strategy:
   adaptive_learning_enabled: false # DISABLED for capital-starved recovery; re-enable after tuning below caps
   adaptive_edge_lookback_hours: 6.0 # Look back this many hours for recent win rate
   adaptive_edge_min_trades: 8 # Need at least this many recent trades before adjusting
+  # Win-rate shortfall must exceed this t-stat vs 50% (rough two-sided test); also skips bump if window PnL ≥ 0.
+  adaptive_edge_confidence_t_stat: 1.5
   adaptive_edge_scale_per_pct: 0.002 # Per 1% below 50% WR — gentler than 0.003 so bad patches don’t freeze the book
   adaptive_edge_max_extra: 0.06 # Cap recent-performance bump (combined with loss_streak_max_extra below → max ~10% add before series extras)
   loss_streak_threshold: 5 # After this many consecutive losses, activate circuit breaker

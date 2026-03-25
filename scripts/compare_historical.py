@@ -398,6 +398,7 @@ class _StrategyParams:
     cross_exchange_spot_move_threshold_pct: float
     enable_signal_model: bool
     signal_model_weights: dict[str, float]
+    adaptive_edge_confidence_t_stat: float
     use_sklearn_calibration: bool
     sklearn_calibration_method: str
     sklearn_calibration_min_samples: int
@@ -828,6 +829,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
         simple_ev_min_edge=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge", 0.03)))),
         simple_ev_kelly_dampen=max(0.001, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("kelly_dampen", 0.25)))),
+        adaptive_edge_confidence_t_stat=max(0.0, float(strategy.get("adaptive_edge_confidence_t_stat", 1.5))),
         simple_ev_max_bankroll_fraction=max(0.001, min(0.25, float((strategy.get("simple_ev_decision") or {}).get("max_bankroll_fraction", 0.02)))),
         simple_ev_spread_wide_fraction=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("spread_wide_fraction", 0.05)))),
         simple_ev_spread_wide_size_mult=max(0.05, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("spread_wide_size_mult", 0.5)))),
@@ -6189,7 +6191,35 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 recent_total = recent.get("total", 0)
                 recent_wr = recent.get("win_rate")
-                if recent_total >= sp.adaptive_edge_min_trades and recent_wr is not None and recent_wr < 0.5:
+
+                # Confidence check: t-stat for win rate shortfall
+                # If shortfall is small and variance is high, we might be reacting to noise.
+                significant = True
+                recent_pnl = int(recent.get("pnl_cents") or 0)
+                if recent_wr is not None and recent_wr < 0.5 and recent_total >= 5:
+                    shortfall = 0.5 - recent_wr
+                    # SE of proportion = sqrt(p*q / n)
+                    se_wr = math.sqrt(0.25 / recent_total)
+                    t_stat = shortfall / max(1e-6, se_wr)
+                    if t_stat < sp.adaptive_edge_confidence_t_stat:
+                        significant = False
+                        if adaptive_learning_enabled:
+                            print(f"[Adaptive] Win rate shortfall {shortfall:.1%} (t={t_stat:.2f}) not significant enough (<{sp.adaptive_edge_confidence_t_stat}) → skipping bump")
+                    # Low win rate can still be positive EV (larger wins). Only tighten if the window lost money.
+                    elif recent_pnl >= 0:
+                        significant = False
+                        if adaptive_learning_enabled:
+                            print(
+                                "[Adaptive] Win rate below 50% but cumulative window PnL ≥ 0 "
+                                "→ skipping bump (possible high-EV / variance; not treating as degradation)"
+                            )
+
+                if (
+                    recent_total >= sp.adaptive_edge_min_trades 
+                    and recent_wr is not None 
+                    and recent_wr < 0.5
+                    and significant
+                ):
                     shortfall = 0.5 - recent_wr
                     adaptive_edge_bump += min(
                         shortfall * 100 * sp.adaptive_edge_scale_per_pct,

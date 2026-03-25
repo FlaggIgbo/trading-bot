@@ -210,10 +210,35 @@ def _run_real(cfg: dict, start_ts: float | None, end_ts: float | None) -> dict:
     }
 
 
+def _synthetic_rec_from_strategy(snap: dict, strategy_cfg: dict) -> str | None:
+    """Recompute BUY YES/NO/SKIP from snapshot hist_p and book using threshold strategy math."""
+    try:
+        from strategies import DefaultThresholdStrategy
+
+        min_edge = float(strategy_cfg.get("min_edge", 0.10))
+        se = strategy_cfg.get("simple_ev_decision") or {}
+        if isinstance(se, dict) and bool(se.get("enabled")):
+            min_edge = float(se.get("min_edge", min_edge))
+        min_fee = float(strategy_cfg.get("min_fee_per_order", 0.01))
+        maker_fee = float(strategy_cfg.get("kalshi_maker_fee_rate", 0.0175))
+        hist_p = float(snap.get("hist_p") or 0.5)
+        yes_bid = float(snap.get("yes_bid") or 0.5)
+        return DefaultThresholdStrategy().recommend(
+            p_yes=hist_p,
+            market_yes=yes_bid,
+            min_edge=min_edge,
+            maker_fee_rate=maker_fee,
+            min_fee_per_order=min_fee,
+        )
+    except Exception:
+        return None
+
+
 def _run_synthetic(
-    cfg: dict,
-    start_ts: float | None,
-    end_ts: float | None,
+    cfg: dict | None = None,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+    re_evaluate: bool = False,
 ) -> dict:
     """Backtest from market snapshots + resolved_outcomes.
 
@@ -410,7 +435,17 @@ def _run_synthetic(
                 continue
             ro = resolved[ticker]
             yes_settled = bool(ro.get("yes_settled"))
-            rec = snap.get("rec")
+            
+            if re_evaluate:
+                rec = _synthetic_rec_from_strategy(snap, strategy_cfg)
+                if rec is None:
+                    rec = snap.get("rec")
+            else:
+                rec = snap.get("rec")
+
+            if rec not in rec_filter:
+                continue
+
             side = "yes" if rec == REC_BUY_YES else "no"
             yes_bid = float(snap.get("yes_bid") or 0)
             no_bid = float(snap.get("no_bid") or 0)
@@ -532,6 +567,11 @@ def main() -> int:
         help="Limit to last N days (0=all)",
     )
     parser.add_argument(
+        "--re-evaluate",
+        action="store_true",
+        help="Re-run strategy logic against snapshots (synthetic only)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print a single JSON object (machine-readable) to stdout; suppress human summary",
@@ -547,7 +587,7 @@ def main() -> int:
     if args.mode == "real":
         out = _run_real(cfg, start_ts, end_ts)
     else:
-        out = _run_synthetic(cfg, start_ts, end_ts)
+        out = _run_synthetic(cfg, start_ts, end_ts, re_evaluate=args.re_evaluate)
 
     if "error" in out:
         print(out["error"])

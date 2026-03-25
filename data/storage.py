@@ -2352,6 +2352,14 @@ def get_recent_performance(
         sold = sum(1 for r in rows if r["outcome"] == "sold")
         pnl = sum(int(r["pnl"]) for r in rows)
         total = len(rows)
+        avg_pnl = pnl / total if total > 0 else 0
+        
+        # Standard deviation for confidence weighting
+        std_pnl = 0.0
+        if total > 1:
+            variance = sum((int(r["pnl"]) - avg_pnl) ** 2 for r in rows) / (total - 1)
+            std_pnl = math.sqrt(variance)
+
         return {
             "total": total,
             "wins": wins,
@@ -2359,7 +2367,8 @@ def get_recent_performance(
             "sold": sold,
             "win_rate": wins / total if total > 0 else None,
             "pnl_cents": pnl,
-            "avg_pnl_cents": pnl / total if total > 0 else 0,
+            "avg_pnl_cents": avg_pnl,
+            "std_pnl_cents": std_pnl,
         }
     except Exception:
         return {"total": 0}
