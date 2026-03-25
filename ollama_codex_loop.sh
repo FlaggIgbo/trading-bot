@@ -29,6 +29,8 @@ OLLMAPATH="${OLLAMA_HOST:-http://127.0.0.1:${OLLAMA_PORT}}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5-coder:7b}"
 OLLAMA_BT_DAYS="${OLLAMA_BT_DAYS:-30}"
 OLLAMA_BT_MODE="${OLLAMA_BT_MODE:-synthetic}"
+# With baseline JSON: reject patches that worsen Sharpe or max drawdown vs pre-patch backtest (see scripts/ollama_patch_validate.py). Set 0 to disable.
+export OLLAMA_VALIDATE_REGRESSION_METRICS="${OLLAMA_VALIDATE_REGRESSION_METRICS:-1}"
 OLLAMA_AUTO_PUSH="${OLLAMA_AUTO_PUSH:-0}"
 # Commit docs/ollama_runs.html, series_leaderboard.html, journal after each refresh — not only when Ollama ships a code patch
 OLLAMA_AUTO_COMMIT_DOCS="${OLLAMA_AUTO_COMMIT_DOCS:-1}"

@@ -1,0 +1,26 @@
+# Syntax check + confirm ollama_codex_loop.sh exports OLLAMA_VALIDATE_REGRESSION_METRICS=1 by default.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: py_compile key scripts
+        run: |
+          python -m py_compile \
+            scripts/ollama_patch_validate.py \
+            scripts/backtest.py \
+            scripts/compare_historical.py
+      - name: Ollama loop exports regression metric gate by default
+        run: grep -q '^export OLLAMA_VALIDATE_REGRESSION_METRICS=' ollama_codex_loop.sh && grep -q 'OLLAMA_VALIDATE_REGRESSION_METRICS:-1' ollama_codex_loop.sh

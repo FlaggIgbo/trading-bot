@@ -412,6 +412,7 @@ The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metr
 | `BLACKLIST_EXTRA_FILE` | `~/…/series_blacklist_auto.txt` | Output path; must match `strategy.blacklist_extra_file` in config. |
 | `OLLAMA_AUTO_BLACKLIST_HOURS` / `MIN_TRADES` / `MAX_WR` | `168` / `20` / `0.25` | Thresholds for the auto-blacklist writer. |
 | `OLLAMA_MAX_PATCH_ATTEMPTS` | `3` | Per tick: regenerate Ollama diff and retry after apply/validate failure (reverts between tries). |
+| `OLLAMA_VALIDATE_REGRESSION_METRICS` | `1` (**exported** by `ollama_codex_loop.sh`) | If `1`/`true`/`yes` and a baseline JSON is used, **`ollama_patch_validate.py`** rejects patches with worse **Sharpe** or **max_drawdown_cents** vs baseline. Set `0` to disable. Tolerances: **`OLLAMA_SHARPE_TOLERANCE`** (default `0.05`), **`OLLAMA_MAX_DD_TOLERANCE_CENTS`** (default `0`). |
 
 Stronger coding models (if your machine can handle them): `ollama pull phi4` or `ollama pull mistral-small`, then `OLLAMA_MODEL=phi4 ./ollama_codex_loop.sh`.
 
