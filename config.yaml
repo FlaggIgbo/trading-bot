@@ -21,7 +21,7 @@ markets:
   - KXHYPE15M
   # Commodities & Nasdaq-100 (Kalshi series → Yahoo underlyings below)
   - KXWTI # WTI crude — https://kalshi.com/markets/kxwti/wti-oil-election-day
-  - KXBRENTD # Brent oil daily — https://kalshi.com/markets/kxbrentd/brent-oil-daily
+  # KXBRENTD — disabled (strategy.blacklist): Kalshi settlement source ≠ yfinance BZ=F; https://kalshi.com/markets/kxbrentd
   - KXBRENTW # Brent oil weekly — https://kalshi.com/markets/kxbrentw/brent-oil
   - KXNASDAQ100U # Nasdaq-100 above/below — https://kalshi.com/markets/kxnasdaq100u/nasdaq-abovebelow
   - KXSILVERD # Silver daily — https://kalshi.com/markets/kxsilverd/silver-daily
@@ -49,8 +49,7 @@ yfinance_tickers:
   # Hyperliquid — Yahoo listing (see https://finance.yahoo.com/quote/HYPE32196-USD/)
   KXHYPE15M: "HYPE32196-USD"
   KXWTI: "CL=F" # WTI crude (NYMEX continuous) — https://finance.yahoo.com/quote/CL=F/
-  KXBRENTD: "BZ=F" # Brent crude (ICE continuous) — same Yahoo as Gemini BRENT*; https://finance.yahoo.com/quote/BZ=F/
-  KXBRENTW: "BZ=F" # Brent weekly — same underlying as KXBRENTD / Gemini Brent commodities
+  KXBRENTW: "BZ=F" # Brent weekly — Yahoo ICE continuous; daily series KXBRENTD disabled (Kalshi vs yfinance mismatch)
   KXNASDAQ100U: "^NDX" # NASDAQ-100 — https://finance.yahoo.com/quote/%5ENDX/
   KXSILVERD: "SI=F" # Silver daily — same COMEX continuous as weekly; https://finance.yahoo.com/quote/SI=F/
   KXSILVERW: "SI=F" # Silver futures — https://finance.yahoo.com/quote/SI=F/
@@ -556,7 +555,7 @@ strategy:
   blacklist_extra_file: ~/.trading-bot-data/series_blacklist_auto.txt
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
   # Excluded from evaluation (new buys) even if listed under markets: or MARKETS= env
-  blacklist: ["KXAAAGASW"] # US gas weekly — off until RBOB/AAA proxy is acceptable
+  blacklist: ["KXAAAGASW", "KXBRENTD"] # gas: RBOB/AAA proxy; Brent daily: Kalshi source ≠ yfinance BZ=F
   # blacklist: ["KXINXU"]   # Exclude these series (optional); also union blacklist_extra_file
   # strategy_engine options: vol_regime (default), default_threshold, strict_threshold (1.25× min edge — research / A/B)
 
