@@ -118,6 +118,7 @@ try:
         get_realized_pnl_stats,
         get_recent_performance,
         get_recent_performance_by_series,
+        get_recent_stop_loss_cooldowns,
         get_seconds_since_last_resolved_trade,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
@@ -137,7 +138,7 @@ try:
         update_stop_loss_book_weak_state,
     )
 except ImportError:
-    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_limit_order_fill_rate_stats = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
+    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_limit_order_fill_rate_stats = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_recent_stop_loss_cooldowns = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
     get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_unresolved_contract_sums_by_platform_yf = update_stop_loss_book_weak_state = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
@@ -495,6 +496,10 @@ class _StrategyParams:
     limit_buy_near_market_min_edge: float
     # Below this net edge, skip cross/near-market aggression (passive/layered only). 0 = off.
     limit_buy_passive_only_below_edge: float
+    max_spread_pct: float
+    stop_loss_cooldown_hours: float
+    tiered_min_edge_enabled: bool
+    tiered_min_edge_bands: list[dict[str, float]]
     limit_buy_ev_tier_pricing: bool
     limit_buy_weak_bid_min_edge: float
     limit_buy_skip_below_weak_edge: bool
@@ -816,6 +821,10 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_buy_passive_only_below_edge=max(
             0.0, min(0.95, float(strategy.get("limit_buy_passive_only_below_edge", 0.0)))
         ),
+        max_spread_pct=max(0.01, min(1.0, float(strategy.get("max_spread_pct", 0.20)))),
+        stop_loss_cooldown_hours=max(0.0, float(strategy.get("stop_loss_cooldown_hours", 0.0))),
+        tiered_min_edge_enabled=bool((strategy.get("tiered_min_edge") or {}).get("enabled", False)),
+        tiered_min_edge_bands=(strategy.get("tiered_min_edge") or {}).get("bands", []),
         limit_buy_ev_tier_pricing=bool(strategy.get("limit_buy_ev_tier_pricing", True)),
         limit_buy_weak_bid_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_weak_bid_min_edge", 0.03)))),
         limit_buy_skip_below_weak_edge=bool(strategy.get("limit_buy_skip_below_weak_edge", True)),
@@ -3069,13 +3078,23 @@ def _simple_ev_recommend(
 
 
 def _simple_ev_net_min_edge_bundle(
-    sp: _StrategyParams, market_or_event: dict | str, yf_ticker: str
+    sp: _StrategyParams, market_or_event: dict | str, yf_ticker: str, side_price: float | None = None
 ) -> tuple[float, dict[str, Any]]:
     """
     Base simple_ev min_edge; extra × on ultra-short horizons; optional × when very close to resolution.
+    If tiered_min_edge is enabled, use price-band hurdle as base.
     Returns (effective_min, detail) for logging.
     """
     base = float(sp.simple_ev_min_edge)
+    if sp.tiered_min_edge_enabled and side_price is not None:
+        p = float(side_price)
+        for band in sp.tiered_min_edge_bands:
+            lo = float(band.get("lo", 0.0))
+            hi = float(band.get("hi", 1.0))
+            if lo <= p < hi:
+                base = float(band.get("min_edge", base))
+                break
+
     detail: dict[str, Any] = {
         "ultra_short": False,
         "horizon_mult": 1.0,
@@ -6114,6 +6133,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     sp = _load_strategy_params(strategy)
+    cooldowns = set()
+    if get_recent_stop_loss_cooldowns and sp.stop_loss_cooldown_hours > 0:
+        cooldowns = get_recent_stop_loss_cooldowns(sp.stop_loss_cooldown_hours, cfg)
     strategy_engine = _build_strategy_engine(strategy)
     print(f"[Strategy] Engine: {strategy.get('strategy_engine', 'vol_regime')}")
     if (sp.use_sklearn_calibration or sp.enable_auto_signal_weight_fit) and (
@@ -6656,6 +6678,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if yes_bid <= 0:
                 yes_bid = float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
 
+            # --- Maximum Spread Cap: Skip illiquid/toxic books ---
+            _y_ask = float(m.get("yes_ask_dollars") or 0)
+            if _y_ask > yes_bid > 0:
+                spread_pct = (_y_ask - yes_bid) / yes_bid
+                if spread_pct > sp.max_spread_pct:
+                    print(f"  {ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
+                    continue
+
             threshold, direction = _extract_strike(m)
             if threshold is None or direction is None:
                 # Skip: empirical and vol models both require a threshold (from title, API, or ticker)
@@ -6854,7 +6884,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             _eff_after_simple_bundle: float | None = None
             _proxy_edge_simple = 0.0
             if sp.simple_ev_decision_enabled:
-                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker)
+                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker, yes_bid)
                 _proxy_edge_simple = float(proxy_basis_extra_min_edge(cfg, series))
                 effective_min = float(_eff_after_simple_bundle) + _proxy_edge_simple
                 if _proxy_edge_simple > 0.0 and _us_edge_detail is not None:
@@ -7117,6 +7147,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             ):
                 rec = REC_SKIP
+
+            # --- Post-Stop Cooldown: Prevent 'revenge trading' falling knives ---
+            if rec in (REC_BUY_YES, REC_BUY_NO) and cooldowns:
+                _side_cd = "yes" if rec == REC_BUY_YES else "no"
+                if (PLATFORM_KALSHI, ticker, _side_cd) in cooldowns:
+                    print(f"  {ticker}: SKIP (cooldown: ticker/side recently hit STOP_LOSS) | {title}")
+                    rec = REC_SKIP
+
             if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
                 rec = REC_SKIP
             if rec in (REC_BUY_YES, REC_BUY_NO):
@@ -7701,6 +7739,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if g_ticker in gemini_used_in_arb:
                     continue  # Already used in ARB_INTER with Kalshi
                 impl = get_yes_price(contract) if contract else get_yes_price(_get_yes_contract(evt) or {})
+
+                # --- Maximum Spread Cap: Skip illiquid/toxic books ---
+                if contract:
+                    no_p = get_no_price(contract)
+                else:
+                    no_p = get_no_price(_get_no_contract(evt) or {})
+                if impl > 0 and no_p > 0:
+                    # For Gemini, impl is YES bid, no_p is NO bid.
+                    # Binary spread: (1 - yes_bid - no_bid). Relative spread vs mid or bid.
+                    # We'll use the same formula as Kalshi if we had both YES bid/ask.
+                    # On Gemini we have YES bid and NO bid. YES ask is ~ 1 - NO bid.
+                    _yes_ask_gem = 1.0 - no_p
+                    spread_pct = (_yes_ask_gem - impl) / impl
+                    if spread_pct > sp.max_spread_pct:
+                        print(f"  [Gemini] {g_ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
+                        continue
+
                 if _should_skip_by_resolution(evt, yf_ticker):
                     print(f"  [Gemini] {g_ticker}: SKIP (unsupported resolution — use 5pm ET) | {title}")
                     continue
@@ -7845,7 +7900,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _proxy_edge_simple_g = 0.0
                 if sp.simple_ev_decision_enabled:
                     _eff_after_simple_bundle_g, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(
-                        sp, evt, yf_ticker
+                        sp, evt, yf_ticker, impl
                     )
                     _proxy_edge_simple_g = float(proxy_basis_extra_min_edge(cfg, series))
                     effective_min_gem = float(_eff_after_simple_bundle_g) + _proxy_edge_simple_g
@@ -8090,6 +8145,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 ):
                     rec = REC_SKIP
+
+                # --- Post-Stop Cooldown: Prevent 'revenge trading' falling knives ---
+                if rec in (REC_BUY_YES, REC_BUY_NO) and cooldowns:
+                    _side_cd_g = "yes" if rec == REC_BUY_YES else "no"
+                    if (PLATFORM_GEMINI, g_ticker, _side_cd_g) in cooldowns:
+                        print(f"  [Gemini] {g_ticker}: SKIP (cooldown: ticker/side recently hit STOP_LOSS) | {title}")
+                        rec = REC_SKIP
+
                 if rec in (REC_BUY_YES, REC_BUY_NO) and defensive_mode_active:
                     rec = REC_SKIP
                 if rec in (REC_BUY_YES, REC_BUY_NO):

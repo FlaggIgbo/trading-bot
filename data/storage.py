@@ -2525,3 +2525,25 @@ def get_ewma_win_rate(
         return {"ewma_win_rate": None, "n_trades": 0}
     finally:
         conn.close()
+
+
+def get_recent_stop_loss_cooldowns(hours: float = 4.0, config: dict | None = None) -> set[tuple[str, str, str]]:
+    """
+    Get (platform, ticker, side) of trades that hit STOP_LOSS within the last N hours.
+    Used to prevent immediate re-entry into 'falling knife' markets.
+    """
+    conn = _get_conn(config)
+    if not conn:
+        return set()
+    try:
+        ts_cutoff = time.time() - (float(hours) * 3600)
+        rows = conn.execute(
+            """SELECT platform, ticker, side FROM predictions
+               WHERE outcome='sold' AND exit_reason='STOP_LOSS' AND resolved_ts > ?""",
+            (ts_cutoff,),
+        ).fetchall()
+        return {(r["platform"], r["ticker"], r["side"]) for r in rows}
+    except Exception:
+        return set()
+    finally:
+        conn.close()

@@ -133,6 +133,12 @@ def main() -> int:
         errors.append("`strategy.min_stability_duration_seconds` must be >= 0.")
     if min_order_book_depth < 0:
         errors.append("`strategy.min_order_book_depth` must be >= 0.")
+    max_spread_pct = _as_float(strategy.get("max_spread_pct"), 0.20)
+    if not (0.01 <= max_spread_pct <= 1.0):
+        errors.append("`strategy.max_spread_pct` must be in [0.01, 1.0].")
+    stop_loss_cooldown_hours = _as_float(strategy.get("stop_loss_cooldown_hours"), 0.0)
+    if stop_loss_cooldown_hours < 0:
+        errors.append("`strategy.stop_loss_cooldown_hours` must be >= 0.")
     if max_pct_of_book_volume < 0 or max_pct_of_book_volume > 1.0:
         errors.append("`strategy.max_pct_of_book_volume` must be in [0, 1] (0 disables book-% cap).")
     if near_expiry_hours is not None:

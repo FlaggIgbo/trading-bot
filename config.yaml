@@ -99,7 +99,7 @@ execution:
   limit_buy_weak_bid_min_edge: 0.03
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.25
+  limit_buy_medium_spread_fraction: 0.50
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
   limit_buy_cross_spread_min_edge: 0.10
   limit_buy_near_market_min_edge: 0.05
@@ -173,6 +173,14 @@ strategy:
     calibration_win_rate_threshold: 0.40 # Resolved WR below this (with min samples) → multiply size by calibration_poor_size_mult
     calibration_poor_size_mult: 0.7
     min_bid_size: 0 # Hard skip when visible bid size below this; 0 = use min_order_book_depth only
+  # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
+  tiered_min_edge:
+    enabled: true
+    bands:
+      - { lo: 0.00, hi: 0.15, min_edge: 0.20 } # Cheap tails: require higher edge to compensate for bid/ask friction
+      - { lo: 0.15, hi: 0.40, min_edge: 0.10 } # Standard 'sweet spot'
+      - { lo: 0.40, hi: 0.65, min_edge: 0.25 } # Coin-flip zone: high risk of churn, require extreme edge
+      - { lo: 0.65, hi: 1.00, min_edge: 0.12 } # Expensive consensus: slightly more than base
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
@@ -263,7 +271,11 @@ strategy:
   # Set back to 10–15 if you see churn or want anti-sniping from DB snapshots again.
   min_stability_duration_seconds: 0
   # PnL: depth floor (vol-scaled in compare_historical). 15 + max_pct_of_book_volume caps adverse selection vs blind 10.
-  min_order_book_depth: 15
+  min_order_book_depth: 30
+  # PnL: Skip trades where (ask - bid) / bid > this cap (prevents trading in illiquid/toxic books).
+  max_spread_pct: 0.20
+  # PnL: Don't re-enter a ticker/side for N hours after a STOP_LOSS exit (anti-revenge trading).
+  stop_loss_cooldown_hours: 4.0
   # PnL: cap each BUY clip to this fraction of visible same-side bid size (0 = off)
   max_pct_of_book_volume: 0.25
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
@@ -446,7 +458,7 @@ strategy:
   vol_distribution: student_t # Heavy-tail volatility distribution: normal or student_t
   vol_t_df: 4.5 # Stronger fat-tail penalty for extreme-fear volatility regimes
   vol_disagree_threshold: 0.30 # When |emp_p - vol_p| exceeds this, vol model is suspect — dampen blend and require extra edge
-  vol_disagree_extra_edge: 0.045 # Extra min_edge when emp vs vol disagree (recovery overrides lower)
+  vol_disagree_extra_edge: 0.06 # Extra min_edge when emp vs vol disagree (recovery overrides lower)
   vol_disagree_dampen_blend: 0.50 # Halve vol weight contribution when models strongly disagree
   # When emp and vol *both* sit very high, disagreement logic never fires — pull blend toward 50% (PnL / overconfidence)
   joint_high_confidence_enabled: true
@@ -509,7 +521,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 2.45 # Was 2.75 — slightly less “market always right” dampening on model P
+    bayesian_market_strength: 3.5 # Was 2.45 — more weight to market reality (anti-hallucination)
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
     ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
