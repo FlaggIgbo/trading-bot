@@ -5,7 +5,7 @@ Write underperforming Kalshi series prefixes to a newline-separated file for run
 compare_historical.py merges `strategy.blacklist_extra_file` into the YAML blacklist on each run.
 This avoids corrupting config.yaml with `echo >>` (YAML comments/structure preserved).
 
-  python3 scripts/apply_series_blacklist.py --hours 168 --min-trades 20 --max-win-rate 0.25 \\
+  python3 scripts/apply_series_blacklist.py --hours 168 --min-trades 40 --max-win-rate 0.20 \\
       --out ~/.trading-bot-data/series_blacklist_auto.txt --merge
 """
 from __future__ import annotations
@@ -48,8 +48,8 @@ def bad_series(
 def main() -> int:
     ap = argparse.ArgumentParser(description="Write auto-blacklist series file (merged at runtime by compare_historical).")
     ap.add_argument("--hours", type=float, default=168.0, help="Lookback hours for performance stats")
-    ap.add_argument("--min-trades", type=int, default=20)
-    ap.add_argument("--max-win-rate", type=float, default=0.25)
+    ap.add_argument("--min-trades", type=int, default=40)
+    ap.add_argument("--max-win-rate", type=float, default=0.20)
     ap.add_argument("--out", type=Path, required=True, help="Output path (newline-separated series)")
     ap.add_argument(
         "--merge",

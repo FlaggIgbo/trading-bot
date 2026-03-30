@@ -3,7 +3,7 @@
 Print YAML comment lines suggesting `strategy.blacklist` entries for weak series.
 Does not modify config automatically — review and paste into config.yaml.
 
-  python3 scripts/suggest_series_blacklist.py [--hours 336] [--min-trades 50] [--max-win-rate 0.30]
+  python3 scripts/suggest_series_blacklist.py [--hours 336] [--min-trades 80] [--max-win-rate 0.22]
 """
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ except ImportError:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=336.0)
-    ap.add_argument("--min-trades", type=int, default=50)
-    ap.add_argument("--max-win-rate", type=float, default=0.30)
+    ap.add_argument("--min-trades", type=int, default=80)
+    ap.add_argument("--max-win-rate", type=float, default=0.22)
     args = ap.parse_args()
 
     if not get_recent_performance_by_series:
