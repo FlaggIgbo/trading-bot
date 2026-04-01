@@ -82,8 +82,9 @@ from models.anti_hallucination import (
     AntiHallucinationConfig,
     adaptive_min_edge,
     apply_anti_hallucination_pipeline,
+    classify_trend_regime,
+    directional_regime_should_skip,
     load_anti_hallucination_config,
-    regime_filter,
 )
 from models.alpha_engine import (
     AlphaEngineConfig,
@@ -538,6 +539,23 @@ class _StrategyParams:
     # When True: drop BUYs whose win range is disjoint from already-kept bets (same yf+resolution+platform).
     # Default False — the disjoint rule blocked many valid multi-strike edges (e.g. INXU hourly ladder).
     filter_disjoint_underlying_buys: bool
+    empirical_multi_horizon_enabled: bool
+    empirical_horizon_short_days: int
+    empirical_horizon_medium_days: int
+    empirical_horizon_long_days: int
+    empirical_horizon_w_short: float
+    empirical_horizon_w_medium: float
+    empirical_horizon_w_long: float
+    dynamic_kill_switch_enabled: bool
+    dynamic_kill_oil_series_prefix: str
+    dynamic_kill_oil_block_buy_no_uptrend: bool
+    dynamic_kill_series_pnl_lookback_hours: float
+    dynamic_kill_pnl_cents_floor: int
+    dynamic_kill_min_trades: int
+    dynamic_kill_poor_pnl_size_mult: float
+    stop_loss_regime_persist_enabled: bool
+    stop_loss_book_persist_counter_trend_seconds: float
+    stop_loss_book_persist_trend_aligned_seconds: float
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
@@ -882,6 +900,33 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         log_effective_min_edge=bool(strategy.get("log_effective_min_edge", True)),
         log_decision_diagnostics=bool(strategy.get("log_decision_diagnostics", False)),
         filter_disjoint_underlying_buys=bool(strategy.get("filter_disjoint_underlying_buys", False)),
+        empirical_multi_horizon_enabled=bool(strategy.get("empirical_multi_horizon_enabled", False)),
+        empirical_horizon_short_days=max(5, int(strategy.get("empirical_horizon_short_days", 21))),
+        empirical_horizon_medium_days=max(5, int(strategy.get("empirical_horizon_medium_days", 90))),
+        empirical_horizon_long_days=max(5, int(strategy.get("empirical_horizon_long_days", 365))),
+        empirical_horizon_w_short=max(0.0, float(strategy.get("empirical_horizon_w_short", 0.5))),
+        empirical_horizon_w_medium=max(0.0, float(strategy.get("empirical_horizon_w_medium", 0.3))),
+        empirical_horizon_w_long=max(0.0, float(strategy.get("empirical_horizon_w_long", 0.2))),
+        dynamic_kill_switch_enabled=bool((strategy.get("dynamic_kill_switch") or {}).get("enabled", False)),
+        dynamic_kill_oil_series_prefix=str((strategy.get("dynamic_kill_switch") or {}).get("oil_series_prefix", "KXWTI")).strip(),
+        dynamic_kill_oil_block_buy_no_uptrend=bool(
+            (strategy.get("dynamic_kill_switch") or {}).get("oil_block_buy_no_uptrend", True)
+        ),
+        dynamic_kill_series_pnl_lookback_hours=max(
+            1.0, float((strategy.get("dynamic_kill_switch") or {}).get("series_pnl_lookback_hours", 168.0))
+        ),
+        dynamic_kill_pnl_cents_floor=int((strategy.get("dynamic_kill_switch") or {}).get("pnl_cents_floor", -5000)),
+        dynamic_kill_min_trades=max(1, int((strategy.get("dynamic_kill_switch") or {}).get("min_trades", 3))),
+        dynamic_kill_poor_pnl_size_mult=max(
+            0.05, min(1.0, float((strategy.get("dynamic_kill_switch") or {}).get("poor_pnl_size_mult", 0.5)))
+        ),
+        stop_loss_regime_persist_enabled=bool(strategy.get("stop_loss_regime_persist_enabled", True)),
+        stop_loss_book_persist_counter_trend_seconds=max(
+            0.0, float(strategy.get("stop_loss_book_persist_counter_trend_seconds", 45.0))
+        ),
+        stop_loss_book_persist_trend_aligned_seconds=max(
+            0.0, float(strategy.get("stop_loss_book_persist_trend_aligned_seconds", 90.0))
+        ),
         ah_cfg=load_anti_hallucination_config(strategy),
         ae_cfg=load_alpha_engine_config(strategy),
     )
@@ -2197,6 +2242,112 @@ def _empirical_probability(
         else:
             wins += w if c < threshold else 0.0
     return wins / total_w if total_w > 0 else 0.0
+
+
+def _empirical_probability_multi_horizon(
+    closes: list[float],
+    threshold: float,
+    direction: str,
+    *,
+    short_days: int,
+    medium_days: int,
+    long_days: int,
+    w_short: float,
+    w_medium: float,
+    w_long: float,
+    recent_weight: float,
+    use_rolling_window: bool,
+    weighting: str,
+    exponential_halflife_bars: int,
+) -> float:
+    """Blend empirical P from short / medium / long lookbacks (same weighting mode each)."""
+    wsum = w_short + w_medium + w_long
+    if wsum <= 0 or not closes:
+        return _empirical_probability(
+            closes,
+            threshold,
+            direction,
+            recent_days=max(short_days, 5),
+            recent_weight=recent_weight,
+            use_rolling_window=use_rolling_window,
+            weighting=weighting,
+            exponential_halflife_bars=exponential_halflife_bars,
+        )
+    n = len(closes)
+    rd_s = max(5, min(short_days, n))
+    rd_m = max(5, min(medium_days, n))
+    rd_l = max(5, min(long_days, n))
+    p_s = _empirical_probability(
+        closes,
+        threshold,
+        direction,
+        recent_days=rd_s,
+        recent_weight=recent_weight,
+        use_rolling_window=use_rolling_window,
+        weighting=weighting,
+        exponential_halflife_bars=exponential_halflife_bars,
+    )
+    p_m = _empirical_probability(
+        closes,
+        threshold,
+        direction,
+        recent_days=rd_m,
+        recent_weight=recent_weight,
+        use_rolling_window=use_rolling_window,
+        weighting=weighting,
+        exponential_halflife_bars=exponential_halflife_bars,
+    )
+    p_l = _empirical_probability(
+        closes,
+        threshold,
+        direction,
+        recent_days=rd_l,
+        recent_weight=recent_weight,
+        use_rolling_window=use_rolling_window,
+        weighting=weighting,
+        exponential_halflife_bars=exponential_halflife_bars,
+    )
+    return (w_short * p_s + w_medium * p_m + w_long * p_l) / wsum
+
+
+def _dynamic_kill_size_mult(series: str, series_pnl: dict[str, dict], sp: _StrategyParams) -> float:
+    if not sp.dynamic_kill_switch_enabled or not series_pnl:
+        return 1.0
+    key = (series or "").strip().upper()
+    perf = series_pnl.get(key)
+    if not perf:
+        return 1.0
+    if int(perf.get("total", 0) or 0) < int(sp.dynamic_kill_min_trades):
+        return 1.0
+    pnl = int(perf.get("pnl_cents", 0) or 0)
+    if pnl < int(sp.dynamic_kill_pnl_cents_floor):
+        return float(sp.dynamic_kill_poor_pnl_size_mult)
+    return 1.0
+
+
+def _effective_stop_loss_persist_seconds(
+    sp: _StrategyParams,
+    *,
+    side: str,
+    closes: list[float] | None,
+    spot: float | None,
+) -> float:
+    base = max(0.0, float(sp.stop_loss_book_persist_seconds))
+    if not sp.stop_loss_regime_persist_enabled:
+        return base
+    if not closes or spot is None or len(closes) < max(sp.ah_cfg.regime_ema_period, 5):
+        return base
+    reg = classify_trend_regime(closes, float(spot), sp.ah_cfg)
+    su = str(side).strip().lower()
+    counter = (su == "no" and reg == "up") or (su == "yes" and reg == "down")
+    aligned = (su == "yes" and reg == "up") or (su == "no" and reg == "down")
+    ct = max(0.0, float(sp.stop_loss_book_persist_counter_trend_seconds))
+    al = max(0.0, float(sp.stop_loss_book_persist_trend_aligned_seconds))
+    if counter:
+        return ct if ct > 0 else base
+    if aligned and al > 0:
+        return max(base, al)
+    return base
 
 
 def _empirical_ci_halfwidth(p_hat: float, n: int, z: float = 1.64) -> float:
@@ -3684,6 +3835,8 @@ def _should_fire_book_stop_loss(
     dte_days: float | None,
     cfg: dict,
     model_conf: float | None = None,
+    closes_for_regime: list[float] | None = None,
+    spot_for_regime: float | None = None,
 ) -> bool:
     """
     Kalshi/Gemini book stop: bid vs entry with effective stop width = base + gradient(ITM edge)
@@ -3733,7 +3886,14 @@ def _should_fire_book_stop_loss(
     if near_exp and not sp.stop_loss_near_expiry_hard_disable:
         eff_stop = min(0.95, eff_stop + float(sp.stop_loss_near_expiry_extra_pct))
 
-    persist = max(0.0, float(sp.stop_loss_book_persist_seconds))
+    persist = _effective_stop_loss_persist_seconds(
+        sp,
+        side=side,
+        closes=closes_for_regime,
+        spot=spot_for_regime if spot_for_regime is not None else spot_for_itm_gate,
+    )
+    if persist <= 0:
+        persist = max(0.0, float(sp.stop_loss_book_persist_seconds))
     if near_exp and not sp.stop_loss_near_expiry_hard_disable and float(sp.stop_loss_near_expiry_persist_mult) > 0:
         persist *= float(sp.stop_loss_near_expiry_persist_mult)
 
@@ -5788,12 +5948,17 @@ def _show_config(args) -> int:
               "dte_edge_mult_short", "dte_edge_mult_long", "max_new_buy_dte_days",
               "passive_bid_chase_enabled", "passive_bid_chase_refresh_minutes",
               "empirical_weighting", "empirical_exponential_halflife_bars",
+              "empirical_multi_horizon_enabled", "empirical_horizon_short_days",
+              "empirical_horizon_medium_days", "empirical_horizon_long_days",
+              "dynamic_kill_switch",
               "enable_model_prob_hard_cap", "model_prob_hard_lo", "model_prob_hard_hi",
               "adaptive_edge_max_extra", "loss_streak_max_extra", "force_min_buy_contracts_one",
               "dynamic_sell_threshold", "position_flip_sell_min_negative_edge",
               "position_loser_sell_p_lose_margin", "hold_winner_to_expiry_enabled",
               "hold_winner_min_spot_vs_strike_pct", "hold_winner_max_dte_days",
               "stop_loss_pct", "stop_loss_min_model_conf", "stop_loss_spot_itm_min_pct", "stop_loss_book_persist_seconds",
+              "stop_loss_regime_persist_enabled", "stop_loss_book_persist_counter_trend_seconds",
+              "stop_loss_book_persist_trend_aligned_seconds",
               "stop_loss_near_expiry_within_hours", "stop_loss_near_expiry_extra_pct",
               "stop_loss_near_expiry_persist_mult", "stop_loss_near_expiry_hard_disable",
               "stop_loss_gradient_max_extra_pct", "stop_loss_gradient_per_edge",
@@ -6373,6 +6538,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
         except Exception:
             pass
+    series_pnl_kill: dict[str, dict[str, Any]] = {}
+    if sp.dynamic_kill_switch_enabled and get_recent_performance_by_series:
+        try:
+            series_pnl_kill = (
+                get_recent_performance_by_series(
+                    lookback_hours=sp.dynamic_kill_series_pnl_lookback_hours, config=cfg
+                )
+                or {}
+            )
+        except Exception:
+            series_pnl_kill = {}
     probability_calibrator = _fit_probability_calibrator(sp, cfg)
     learned_signal_weights = _fit_signal_model_weights(sp, cfg)
     if learned_signal_weights:
@@ -6761,16 +6937,33 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
             closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
             recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
-            emp = _empirical_probability(
-                closes_for_emp,
-                threshold,
-                direction,
-                recent_days=sp.empirical_recent_days,
-                recent_weight=recent_w,
-                use_rolling_window=sp.empirical_use_rolling_window,
-                weighting=sp.empirical_weighting,
-                exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
-            )
+            if sp.empirical_multi_horizon_enabled:
+                emp = _empirical_probability_multi_horizon(
+                    closes_for_emp,
+                    threshold,
+                    direction,
+                    short_days=sp.empirical_horizon_short_days,
+                    medium_days=sp.empirical_horizon_medium_days,
+                    long_days=sp.empirical_horizon_long_days,
+                    w_short=sp.empirical_horizon_w_short,
+                    w_medium=sp.empirical_horizon_w_medium,
+                    w_long=sp.empirical_horizon_w_long,
+                    recent_weight=recent_w,
+                    use_rolling_window=sp.empirical_use_rolling_window,
+                    weighting=sp.empirical_weighting,
+                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
+                )
+            else:
+                emp = _empirical_probability(
+                    closes_for_emp,
+                    threshold,
+                    direction,
+                    recent_days=sp.empirical_recent_days,
+                    recent_weight=recent_w,
+                    use_rolling_window=sp.empirical_use_rolling_window,
+                    weighting=sp.empirical_weighting,
+                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
+                )
             hist_p = emp
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             ewma_lambda_used = _ewma_lambda_for_market(sp, m, yf_ticker)
@@ -7138,15 +7331,24 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 rec = REC_SKIP
             if rec == REC_BUY_YES and momentum_crash:
                 rec = REC_SKIP
-            # --- Regime filter: block BUY YES when EMA trend opposes trade direction ---
-            if (
-                not sp.simple_ev_decision_enabled
-                and sp.ah_cfg.regime_filter_enabled
-                and regime_filter(
-                    closes, current_price, direction, rec, ema_period=sp.ah_cfg.regime_ema_period,
+            # --- Regime + momentum gates (simple_ev and legacy; BUY NO symmetry + RSI) ---
+            if sp.ah_cfg.regime_filter_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                _skip_rg, _why_rg = directional_regime_should_skip(
+                    rec, direction, closes, current_price, sp.ah_cfg
                 )
+                if _skip_rg:
+                    print(f"  {ticker}: SKIP (regime: {_why_rg}) | {title}")
+                    rec = REC_SKIP
+            if (
+                rec == REC_BUY_NO
+                and sp.dynamic_kill_switch_enabled
+                and sp.dynamic_kill_oil_block_buy_no_uptrend
             ):
-                rec = REC_SKIP
+                _oil_pfx = sp.dynamic_kill_oil_series_prefix.strip().upper()
+                if (series or "").strip().upper().startswith(_oil_pfx):
+                    if classify_trend_regime(closes, current_price, sp.ah_cfg) == "up":
+                        print(f"  {ticker}: SKIP (oil uptrend kill-switch: no BUY NO) | {title}")
+                        rec = REC_SKIP
 
             # --- Post-Stop Cooldown: Prevent 'revenge trading' falling knives ---
             if rec in (REC_BUY_YES, REC_BUY_NO) and cooldowns:
@@ -7554,6 +7756,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _sf *= float(sp.simple_ev_spread_wide_size_mult)
                     if sp.simple_ev_edge_size_boost_edge > 0 and _ev_n >= float(sp.simple_ev_edge_size_boost_edge):
                         _sf *= float(sp.simple_ev_edge_size_boost_mult)
+                    _sf *= _dynamic_kill_size_mult(series, series_pnl_kill, sp)
                     _cost_c = max(bid * 100.0, 1.0)
                     count_base = int(balance_cents * _sf / _cost_c)
                     count_base = max(min_contracts, count_base) if count_base > 0 else 0
@@ -7786,16 +7989,33 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
                 recent_w_g = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
-                emp = _empirical_probability(
-                    closes_for_emp_g,
-                    threshold_g,
-                    direction_g,
-                    recent_days=sp.empirical_recent_days,
-                    recent_weight=recent_w_g,
-                    use_rolling_window=sp.empirical_use_rolling_window,
-                    weighting=sp.empirical_weighting,
-                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
-                )
+                if sp.empirical_multi_horizon_enabled:
+                    emp = _empirical_probability_multi_horizon(
+                        closes_for_emp_g,
+                        threshold_g,
+                        direction_g,
+                        short_days=sp.empirical_horizon_short_days,
+                        medium_days=sp.empirical_horizon_medium_days,
+                        long_days=sp.empirical_horizon_long_days,
+                        w_short=sp.empirical_horizon_w_short,
+                        w_medium=sp.empirical_horizon_w_medium,
+                        w_long=sp.empirical_horizon_w_long,
+                        recent_weight=recent_w_g,
+                        use_rolling_window=sp.empirical_use_rolling_window,
+                        weighting=sp.empirical_weighting,
+                        exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
+                    )
+                else:
+                    emp = _empirical_probability(
+                        closes_for_emp_g,
+                        threshold_g,
+                        direction_g,
+                        recent_days=sp.empirical_recent_days,
+                        recent_weight=recent_w_g,
+                        use_rolling_window=sp.empirical_use_rolling_window,
+                        weighting=sp.empirical_weighting,
+                        exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
+                    )
                 dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
                 ewma_lambda_used_g = _ewma_lambda_for_market(sp, evt, yf_ticker)
                 vol_p_gem = (
@@ -8136,15 +8356,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rec = REC_SKIP
                 if rec == REC_BUY_YES and momentum_crash:
                     rec = REC_SKIP
-                # --- Regime filter (Gemini): block BUY YES when EMA trend opposes direction ---
-                if (
-                    not sp.simple_ev_decision_enabled
-                    and sp.ah_cfg.regime_filter_enabled
-                    and regime_filter(
-                        closes, current_price, direction_g, rec, ema_period=sp.ah_cfg.regime_ema_period,
+                if sp.ah_cfg.regime_filter_enabled and rec in (REC_BUY_YES, REC_BUY_NO):
+                    _skip_rgg, _why_rgg = directional_regime_should_skip(
+                        rec, direction_g, closes, current_price, sp.ah_cfg
                     )
+                    if _skip_rgg:
+                        print(f"  [Gemini] {g_ticker}: SKIP (regime: {_why_rgg}) | {title}")
+                        rec = REC_SKIP
+                if (
+                    rec == REC_BUY_NO
+                    and sp.dynamic_kill_switch_enabled
+                    and sp.dynamic_kill_oil_block_buy_no_uptrend
                 ):
-                    rec = REC_SKIP
+                    _gem_series_key = (g_ticker or "").split("-")[0].strip().upper()
+                    _oil_pfx_g = sp.dynamic_kill_oil_series_prefix.strip().upper()
+                    if _gem_series_key.startswith(_oil_pfx_g) or "WTI" in (g_ticker or "").upper():
+                        if classify_trend_regime(closes, current_price, sp.ah_cfg) == "up":
+                            print(
+                                f"  [Gemini] {g_ticker}: SKIP (oil uptrend kill-switch: no BUY NO) | {title}"
+                            )
+                            rec = REC_SKIP
 
                 # --- Post-Stop Cooldown: Prevent 'revenge trading' falling knives ---
                 if rec in (REC_BUY_YES, REC_BUY_NO) and cooldowns:
@@ -8546,6 +8777,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             _sf_g *= float(sp.simple_ev_spread_wide_size_mult)
                         if sp.simple_ev_edge_size_boost_edge > 0 and _ev_ng >= float(sp.simple_ev_edge_size_boost_edge):
                             _sf_g *= float(sp.simple_ev_edge_size_boost_mult)
+                        _sf_g *= _dynamic_kill_size_mult(
+                            (g_ticker or "").split("-")[0].strip().upper(),
+                            series_pnl_kill,
+                            sp,
+                        )
                         _cost_cg = max(bid * 100.0, 1.0)
                         _gem_sz_bal = max(0, int(gemini_balance_for_arb))
                         count_base = int(_gem_sz_bal * _sf_g / _cost_cg)
@@ -9016,6 +9252,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         dte_days=dte_pos,
                                         cfg=cfg,
                                         model_conf=_model_conf,
+                                        closes_for_regime=closes,
+                                        spot_for_regime=current_price_pos,
                                     ):
                                         pending_sells.append({
                                             "platform": PLATFORM_KALSHI,
@@ -9311,6 +9549,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     dte_days=dte_cached,
                     cfg=cfg,
                     model_conf=_model_conf,
+                    closes_for_regime=closes,
+                    spot_for_regime=current_price_pos,
                 ):
                     pending_sells.append({
                         "platform": PLATFORM_KALSHI,
@@ -9685,6 +9925,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             dte_days=dte_g,
                             cfg=cfg,
                             model_conf=_model_conf_g,
+                            closes_for_regime=closes,
+                            spot_for_regime=current_price_g,
                         ):
                             pending_sells.append({
                                 "platform": PLATFORM_GEMINI,

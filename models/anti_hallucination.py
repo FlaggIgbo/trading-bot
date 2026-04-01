@@ -10,7 +10,8 @@ Layers:
   2. EWMA Probability  – exponentially weight recent price data
   3. Volatility Z-Score – fatten tails when current vol is anomalous
   4. Adaptive Edge      – require larger edge for cheap/expensive contracts
-  5. Regime Filter      – block trend-opposed trades via EMA gate
+  5. Regime Filter      – EMA alignment for BUY YES; BUY NO blocked on momentum
+                          (price > short EMA + RSI); optional strong-trend routing
 """
 from __future__ import annotations
 
@@ -51,6 +52,22 @@ class AntiHallucinationConfig:
     regime_filter_enabled: bool = True
     regime_ema_period: int = 20
     regime_require_alignment: bool = True
+    # Faster EMA + multi-factor trend score (level + slope + recent return)
+    regime_ema_fast_period: int = 10
+    trend_score_w_level: float = 1.0
+    trend_score_w_slope: float = 0.8
+    trend_score_w_ret: float = 0.5
+    trend_score_up_threshold: float = 0.008
+    trend_score_down_threshold: float = 0.008
+    # Hard momentum gate for BUY NO (price above short EMA + elevated RSI)
+    buy_no_momentum_gate_enabled: bool = True
+    buy_no_momentum_ema_period: int = 10
+    buy_no_momentum_rsi_period: int = 14
+    buy_no_momentum_rsi_min: float = 60.0
+    # Strong-trend routing (optional strict block lists)
+    regime_routing_enabled: bool = True
+    regime_block_buy_no_in_uptrend: bool = True
+    regime_block_buy_yes_in_downtrend: bool = False
 
 
 def load_anti_hallucination_config(strategy: dict) -> AntiHallucinationConfig:
@@ -76,6 +93,19 @@ def load_anti_hallucination_config(strategy: dict) -> AntiHallucinationConfig:
         regime_filter_enabled=bool(ah.get("regime_filter_enabled", True)),
         regime_ema_period=int(ah.get("regime_ema_period", 20)),
         regime_require_alignment=bool(ah.get("regime_require_alignment", True)),
+        regime_ema_fast_period=int(ah.get("regime_ema_fast_period", 10)),
+        trend_score_w_level=float(ah.get("trend_score_w_level", 1.0)),
+        trend_score_w_slope=float(ah.get("trend_score_w_slope", 0.8)),
+        trend_score_w_ret=float(ah.get("trend_score_w_ret", 0.5)),
+        trend_score_up_threshold=float(ah.get("trend_score_up_threshold", 0.008)),
+        trend_score_down_threshold=float(ah.get("trend_score_down_threshold", 0.008)),
+        buy_no_momentum_gate_enabled=bool(ah.get("buy_no_momentum_gate_enabled", True)),
+        buy_no_momentum_ema_period=int(ah.get("buy_no_momentum_ema_period", 10)),
+        buy_no_momentum_rsi_period=int(ah.get("buy_no_momentum_rsi_period", 14)),
+        buy_no_momentum_rsi_min=float(ah.get("buy_no_momentum_rsi_min", 60.0)),
+        regime_routing_enabled=bool(ah.get("regime_routing_enabled", True)),
+        regime_block_buy_no_in_uptrend=bool(ah.get("regime_block_buy_no_in_uptrend", True)),
+        regime_block_buy_yes_in_downtrend=bool(ah.get("regime_block_buy_yes_in_downtrend", False)),
     )
 
 
@@ -291,6 +321,101 @@ def compute_ema(closes: list[float], period: int) -> float | None:
     for price in closes[1:]:
         ema = price * k + ema * (1 - k)
     return ema
+
+
+def compute_rsi_wilder(closes: list[float], period: int = 14) -> float | None:
+    """Wilder-style RSI on last `period` closes (same construction as compare_historical._compute_rsi)."""
+    if len(closes) < period + 1:
+        return None
+    gains = 0.0
+    losses = 0.0
+    for i in range(-period, 0):
+        delta = closes[i] - closes[i - 1]
+        if delta > 0:
+            gains += delta
+        else:
+            losses -= delta
+    avg_gain = gains / period
+    avg_loss = losses / period
+    if avg_loss < 1e-12:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def classify_trend_regime(
+    closes: list[float],
+    current_price: float,
+    cfg: AntiHallucinationConfig,
+) -> str:
+    """
+    Classify underlying trend as 'up', 'down', or 'neutral' using
+    EMA level gap, fast-vs-slow EMA slope, and a short lookback return.
+    """
+    slow_p = max(2, int(cfg.regime_ema_period))
+    fast_p = max(2, min(int(cfg.regime_ema_fast_period), slow_p - 1)) if slow_p > 3 else 2
+    ema_s = compute_ema(closes, slow_p)
+    ema_f = compute_ema(closes, fast_p)
+    if ema_s is None or ema_f is None or ema_s <= 0:
+        return "neutral"
+    level = (float(current_price) - ema_s) / ema_s
+    slope = (ema_f - ema_s) / ema_s
+    ret_n = min(5, len(closes) - 1)
+    rret = (
+        (float(current_price) / float(closes[-1 - ret_n]) - 1.0)
+        if ret_n > 0 and closes[-1 - ret_n] > 0
+        else 0.0
+    )
+    w1, w2, w3 = cfg.trend_score_w_level, cfg.trend_score_w_slope, cfg.trend_score_w_ret
+    score = w1 * level + w2 * slope + w3 * rret
+    if score > float(cfg.trend_score_up_threshold):
+        return "up"
+    if score < -float(cfg.trend_score_down_threshold):
+        return "down"
+    return "neutral"
+
+
+def directional_regime_should_skip(
+    rec: str,
+    direction: str,
+    closes: list[float],
+    current_price: float,
+    cfg: AntiHallucinationConfig,
+) -> tuple[bool, str]:
+    """
+    Post-recommendation gate: True → skip trade (counter-trend / momentum hazard).
+
+    Order: BUY NO momentum (RSI + EMA), strong-trend routing, legacy BUY YES EMA alignment.
+    """
+    if not cfg.regime_filter_enabled:
+        return False, ""
+    if rec not in ("BUY YES", "BUY NO"):
+        return False, ""
+
+    regime = classify_trend_regime(closes, current_price, cfg)
+
+    if rec == "BUY NO" and cfg.buy_no_momentum_gate_enabled:
+        ema_gate = compute_ema(closes, max(2, int(cfg.buy_no_momentum_ema_period)))
+        rsi = compute_rsi_wilder(closes, max(2, int(cfg.buy_no_momentum_rsi_period)))
+        if (
+            ema_gate is not None
+            and rsi is not None
+            and float(current_price) > ema_gate
+            and rsi >= float(cfg.buy_no_momentum_rsi_min)
+        ):
+            return True, "buy_no_momentum_gate"
+
+    if cfg.regime_routing_enabled:
+        if regime == "up" and rec == "BUY NO" and cfg.regime_block_buy_no_in_uptrend:
+            return True, "uptrend_block_buy_no"
+        if regime == "down" and rec == "BUY YES" and cfg.regime_block_buy_yes_in_downtrend:
+            return True, "downtrend_block_buy_yes"
+
+    if cfg.regime_require_alignment and rec == "BUY YES":
+        if regime_filter(closes, current_price, direction, rec, ema_period=cfg.regime_ema_period):
+            return True, "ema_block_buy_yes_countertrend"
+
+    return False, ""
 
 
 def regime_filter(

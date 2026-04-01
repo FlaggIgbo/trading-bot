@@ -6,7 +6,10 @@ compare_historical.py merges `strategy.blacklist_extra_file` into the YAML black
 This avoids corrupting config.yaml with `echo >>` (YAML comments/structure preserved).
 
   python3 scripts/apply_series_blacklist.py --hours 168 --min-trades 40 --max-win-rate 0.20 \\
-      --out ~/.trading-bot-data/series_blacklist_auto.txt --merge
+      --out ~/.trading-bot-data/series_blacklist_auto.txt
+
+  With --merge, union with existing lines (bans stick until manually edited).
+  Default (no --merge): rewrite to current underperformers only (series can drop off when WR recovers).
 """
 from __future__ import annotations
 

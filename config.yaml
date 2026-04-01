@@ -21,7 +21,7 @@ markets:
   - KXHYPE15M
   # Commodities & Nasdaq-100 (Kalshi series → Yahoo underlyings below)
   - KXWTI # WTI crude — https://kalshi.com/markets/kxwti/wti-oil-election-day
-  # KXBRENTD — disabled (strategy.blacklist): Kalshi settlement source ≠ yfinance BZ=F; https://kalshi.com/markets/kxbrentd
+  # KXBRENTD — not listed; Kalshi settlement source ≠ yfinance BZ=F — add to markets if you accept proxy risk
   - KXBRENTW # Brent oil weekly — https://kalshi.com/markets/kxbrentw/brent-oil
   - KXNASDAQ100U # Nasdaq-100 above/below — https://kalshi.com/markets/kxnasdaq100u/nasdaq-abovebelow
   - KXSILVERD # Silver daily — https://kalshi.com/markets/kxsilverd/silver-daily
@@ -29,7 +29,7 @@ markets:
   - KXGOLDD # Gold daily — https://kalshi.com/markets/kxgoldd/gold-daily
   - KXGOLDW # Gold weekly — https://kalshi.com/markets/kxgoldw/gold-weekly-price-
   - KXCOPPERD # Daily copper — https://kalshi.com/markets/kxcopperd/daily-copper
-  # KXAAAGASW — disabled (see strategy.blacklist); re-add here when you want gas weekly again
+  # KXAAAGASW — not listed (RBOB/AAA proxy noise); add to markets if you want gas weekly
 
 # How often to poll markets (seconds)
 poll_interval_seconds: 60
@@ -257,7 +257,15 @@ strategy:
   passive_limit_quote: bid_plus_tick # overridden by execution.limit_offset_cents≥1 → same; dip|mid for deeper passive
   # Empirical P(above/below): exponential weights recent bars (crypto regime shifts); step_recent = legacy flat window
   empirical_weighting: exponential # step_recent | exponential
-  empirical_exponential_halflife_bars: 14 # Recent ~2 weeks of daily bars dominate vs flat 365d average
+  empirical_exponential_halflife_bars: 6 # Shorter memory for fast regime shifts (oil/crypto)
+  # Multi-horizon empirical blend: 0.5×short + 0.3×medium + 0.2×long (same exp weighting each)
+  empirical_multi_horizon_enabled: true
+  empirical_horizon_short_days: 21
+  empirical_horizon_medium_days: 90
+  empirical_horizon_long_days: 365
+  empirical_horizon_w_short: 0.5
+  empirical_horizon_w_medium: 0.3
+  empirical_horizon_w_long: 0.2
   # Hard cap blended model P before edge/Kelly (100% vol P → full Kelly is unsafe on $5 bankroll)
   enable_model_prob_hard_cap: true
   model_prob_hard_lo: 0.02 # Anti-gambler floor: never assume <2% chance of black swan
@@ -379,7 +387,7 @@ strategy:
   p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
-  kelly_fraction: 0.18 # Fractional Kelly; circuit breaker caps runaway sizing on bad regimes
+  kelly_fraction: 0.10 # Lower fractional Kelly while strategy uncertainty is high
   dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
   dynamic_kelly_floor: 0.10 # Min Kelly fraction floor under stress
   dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
@@ -409,7 +417,11 @@ strategy:
   stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
   # Book stop is still triggered by Kalshi bid vs entry; these only gate *when* it may fire:
   stop_loss_spot_itm_min_pct: 0.01 # Suppress book stop if underlying is >= this % inside the winning region vs strike (0 = off)
-  stop_loss_book_persist_seconds: 60 # Require weak book continuously this long (SQLite, survives cron); 0 = immediate
+  stop_loss_book_persist_seconds: 60 # Base persistence; regime-aware overrides below
+  # Counter-trend book stops exit faster; with-trend stops tolerate weak book longer (not a global loosen-all)
+  stop_loss_regime_persist_enabled: true
+  stop_loss_book_persist_counter_trend_seconds: 45
+  stop_loss_book_persist_trend_aligned_seconds: 90
   # Near-expiry (hours to resolution < window): widen book stop + multiply persistence. Set hard_disable for legacy “no stops”.
   stop_loss_near_expiry_within_hours: 0 # 0 = off; or use legacy stop_loss_disable_within_hours if this key omitted
   stop_loss_near_expiry_extra_pct: 0.12 # Added to effective stop width when near expiry
@@ -521,7 +533,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 3.5 # Was 2.45 — more weight to market reality (anti-hallucination)
+    bayesian_market_strength: 5.0 # Trust market more when model disagrees (anti-hallucination)
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
     ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
@@ -537,9 +549,31 @@ strategy:
     adaptive_edge_otm_base_mult: 1.8 # Reduced from 2.5; less punishing for cheap/expensive contracts
     adaptive_edge_trend_opposed_mult: 1.5 # Reduced from 2.0; less punishing for trend-opposed trades
     adaptive_edge_strike_dist_mult: 1.2 # Strike distance scaling (was hardcoded 2.0); lower = less compounding with OTM mult
-    regime_filter_enabled: true # EMA regime gate: block trend-opposed BUY YES
-    regime_ema_period: 20 # EMA lookback period for trend detection
-    regime_require_alignment: true # Require trend alignment for BUY YES
+    regime_filter_enabled: true # Master switch for regime + BUY NO momentum gates
+    regime_ema_period: 20 # Slow EMA for trend score + legacy BUY YES gate
+    regime_ema_fast_period: 10 # Fast EMA for trend slope
+    trend_score_w_level: 1.0
+    trend_score_w_slope: 0.8
+    trend_score_w_ret: 0.5
+    trend_score_up_threshold: 0.008
+    trend_score_down_threshold: 0.008
+    regime_require_alignment: true # Legacy: block counter-trend BUY YES vs slow EMA
+    buy_no_momentum_gate_enabled: true # Block BUY NO when price > EMA10 and RSI >= threshold
+    buy_no_momentum_ema_period: 10
+    buy_no_momentum_rsi_period: 14
+    buy_no_momentum_rsi_min: 60.0
+    regime_routing_enabled: true
+    regime_block_buy_no_in_uptrend: true # Strong uptrend → no naked NO / short-vol on the rally
+    regime_block_buy_yes_in_downtrend: false # Keep false: rely on EMA alignment for YES (mean-reversion paths)
+  # Surgical kill switch: oil uptrend NO ban + per-series size haircut on bad 7d PnL (not blanket blacklist)
+  dynamic_kill_switch:
+    enabled: true
+    oil_series_prefix: KXWTI
+    oil_block_buy_no_uptrend: true
+    series_pnl_lookback_hours: 168
+    pnl_cents_floor: -5000 # −$50 in window → halve simple-EV size for that series
+    min_trades: 3
+    poor_pnl_size_mult: 0.5
   # Alpha engine: OBI, markout PnL, vol-adjusted Kelly, lead-lag signal
   alpha_engine:
     obi_enabled: true # Order Book Imbalance: directional signal from bid/ask depth
@@ -563,12 +597,12 @@ strategy:
     lead_lag_min_move_pct: 0.003 # Min absolute move in leader to trigger signal
     lead_lag_edge_bonus: 0.02 # Edge bonus/penalty when lead-lag signal is active
     lead_lag_lookback_bars: 5 # Bars of leader data used to compute momentum
-  # Runtime merge: one series ticker per line (# comments ok). Updated by ollama_codex_loop + apply_series_blacklist.py
+  # Runtime merge: one series ticker per line (# comments ok). Ollama loop / apply_series_blacklist.py add/remove via this file (no YAML churn).
   blacklist_extra_file: ~/.trading-bot-data/series_blacklist_auto.txt
   # whitelist: ["KXBTCD", "KXETHD"]   # Only evaluate these series (optional)
-  # Excluded from evaluation (new buys) even if listed under markets: or MARKETS= env
-  blacklist: ["KXAAAGASW", "KXBRENTD"] # gas: RBOB/AAA proxy; Brent daily: Kalshi source ≠ yfinance BZ=F
-  # blacklist: ["KXINXU"]   # Exclude these series (optional); also union blacklist_extra_file
+  # Static YAML ban list (empty = rely on blacklist_extra_file + scripts to populate dynamically)
+  blacklist: []
+  # Optional: blacklist: ["KXINXU"]  # also unions blacklist_extra_file on each compare_historical run
   # strategy_engine options: vol_regime (default), default_threshold, strict_threshold (1.25× min edge — research / A/B)
 
 # Local historical storage (SQLite). Data in ~/.trading-bot-data/ — not committed to git.

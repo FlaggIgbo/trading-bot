@@ -408,7 +408,7 @@ The repo root script builds `docs/ollama_runs.html`, appends `~/comparisons/metr
 | `OLLAMA_LEADERBOARD_HOURS` | `336` | Lookback for `export_series_leaderboard.py` / `suggest_series_blacklist.py` (14 days). |
 | `OLLAMA_BLACKLIST_MIN_TRADES` | `50` | Min resolved trades before a series is suggested for blacklist (win rate under 30%). |
 | `OLLAMA_PROMPT_LB_HOURS` | `72` | Leaderboard lookback **embedded in the Ollama prompt** (HTML stripped to text). |
-| `OLLAMA_AUTO_BLACKLIST` | `1` | If `1`, runs `apply_series_blacklist.py --merge` → `BLACKLIST_EXTRA_FILE`. Set `0` to disable. |
+| `OLLAMA_AUTO_BLACKLIST` | `1` | If `1`, runs `apply_series_blacklist.py` (rewrites `BLACKLIST_EXTRA_FILE` to current weak series; no `--merge`). Set `0` to disable. |
 | `BLACKLIST_EXTRA_FILE` | `~/…/series_blacklist_auto.txt` | Output path; must match `strategy.blacklist_extra_file` in config. |
 | `OLLAMA_AUTO_BLACKLIST_HOURS` / `MIN_TRADES` / `MAX_WR` | `168` / `20` / `0.25` | Thresholds for the auto-blacklist writer. |
 | `OLLAMA_MAX_PATCH_ATTEMPTS` | `3` | Per tick: regenerate Ollama diff and retry after apply/validate failure (reverts between tries). |
@@ -454,7 +454,7 @@ Stronger coding models (if your machine can handle them): `ollama pull phi4` or 
 | `python3 scripts/hyperopt.py`             | Tune backtest params via grid search |
 | `python3 scripts/export_series_leaderboard.py` | HTML per-series PnL / win rate from SQLite |
 | `python3 scripts/suggest_series_blacklist.py` | Print commented `strategy.blacklist` hints (does not edit YAML) |
-| `python3 scripts/apply_series_blacklist.py` | Write weak series to `strategy.blacklist_extra_file` (safe merge; no YAML append) |
+| `python3 scripts/apply_series_blacklist.py` | Write weak series to `strategy.blacklist_extra_file` (default: replace file; use `--merge` to union with existing; no YAML append) |
 | `streamlit run scripts/streamlit_research_app.py` | Research UI: preview + multi-strategy compare |
 
 ### Main evaluation: `scripts/compare_historical.py`

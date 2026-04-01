@@ -169,9 +169,10 @@ else
 fi
 if [[ "$OLLAMA_AUTO_BLACKLIST" == "1" ]]; then
   mkdir -p "$(dirname "$BLACKLIST_EXTRA_FILE")"
+  # No --merge: rewrite file each run so series recover off the list when stats improve
   "$PYTHON" "$REPO/scripts/apply_series_blacklist.py" --hours "${OLLAMA_AUTO_BLACKLIST_HOURS:-168}" \
     --min-trades "${OLLAMA_AUTO_BLACKLIST_MIN_TRADES:-40}" --max-win-rate "${OLLAMA_AUTO_BLACKLIST_MAX_WR:-0.20}" \
-    --out "$BLACKLIST_EXTRA_FILE" --merge 2>/dev/null || true
+    --out "$BLACKLIST_EXTRA_FILE" 2>/dev/null || true
 fi
 
 # --- 3) HTML metrics table + embedded leaderboard (Python: CSV-safe, escaped, UTC timestamps) ---
