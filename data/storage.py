@@ -882,7 +882,8 @@ def record_limit_order(
     threshold: float | None = None,
     direction: str | None = None,
     config: dict | None = None,
-    signal_id: int | None = None, source: str | None = None,
+    signal_id: int | None = None,
+    source: str | None = None,
 ) -> int | None:
     """
     Record a limit order we placed (status=placed). Used for fill attribution and unfilled analysis.
@@ -1081,7 +1082,7 @@ def record_prediction_from_fill(
     count: int,
     fill_ts: float | None = None,
     config: dict | None = None,
-    signal_id: int | None = None, source: str | None = None,
+    signal_id: int | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
     """
