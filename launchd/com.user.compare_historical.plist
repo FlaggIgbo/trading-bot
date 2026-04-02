@@ -9,7 +9,7 @@
         <string>/Users/ogechukwuflagg-igbo/git/trading-bot/.venv/bin/python3</string>
         <string>/Users/ogechukwuflagg-igbo/git/trading-bot/scripts/compare_historical.py</string>
         <string>--days</string>
-        <string>365</string>
+        <string>730</string>
         <string>--use-volatility</string>
         <string>--execute</string>
         <string>--verbose</string>

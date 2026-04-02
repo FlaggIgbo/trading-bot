@@ -5,7 +5,7 @@
 **Barbell (live trading):** With **`strategy.barbell_enabled: true`** in repo `config.yaml`, each scheduled compare run only places directional BUY YES/NO trades that qualify as **base** (high-P consensus) or **alpha** (cheap + large net edge). See root **`README.md`** § *Barbell strategy*. Toggle in YAML only; no plist key required.
 
 This setup includes:
-- `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes.
+- `com.user.compare_historical.plist`: runs `scripts/compare_historical.py` every 5 minutes with **`--days 730`** (~2y history). If you change `ProgramArguments` in the repo plist, **re-copy** to `~/Library/LaunchAgents/` and **bootstrap** again (see below)—`kickstart` alone does not update argv.
 - `com.user.daily_performance_report.plist`: runs `scripts/daily_performance_report.py` once daily and writes a dated `.txt` summary.
 - `com.user.ollama_codex_loop.plist`: runs `ollama_codex_loop.sh` **once per day** (default **00:10** local) to update `docs/ollama_runs.html` from metrics and optionally apply Ollama-suggested patches — after the prior day’s session and shortly after the 23:55 daily report.
 

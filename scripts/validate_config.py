@@ -129,6 +129,9 @@ def main() -> int:
     max_open_contracts_per_underlying = _as_int(strategy.get("max_open_contracts_per_underlying"), 0)
     if max_open_contracts_per_underlying < 0:
         errors.append("`strategy.max_open_contracts_per_underlying` must be >= 0 (0 disables per-underlying cap).")
+    max_open_ultra = _as_int(strategy.get("max_open_contracts_per_underlying_ultra_short"), 0)
+    if max_open_ultra < 0:
+        errors.append("`strategy.max_open_contracts_per_underlying_ultra_short` must be >= 0 (0 = use base cap for all horizons).")
     if min_stability_duration_seconds < 0:
         errors.append("`strategy.min_stability_duration_seconds` must be >= 0.")
     if min_order_book_depth < 0:

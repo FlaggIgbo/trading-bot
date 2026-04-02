@@ -248,7 +248,7 @@ strategy:
   max_buy_yes_strike_above_pct: 0.08
   max_buy_no_strike_above_pct: 0.08
   min_no_price: 0.05 # Skip BUY NO when NO bid <5¢ (symmetric with min_yes; thin book protection)
-  days_back: 365 # Days of historical data for P(above/below). Longer = more stable empirical P
+  days_back: 730 # ~2y historical for P(above/below); launchd passes --days 730 to match
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
@@ -307,6 +307,9 @@ strategy:
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   # Sum of unresolved contract count per (platform, Yahoo underlying), e.g. all BTC-USD Gemini legs share one bucket. 0 = off.
   max_open_contracts_per_underlying: 20
+  # Optional separate cap for ultra-short horizons (15m tickers / DTE <= ultra_short_dte_hours). 0 = use base cap only.
+  # Modest +20% vs base so 15m can still get entries when longer-dated legs fill the bucket; same yf_ticker shares one open sum.
+  max_open_contracts_per_underlying_ultra_short: 24
   layered_order_levels: 4 # PnL: one extra level vs 3 for smoother VWAP when size > 1
   limit_dip_pct_high_confidence: 0.02 # High P(win): bid close to tape (was 0.08) so consensus sniper / near-expiry orders actually fill
   limit_dip_pct_price_decline: 0.06 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg

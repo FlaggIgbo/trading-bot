@@ -11,7 +11,7 @@ Example: "Bitcoin above $81,250 on Mar 16?" → historical says 5% of days close
 Designed to run every 15 minutes locally for continuous evaluation.
 See README for cron setup.
 
-Run: python3 scripts/compare_historical.py [--days 365] [--markets 0] [--edge 0.15]
+Run: python3 scripts/compare_historical.py [--days 730] [--markets 0] [--edge 0.15]
 """
 from __future__ import annotations
 
@@ -5255,25 +5255,65 @@ def _filter_pending_buys_by_min_payout_ratio(
         pending_orders[:] = kept
 
 
+def _pending_order_is_ultra_short_horizon(o: dict, ultra_short_dte_hours: float) -> bool:
+    """
+    True when a pending BUY looks like a sub-hour / 15m-style contract for open-cap purposes.
+    Uses ticker/title patterns (KX*15M, *15M*) and optional DTE in days vs ultra_short_dte_hours.
+    """
+    ticker = str(o.get("ticker") or "")
+    title = str(o.get("title") or "")
+    if re.search(r"(?i)KX[A-Z0-9]*15M|[A-Z]{2,12}15M", f"{ticker} {title}"):
+        return True
+    if ultra_short_dte_hours and ultra_short_dte_hours > 0:
+        dte = o.get("dte")
+        if dte is not None:
+            try:
+                dte_days = float(dte)
+                if dte_days <= ultra_short_dte_hours / 24.0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    return False
+
+
+def _effective_open_contract_cap_for_order(
+    o: dict,
+    base_cap: int,
+    ultra_short_cap: int,
+    ultra_short_dte_hours: float,
+) -> int:
+    """Per-order cap: optional higher (or lower) limit for ultra-short horizons."""
+    if base_cap <= 0:
+        return 0
+    if ultra_short_cap > 0 and _pending_order_is_ultra_short_horizon(o, ultra_short_dte_hours):
+        return int(ultra_short_cap)
+    return int(base_cap)
+
+
 def _apply_max_open_contracts_per_underlying(
     pending_orders: list[dict],
     cfg: dict,
-    cap: int,
+    base_cap: int,
     get_sums: Any,
     logger: Any = print,
+    ultra_short_cap: int = 0,
+    ultra_short_dte_hours: float = 0.0,
 ) -> None:
     """
     Drop pending BUYs that would push unresolved contract count for (platform, yf_ticker)
-    above `cap`. Orders without yf_ticker pass through (caller should set yf on normal paths).
+    above the effective cap (base_cap, or ultra_short_cap when set and the order is ultra-short).
+    Orders without yf_ticker pass through (caller should set yf on normal paths).
     """
-    if cap <= 0 or not pending_orders or not get_sums:
+    if base_cap <= 0 or not pending_orders or not get_sums:
         return
     try:
         sums: dict[tuple[str, str], int] = dict(get_sums(cfg) or {})
     except Exception:
         return
+    initial_funded = sum(1 for o in pending_orders if int(o.get("count", 0) or 0) > 0)
     kept: list[dict] = []
     blocked_keys: set[tuple[str, str]] = set()
+    blocked_rows: list[tuple[str, str, int, int, int, str]] = []
     for o in pending_orders:
         yf = (o.get("yf_ticker") or "").strip()
         plat = str(o.get("platform") or "")
@@ -5286,22 +5326,66 @@ def _apply_max_open_contracts_per_underlying(
             continue
         key = (plat, yf)
         cur = int(sums.get(key, 0) or 0)
-        if cur + cnt > cap:
+        eff_cap = _effective_open_contract_cap_for_order(
+            o, base_cap, ultra_short_cap, ultra_short_dte_hours
+        )
+        if cur + cnt > eff_cap:
             blocked_keys.add(key)
+            blocked_rows.append((plat, yf, cur, eff_cap, cnt, str(o.get("ticker") or "")))
             continue
         sums[key] = cur + cnt
         kept.append(o)
+    pending_orders[:] = kept
+    funded_after = sum(1 for o in pending_orders if int(o.get("count", 0) or 0) > 0)
     if blocked_keys:
-        pending_orders[:] = kept
-        logger(
-            f"[Risk] Per-underlying open-contract cap ({cap}): blocked order(s) for "
-            f"{len(blocked_keys)} (platform, yf_ticker) bucket(s) already at or over limit."
+        ultra_note = (
+            f", ultra_short_cap={ultra_short_cap}" if ultra_short_cap > 0 else ""
         )
-        for plat, yf in sorted(blocked_keys):
-            logger(f"         {plat} + {yf}")
+        logger(
+            f"[Risk] Per-underlying open-contract cap summary: base_cap={base_cap}{ultra_note} — "
+            f"blocked {len(blocked_rows)} BUY leg(s) across {len(blocked_keys)} (platform, yf) bucket(s)."
+        )
+        ag: dict[tuple[str, str], dict[str, Any]] = {}
+        for plat, yf, cur, eff_c, cnt, tkr in blocked_rows:
+            k2 = (plat, yf)
+            if k2 not in ag:
+                ag[k2] = {
+                    "cur_max": cur,
+                    "cap": eff_c,
+                    "need_sum": 0,
+                    "n": 0,
+                    "tickers": [],
+                }
+            e = ag[k2]
+            e["cur_max"] = max(e["cur_max"], cur)
+            e["cap"] = eff_c
+            e["need_sum"] += cnt
+            e["n"] += 1
+            if tkr and len(e["tickers"]) < 4:
+                e["tickers"].append(tkr)
+        for (plat, yf) in sorted(ag.keys()):
+            e = ag[(plat, yf)]
+            cur_m = int(e["cur_max"])
+            cap_v = int(e["cap"])
+            headroom = max(0, cap_v - cur_m)
+            cap_tag = "" if cap_v == base_cap else " [ultra_short cap]"
+            sample = ", ".join(e["tickers"]) if e["tickers"] else "—"
+            logger(
+                f"         {plat} + {yf}  |  open≈{cur_m}  |  cap={cap_v}{cap_tag}  |  "
+                f"headroom={headroom}  |  blocked {e['n']} leg(s), +{e['need_sum']} contracts  |  e.g. {sample}"
+            )
         logger("")
-    else:
-        pending_orders[:] = kept
+    if (
+        initial_funded > 0
+        and funded_after == 0
+        and blocked_keys
+    ):
+        logger(
+            "[Capacity] All funded BUYs removed this run (open-contract caps). "
+            "Inventory is saturating entry slots — exits/resolution free capacity, or raise "
+            "max_open_contracts_per_underlying / max_open_contracts_per_underlying_ultra_short."
+        )
+        logger("")
 
 
 def _capital_efficiency_score_order(o: dict) -> float:
@@ -6120,12 +6204,12 @@ def _show_config(args) -> int:
 def main():
     cfg = get_config()
     strategy = _effective_strategy_dict(cfg)
-    default_days = int(strategy.get("days_back", 365))
+    default_days = int(strategy.get("days_back", 730))
 
     parser = argparse.ArgumentParser(
         description="Evaluate Kalshi/Gemini contracts using historical data → BUY YES / BUY NO / SKIP"
     )
-    parser.add_argument("--days", type=int, default=default_days, help="Days of historical data (default: config days_back or 365)")
+    parser.add_argument("--days", type=int, default=default_days, help="Days of historical data (default: config days_back or 730)")
     parser.add_argument("--markets", type=int, default=0, help="Max markets per series (0 = all)")
     parser.add_argument("--edge", type=float, default=0.15, help="Min edge (0-1) to recommend buy")
     parser.add_argument("--no-llm", action="store_true", help="Skip Ollama analysis")
@@ -10414,12 +10498,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print()
 
     max_open_cu = int(strategy.get("max_open_contracts_per_underlying", 0) or 0)
+    max_open_ultra = int(strategy.get("max_open_contracts_per_underlying_ultra_short", 0) or 0)
     _apply_max_open_contracts_per_underlying(
         pending_orders,
         cfg,
         max_open_cu,
         get_unresolved_contract_sums_by_platform_yf,
         logger=print,
+        ultra_short_cap=max_open_ultra,
+        ultra_short_dte_hours=float(sp.ultra_short_dte_hours or 0.0),
     )
 
     loss_cb_pct = float(sp.adaptive_loss_block_max_balance_loss_pct)
