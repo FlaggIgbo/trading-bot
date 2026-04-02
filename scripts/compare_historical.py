@@ -518,7 +518,7 @@ class _StrategyParams:
     limit_buy_escalate_after_minutes_1: float
     limit_buy_escalate_after_minutes_2: float
     limit_buy_escalation_cancel_minutes: int
-    # Wide/gapped book: lift passive quotes + optional EV touch-lift (exempt Brent / BZ=F by default).
+    # Wide/gapped book: lift passive quotes + optional EV touch-lift.
     limit_buy_wide_book_coalesce_enabled: bool
     limit_buy_wide_book_spread_rel: float
     limit_buy_wide_book_anchor_fraction: float
@@ -872,12 +872,12 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_buy_wide_book_conservative_substrings=(
             [str(x).strip() for x in strategy["limit_buy_wide_book_conservative_substrings"] if str(x).strip()]
             if isinstance(strategy.get("limit_buy_wide_book_conservative_substrings"), list)
-            else ["BRENT", "KXBRENT"]
+            else []
         ),
         limit_buy_wide_book_conservative_yf_tickers=(
             [str(x).strip() for x in strategy["limit_buy_wide_book_conservative_yf_tickers"] if str(x).strip()]
             if isinstance(strategy.get("limit_buy_wide_book_conservative_yf_tickers"), list)
-            else ["BZ=F"]
+            else []
         ),
         resting_cancel_if_market_bid_above_limit_by=max(0.0, min(0.5, float(strategy.get("resting_cancel_if_market_bid_above_limit_by", 0.0)))),
         simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
@@ -1206,7 +1206,6 @@ def _limit_buy_wide_book_conservative(
 ) -> bool:
     """
     When True, skip wide-book limit coalesce / EV touch-lift (stay deep passive).
-    Used for Brent / proxy-mismatch underlyings where aggressive lift vs tape is undesirable.
     """
     t = (ticker or "").upper()
     for s in substrings:
@@ -1648,8 +1647,7 @@ def _compute_limit_price(
     weak→bid) instead of only deep dip bids. If passive_only_below_edge > 0 and net_edge is below it,
     aggression is skipped (maker-style limits). Set ev_tier_pricing=False for legacy bid+tick / ask−1¢ tiers.
     wide_book_*: on wide (ask−bid)/bid, lift passive quotes toward the touch (capped by fair_cap); optional
-    EV touch-lift when quote sits below bid but fair_cap still allows paying the bid. Brent/BZ=F exempt via
-    wide_book_conservative at the call site.
+    EV touch-lift when quote sits below bid but fair_cap still allows paying the bid.
     """
     mode_norm = (mode or "fixed_pct").strip().lower()
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
