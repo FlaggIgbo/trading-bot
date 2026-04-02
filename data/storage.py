@@ -1082,6 +1082,7 @@ def record_prediction_from_fill(
     fill_ts: float | None = None,
     config: dict | None = None,
     signal_id: int | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """
     Insert prediction only from confirmed fills (idempotent by platform+fill_id).
