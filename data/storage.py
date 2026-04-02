@@ -198,6 +198,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_pos_eval_outcome ON position_evaluations(outcome);
         CREATE INDEX IF NOT EXISTS idx_pos_eval_ts ON position_evaluations(ts);
         CREATE INDEX IF NOT EXISTS idx_pos_eval_resolved_ts ON position_evaluations(resolved_ts);
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            side TEXT NOT NULL,
+            hist_p REAL,
+            theoretical_price REAL,
+            edge REAL,
+            ts REAL NOT NULL,
+            outcome TEXT,
+            resolved_ts REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_signals_ticker ON signals(ticker);
+        CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome);
     """)
     _migrate_predictions_price_after_buy(conn)
     _migrate_predictions_fill_attribution(conn)
@@ -1401,6 +1415,32 @@ def record_prediction_early_exit(
         conn.close()
 
 
+def record_signal(platform: str, ticker: str, side: str, hist_p: float, theoretical_price: float, edge: float, cfg: dict) -> None:
+    """Record a recommendation signal (Opportunity-level accounting)."""
+    db_path = _get_db_path(cfg)
+    ts = time.time()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            INSERT INTO signals (platform, ticker, side, hist_p, theoretical_price, edge, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (platform, ticker, side, hist_p, theoretical_price, edge, ts))
+        conn.commit()
+
+def resolve_signal_outcomes(ticker: str, yes_settled: bool, cfg: dict) -> None:
+    """Update unresolved signals for a ticker with the settled outcome."""
+    db_path = _get_db_path(cfg)
+    resolved_ts = time.time()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            UPDATE signals
+            SET outcome = CASE 
+                WHEN (side = 'yes' AND ? = 1) OR (side = 'no' AND ? = 0) THEN 'win'
+                ELSE 'lose'
+            END,
+            resolved_ts = ?
+            WHERE ticker = ? AND outcome IS NULL
+        """, (1 if yes_settled else 0, 1 if yes_settled else 0, resolved_ts, ticker))
+        conn.commit()
 def record_prediction_outcome(
     prediction_id: int,
     yes_settled: bool,

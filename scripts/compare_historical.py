@@ -118,8 +118,6 @@ try:
         get_limit_order_fill_rate_stats,
         get_loss_streak,
         get_market_snapshots_for_backtest,
-        get_position_evaluation_stats,
-        get_nearest_market_snapshot,
         get_predictions_for_backtest,
         get_realized_pnl_stats,
         get_recent_performance,
@@ -138,6 +136,8 @@ try:
         record_market_snapshot,
         record_order_cancel,
         record_prediction_outcome,
+        record_signal,
+        resolve_signal_outcomes,
         record_resolved,
         resolve_position_evaluations,
         get_markout_history,
@@ -6014,6 +6014,9 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
                 market_yes_at_last=snap.get("yes_bid") if snap else None,
                 config=cfg,
             )
+        
+        # Opportunity-level accounting resolution
+        resolve_signal_outcomes(t, yes_settled, cfg)
 
 
 def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
@@ -6130,6 +6133,9 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
             p["id"], yes_settled, pnl_cents, cfg,
             resolution_price=res_price,
         )
+        
+        # Opportunity-level accounting resolution
+        resolve_signal_outcomes(t, yes_settled, cfg)
         if resolve_position_evaluations:
             resolve_position_evaluations(
                 t, yes_settled, cfg,
@@ -8070,6 +8076,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     price=float(price),
                     min_contracts=min_contracts,
                 )
+                # Opportunity-level accounting
+                record_signal(PLATFORM_KALSHI, ticker, side, hist_p, bid, _chosen_net_k, cfg)
+
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
                     "ticker": ticker,
@@ -8122,6 +8131,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             ticker=ticker, platform=PLATFORM_KALSHI, cfg=cfg, min_stability_seconds=dynamic_stability_seconds,
                             skip_in_preview=getattr(args, "preview", False),
                         ):
+                            # Opportunity-level accounting
+                            record_signal(PLATFORM_KALSHI, ticker, side_dip, hist_p, bid_dip, gap, cfg)
+
                             pending_orders.append({
                                 "platform": PLATFORM_KALSHI,
                                 "ticker": ticker,
@@ -8171,6 +8183,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             yes_ask=_book_lot.get("yes_ask"),
                             no_ask=_book_lot.get("no_ask"),
                         )
+                        # Opportunity-level accounting
+                        record_signal(PLATFORM_KALSHI, ticker, side_lot, hist_p, bid_lot, p_win_lot, cfg)
+
                         pending_orders.append({
                             "platform": PLATFORM_KALSHI,
                             "ticker": ticker,
@@ -9147,6 +9162,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     }
                     if instrument_symbol:
                         order_entry["instrument_symbol"] = instrument_symbol
+                    # Opportunity-level accounting
+                    record_signal(PLATFORM_GEMINI, g_ticker, side, hist_p_gem, bid, _chosen_net_g, cfg)
+
                     pending_orders.append(order_entry)
                 elif sp.enable_disagreement_dip and rec == REC_SKIP:
                     # Strong disagreement: market 95% vs we 45% → place low limit to catch dips
@@ -9205,6 +9223,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 }
                                 if instrument_symbol:
                                     dip_entry["instrument_symbol"] = get_instrument_symbol(evt, side_dip) or instrument_symbol
+                                # Opportunity-level accounting
+                                record_signal(PLATFORM_GEMINI, evt.get("ticker", "?"), side_dip, hist_p_gem, bid_dip, gap, cfg)
+
                                 pending_orders.append(dip_entry)
                                 print(f"       [Disagreement Dip] {side_dip.upper()} | gap={gap:.1%} | limit ${price_dip:.2f} (below ${bid_dip:.2f}) x {sp.disagreement_dip_contracts}")
                                 added_dip = True
@@ -9261,6 +9282,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             }
                             if instrument_symbol:
                                 lot_entry["instrument_symbol"] = get_instrument_symbol(evt, side_lot) or instrument_symbol
+                            # Opportunity-level accounting
+                            record_signal(PLATFORM_GEMINI, evt.get("ticker", "?"), side_lot, hist_p_gem, bid_lot, p_win_lot, cfg)
+
                             pending_orders.append(lot_entry)
                             print(
                                 f"       [Lottery Limit] {side_lot.upper()} | P(win)={p_win_lot:.1%} | "
