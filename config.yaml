@@ -113,6 +113,17 @@ execution:
   limit_buy_escalation_cancel_minutes: 0
   # Avoid stacking another same-side BUY while an unresolved position exists for that market (platform+ticker+side).
   skip_new_buy_when_unresolved_same_side: true
+  # Wide/gapped order books: lift dip-based limits toward bid + anchor×(ask−bid), capped by model fair value;
+  # EV-tier quotes also get a touch-lift to at least the bid when fair_cap allows. Brent / BZ=F stay exempt
+  # (Kalshi index vs Yahoo proxy mismatch — keep passive “fishing” there).
+  limit_buy_wide_book_coalesce_enabled: true
+  limit_buy_wide_book_spread_rel: 0.22
+  limit_buy_wide_book_anchor_fraction: 0.38
+  limit_buy_wide_book_conservative_substrings:
+    - BRENT
+    - KXBRENT
+  limit_buy_wide_book_conservative_yf_tickers:
+    - BZ=F
 
 # Optional recovery overlay (merged into strategy before execution merge). Use for low-balance “get gears turning”.
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.

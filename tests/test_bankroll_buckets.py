@@ -200,5 +200,95 @@ class TestEvTierLimitPricing(unittest.TestCase):
         self.assertEqual(dip, 0.0)
 
 
+class TestWideBookLimitCoalesce(unittest.TestCase):
+    def test_layered_lift_on_wide_spread(self) -> None:
+        px, _ = _compute_limit_price(
+            bid=0.10,
+            ask=0.71,
+            p_win=0.85,
+            maker_fee_rate=0.0,
+            min_fee_per_order=0.0,
+            mode="layered",
+            base_dip=0.05,
+            tick_offset=1,
+            held_same_side=0,
+            held_opp_side=0,
+            max_inventory_skew_pct=0.0,
+            layered_order_levels=2,
+            order_count=1,
+            max_dip_cap=0.25,
+            passive_quote="dip",
+            net_edge=None,
+            edge_aggression_enabled=False,
+            wide_book_coalesce_enabled=True,
+            wide_book_conservative=False,
+            wide_book_spread_rel=0.22,
+            wide_book_anchor_fraction=0.38,
+        )
+        self.assertIsNotNone(px)
+        assert px is not None
+        self.assertGreaterEqual(px, 0.30)
+
+    def test_conservative_skips_wide_book_lift(self) -> None:
+        px, _ = _compute_limit_price(
+            bid=0.10,
+            ask=0.71,
+            p_win=0.85,
+            maker_fee_rate=0.0,
+            min_fee_per_order=0.0,
+            mode="layered",
+            base_dip=0.05,
+            tick_offset=1,
+            held_same_side=0,
+            held_opp_side=0,
+            max_inventory_skew_pct=0.0,
+            layered_order_levels=2,
+            order_count=1,
+            max_dip_cap=0.25,
+            passive_quote="dip",
+            net_edge=None,
+            edge_aggression_enabled=False,
+            wide_book_coalesce_enabled=True,
+            wide_book_conservative=True,
+            wide_book_spread_rel=0.22,
+            wide_book_anchor_fraction=0.38,
+        )
+        self.assertIsNotNone(px)
+        assert px is not None
+        self.assertLess(px, 0.20)
+
+    def test_ev_touch_lift_when_cross_tier_below_bid(self) -> None:
+        px, _ = _compute_limit_price(
+            bid=0.71,
+            ask=0.09,
+            p_win=0.83,
+            maker_fee_rate=0.0,
+            min_fee_per_order=0.0,
+            mode="layered",
+            base_dip=0.05,
+            tick_offset=1,
+            held_same_side=0,
+            held_opp_side=0,
+            max_inventory_skew_pct=0.0,
+            layered_order_levels=2,
+            order_count=1,
+            max_dip_cap=0.25,
+            passive_quote="dip",
+            net_edge=0.12,
+            edge_aggression_enabled=True,
+            cross_spread_min_edge=0.10,
+            near_market_min_edge=0.05,
+            passive_only_below_edge=0.0,
+            ev_tier_pricing=True,
+            weak_bid_min_edge=0.03,
+            skip_below_weak_edge=True,
+            wide_book_coalesce_enabled=True,
+            wide_book_conservative=False,
+        )
+        self.assertIsNotNone(px)
+        assert px is not None
+        self.assertAlmostEqual(px, 0.71, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

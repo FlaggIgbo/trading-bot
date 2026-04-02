@@ -298,6 +298,34 @@ def main() -> int:
     if chase_min < 0:
         errors.append("`strategy.passive_bid_chase_refresh_minutes` must be >= 0.")
 
+    _wb_sp = execution_cfg.get("limit_buy_wide_book_spread_rel")
+    if _wb_sp is None:
+        _wb_sp = strategy.get("limit_buy_wide_book_spread_rel")
+    if _wb_sp is not None:
+        wb_spread = _as_float(_wb_sp, -1.0)
+        if wb_spread < 0 or wb_spread > 2.0:
+            errors.append(
+                "`execution.limit_buy_wide_book_spread_rel` / `strategy.*` must be in [0, 2] ((ask−bid)/bid gate)."
+            )
+    _wb_an = execution_cfg.get("limit_buy_wide_book_anchor_fraction")
+    if _wb_an is None:
+        _wb_an = strategy.get("limit_buy_wide_book_anchor_fraction")
+    if _wb_an is not None:
+        wb_anchor = _as_float(_wb_an, -1.0)
+        if wb_anchor < 0 or wb_anchor > 1.0:
+            errors.append(
+                "`execution.limit_buy_wide_book_anchor_fraction` / `strategy.*` must be in [0, 1]."
+            )
+    for _wk, _label in (
+        ("limit_buy_wide_book_conservative_substrings", "substring"),
+        ("limit_buy_wide_book_conservative_yf_tickers", "Yahoo ticker"),
+    ):
+        _wl = execution_cfg.get(_wk)
+        if _wl is None:
+            _wl = strategy.get(_wk)
+        if _wl is not None and not isinstance(_wl, list):
+            errors.append(f"`execution.{_wk}` / `strategy.{_wk}` must be a list of {_label}s when set.")
+
     flip_edge_buf = _as_float(strategy.get("position_flip_sell_min_negative_edge"), 0.0)
     if flip_edge_buf < 0 or flip_edge_buf > 0.99:
         errors.append("`strategy.position_flip_sell_min_negative_edge` must be in [0, 0.99] (0 = legacy flip sells).")

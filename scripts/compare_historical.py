@@ -510,6 +510,12 @@ class _StrategyParams:
     limit_buy_escalate_after_minutes_1: float
     limit_buy_escalate_after_minutes_2: float
     limit_buy_escalation_cancel_minutes: int
+    # Wide/gapped book: lift passive quotes + optional EV touch-lift (exempt Brent / BZ=F by default).
+    limit_buy_wide_book_coalesce_enabled: bool
+    limit_buy_wide_book_spread_rel: float
+    limit_buy_wide_book_anchor_fraction: float
+    limit_buy_wide_book_conservative_substrings: list[str]
+    limit_buy_wide_book_conservative_yf_tickers: list[str]
     resting_cancel_if_market_bid_above_limit_by: float
     # Simple EV mode: single net-edge gate, Kelly sizing, uncertainty/calibration → size only.
     simple_ev_decision_enabled: bool
@@ -852,6 +858,19 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         limit_buy_escalate_after_minutes_1=max(0.0, float(strategy.get("limit_buy_escalate_after_minutes_1", 5.0))),
         limit_buy_escalate_after_minutes_2=max(0.0, float(strategy.get("limit_buy_escalate_after_minutes_2", 10.0))),
         limit_buy_escalation_cancel_minutes=max(0, int(strategy.get("limit_buy_escalation_cancel_minutes", 0))),
+        limit_buy_wide_book_coalesce_enabled=bool(strategy.get("limit_buy_wide_book_coalesce_enabled", False)),
+        limit_buy_wide_book_spread_rel=max(0.0, min(2.0, float(strategy.get("limit_buy_wide_book_spread_rel", 0.22)))),
+        limit_buy_wide_book_anchor_fraction=max(0.0, min(1.0, float(strategy.get("limit_buy_wide_book_anchor_fraction", 0.38)))),
+        limit_buy_wide_book_conservative_substrings=(
+            [str(x).strip() for x in strategy["limit_buy_wide_book_conservative_substrings"] if str(x).strip()]
+            if isinstance(strategy.get("limit_buy_wide_book_conservative_substrings"), list)
+            else ["BRENT", "KXBRENT"]
+        ),
+        limit_buy_wide_book_conservative_yf_tickers=(
+            [str(x).strip() for x in strategy["limit_buy_wide_book_conservative_yf_tickers"] if str(x).strip()]
+            if isinstance(strategy.get("limit_buy_wide_book_conservative_yf_tickers"), list)
+            else ["BZ=F"]
+        ),
         resting_cancel_if_market_bid_above_limit_by=max(0.0, min(0.5, float(strategy.get("resting_cancel_if_market_bid_above_limit_by", 0.0)))),
         simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
         simple_ev_min_edge=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge", 0.03)))),
@@ -1171,6 +1190,60 @@ def _clip_price(v: float) -> float:
     return max(0.01, min(0.99, float(v)))
 
 
+def _limit_buy_wide_book_conservative(
+    ticker: str,
+    yf_ticker: str | None,
+    substrings: list[str],
+    yf_exact: list[str],
+) -> bool:
+    """
+    When True, skip wide-book limit coalesce / EV touch-lift (stay deep passive).
+    Used for Brent / proxy-mismatch underlyings where aggressive lift vs tape is undesirable.
+    """
+    t = (ticker or "").upper()
+    for s in substrings:
+        su = (s or "").strip().upper()
+        if su and su in t:
+            return True
+    yf = (yf_ticker or "").strip().upper()
+    for x in yf_exact:
+        if (x or "").strip().upper() == yf:
+            return True
+    return False
+
+
+def _wide_book_lift_passive_raw_price(
+    *,
+    bid: float,
+    ask: float | None,
+    fair_cap: float,
+    raw_price: float,
+    enabled: bool,
+    conservative: bool,
+    spread_rel_threshold: float,
+    anchor_fraction: float,
+) -> float:
+    """
+    On wide (ask-bid)/bid books, raise dip-based raw_price toward bid + anchor×(ask-bid),
+    capped by fair_cap — avoids lottery bids far below the working side when the book is gapped.
+    """
+    if not enabled or conservative or ask is None:
+        return raw_price
+    b = float(bid)
+    a = float(ask)
+    if b <= 0 or a <= b + 1e-9:
+        return raw_price
+    rel = (a - b) / b
+    thr = max(0.0, float(spread_rel_threshold))
+    if rel < thr:
+        return raw_price
+    frac = max(0.0, min(1.0, float(anchor_fraction)))
+    anchor = b + frac * (a - b)
+    cap = max(0.01, min(0.99, float(fair_cap)))
+    lift = min(anchor, cap)
+    return max(float(raw_price), lift)
+
+
 def _compute_lottery_limit_price(
     *,
     sp: _StrategyParams,
@@ -1360,6 +1433,8 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
         "limit_buy_medium_spread_fraction",
         "limit_buy_escalate_after_minutes_1",
         "limit_buy_escalate_after_minutes_2",
+        "limit_buy_wide_book_spread_rel",
+        "limit_buy_wide_book_anchor_fraction",
     )
     for k in _ex_float:
         if ex.get(k) is not None:
@@ -1380,9 +1455,16 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
         "limit_buy_ev_tier_pricing",
         "limit_buy_skip_below_weak_edge",
         "limit_buy_escalation_price_enabled",
+        "limit_buy_wide_book_coalesce_enabled",
     ):
         if ex.get(k) is not None:
             strategy[k] = bool(ex[k])
+    for _lk in (
+        "limit_buy_wide_book_conservative_substrings",
+        "limit_buy_wide_book_conservative_yf_tickers",
+    ):
+        if ex.get(_lk) is not None and isinstance(ex[_lk], list):
+            strategy[_lk] = [str(x).strip() for x in ex[_lk] if str(x).strip()]
     ps = str(ex.get("price_strategy") or "").strip().lower()
     if ps == "passive":
         try:
@@ -1546,6 +1628,10 @@ def _compute_limit_price(
     escalation_price_enabled: bool = False,
     escalate_after_minutes_1: float = 5.0,
     escalate_after_minutes_2: float = 10.0,
+    wide_book_coalesce_enabled: bool = False,
+    wide_book_conservative: bool = False,
+    wide_book_spread_rel: float = 0.22,
+    wide_book_anchor_fraction: float = 0.38,
 ) -> tuple[float | None, float]:
     """
     Returns (limit_price, dip_used_proxy). limit_price is None when EV-tier policy skips the quote.
@@ -1553,6 +1639,9 @@ def _compute_limit_price(
     When edge_aggression_enabled and net_edge is set, quote by edge tier (strong→ask, medium→mid/spread,
     weak→bid) instead of only deep dip bids. If passive_only_below_edge > 0 and net_edge is below it,
     aggression is skipped (maker-style limits). Set ev_tier_pricing=False for legacy bid+tick / ask−1¢ tiers.
+    wide_book_*: on wide (ask−bid)/bid, lift passive quotes toward the touch (capped by fair_cap); optional
+    EV touch-lift when quote sits below bid but fair_cap still allows paying the bid. Brent/BZ=F exempt via
+    wide_book_conservative at the call site.
     """
     mode_norm = (mode or "fixed_pct").strip().lower()
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
@@ -1614,17 +1703,43 @@ def _compute_limit_price(
                     px_esc = min(px_esc, fair_cap)
                     if ask is not None and float(ask) > 0:
                         px_esc = min(px_esc, float(ask))
+                if (
+                    wide_book_coalesce_enabled
+                    and not wide_book_conservative
+                    and float(bid) > 0
+                    and px_esc + 1e-9 < float(bid)
+                    and float(fair_cap) + 1e-9 >= float(bid)
+                ):
+                    px_esc = min(float(fair_cap), float(bid))
                 return _clip_price(px_esc), 0.0
         else:
             if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
                 aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
-                return _clip_price(aggressive), 0.0
+                px_leg = float(aggressive)
+                if (
+                    wide_book_coalesce_enabled
+                    and not wide_book_conservative
+                    and float(bid) > 0
+                    and px_leg + 1e-9 < float(bid)
+                    and float(fair_cap) + 1e-9 >= float(bid)
+                ):
+                    px_leg = min(float(fair_cap), float(bid))
+                return _clip_price(px_leg), 0.0
             if ne >= float(near_market_min_edge):
                 jump = float(bid) + tick
                 if ask is not None and ask > 0:
                     jump = min(jump, max(0.01, float(ask) - 0.01))
                 near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
-                return _clip_price(near_px), 0.0
+                px_near = float(near_px)
+                if (
+                    wide_book_coalesce_enabled
+                    and not wide_book_conservative
+                    and float(bid) > 0
+                    and px_near + 1e-9 < float(bid)
+                    and float(fair_cap) + 1e-9 >= float(bid)
+                ):
+                    px_near = min(float(fair_cap), float(bid))
+                return _clip_price(px_near), 0.0
 
     if mode_norm == "fixed_pct":
         dip = max(0.0, min(max_dip_cap, float(base_dip)))
@@ -1651,6 +1766,18 @@ def _compute_limit_price(
             base_price -= level_idx * depth_per_level
 
         raw_price = min(base_price, fair_cap)
+
+    if mode_norm in ("fixed_pct", "layered"):
+        raw_price = _wide_book_lift_passive_raw_price(
+            bid=bid,
+            ask=ask,
+            fair_cap=float(fair_cap),
+            raw_price=float(raw_price),
+            enabled=wide_book_coalesce_enabled,
+            conservative=wide_book_conservative,
+            spread_rel_threshold=wide_book_spread_rel,
+            anchor_fraction=wide_book_anchor_fraction,
+        )
 
     # Inventory-based quote skew: less aggressive on same-side inventory, slightly
     # more aggressive when holding opposite side (helps rebalance exposure).
@@ -7681,6 +7808,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _fee_le = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
                 _net_edge_le = _chosen_net_k
                 _age_k = resting_buy_age_minutes.get((PLATFORM_KALSHI, ticker, side))
+                _wbc_k = _limit_buy_wide_book_conservative(
+                    ticker,
+                    yf_ticker,
+                    sp.limit_buy_wide_book_conservative_substrings,
+                    sp.limit_buy_wide_book_conservative_yf_tickers,
+                )
                 price, dip_used = _compute_limit_price(
                     bid=bid,
                     ask=ask_side,
@@ -7711,6 +7844,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     escalation_price_enabled=sp.limit_buy_escalation_price_enabled,
                     escalate_after_minutes_1=sp.limit_buy_escalate_after_minutes_1,
                     escalate_after_minutes_2=sp.limit_buy_escalate_after_minutes_2,
+                    wide_book_coalesce_enabled=sp.limit_buy_wide_book_coalesce_enabled,
+                    wide_book_conservative=_wbc_k,
+                    wide_book_spread_rel=sp.limit_buy_wide_book_spread_rel,
+                    wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
                 )
                 if price is None:
                     print(
@@ -8702,6 +8839,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _net_edge_leg = _chosen_net_g
                     _sym_g = get_instrument_symbol(evt, side) or ""
                     _age_g = resting_buy_age_minutes.get((PLATFORM_GEMINI, _sym_g, side)) if _sym_g else None
+                    _wbc_g = _limit_buy_wide_book_conservative(
+                        str(evt.get("ticker", "?") or ""),
+                        yf_ticker,
+                        sp.limit_buy_wide_book_conservative_substrings,
+                        sp.limit_buy_wide_book_conservative_yf_tickers,
+                    )
                     price, dip_used = _compute_limit_price(
                         bid=bid,
                         ask=ask_side,
@@ -8732,6 +8875,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         escalation_price_enabled=sp.limit_buy_escalation_price_enabled,
                         escalate_after_minutes_1=sp.limit_buy_escalate_after_minutes_1,
                         escalate_after_minutes_2=sp.limit_buy_escalate_after_minutes_2,
+                        wide_book_coalesce_enabled=sp.limit_buy_wide_book_coalesce_enabled,
+                        wide_book_conservative=_wbc_g,
+                        wide_book_spread_rel=sp.limit_buy_wide_book_spread_rel,
+                        wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
                     )
                     if price is None:
                         print(
