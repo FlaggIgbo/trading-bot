@@ -223,6 +223,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     _migrate_limit_orders_fill_attribution(conn)
     _migrate_markout_table(conn)
     _migrate_stop_loss_book_state(conn)
+    _migrate_signal_id(conn)
 
 
 def _migrate_predictions_price_after_buy(conn: sqlite3.Connection) -> None:
@@ -881,6 +882,7 @@ def record_limit_order(
     threshold: float | None = None,
     direction: str | None = None,
     config: dict | None = None,
+    signal_id: int | None = None,
 ) -> int | None:
     """
     Record a limit order we placed (status=placed). Used for fill attribution and unfilled analysis.
@@ -894,8 +896,8 @@ def record_limit_order(
         cur = conn.execute(
             """INSERT INTO limit_orders
                (platform, ticker, order_id, side, action, limit_price, bid_at_place, dip_pct_used,
-                hist_p, vol_p, edge, rec, count, ts, yf_ticker, threshold, direction, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                hist_p, vol_p, edge, rec, count, ts, yf_ticker, threshold, direction, status, signal_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 platform,
                 ticker,
@@ -915,6 +917,7 @@ def record_limit_order(
                 threshold,
                 direction or "",
                 "placed",
+                signal_id,
             ),
         )
         conn.commit()
@@ -1077,8 +1080,8 @@ def record_prediction_from_fill(
     entry_price: float,
     count: int,
     fill_ts: float | None = None,
-    source: str = "fill_reconciliation",
     config: dict | None = None,
+    signal_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Insert prediction only from confirmed fills (idempotent by platform+fill_id).
@@ -1111,7 +1114,7 @@ def record_prediction_from_fill(
             try:
                 ctx = conn.execute(
                     """SELECT ticker, side, hist_p, vol_p, yf_ticker, threshold, direction, rec,
-                              theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps
+                              theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps, signal_id
                        FROM limit_orders
                        WHERE platform=? AND order_id=?
                        ORDER BY ts DESC LIMIT 1""",
@@ -1145,13 +1148,14 @@ def record_prediction_from_fill(
         bid_at_place = float(ctx["bid_at_place"]) if ctx and ctx["bid_at_place"] is not None else None
         spread_bps_at_place = float(ctx["spread_bps_at_place"]) if ctx and ctx["spread_bps_at_place"] is not None else None
         fill_slippage_bps = float(ctx["fill_slippage_bps"]) if ctx and ctx["fill_slippage_bps"] is not None else None
+        final_signal_id = signal_id or (ctx["signal_id"] if ctx else None)
 
         ts_val = float(fill_ts if fill_ts is not None else time.time())
         cur = conn.execute(
             """INSERT INTO predictions
                (platform, ticker, order_id, fill_id, side, hist_p, vol_p, entry_price, count, ts, fill_ts, source,
-                yf_ticker, threshold, direction, rec, theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                yf_ticker, threshold, direction, rec, theoretical_price, bid_at_place, spread_bps_at_place, fill_slippage_bps, signal_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 platform,
                 row_ticker,
@@ -1173,6 +1177,7 @@ def record_prediction_from_fill(
                 bid_at_place,
                 spread_bps_at_place,
                 fill_slippage_bps,
+                final_signal_id,
             ),
         )
         if order_id:
@@ -1415,16 +1420,21 @@ def record_prediction_early_exit(
         conn.close()
 
 
-def record_signal(platform: str, ticker: str, side: str, hist_p: float, theoretical_price: float, edge: float, cfg: dict) -> None:
-    """Record a recommendation signal (Opportunity-level accounting)."""
+def record_signal(platform: str, ticker: str, side: str, hist_p: float, theoretical_price: float, edge: float, cfg: dict) -> int | None:
+    """Record a recommendation signal (Opportunity-level accounting). Returns the signal ID."""
     db_path = _get_db_path(cfg)
     ts = time.time()
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""
-            INSERT INTO signals (platform, ticker, side, hist_p, theoretical_price, edge, ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (platform, ticker, side, hist_p, theoretical_price, edge, ts))
-        conn.commit()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.execute("""
+                INSERT INTO signals (platform, ticker, side, hist_p, theoretical_price, edge, ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (platform, ticker, side, hist_p, theoretical_price, edge, ts))
+            conn.commit()
+            return cursor.lastrowid
+    except Exception as e:
+        print(f"[Storage] Error recording signal: {e}")
+        return None
 
 def resolve_signal_outcomes(ticker: str, yes_settled: bool, cfg: dict) -> None:
     """Update unresolved signals for a ticker with the settled outcome."""
@@ -2644,3 +2654,12 @@ def get_nearest_market_snapshot(
         return None
     finally:
         conn.close()
+
+def _migrate_signal_id(conn: sqlite3.Connection) -> None:
+    """Add signal_id to limit_orders and predictions to link decisions to fills."""
+    for table in ["limit_orders", "predictions"]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN signal_id INTEGER")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass

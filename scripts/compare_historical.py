@@ -8077,7 +8077,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     min_contracts=min_contracts,
                 )
                 # Opportunity-level accounting
-                record_signal(PLATFORM_KALSHI, ticker, side, hist_p, bid, _chosen_net_k, cfg)
+                sig_id = record_signal(PLATFORM_KALSHI, ticker, side, hist_p, bid, _chosen_net_k, cfg)
 
                 pending_orders.append({
                     "platform": PLATFORM_KALSHI,
@@ -8092,6 +8092,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "liquidity_mult": liq_mult,
                     "dip_pct_used": dip_used,
                     "edge": _chosen_net_k,
+                    "signal_id": sig_id,
                     "count": count,
                     "hist_p": hist_p,
                     "vol_p": vol_p,
@@ -8132,7 +8133,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             skip_in_preview=getattr(args, "preview", False),
                         ):
                             # Opportunity-level accounting
-                            record_signal(PLATFORM_KALSHI, ticker, side_dip, hist_p, bid_dip, gap, cfg)
+                            sig_id_dip = record_signal(PLATFORM_KALSHI, ticker, side_dip, hist_p, bid_dip, gap, cfg)
 
                             pending_orders.append({
                                 "platform": PLATFORM_KALSHI,
@@ -8184,7 +8185,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             no_ask=_book_lot.get("no_ask"),
                         )
                         # Opportunity-level accounting
-                        record_signal(PLATFORM_KALSHI, ticker, side_lot, hist_p, bid_lot, p_win_lot, cfg)
+                        sig_id_lot = record_signal(PLATFORM_KALSHI, ticker, side_lot, hist_p, bid_lot, p_win_lot, cfg)
 
                         pending_orders.append({
                             "platform": PLATFORM_KALSHI,
@@ -8197,6 +8198,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             "theoretical_price": bid_lot,
                             "spread_bps_at_place": 0,
                             "edge": p_win_lot,
+                            "signal_id": sig_id_lot,
                             "count": sp.lottery_limit_contracts,
                             "hist_p": hist_p,
                             "vol_p": vol_p,
@@ -9163,7 +9165,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if instrument_symbol:
                         order_entry["instrument_symbol"] = instrument_symbol
                     # Opportunity-level accounting
-                    record_signal(PLATFORM_GEMINI, g_ticker, side, hist_p_gem, bid, _chosen_net_g, cfg)
+                    sig_id_g = record_signal(PLATFORM_GEMINI, g_ticker, side, hist_p_gem, bid, _chosen_net_g, cfg)
+                    order_entry["signal_id"] = sig_id_g
 
                     pending_orders.append(order_entry)
                 elif sp.enable_disagreement_dip and rec == REC_SKIP:
@@ -9224,7 +9227,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 if instrument_symbol:
                                     dip_entry["instrument_symbol"] = get_instrument_symbol(evt, side_dip) or instrument_symbol
                                 # Opportunity-level accounting
-                                record_signal(PLATFORM_GEMINI, evt.get("ticker", "?"), side_dip, hist_p_gem, bid_dip, gap, cfg)
+                                sig_id_dip_g = record_signal(PLATFORM_GEMINI, evt.get("ticker", "?"), side_dip, hist_p_gem, bid_dip, gap, cfg)
+                                dip_entry["signal_id"] = sig_id_dip_g
 
                                 pending_orders.append(dip_entry)
                                 print(f"       [Disagreement Dip] {side_dip.upper()} | gap={gap:.1%} | limit ${price_dip:.2f} (below ${bid_dip:.2f}) x {sp.disagreement_dip_contracts}")
@@ -9283,7 +9287,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             if instrument_symbol:
                                 lot_entry["instrument_symbol"] = get_instrument_symbol(evt, side_lot) or instrument_symbol
                             # Opportunity-level accounting
-                            record_signal(PLATFORM_GEMINI, evt.get("ticker", "?"), side_lot, hist_p_gem, bid_lot, p_win_lot, cfg)
+                            sig_id_lot_g = record_signal(PLATFORM_GEMINI, evt.get("ticker", "?"), side_lot, hist_p_gem, bid_lot, p_win_lot, cfg)
+                            lot_entry["signal_id"] = sig_id_lot_g
 
                             pending_orders.append(lot_entry)
                             print(
@@ -10932,7 +10937,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 yf_ticker=o.get("yf_ticker"),
                                 threshold=o.get("threshold"),
                                 direction=o.get("direction"),
-                                config=cfg,
+                                config=cfg, signal_id=o.get("signal_id"),
                             )
                     else:
                         print(f"  (skipped BUY {o['ticker']} - balance/API constraint)")
@@ -10981,7 +10986,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 yf_ticker=o.get("yf_ticker"),
                                 threshold=o.get("threshold"),
                                 direction=o.get("direction"),
-                                config=cfg,
+                                config=cfg, signal_id=o.get("signal_id"),
                             )
                     else:
                         _gem_err = getattr(gemini_trading, "last_place_order_error", None) or "balance/API constraint"

@@ -29,31 +29,45 @@ def main():
 
     cutoff_ts = time.time() - (args.days * 86400)
     
-    # 1. Query Signals (All Opportunities) - use creation time 'ts' for counting total signals
+    # 1. Query Signals (All Opportunities)
+    # Using 'id' as the signal_id
     sig_query = """
-        SELECT side, edge, outcome 
+        SELECT id, side, edge, outcome 
         FROM signals
         WHERE ts >= ?
     """
     signals = conn.execute(sig_query, (cutoff_ts,)).fetchall()
     
-    # 2. Query Predictions (Filled Trades) - use creation time 'ts' for calculating fill rate
+    # 2. Query Predictions (Filled Trades)
+    # We now group by signal_id to ensure we don't double-count fills for the same decision
     pred_query = """
-        SELECT side, hist_p, theoretical_price, bid_at_place, entry_price, 
-               outcome, realized_pnl_cents
+        SELECT signal_id, outcome, realized_pnl_cents
         FROM predictions
-        WHERE ts >= ?
+        WHERE ts >= ? AND signal_id IS NOT NULL
     """
     fills = conn.execute(pred_query, (cutoff_ts,)).fetchall()
     
+    # Build a lookup of which signals were filled
+    filled_signal_ids = {}
+    for f in fills:
+        sid = f["signal_id"]
+        if sid not in filled_signal_ids:
+            filled_signal_ids[sid] = {"wins": 0, "res": 0, "pnl": 0}
+        
+        if f["outcome"] in ("win", "lose"):
+            filled_signal_ids[sid]["res"] += 1
+            if f["outcome"] == "win":
+                filled_signal_ids[sid]["wins"] += 1
+        filled_signal_ids[sid]["pnl"] += int(f["realized_pnl_cents"] or 0)
+
     buckets = {
-        "<8%":   {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "fill_total": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
-        "8–10%": {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "fill_total": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
-        "10–20%": {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "fill_total": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
-        "20%+":  {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "fill_total": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
+        "<8%":   {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "filled_sigs": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
+        "8–10%": {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "filled_sigs": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
+        "10–20%": {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "filled_sigs": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
+        "20%+":  {"sig_total": 0, "sig_res": 0, "sig_wins": 0, "filled_sigs": 0, "fill_res": 0, "fill_wins": 0, "pnl": 0},
     }
 
-    # Process Signals for Shadow Stats
+    # Process Signals for Shadow Stats & Join with Fills
     for s in signals:
         edge = float(s["edge"] or 0.0)
         bucket_key = None
@@ -64,34 +78,25 @@ def main():
         
         b = buckets[bucket_key]
         b["sig_total"] += 1
+        
+        # Shadow Outcome
         if s["outcome"] in ("win", "lose"):
             b["sig_res"] += 1
             if s["outcome"] == "win":
                 b["sig_wins"] += 1
+        
+        # Realized Outcome (Linked via signal_id)
+        sid = s["id"]
+        if sid in filled_signal_ids:
+            fstats = filled_signal_ids[sid]
+            b["filled_sigs"] += 1
+            b["pnl"] += fstats["pnl"]
+            if fstats["res"] > 0:
+                b["fill_res"] += 1
+                # A signal counts as a win if any of its fills (usually just 1) ended in a win
+                if fstats["wins"] > 0:
+                    b["fill_wins"] += 1
 
-    # Process Fills for Realized Stats
-    for f in fills:
-        # Re-derive expected edge to bucket correctly (matching signals logic)
-        side = (f["side"] or "").lower()
-        model_p = float(f["hist_p"] or 0.0) if side == "yes" else (1.0 - float(f["hist_p"] or 0.0))
-        # Use theoretical_price or bid_at_place for expected edge
-        exp_price = f["theoretical_price"] or f["bid_at_place"] or f["entry_price"]
-        edge = model_p - float(exp_price) - 0.01 # fee proxy
-        
-        bucket_key = None
-        if edge < 0.08: bucket_key = "<8%"
-        elif edge < 0.10: bucket_key = "8–10%"
-        elif edge < 0.20: bucket_key = "10–20%"
-        else: bucket_key = "20%+"
-        
-        b = buckets[bucket_key]
-        b["fill_total"] += 1
-        if f["outcome"] in ("win", "lose"):
-            b["fill_res"] += 1
-            if f["outcome"] == "win":
-                b["fill_wins"] += 1
-            b["pnl"] += int(f["realized_pnl_cents"] or 0)
-        
     print(f"\n==========================================================================")
     print(f" BIAS-CORRECTED PnL ATTRIBUTION (Last {args.days} days)")
     print(f"==========================================================================")
@@ -100,16 +105,16 @@ def main():
     
     for key in ["<8%", "8–10%", "10–20%", "20%+"]:
         b = buckets[key]
-        if b["sig_total"] == 0 and b["fill_total"] == 0:
+        if b["sig_total"] == 0 and b["filled_sigs"] == 0:
             print(f"{key:<10} | {0:<8} | {'-':<10} | {'-':<10} | {'-':<10} | {0}")
             continue
             
-        rate = (b["fill_total"] / b["sig_total"] * 100.0) if b["sig_total"] > 0 else 100.0 # if fills but no sigs, it's 100% or anomalous
+        rate = (b["filled_sigs"] / b["sig_total"] * 100.0) if b["sig_total"] > 0 else 0.0
         swr = (b["sig_wins"] / b["sig_res"] * 100.0) if b["sig_res"] > 0 else None
         rwr = (b["fill_wins"] / b["fill_res"] * 100.0) if b["fill_res"] > 0 else None
         
         # Format strings
-        rate_s = f"{rate:>5.1f}%" if b["sig_total"] > 0 else "N/A"
+        rate_s = f"{rate:>5.1f}%" if b["sig_total"] > 0 else "0.0%"
         swr_s = f"{swr:>5.1f}%" if swr is not None else "N/A"
         rwr_s = f"{rwr:>5.1f}%" if rwr is not None else "N/A"
         
@@ -118,7 +123,7 @@ def main():
     print("==========================================================================\n")
     print("Shadow WR (Win Rate) reflects our model's accuracy on all opportunities.")
     print("Real WR   (Win Rate) reflects our performance only on filled trades.")
-    print("Fill Rate counts all BUY signals vs all resulting predictions.")
+    print("Fill Rate counts % of signals that resulted in at least one fill.")
     print("==========================================================================\n")
 
 if __name__ == "__main__":
