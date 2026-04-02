@@ -429,7 +429,8 @@ def _migrate_markout_table(conn: sqlite3.Connection) -> None:
                 price_after REAL NOT NULL,
                 markout_bps REAL NOT NULL,
                 fill_ts REAL NOT NULL,
-                snapshot_ts REAL NOT NULL
+                snapshot_ts REAL NOT NULL,
+                UNIQUE(platform, fill_id, window_minutes)
             )
         """)
         conn.execute(
@@ -462,7 +463,7 @@ def record_markout_snapshot(
         return
     try:
         conn.execute(
-            """INSERT INTO markout_snapshots
+            """INSERT OR IGNORE INTO markout_snapshots
                (platform, ticker, fill_id, side, entry_price,
                 window_minutes, price_after, markout_bps, fill_ts, snapshot_ts)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
@@ -2545,5 +2546,51 @@ def get_recent_stop_loss_cooldowns(hours: float = 4.0, config: dict | None = Non
         return {(r["platform"], r["ticker"], r["side"]) for r in rows}
     except Exception:
         return set()
+    finally:
+        conn.close()
+
+def get_filled_predictions_for_markout(
+    lookback_hours: float = 24.0,
+    config: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Return all predictions with fills in the last N hours that might need markouts."""
+    conn = _get_conn(config)
+    if not conn: return []
+    try:
+        cutoff = time.time() - lookback_hours * 3600
+        rows = conn.execute(
+            """SELECT platform, ticker, fill_id, side, entry_price, fill_ts 
+               FROM predictions 
+               WHERE fill_ts >= ? AND fill_id IS NOT NULL 
+               ORDER BY fill_ts DESC""",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+def get_nearest_market_snapshot(
+    platform: str,
+    ticker: str,
+    target_ts: float,
+    tolerance_seconds: float = 300,
+    config: dict | None = None,
+) -> dict[str, Any] | None:
+    """Find the market snapshot for a ticker closest to target_ts within tolerance."""
+    conn = _get_conn(config)
+    if not conn: return None
+    try:
+        # Find the snapshot where ABS(ts - target_ts) is minimized
+        row = conn.execute(
+            """SELECT yes_bid, no_bid, ts FROM market_snapshots
+               WHERE platform=? AND ticker=? AND ABS(ts - ?) <= ?
+               ORDER BY ABS(ts - ?) LIMIT 1""",
+            (platform, ticker, target_ts, tolerance_seconds, target_ts),
+        ).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
     finally:
         conn.close()

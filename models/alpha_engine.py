@@ -29,6 +29,7 @@ class AlphaEngineConfig:
     markout_windows_minutes: list[int] = field(default_factory=lambda: [1, 5, 15])
     markout_toxic_threshold_bps: float = -50.0
     markout_edge_penalty: float = 0.03
+    markout_penalty_multiplier: float = 1.0  # Multiplier for continuous penalty scaling
     markout_min_samples: int = 5
 
     # --- Volatility-Adjusted Kelly ---
@@ -68,6 +69,7 @@ def load_alpha_engine_config(strategy: dict) -> AlphaEngineConfig:
         markout_windows_minutes=[int(w) for w in windows],
         markout_toxic_threshold_bps=float(ae.get("markout_toxic_threshold_bps", -50.0)),
         markout_edge_penalty=float(ae.get("markout_edge_penalty", 0.03)),
+        markout_penalty_multiplier=float(ae.get("markout_penalty_multiplier", 1.0)),
         markout_min_samples=int(ae.get("markout_min_samples", 5)),
         vol_kelly_enabled=bool(ae.get("vol_kelly_enabled", True)),
         vol_kelly_baseline_vol=float(ae.get("vol_kelly_baseline_vol", 0.02)),
@@ -193,16 +195,28 @@ def toxic_flow_edge_penalty(
     *,
     threshold_bps: float = -50.0,
     min_samples: int = 5,
-    penalty: float = 0.03,
+    base_penalty: float = 0.03,
+    multiplier: float = 1.0,
 ) -> float:
     """
     If a ticker is toxic, return a positive edge penalty so the strategy
-    demands more edge before entering again. This forces the model's
-    min_edge to exceed the adverse selection cost.
+    demands more edge before entering again.
+
+    Now using a continuous scaling function:
+    Penalty = base_penalty * (1 + multiplier * abs(avg - threshold) / 100)
+    This makes the bot progressively more cautious as adverse selection increases.
     """
-    if is_ticker_toxic(markout_history, threshold_bps, min_samples):
-        return penalty
-    return 0.0
+    if len(markout_history) < min_samples:
+        return 0.0
+    avg = sum(markout_history) / len(markout_history)
+    if avg >= threshold_bps:
+        return 0.0
+
+    # Calculate "excess toxicity" in bps
+    excess = abs(avg - threshold_bps)
+    # Scale: for every 100 bps (1%) of excess toxicity, add 'multiplier' * base_penalty
+    scaling_factor = 1.0 + (multiplier * (excess / 100.0))
+    return base_penalty * scaling_factor
 
 
 # ---------------------------------------------------------------------------

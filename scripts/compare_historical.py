@@ -115,6 +115,7 @@ try:
         get_loss_streak,
         get_market_snapshots_for_backtest,
         get_position_evaluation_stats,
+        get_nearest_market_snapshot,
         get_predictions_for_backtest,
         get_realized_pnl_stats,
         get_recent_performance,
@@ -136,11 +137,14 @@ try:
         record_resolved,
         resolve_position_evaluations,
         get_markout_history,
+        record_markout_snapshot,
+        get_filled_predictions_for_markout,
+        get_nearest_market_snapshot,
         update_stop_loss_book_weak_state,
     )
 except ImportError:
     expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_limit_order_fill_rate_stats = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_recent_stop_loss_cooldowns = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
-    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_unresolved_contract_sums_by_platform_yf = update_stop_loss_book_weak_state = None
+    get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_markout_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_filled_predictions_for_markout = get_nearest_market_snapshot = get_unresolved_contract_sums_by_platform_yf = update_stop_loss_book_weak_state = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
@@ -6509,6 +6513,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     sp = _load_strategy_params(strategy)
+    # Reconcile markouts (toxic flow data) if enabled
+    if sp.ae_cfg.markout_enabled:
+        try:
+            _reconcile_and_record_markouts(cfg, sp.ae_cfg)
+        except Exception as e:
+            print(f"[Markouts] Reconciliation failed: {e}")
+
     cooldowns = set()
     if get_recent_stop_loss_cooldowns and sp.stop_loss_cooldown_hours > 0:
         cooldowns = get_recent_stop_loss_cooldowns(sp.stop_loss_cooldown_hours, cfg)
@@ -7346,7 +7357,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _markout_hist,
                         threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
                         min_samples=sp.ae_cfg.markout_min_samples,
-                        penalty=sp.ae_cfg.markout_edge_penalty,
+                        base_penalty=sp.ae_cfg.markout_edge_penalty,
+                        multiplier=sp.ae_cfg.markout_penalty_multiplier,
                     )
                     effective_min += _toxic_penalty
                 # --- Alpha engine: OBI edge adjustment ---
@@ -8393,7 +8405,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             _markout_hist_g,
                             threshold_bps=sp.ae_cfg.markout_toxic_threshold_bps,
                             min_samples=sp.ae_cfg.markout_min_samples,
-                            penalty=sp.ae_cfg.markout_edge_penalty,
+                            base_penalty=sp.ae_cfg.markout_edge_penalty,
+                            multiplier=sp.ae_cfg.markout_penalty_multiplier,
                         )
                         effective_min_gem += _toxic_penalty_g
                     # --- Alpha engine: OBI edge adjustment (Gemini) ---
@@ -11018,3 +11031,64 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+def _reconcile_and_record_markouts(cfg: dict, ae_cfg: AlphaEngineConfig) -> None:
+    """
+    For filled predictions, check if 1m, 5m, or 15m windows have elapsed.
+    If so, find the nearest market price and record markout snapshots.
+    """
+    if not get_filled_predictions_for_markout or not record_markout_snapshot or not get_nearest_market_snapshot:
+        return
+
+    # Check last 24 hours of fills
+    fills = get_filled_predictions_for_markout(lookback_hours=24.0, config=cfg)
+    if not fills:
+        return
+
+    now = time.time()
+    recorded_count = 0
+    for f in fills:
+        plat = f["platform"]
+        tkr = f["ticker"]
+        fid = f["fill_id"]
+        side = f["side"]
+        entry = f["entry_price"]
+        fill_ts = f["fill_ts"]
+
+        if not fill_ts:
+            continue
+
+        for win in ae_cfg.markout_windows_minutes:
+            target_ts = fill_ts + (win * 60)
+            if now < target_ts:
+                continue  # Window hasn't elapsed yet
+
+            # Fetch the nearest snapshot (within 10 min tolerance)
+            snap = get_nearest_market_snapshot(plat, tkr, target_ts, tolerance_seconds=600, config=cfg)
+            if not snap:
+                continue
+
+            # Use the bid on our side as the 'price_after'
+            price_after = snap["yes_bid"] if side.lower() == "yes" else snap[ "no_bid"]
+            if price_after is None or price_after <= 0:
+                continue
+
+            # markout_bps = (price_after - entry) * 10000
+            markout_bps = (price_after - entry) * 10000
+
+            # record_markout_snapshot is now idempotent via INSERT OR IGNORE and UNIQUE index
+            record_markout_snapshot(
+                platform=plat,
+                ticker=tkr,
+                fill_id=fid,
+                side=side,
+                entry_price=entry,
+                window_minutes=win,
+                price_after=price_after,
+                markout_bps=markout_bps,
+                fill_ts=fill_ts,
+                config=cfg,
+            )
+            recorded_count += 1
+    if recorded_count > 0:
+        print(f"[Markouts] Recorded {recorded_count} new markout observations across recent fills.")
