@@ -118,7 +118,7 @@ execution:
   # EV-tier quotes also get a touch-lift to at least the bid when fair_cap allows.
   limit_buy_wide_book_coalesce_enabled: true
   limit_buy_wide_book_spread_rel: 0.22
-  limit_buy_wide_book_anchor_fraction: 0.38
+  limit_buy_wide_book_anchor_fraction: 0.60
   limit_buy_wide_book_conservative_substrings: []
   limit_buy_wide_book_conservative_yf_tickers: []
 
@@ -126,7 +126,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.10
+  min_edge: 0.08
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -143,10 +143,10 @@ recovery:
   enable_vol_regime_scaling: false
   dte_edge_scaling_enabled: false
   # >1.0 stacks on simple_ev and legacy min_edge for 15m / sub-hour (simple_ev path applies this in compare_historical)
-  ultra_short_min_edge_mult: 1.85
+  ultra_short_min_edge_mult: 1.35
   # Hourly / non–5pm crypto (and non–4pm S&P) use strict mode: model P(win) must exceed these AND edge — funding wallets does not change that.
-  intraday_other_min_p_win: 0.75 # Loosened with global circuit breaker as backstop
-  intraday_other_min_p_win_with_vol: 0.67 # Paired with vol path
+  intraday_other_min_p_win: 0.70 # Loosened with global circuit breaker as backstop
+  intraday_other_min_p_win_with_vol: 0.62 # Paired with vol path
   # 0 = off. A low strategy cap (e.g. 22¢) drops almost every BUY (69¢ YES / 31¢ NO both fail).
   max_buy_limit_price: 0
 
@@ -157,8 +157,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 10% base, 15% on 15m (× ultra_short_min_edge_mult). Tighter spread haircut on wide books.
-    min_edge: 0.10
+    # Net edge after maker fee; 8% base, 11% on 15m (× ultra_short_min_edge_mult). Tighter spread haircut on wide books.
+    min_edge: 0.08
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.60
@@ -168,7 +168,7 @@ strategy:
     cheap_band_price_hi: 0.10
     cheap_band_min_net_edge: 0.15
     kelly_dampen: 0.32 # Fraction of raw Kelly — modestly higher for PnL vs prior 0.25 (still capped per trade)
-    max_bankroll_fraction: 0.018 # Hard cap on bankroll fraction per trade (was 0.01; scales +EV clips)
+    max_bankroll_fraction: 0.024 # Hard cap on bankroll fraction per trade (was 0.01; scales +EV clips)
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
     edge_size_boost_edge: 0.16
     edge_size_boost_mult: 1.22
@@ -184,11 +184,12 @@ strategy:
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
+    min_edge: 0.08
     bands:
-      - { lo: 0.00, hi: 0.15, min_edge: 0.20 } # Cheap tails: require higher edge to compensate for bid/ask friction
-      - { lo: 0.15, hi: 0.40, min_edge: 0.10 } # Standard 'sweet spot'
-      - { lo: 0.40, hi: 0.65, min_edge: 0.25 } # Coin-flip zone: high risk of churn, require extreme edge
-      - { lo: 0.65, hi: 1.00, min_edge: 0.12 } # Expensive consensus: slightly more than base
+      - { lo: 0.00, hi: 0.15, min_edge: 0.15 } # Cheap tails: require higher edge to compensate for bid/ask friction
+      - { lo: 0.15, hi: 0.40, min_edge: 0.08 } # Standard 'sweet spot'
+      - { lo: 0.40, hi: 0.65, min_edge: 0.20 } # Coin-flip zone: high risk of churn, require extreme edge
+      - { lo: 0.65, hi: 1.00, min_edge: 0.08 } # Expensive consensus: slightly more than base
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
@@ -198,7 +199,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.10
+  min_edge: 0.08
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: false
@@ -223,7 +224,7 @@ strategy:
   # Strict intraday / ultra-short used recommend_strict without easy-win or sniper — barbell “base” could never clear.
   barbell_soften_strict_intraday: true # false = legacy strict path (full intraday min_p_win + edge only)
   barbell_strict_relaxed_min_p_win: 0.72 # When barbell-base-shaped, min() with strict min_p_win (e.g. 0.85 → 0.72)
-  min_yes_price: 0.05 # Skip BUY YES below 5¢ — avoids illiquid penny artifacts (was 1¢)
+  min_yes_price: 0.01 # Skip BUY YES below 1¢ (was 5¢) — avoids hard-filtering alpha OTM tails
   # Steamroller guard: above this YES bid, only barbell-base (or skip). Align with max_buy_limit_price for expensive consensus trades.
   max_yes_price_for_buy: 0.85
   # Hard cap on limit price for any proposed BUY (YES or NO). Blocks 99¢ NO "nickels in front of steamroller" on micro balance. 0 = off
@@ -244,10 +245,14 @@ strategy:
   # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
   max_buy_yes_strike_above_pct: 0.08
   max_buy_no_strike_above_pct: 0.08
-  min_no_price: 0.05 # Skip BUY NO when NO bid <5¢ (symmetric with min_yes; thin book protection)
+  min_no_price: 0.01 # Skip BUY NO when NO bid < 1¢ (was 5¢) — symmetric with min_yes
   days_back: 730 # ~2y historical for P(above/below); launchd passes --days 730 to match
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
+  # Refined strategy params from agent review
+  taker_edge_threshold: 0.35 # Cross the spread (pay the ask) if net edge clears this extreme hurdle
+  ultra_short_k_spread: 0.4 # Sensitivity to spread in the additive edge hurdle
+  ultra_short_latency_risk: 0.01 # Baseline risk adder for sub-hour horizons
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
   dynamic_sell_threshold: true # EV-optimal: sell when P(lose) > 1 - (bid - exit_fee). Adapts threshold to current bid price.
   # Anti–paper-hands: mean-reversion + EV exits only when very wrong; ITM winners often held to expiry window.
@@ -410,7 +415,7 @@ strategy:
   adaptive_loss_block_lookback_hours: 8.0 # Window for summing realized_pnl on resolved predictions (per platform)
   adaptive_loss_block_min_trades: 5 # Min resolutions on that platform in the window before breaker can fire
   enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
-  two_sided_quote_min_edge: 0.10 # Aligned with min_edge; still must be <= min_edge
+  two_sided_quote_min_edge: 0.08 # Aligned with min_edge; still must be <= min_edge
   macro_signal_enabled: true # Include macro cross-asset context in signal model
   macro_signal_tickers: ["SPY", "UUP"] # More reliable intraday proxy tickers for risk-on/risk-off macro signal
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)

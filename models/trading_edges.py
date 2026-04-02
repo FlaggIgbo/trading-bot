@@ -162,7 +162,7 @@ def horizon_adjusted_required_edge(
 
 def liquidity_size_multiplier(
     price: float,
-    min_price_threshold: float = 0.05,
+    min_price_threshold: float = 0.01,
     floor_mult: float = 0.1,
 ) -> float:
     """

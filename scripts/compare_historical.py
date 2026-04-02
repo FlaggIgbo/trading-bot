@@ -278,6 +278,9 @@ class _StrategyParams:
     dte_edge_mult_long: float
     max_new_buy_dte_days: float  # 0 = off; skip directional BUY when DTE exceeds
     passive_bid_chase_enabled: bool
+    taker_edge_threshold: float
+    ultra_short_k_spread: float
+    ultra_short_latency_risk: float
     passive_bid_chase_refresh_minutes: int
     max_buy_yes_strike_above_pct: float
     max_buy_no_strike_above_pct: float
@@ -615,6 +618,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         dte_edge_mult_long=max(0.1, float(strategy.get("dte_edge_mult_long", 1.18))),
         max_new_buy_dte_days=max(0.0, float(strategy.get("max_new_buy_dte_days", 0) or 0)),
         passive_bid_chase_enabled=bool(strategy.get("passive_bid_chase_enabled", False)),
+        taker_edge_threshold=float(strategy.get("taker_edge_threshold", 0.35)),
+        ultra_short_k_spread=float(strategy.get("ultra_short_k_spread", 0.4)),
+        ultra_short_latency_risk=float(strategy.get("ultra_short_latency_risk", 0.01)),
         passive_bid_chase_refresh_minutes=max(0, int(strategy.get("passive_bid_chase_refresh_minutes", 0) or 0)),
         max_buy_yes_strike_above_pct=float(strategy.get("max_buy_yes_strike_above_pct", 0.05)),
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
@@ -3411,8 +3417,8 @@ def _simple_ev_net_min_edge_bundle(
         base_edge=base,
         minutes_left=mins,
         spread=spread,
-        k_spread=0.5,  # Parameterize later if needed
-        latency_risk=0.015, # Parameterize later if needed
+        k_spread=float(sp.ultra_short_k_spread),
+        latency_risk=float(sp.ultra_short_latency_risk),
     )
     
     # For logging/display logic that expects multipliers, we can calculate a pseudo-multiplier
@@ -6252,6 +6258,7 @@ def main():
         default="",
         help="Comma-separated strategy_engine names; print alternate recommendations vs same model P (e.g. vol_regime,default_threshold,strict_threshold)",
     )
+    parser.add_argument("--force-trades", action="store_true", help="Bypass min_edge and min_p_win filters for diagnostic evaluation (forced execution)")
     args = parser.parse_args()
 
     if args.show_config:
@@ -7523,6 +7530,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         **_strategy_recommend_extras(sp),
                     )
                 )
+            if getattr(args, "force_trades", False) and rec == REC_SKIP:
+                # Forced diagnostic mode: evaluate if model P favors YES or NO even if hurdle not cleared
+                if hist_p > yes_bid:
+                    rec = REC_BUY_YES
+                elif (1.0 - hist_p) > no_bid_early:
+                    rec = REC_BUY_NO
+
             if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte is not None and float(dte) > sp.max_new_buy_dte_days:
                 rec = REC_SKIP
             # Skip BUY NO when price already above strike (risky to bet NO)
@@ -7975,6 +7989,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     wide_book_spread_rel=sp.limit_buy_wide_book_spread_rel,
                     wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
                 )
+                if sp.taker_edge_threshold > 0 and _net_edge_le >= sp.taker_edge_threshold and ask_side is not None and ask_side > 0:
+                    print(f"    [Taker Mode] Edge {_net_edge_le:.1%} >= {sp.taker_edge_threshold:.1%} → paying ask {ask_side:.2f}")
+                    price = ask_side
+                    dip_used = 0.0
                 if price is None:
                     print(
                         f"    Why: limit quote skipped — net edge {_net_edge_le:.1%} below weak tier "
@@ -9011,6 +9029,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         wide_book_spread_rel=sp.limit_buy_wide_book_spread_rel,
                         wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
                     )
+                    if sp.taker_edge_threshold > 0 and _net_edge_leg >= sp.taker_edge_threshold and ask_side is not None and ask_side > 0:
+                        print(f"    [Taker Mode] Edge {_net_edge_leg:.1%} >= {sp.taker_edge_threshold:.1%} → paying ask {ask_side:.2f}")
+                        price = ask_side
+                        dip_used = 0.0
                     if price is None:
                         print(
                             f"    Why: limit quote skipped — net edge {_net_edge_leg:.1%} below weak tier "

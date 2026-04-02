@@ -255,6 +255,8 @@ def _run_synthetic(
         return {"error": "storage not available"}
 
     rec_filter = [REC_BUY_YES, REC_BUY_NO]
+    if re_evaluate:
+        rec_filter = None
     bt_cfg = (cfg or {}).get("backtest", {})
     strategy_cfg = (cfg or {}).get("strategy", {})
     slippage_bps = float(bt_cfg.get("synthetic_slippage_bps", 100.0))  # 100 bps = 1%
@@ -443,7 +445,10 @@ def _run_synthetic(
             else:
                 rec = snap.get("rec")
 
-            if rec not in rec_filter:
+            if rec_filter is not None and rec not in rec_filter:
+                continue
+
+            if rec not in (REC_BUY_YES, REC_BUY_NO):
                 continue
 
             side = "yes" if rec == REC_BUY_YES else "no"

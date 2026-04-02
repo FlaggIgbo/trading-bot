@@ -47,7 +47,7 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.10
+    min_edge: 0.08
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.58
     skip_p_win_mid_hi: 0.78
