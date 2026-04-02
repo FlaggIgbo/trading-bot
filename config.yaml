@@ -102,7 +102,7 @@ execution:
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
   limit_buy_medium_spread_fraction: 0.50
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.10
+  limit_buy_cross_spread_min_edge: 0.08
   limit_buy_near_market_min_edge: 0.05
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
   limit_buy_passive_only_below_edge: 0.075
@@ -215,7 +215,7 @@ strategy:
   barbell_alpha_kelly_mult: 0.12 # Much smaller sizing for lottery / mispricing tail
   # Easy win: helps base-layer high-P trades clear edge after fees (paired with barbell base)
   enable_easy_win: true
-  min_edge_easy_win: 0.10 # Must stay <= strategy.min_edge (validate_config)
+  min_edge_easy_win: 0.08 # Must stay <= strategy.min_edge (0.08)
   easy_win_min_p_win: 0.91 # Slightly below 0.93 so rare “aligned very high” lines can clear; consensus sniper handles barbell-base tape agreement
   easy_win_min_market_p: 0.75 # Easier easy-win gate → more high-confidence tape clears min_edge_easy_win path
   # Consensus sniper: when barbell is on, trades matching barbell_base_* use this net-edge hurdle (can be slightly negative to absorb maker fee when p≈bid)
