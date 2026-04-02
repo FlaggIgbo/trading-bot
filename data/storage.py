@@ -2189,10 +2189,20 @@ def get_position_evaluation_stats(
         for k in sorted(buckets):
             w, l = buckets[k]["wins"], buckets[k]["losses"]
             bucket_stats.append({"hist_p_range": k, "count": w + l, "win_rate": w / (w + l) if (w + l) > 0 else None})
+        keep_preds = [float(r["hist_p"] or 0.5) for r in keep_rows]
+        keep_outs = [1.0 if r["outcome"] == "win" else 0.0 for r in keep_rows]
         return {
             "enabled": True,
             "total": len(rows),
-            "keep": {"count": len(keep_rows), "wins": keep_wins, "losses": keep_losses, "win_rate": keep_wr, "pnl_cents": keep_pnl},
+            "keep": {
+                "count": len(keep_rows),
+                "wins": keep_wins,
+                "losses": keep_losses,
+                "win_rate": keep_wr,
+                "pnl_cents": keep_pnl,
+                "predictions": keep_preds,
+                "outcomes": keep_outs,
+            },
             "sell": {"count": len(sell_rows), "wins": sell_wins, "losses": sell_losses, "win_rate": sell_wr, "pnl_cents": sell_pnl},
             "keep_buckets": bucket_stats,
         }

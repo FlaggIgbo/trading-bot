@@ -92,3 +92,91 @@ def clip_probability(p: float, lo: float, hi: float, *, enabled: bool = True) ->
     if not enabled:
         return float(p)
     return max(float(lo), min(float(hi), float(p)))
+
+
+def brier_score(predictions: list[float], outcomes: list[float]) -> float | None:
+    """
+    Mean Squared Error of probabilities: 1/N * sum((p - o)^2).
+    Outcomes should be 1.0 (win) or 0.0 (loss). Lower is better (0.0 = perfect).
+    """
+    if not predictions or len(predictions) != len(outcomes):
+        return None
+    total_sq_error = sum((p - o) ** 2 for p, o in zip(predictions, outcomes))
+    return total_sq_error / len(predictions)
+
+
+def expected_calibration_error(
+    predictions: list[float], outcomes: list[float], n_bins: int = 10
+) -> float | None:
+    """
+    ECE: Weighted average of |accuracy - confidence| across probability bins.
+    Simplified version using 10 fixed bins (0-10%, 10-20%, etc).
+    """
+    if not predictions or len(predictions) != len(outcomes):
+        return None
+    
+    bin_counts = [0] * n_bins
+    bin_confidences = [0.0] * n_bins
+    bin_accuracies = [0.0] * n_bins
+    
+    for p, o in zip(predictions, outcomes):
+        bin_idx = min(n_bins - 1, int(p * n_bins))
+        bin_counts[bin_idx] += 1
+        bin_confidences[bin_idx] += p
+        bin_accuracies[bin_idx] += o
+        
+    total_ece = 0.0
+    n_total = len(predictions)
+    for i in range(n_bins):
+        if bin_counts[i] > 0:
+            avg_conf = bin_confidences[i] / bin_counts[i]
+            avg_acc = bin_accuracies[i] / bin_counts[i]
+            total_ece += (bin_counts[i] / n_total) * abs(avg_conf - avg_acc)
+            
+    return total_ece
+
+
+def horizon_adjusted_required_edge(
+    base_edge: float,
+    minutes_left: float | None,
+    spread: float = 0.02,
+    k_spread: float = 0.5,
+    latency_risk: float = 0.015,
+) -> float:
+    """
+    Dynamic required edge threshold based on time remaining.
+    Instead of a blunt multiplier, use additive risk factors.
+    As time -> 0, liquidity and latency risks dominate.
+    """
+    if minutes_left is None or minutes_left > 60:
+        return base_edge
+    
+    # Linear ramp for latency risk as we get very close to resolution
+    # (e.g. at 0m it's full latency_risk, at 60m it's 0)
+    risk_factor = max(0.0, (60.0 - minutes_left) / 60.0)
+    
+    # required_edge = base + k*spread + ramped_latency_risk
+    # We add the spread-based hurdle to ensure we aren't just crossing wide books blindly
+    return base_edge + (k_spread * spread) + (risk_factor * latency_risk)
+
+
+def liquidity_size_multiplier(
+    price: float,
+    min_price_threshold: float = 0.05,
+    floor_mult: float = 0.1,
+) -> float:
+    """
+    Instead of a hard filter for cheap contracts (e.g. < 5¢), 
+    linearly scale down the position size.
+    
+    Returns 1.0 for price >= threshold.
+    Returns floor_mult for price close to 0.
+    """
+    if price >= min_price_threshold:
+        return 1.0
+    if price <= 0:
+        return floor_mult
+    
+    # Linear decay from 1.0 to floor_mult
+    ratio = price / min_price_threshold
+    return floor_mult + (1.0 - floor_mult) * ratio

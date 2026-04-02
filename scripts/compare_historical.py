@@ -98,6 +98,10 @@ from models.alpha_engine import (
 )
 from models.decision_diagnostics import build_required_edge_breakdown, print_decision_diagnostics_line
 from models.trading_edges import (
+    brier_score,
+    expected_calibration_error,
+    horizon_adjusted_required_edge,
+    liquidity_size_multiplier as _price_liquidity_mult,
     maker_fee_per_contract as _fee_per_contract,
     net_edges_buy_legs as _net_edges_buy_legs,
     simple_ev_spend_fraction,
@@ -3360,7 +3364,11 @@ def _simple_ev_recommend(
 
 
 def _simple_ev_net_min_edge_bundle(
-    sp: _StrategyParams, market_or_event: dict | str, yf_ticker: str, side_price: float | None = None
+    sp: _StrategyParams, 
+    market_or_event: dict | str, 
+    yf_ticker: str, 
+    yes_bid: float | None = None,
+    no_bid: float | None = None,
 ) -> tuple[float, dict[str, Any]]:
     """
     Base simple_ev min_edge; extra × on ultra-short horizons; optional × when very close to resolution.
@@ -3368,8 +3376,8 @@ def _simple_ev_net_min_edge_bundle(
     Returns (effective_min, detail) for logging.
     """
     base = float(sp.simple_ev_min_edge)
-    if sp.tiered_min_edge_enabled and side_price is not None:
-        p = float(side_price)
+    if sp.tiered_min_edge_enabled and yes_bid is not None:
+        p = float(yes_bid)
         for band in sp.tiered_min_edge_bands:
             lo = float(band.get("lo", 0.0))
             hi = float(band.get("hi", 1.0))
@@ -3379,28 +3387,40 @@ def _simple_ev_net_min_edge_bundle(
 
     detail: dict[str, Any] = {
         "ultra_short": False,
-        "horizon_mult": 1.0,
-        "late_mult": 1.0,
+        "horizon_mult": 1.0,  # Legacy field for log compatibility
+        "late_mult": 1.0,     # Legacy field for log compatibility
         "minutes_left": None,
         "base": base,
+        "spread": None,
     }
-    eff = base
+    
     us = _is_ultra_short_horizon(market_or_event, yf_ticker, sp)
     detail["ultra_short"] = us
-    if us and sp.ultra_short_min_edge_mult > 1.0:
-        eff *= float(sp.ultra_short_min_edge_mult)
-        detail["horizon_mult"] = float(sp.ultra_short_min_edge_mult)
     mins = _minutes_until_resolution_unified(market_or_event, yf_ticker)
     detail["minutes_left"] = mins
-    if (
-        us
-        and float(sp.ultra_short_late_minutes_threshold) > 0.0
-        and mins is not None
-        and mins < float(sp.ultra_short_late_minutes_threshold)
-        and float(sp.ultra_short_late_min_edge_mult) > 1.0
-    ):
-        eff *= float(sp.ultra_short_late_min_edge_mult)
-        detail["late_mult"] = float(sp.ultra_short_late_min_edge_mult)
+    
+    if not us:
+        return base, detail
+        
+    # Horizon is ultra-short. Calculate spread if possible.
+    spread = 0.02
+    if yes_bid is not None and no_bid is not None:
+        spread = max(0.001, (yes_bid + no_bid) - 1.0)
+    detail["spread"] = spread
+    
+    # Use new additive formula instead of blunt multiplier
+    eff = horizon_adjusted_required_edge(
+        base_edge=base,
+        minutes_left=mins,
+        spread=spread,
+        k_spread=0.5,  # Parameterize later if needed
+        latency_risk=0.015, # Parameterize later if needed
+    )
+    
+    # For logging/display logic that expects multipliers, we can calculate a pseudo-multiplier
+    if base > 0:
+        detail["horizon_mult"] = eff / base
+        
     return eff, detail
 
 
@@ -6900,6 +6920,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if keep.get("count", 0) > 0:
                     wr = f"{keep['win_rate']:.0%}" if keep.get("win_rate") is not None else "N/A"
                     print(f"  KEEP: {keep['count']} positions | {keep.get('wins',0)} won, {keep.get('losses',0)} lost | win rate {wr} | PnL {keep.get('pnl_cents',0):+d}¢")
+                    
+                    # Calculate Brier Score and ECE for KEEP positions
+                    preds = keep.get("predictions", [])
+                    outs = keep.get("outcomes", [])
+                    if preds and outs:
+                        bs = brier_score(preds, outs)
+                        ece = expected_calibration_error(preds, outs)
+                        bs_s = f"{bs:.4f}" if bs is not None else "N/A"
+                        ece_s = f"{ece:.1%}" if ece is not None else "N/A"
+                        print(f"  Reliability: Brier Score {bs_s} (lower=better) | Expected Calibration Error {ece_s}")
+
                 if sell.get("count", 0) > 0:
                     wr = f"{sell['win_rate']:.0%}" if sell.get("win_rate") is not None else "N/A"
                     print(f"  SELL: {sell['count']} positions | {sell.get('wins',0)} won, {sell.get('losses',0)} lost | win rate {wr} | PnL {sell.get('pnl_cents',0):+d}¢")
@@ -7299,7 +7330,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             _eff_after_simple_bundle: float | None = None
             _proxy_edge_simple = 0.0
             if sp.simple_ev_decision_enabled:
-                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker, yes_bid)
+                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker, yes_bid, no_bid_early)
                 _proxy_edge_simple = float(proxy_basis_extra_min_edge(cfg, series))
                 effective_min = float(_eff_after_simple_bundle) + _proxy_edge_simple
                 if _proxy_edge_simple > 0.0 and _us_edge_detail is not None:
@@ -7514,8 +7545,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if should_favor:
                         rec = REC_BUY_YES
             # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance
-            if rec == REC_BUY_YES and yes_bid < sp.min_yes_price:
-                rec = REC_SKIP
+            # Deprecated hard skip: now using dynamic size scaling via _price_liquidity_mult below
+            # if rec == REC_BUY_YES and yes_bid < sp.min_yes_price:
+            #     rec = REC_SKIP
             # Steamroller: skip expensive YES unless barbell base layer (high-P consensus up to barbell_base_max_yes_price)
             if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and yes_bid > sp.max_yes_price_for_buy:
                 if sp.simple_ev_decision_enabled or not sp.barbell_enabled:
@@ -7535,8 +7567,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         rec = REC_SKIP
             # Skip BUY NO when market prices NO very low (market thinks our side unlikely); same override when vol shows high P(NO)
             if rec == REC_BUY_NO and no_bid_early < sp.min_no_price:
-                if not (use_vol and vol_p is not None and (1 - hist_p) >= 0.95):
-                    rec = REC_SKIP
+                # Deprecated hard skip: now using dynamic size scaling
+                pass
             # Skip BUY NO on "below X" when strike is far above current (BUY NO = "price > X" needs big rally) unless vol shows P(NO) ≥95%
             _eff_max_no_above = _dte_adjusted_strike_pct(sp.max_buy_no_strike_above_pct, dte)
             if rec == REC_BUY_NO and direction == "below" and _eff_max_no_above > 0:
@@ -7994,7 +8026,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     count_base = int(balance_cents * _sf / _cost_c)
                     count_base = max(min_contracts, count_base) if count_base > 0 else 0
                     liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
-                    liq_mult = 1.0
+                    # Integrate new price-based liquidity multiplier
+                    _price_mult = _price_liquidity_mult(bid, sp.min_yes_price)
+                    liq_mult *= _price_mult
+                    
                     liq_mult *= depth_mult
                     liq_mult *= size_regime_mult
                 else:
@@ -8353,7 +8388,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _proxy_edge_simple_g = 0.0
                 if sp.simple_ev_decision_enabled:
                     _eff_after_simple_bundle_g, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(
-                        sp, evt, yf_ticker, impl
+                        sp, evt, yf_ticker, impl, no_bid_gem_early
                     )
                     _proxy_edge_simple_g = float(proxy_basis_extra_min_edge(cfg, series))
                     effective_min_gem = float(_eff_after_simple_bundle_g) + _proxy_edge_simple_g
@@ -8550,8 +8585,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if should_favor:
                             rec = REC_BUY_YES
                 # Skip BUY YES when market prices it very low (e.g. 1¢): market thinks <5% chance
-                if rec == REC_BUY_YES and impl < sp.min_yes_price:
-                    rec = REC_SKIP
+                # Deprecated hard skip
+                # if rec == REC_BUY_YES and impl < sp.min_yes_price:
+                #     rec = REC_SKIP
                 if rec == REC_BUY_YES and sp.max_yes_price_for_buy > 0 and impl > sp.max_yes_price_for_buy:
                     if sp.simple_ev_decision_enabled or not sp.barbell_enabled:
                         rec = REC_SKIP
@@ -9031,7 +9067,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         count_base = int(_gem_sz_bal * _sf_g / _cost_cg)
                         count_base = max(min_contracts, count_base) if count_base > 0 else 0
                         liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
-                        liq_mult = 1.0
+                        # Integrate new price-based liquidity multiplier
+                        _price_mult_g = _price_liquidity_mult(bid, sp.min_yes_price)
+                        liq_mult *= _price_mult_g
+                        
                         liq_mult *= depth_mult
                         liq_mult *= size_regime_mult
                     else:
