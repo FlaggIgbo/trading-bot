@@ -23,6 +23,7 @@ markets:
   - KXHIGHCHI # Chicago High Temp
   - KXHIGHTBOS # Boston High Temp
   - KXHIGHTNYC # NYC High Temp
+  - KXTEMPNYCH # NYC Hourly Temp
   - KXLOWTCHI # Chicago Low Temp
   - KXHIGHMIA # Miami
   - KXHIGHLAX # LA
@@ -84,6 +85,7 @@ yfinance_tickers:
   KXHIGHCHI: "WEATHER:CHI"
   KXHIGHTBOS: "WEATHER:BOS"
   KXHIGHTNYC: "WEATHER:NYC"
+  KXTEMPNYCH: "WEATHER:NYC"
   KXLOWTCHI: "WEATHER:CHI"
   KXHIGHMIA: "WEATHER:MIA"
   KXHIGHLAX: "WEATHER:LAX"

@@ -4,6 +4,7 @@ Combines deterministic forecasts, ensemble spread, and seasonal baselines.
 """
 from __future__ import annotations
 import math
+import re
 from datetime import datetime
 
 # Fallback Normal CDF using math.erf (avoids scipy dependency)
@@ -57,6 +58,8 @@ TICKER_CITY_MAP = {
     "KXLOWTBOS": "BOS",
     "KXLOWTLAX": "LAX",
     "KXLOWTMIA": "MIA",
+    # Hourly Series
+    "KXTEMPNYCH": "NYC",
 }
 
 # Add any Gemini specific keywords if needed, but compare_historical handles them via yf_ticker mapping
@@ -83,14 +86,32 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
     forecast = get_forecast(lat, lon)
     f_mean = None
     if forecast:
-        daily = forecast.get("daily", {})
-        times = daily.get("time", [])
-        if resolution_date in times:
-            idx = times.index(resolution_date)
-            # Use 'max' or 'min' based on ticker
-            if "LOW" in ticker:
+        if "TEMPNYCH" in ticker:
+            # Parse hour from ticker: KXTEMPNYCH-26APR0316 or KXTEMPNYCH-26APR0316-T61
+            hour_match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})', ticker)
+            if hour_match:
+                #YY = hour_match.group(1), MMM = hour_match.group(2), DD = hour_match.group(3), HH = hour_match.group(4)
+                target_hour = int(hour_match.group(4))
+                hourly = forecast.get("hourly", {})
+                h_times = hourly.get("time", [])
+                h_temps = hourly.get("temperature_2m", [])
+                
+                # Match datetime "YYYY-MM-DDTHH:00"
+                target_ts = f"{resolution_date}T{target_hour:02d}:00"
+                if target_ts in h_times:
+                    idx = h_times.index(target_ts)
+                    f_mean = h_temps[idx]
+        elif "LOW" in ticker:
+            daily = forecast.get("daily", {})
+            times = daily.get("time", [])
+            if resolution_date in times:
+                idx = times.index(resolution_date)
                 f_mean = daily.get("temperature_2m_min", [])[idx]
-            else:
+        else:
+            daily = forecast.get("daily", {})
+            times = daily.get("time", [])
+            if resolution_date in times:
+                idx = times.index(resolution_date)
                 f_mean = daily.get("temperature_2m_max", [])[idx]
                 
     # 2. Ensemble Forecast (uncertainty proxy)
