@@ -55,6 +55,10 @@ Run scripts from the project root (e.g. `python scripts/compare_historical.py`).
 
 ## Running
 
+The bot is currently configured to run on **Render.com** for continuous evaluation and execution. 
+
+To evaluate markets manually or in preview mode:
+
 ```bash
 python scripts/compare_historical.py --preview --no-llm
 ```
@@ -65,6 +69,21 @@ The engine will:
 - Evaluate Kalshi and Gemini contracts with empirical + volatility + calibrated signals
 - Recommend BUY YES / BUY NO / SKIP and optionally stage limit orders
 - Apply strategy-engine logic from `strategy.strategy_engine` in `config.yaml`
+
+### Performance Tracking
+
+Since the bot runs remotely, you can view your trade performance and PnL directly from the exchange APIs using the performance script. You can run it locally (provided you have your `.env` with API keys set up) or on any machine:
+
+```bash
+# See performance for the last 7 days
+python3 scripts/performance_from_api.py
+
+# See performance for the last 30 days
+python3 scripts/performance_from_api.py --days 30
+
+# Sync remote trades into your local SQLite database for analysis
+python3 scripts/performance_from_api.py --sync
+```
 
 ### Barbell strategy (`strategy.barbell_enabled`)
 
