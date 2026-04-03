@@ -134,6 +134,28 @@ _CRYPTO_ASSET_KEYS = {
     "high temp": "WEATHER:HIGH",
     "low temp": "WEATHER:LOW",
     "temp": "WEATHER",
+    # City-specific Weather
+    "chicago": "WEATHER:CHI",
+    "nyc": "WEATHER:NYC",
+    "new york": "WEATHER:NYC",
+    "miami": "WEATHER:MIA",
+    "los angeles": "WEATHER:LAX",
+    "boston": "WEATHER:BOS",
+    "austin": "WEATHER:AUS",
+    "dallas": "WEATHER:DAL",
+    "philadelphia": "WEATHER:PHL",
+    "phoenix": "WEATHER:PHX",
+    "denver": "WEATHER:DEN",
+    "las vegas": "WEATHER:LAS",
+    "seattle": "WEATHER:SEA",
+    "san francisco": "WEATHER:SFO",
+    "houston": "WEATHER:HOU",
+    "washington": "WEATHER:DC",
+    "atlanta": "WEATHER:ATL",
+    "minneapolis": "WEATHER:MSP",
+    "new orleans": "WEATHER:MSY",
+    "oklahoma": "WEATHER:OKC",
+    "san antonio": "WEATHER:SAT",
 }
 
 

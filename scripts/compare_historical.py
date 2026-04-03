@@ -204,6 +204,10 @@ GEMINI_CRYPTO_YF = {
     "HYPE32196-USD",  # Yahoo symbol for Hyperliquid; Gemini buckets still use HYPE-USD from _event_to_asset
     "CL=F",  # WTI — Gemini KK_RFR_WTIUSDC / WTIOIL-USDC; Kalshi KXWTI uses same Yahoo continuous future
     "BZ=F",  # Brent — Gemini KK_RFR_BRENTOILUSDC; Yahoo ICE continuous — https://finance.yahoo.com/quote/BZ=F/
+    "WEATHER:NYC", "WEATHER:CHI", "WEATHER:BOS", "WEATHER:MIA", "WEATHER:LAX",
+    "WEATHER:AUS", "WEATHER:DAL", "WEATHER:PHL", "WEATHER:PHX", "WEATHER:DEN",
+    "WEATHER:LAS", "WEATHER:SEA", "WEATHER:SFO", "WEATHER:HOU", "WEATHER:DC",
+    "WEATHER:ATL", "WEATHER:MSP", "WEATHER:MSY", "WEATHER:OKC", "WEATHER:SAT",
 }
 # When Yahoo ticker ≠ Gemini _event_to_asset key, map here for inter-arb / sanity / Gemini loop lookups.
 GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
@@ -7285,6 +7289,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 emp = hist_p
                 use_vol = False # Weather model handles its own distribution
+                closes_for_emp = []
             else:
                 closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
                 recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
@@ -8319,7 +8324,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print()
 
         # Gemini crypto — expand to individual markets (binary: 1 per event; categorical: 1 per strike contract)
-        if yf_ticker in GEMINI_CRYPTO_YF:
+        if yf_ticker in GEMINI_CRYPTO_YF or (yf_ticker and yf_ticker.startswith("WEATHER:")):
             gemini_evts = _gemini_events_list_for_yf_ticker(gemini_events_by_asset, yf_ticker)
             gemini_markets = expand_gemini_events_to_markets(gemini_evts)
             if args.markets > 0:
