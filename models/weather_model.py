@@ -58,7 +58,22 @@ TICKER_CITY_MAP = {
     "KXLOWTBOS": "BOS",
     "KXLOWTLAX": "LAX",
     "KXLOWTMIA": "MIA",
-    # Hourly Series
+    "KXLOWTAUS": "AUS",
+    "KXLOWTDAL": "DAL",
+    "KXLOWTPHL": "PHL",
+    "KXLOWTPHIL": "PHL",
+    "KXLOWTPHX": "PHX",
+    "KXLOWTDEN": "DEN",
+    "KXLOWTLAS": "LAS",
+    "KXLOWTSEA": "SEA",
+    "KXLOWTSFO": "SFO",
+    "KXLOWTHOU": "HOU",
+    "KXLOWTDC":  "DC",
+    "KXLOWTATL": "ATL",
+    "KXLOWTMSP": "MSP",
+    "KXLOWTMSY": "MSY",
+    "KXLOWTOKC": "OKC",
+    "KXLOWTSAT": "SAT",
     "KXTEMPNYCH": "NYC",
 }
 
@@ -70,11 +85,19 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
     resolution_date: ISO date "YYYY-MM-DD"
     """
     city_code = None
-    for t_prefix, city in TICKER_CITY_MAP.items():
-        if ticker.startswith(t_prefix):
+    # Lookup City Code (supports Kalshi prefix or Gemini keyword)
+    for key, city in TICKER_CITY_MAP.items():
+        if key in ticker.upper():
             city_code = city
             break
             
+    if not city_code:
+        # Fallback for Gemini keywords if not in TICKER_CITY_MAP
+        for city in LOCATIONS.keys():
+            if city in ticker.upper():
+                city_code = city
+                break
+                
     if not city_code:
         return None
         
@@ -82,6 +105,9 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
     if lat is None:
         return None
         
+    # Determine if we want High/Max or Low/Min
+    is_low = any(x in ticker.upper() for x in ("LOW", "MIN", "COLD"))
+    
     # 1. Deterministic Forecast
     forecast = get_forecast(lat, lon)
     f_mean = None
@@ -101,13 +127,14 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
                 if target_ts in h_times:
                     idx = h_times.index(target_ts)
                     f_mean = h_temps[idx]
-        elif "LOW" in ticker:
+        elif is_low:
             daily = forecast.get("daily", {})
             times = daily.get("time", [])
             if resolution_date in times:
                 idx = times.index(resolution_date)
                 f_mean = daily.get("temperature_2m_min", [])[idx]
         else:
+            # Default to High/Max weather probability
             daily = forecast.get("daily", {})
             times = daily.get("time", [])
             if resolution_date in times:
@@ -122,7 +149,10 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
     seasonality = get_historical_seasonality(lat, lon, month_day)
     s_mean, s_std_dev = None, None
     if seasonality:
-        s_data = seasonality.get("min" if "LOW" in ticker else "max")
+        s_data = seasonality.get("min" if is_low else "max")
+        if s_data:
+            s_mean = s_data.get("mean")
+            s_std_dev = s_data.get("std")
         if s_data:
             s_mean = s_data["mean"]
             s_std_dev = s_data["std_dev"]

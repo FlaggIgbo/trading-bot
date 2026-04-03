@@ -25,7 +25,26 @@ markets:
   - KXHIGHTNYC # NYC High Temp
   - KXTEMPNYCH # NYC Hourly Temp
   - KXLOWTCHI # Chicago Low Temp
-  - KXHIGHMIA # Miami
+  - KXLOWTBOS # Boston Low
+  - KXLOWTNYC # NYC Low
+  - KXLOWTMIA # Miami Low
+  - KXLOWTLAX # LA Low
+  - KXLOWTAUS # Austin Low
+  - KXLOWTDAL # Dallas Low
+  - KXLOWTPHIL # Philly Low
+  - KXLOWTPHX # Phoenix Low
+  - KXLOWTDEN # Denver Low
+  - KXLOWTSEA # Seattle Low
+  - KXLOWTSFO # San Fran Low
+  - KXLOWTHOU # Houston Low
+  - KXLOWTLAS # Vegas Low
+  - KXLOWTDC # DC Low
+  - KXLOWTATL # Atlanta Low
+  - KXLOWTMSP # Minneapolis Low
+  - KXLOWTMSY # New Orleans Low
+  - KXLOWTOKC # Oklahoma City Low
+  - KXLOWTSAT # San Antonio Low
+  - KXHIGHMIA # Miami High
   - KXHIGHLAX # LA
   - KXHIGHAUS # Austin
   - KXHIGHDAL # Dallas
@@ -86,7 +105,28 @@ yfinance_tickers:
   KXHIGHTBOS: "WEATHER:BOS"
   KXHIGHTNYC: "WEATHER:NYC"
   KXTEMPNYCH: "WEATHER:NYC"
+  # Kalshi Low Mapping
   KXLOWTCHI: "WEATHER:CHI"
+  KXLOWTBOS: "WEATHER:BOS"
+  KXLOWTNYC: "WEATHER:NYC"
+  KXLOWTMIA: "WEATHER:MIA"
+  KXLOWTLAX: "WEATHER:LAX"
+  KXLOWTAUS: "WEATHER:AUS"
+  KXLOWTPHIL: "WEATHER:PHL"
+  KXLOWTPHX: "WEATHER:PHX"
+  KXLOWTDEN: "WEATHER:DEN"
+  KXLOWTLAS: "WEATHER:LAS"
+  KXLOWTSEA: "WEATHER:SEA"
+  KXLOWTSFO: "WEATHER:SFO"
+  KXLOWTHOU: "WEATHER:HOU"
+  KXLOWTDAL: "WEATHER:DAL"
+  KXLOWTDC: "WEATHER:DC"
+  KXLOWTATL: "WEATHER:ATL"
+  KXLOWTMSP: "WEATHER:MSP"
+  KXLOWTMSY: "WEATHER:MSY"
+  KXLOWTOKC: "WEATHER:OKC"
+  KXLOWTSAT: "WEATHER:SAT"
+  # Kalshi High Mapping
   KXHIGHMIA: "WEATHER:MIA"
   KXHIGHLAX: "WEATHER:LAX"
   KXHIGHAUS: "WEATHER:AUS"
@@ -106,10 +146,47 @@ yfinance_tickers:
   KXHIGHSAT: "WEATHER:SAT"
   # Gemini Weather (Keyword mapping)
   "NYC Snowfall": "WEATHER:NYC"
+  "Highest temperature in NYC": "WEATHER:NYC"
+  "Lowest temperature in NYC": "WEATHER:NYC"
   "Temperature in Chicago": "WEATHER:CHI"
+  "Highest temperature in Chicago": "WEATHER:CHI"
+  "Lowest temperature in Chicago": "WEATHER:CHI"
   "Temperature in Miami": "WEATHER:MIA"
+  "Highest temperature in Miami": "WEATHER:MIA"
   "Temperature in Los Angeles": "WEATHER:LAX"
+  "Highest temperature in Los Angeles": "WEATHER:LAX"
   "Temperature in Boston": "WEATHER:BOS"
+  "Highest temperature in Boston": "WEATHER:BOS"
+  "Temperature in Austin": "WEATHER:AUS"
+  "Highest temperature in Austin": "WEATHER:AUS"
+  "Temperature in Dallas": "WEATHER:DAL"
+  "Highest temperature in Dallas": "WEATHER:DAL"
+  "Temperature in Philadelphia": "WEATHER:PHL"
+  "Highest temperature in Philadelphia": "WEATHER:PHL"
+  "Temperature in Phoenix": "WEATHER:PHX"
+  "Highest temperature in Phoenix": "WEATHER:PHX"
+  "Temperature in Denver": "WEATHER:DEN"
+  "Highest temperature in Denver": "WEATHER:DEN"
+  "Temperature in Las Vegas": "WEATHER:LAS"
+  "Highest temperature in Las Vegas": "WEATHER:LAS"
+  "Temperature in Seattle": "WEATHER:SEA"
+  "Highest temperature in Seattle": "WEATHER:SEA"
+  "Temperature in San Francisco": "WEATHER:SFO"
+  "Highest temperature in San Francisco": "WEATHER:SFO"
+  "Temperature in Houston": "WEATHER:HOU"
+  "Highest temperature in Houston": "WEATHER:HOU"
+  "Temperature in Washington": "WEATHER:DC"
+  "Highest temperature in Washington": "WEATHER:DC"
+  "Temperature in Atlanta": "WEATHER:ATL"
+  "Highest temperature in Atlanta": "WEATHER:ATL"
+  "Temperature in Minneapolis": "WEATHER:MSP"
+  "Highest temperature in Minneapolis": "WEATHER:MSP"
+  "Temperature in New Orleans": "WEATHER:MSY"
+  "Highest temperature in New Orleans": "WEATHER:MSY"
+  "Temperature in Oklahoma": "WEATHER:OKC"
+  "Highest temperature in Oklahoma": "WEATHER:OKC"
+  "Temperature in San Antonio": "WEATHER:SAT"
+  "Highest temperature in San Antonio": "WEATHER:SAT"
 
 # Shift Yahoo wholesale RBOB ($/gal) toward retail (e.g. AAA national) for model vs Kalshi strikes.
 # adjusted = yahoo_price * multiply + add. Tune add ~0.70–1.10 vs current RB=F–AAA gap.
