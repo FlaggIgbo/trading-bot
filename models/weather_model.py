@@ -143,19 +143,30 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
     
     return final_mean, final_std_dev
 
-def calculate_weather_probability(ticker: str, resolution_date: str, strike: float, direction: str) -> float | None:
-    """direction: 'above' or 'below'"""
+def calculate_weather_probability(ticker: str, resolution_date: str, strike: float, direction: str, strike_hi: float | None = None) -> float | None:
+    """
+    direction: 'above' | 'below' | 'between'
+    If 'between', strike_hi must be provided (or inferred if strike encodes a range).
+    """
     dist = get_weather_distribution(ticker, resolution_date)
     if not dist:
         return None
         
     mean, std_dev = dist
     if std_dev <= 0:
-        return 1.0 if (direction == 'above' and mean > strike) else 0.0
+        if direction == 'above': return 1.0 if mean > strike else 0.0
+        if direction == 'below': return 1.0 if mean < strike else 0.0
+        if direction == 'between' and strike_hi is not None:
+            return 1.0 if strike <= mean <= strike_hi else 0.0
+        return 0.0
         
-    prob_above = 1 - norm_cdf(strike, loc=mean, scale=std_dev)
-    
     if direction == 'above':
-        return prob_above
-    else:
-        return 1 - prob_above
+        return 1 - norm_cdf(strike, loc=mean, scale=std_dev)
+    elif direction == 'below':
+        return norm_cdf(strike, loc=mean, scale=std_dev)
+    elif direction == 'between' and strike_hi is not None:
+        p_lo = norm_cdf(strike, loc=mean, scale=std_dev)
+        p_hi = norm_cdf(strike_hi, loc=mean, scale=std_dev)
+        return max(0.0, p_hi - p_lo)
+    
+    return None

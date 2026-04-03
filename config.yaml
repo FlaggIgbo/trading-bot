@@ -150,12 +150,12 @@ execution:
   limit_buy_weak_bid_min_edge: 0.03
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.50
+  limit_buy_medium_spread_fraction: 0.65
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.08
-  limit_buy_near_market_min_edge: 0.05
+  limit_buy_cross_spread_min_edge: 0.075
+  limit_buy_near_market_min_edge: 0.045
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
-  limit_buy_passive_only_below_edge: 0.075
+  limit_buy_passive_only_below_edge: 0.065
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
   limit_buy_escalation_price_enabled: true
   limit_buy_escalate_after_minutes_1: 5
@@ -168,7 +168,7 @@ execution:
   # EV-tier quotes also get a touch-lift to at least the bid when fair_cap allows.
   limit_buy_wide_book_coalesce_enabled: true
   limit_buy_wide_book_spread_rel: 0.22
-  limit_buy_wide_book_anchor_fraction: 0.60
+  limit_buy_wide_book_anchor_fraction: 0.70
   limit_buy_wide_book_conservative_substrings: []
   limit_buy_wide_book_conservative_yf_tickers: []
 

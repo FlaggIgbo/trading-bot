@@ -130,6 +130,10 @@ _CRYPTO_ASSET_KEYS = {
     "brent crude": "BZ=F",
     "oil (brent)": "BZ=F",
     "brent": "BZ=F",
+    # Weather
+    "high temp": "WEATHER:HIGH",
+    "low temp": "WEATHER:LOW",
+    "temp": "WEATHER",
 }
 
 
@@ -147,10 +151,23 @@ def _event_to_asset(event: dict) -> str | None:
     return None
 
 
-def _extract_threshold_from_title(title: str) -> tuple[float | None, str | None]:
-    """Parse threshold and direction from event title or contract label. Returns (threshold, direction)."""
+def _extract_threshold_from_title(title: str) -> tuple[float | None, str | None, float | None]:
+    """Parse threshold, direction, and optional threshold_hi from event title or contract label. Returns (threshold, direction, threshold_hi)."""
     import re
     title_lower = (title or "").lower()
+    
+    # Range/Bracket: "61-62°" or "between 50 and 60"
+    range_match = re.search(r"([\d.,]+)\s*-\s*([\d.,]+)°", title_lower)
+    if not range_match:
+        range_match = re.search(r"between\s*([\d.,]+)\s*and\s*([\d.,]+)", title_lower, re.I)
+    if range_match:
+        try:
+            lo = float(range_match.group(1).replace(",", ""))
+            hi = float(range_match.group(2).replace(",", ""))
+            return lo, "between", hi
+        except ValueError:
+            pass
+
     for pattern, direction in [
         # Gemini commodities categoricals: "$90 or above", "$85 or below"
         (r"\$?\s*([\d,]+(?:\.\d+)?)\s+or\s+above\b", "above"),
@@ -171,10 +188,10 @@ def _extract_threshold_from_title(title: str) -> tuple[float | None, str | None]
                 val = float(raw)
                 if "k" in m.group(0).lower() and val < 100:
                     val *= 1000
-                return val, direction
+                return val, direction, None
             except ValueError:
                 pass
-    return None, None
+    return None, None, None
 
 
 class GeminiPredictionClient:
@@ -278,6 +295,11 @@ class GeminiPredictionClient:
                     out.append(evt)
         except Exception as e:
             log.debug("Gemini BRENT search fetch failed: %s", e)
+        # Weather
+        try:
+            _fetch_category("weather")
+        except Exception as e:
+            log.debug("Gemini weather category fetch failed: %s", e)
         return out
 
     def get_events_by_asset(
@@ -354,8 +376,8 @@ def get_no_price(event: dict) -> float:
     return 0.0
 
 
-def extract_strike_from_event(event: dict) -> tuple[float | None, str | None]:
-    """Extract (threshold, direction) from Gemini event for historical comparison."""
+def extract_strike_from_event(event: dict) -> tuple[float | None, str | None, float | None]:
+    """Extract (threshold, direction, threshold_hi) from Gemini event for historical comparison."""
     return _extract_threshold_from_title(event.get("title") or "")
 
 
@@ -388,7 +410,7 @@ def expand_gemini_events_to_markets(events: list[dict]) -> list[dict]:
         if is_categorical:
             for c in evt.get("contracts") or []:
                 label = c.get("label") or c.get("abbreviatedName") or ""
-                threshold, direction = _extract_threshold_from_title(label)
+                threshold, direction, threshold_hi = _extract_threshold_from_title(label)
                 if threshold is not None and direction is not None:
                     inst_sym = c.get("instrumentSymbol")
                     if inst_sym:
@@ -397,18 +419,20 @@ def expand_gemini_events_to_markets(events: list[dict]) -> list[dict]:
                             "event": evt,
                             "contract": c,
                             "threshold": threshold,
+                            "threshold_hi": threshold_hi,
                             "direction": direction,
                             "ticker": evt_ticker,
                             "title": f"{title} ({contract_label})",
                             "instrument_symbol": inst_sym,
                         })
         else:
-            threshold, direction = _extract_threshold_from_title(evt.get("title") or "")
+            threshold, direction, threshold_hi = _extract_threshold_from_title(evt.get("title") or "")
             if threshold is not None and direction is not None:
                 markets.append({
                     "event": evt,
                     "contract": None,
                     "threshold": threshold,
+                    "threshold_hi": threshold_hi,
                     "direction": direction,
                     "ticker": evt_ticker,
                     "title": title,

@@ -2258,17 +2258,20 @@ def _hours_until_resolution(title: str, yf_ticker: str) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _extract_strike(market: dict) -> tuple[float | None, str | None]:
+def _extract_strike(market: dict) -> tuple[float | None, str | None, float | None]:
     """
-    Extract threshold and direction from Kalshi market.
-    Returns (threshold, direction) - direction: 'above'|'below'|None.
+    Extract threshold, direction, and optional high-threshold for ranges from Kalshi market.
+    Returns (threshold, direction, threshold_hi) - direction: 'above'|'below'|'between'|None.
     """
     m = market.get("market", market)
     strike_type = (m.get("strike_type") or "").lower()
     floor = m.get("floor_strike")
     cap = m.get("cap_strike")
-    threshold, direction = None, None
-    if floor is not None and strike_type in ("greater", "greater_or_equal"):
+    threshold, direction, threshold_hi = None, None, None
+    
+    if strike_type == "between" and floor is not None and cap is not None:
+        threshold, direction, threshold_hi = float(floor), "between", float(cap)
+    elif floor is not None and strike_type in ("greater", "greater_or_equal"):
         threshold, direction = float(floor), "above"
     elif cap is not None and strike_type in ("less", "less_or_equal"):
         threshold, direction = float(cap), "below"
@@ -2278,27 +2281,46 @@ def _extract_strike(market: dict) -> tuple[float | None, str | None]:
         threshold, direction = float(cap), "below"
 
     if threshold is None:
-        title = (m.get("title") or m.get("yes_sub_title") or "") + (m.get("no_sub_title") or "")
-        for pattern, dir_ in [
-            (r"above\s*\$?([\d,]+(?:\.\d+)?)", "above"),
-            (r">\s*\$?([\d,]+(?:\.\d+)?)", "above"),
-            (r"over\s*\$?([\d,]+(?:\.\d+)?)", "above"),
-            (r"below\s*\$?([\d,]+(?:\.\d+)?)", "below"),
-            (r"<\s*\$?([\d,]+(?:\.\d+)?)", "below"),
-        ]:
-            match = re.search(pattern, title, re.I)
-            if match:
-                threshold = float(match.group(1).replace(",", ""))
-                direction = dir_
-                break
-    # Fallback: parse strike from Kalshi ticker (e.g. KXXRPD-26MAR1600-T1.4199 -> 1.4199)
+        title = (m.get("title") or m.get("yes_sub_title") or "") + " " + (m.get("no_sub_title") or "")
+        # Range/Bracket: "61-62°" or "between 50 and 60"
+        range_match = re.search(r"([\d.,]+)\s*-\s*([\d.,]+)°", title)
+        if not range_match:
+            range_match = re.search(r"between\s*([\d.,]+)\s*and\s*([\d.,]+)", title, re.I)
+        if range_match:
+            threshold = float(range_match.group(1).replace(",", ""))
+            threshold_hi = float(range_match.group(2).replace(",", ""))
+            direction = "between"
+        else:
+            for pattern, dir_ in [
+                (r"above\s*\$?([\d,]+(?:\.\d+)?)", "above"),
+                (r">\s*\$?([\d,]+(?:\.\d+)?)", "above"),
+                (r"over\s*\$?([\d,]+(?:\.\d+)?)", "above"),
+                (r"below\s*\$?([\d,]+(?:\.\d+)?)", "below"),
+                (r"<\s*\$?([\d,]+(?:\.\d+)?)", "below"),
+            ]:
+                match = re.search(pattern, title, re.I)
+                if match:
+                    threshold = float(match.group(1).replace(",", ""))
+                    direction = dir_
+                    break
+                    
+    # Fallback: parse strike from Kalshi ticker
+    ticker = m.get("ticker") or ""
     if threshold is None:
-        ticker = m.get("ticker") or ""
-        match = re.search(r"-T([\d.]+)$", ticker)
-        if match:
-            threshold = float(match.group(1))
-            direction = "above"  # Kalshi price tickers typically encode "above" strikes
-    return threshold, direction
+        # Bracket: -B61.5 -> [61, 62] (center +/- 0.5)
+        b_match = re.search(r"-B([\d.]+)$", ticker)
+        if b_match:
+            center = float(b_match.group(1))
+            threshold = center - 0.5
+            threshold_hi = center + 0.5
+            direction = "between"
+        else:
+            t_match = re.search(r"-T([\d.]+)$", ticker)
+            if t_match:
+                threshold = float(t_match.group(1))
+                direction = "above"
+                
+    return threshold, direction, threshold_hi
 
 
 # ---------------------------------------------------------------------------
@@ -4710,17 +4732,23 @@ def _check_intra_arb_kalshi(m: dict, min_arb_fee: float) -> tuple[float, float, 
 
 
 def _find_matching_gemini_event(
-    gemini_evts: list[dict], threshold: float, direction: str
+    gemini_evts: list[dict], threshold: float, direction: str, threshold_hi: float | None = None
 ) -> dict | None:
     """Find Gemini event with same threshold (±1%) and direction for inter-arb matching."""
     for evt in gemini_evts or []:
-        th_g, dir_g = extract_strike_from_event(evt)
+        th_g, dir_g, th_hi_g = extract_strike_from_event(evt)
         if th_g is None or dir_g != direction:
             continue
-        if threshold <= 0:
-            continue
-        if abs(th_g - threshold) / threshold < 0.01:
-            return evt
+        if direction == "between":
+            if th_hi_g is None or threshold_hi is None:
+                continue
+            if abs(th_g - threshold) < 0.05 and abs(th_hi_g - threshold_hi) < 0.05:
+                return evt
+        else:
+            if threshold <= 0:
+                continue
+            if abs(th_g - threshold) / threshold < 0.01:
+                return evt
     return None
 
 
@@ -5518,24 +5546,40 @@ def _adaptive_execution_thresholds(
     """
     cross_live = float(sp.limit_buy_cross_spread_min_edge)
     near_live = float(sp.limit_buy_near_market_min_edge)
-    if not fill_stats:
-        return cross_live, near_live
     try:
         n = int(fill_stats.get("count", 0) or 0)
         with_theoretical = int(fill_stats.get("with_theoretical", 0) or 0)
         avg_slip = fill_stats.get("avg_fill_slippage_bps")
-        if n < 20:
+        avg_spread = fill_stats.get("avg_spread_bps_at_place")
+        if n < 10: # Lowered from 20 to react faster on new accounts/cleared logs
             return cross_live, near_live
         fill_rate = (with_theoretical / float(max(1, n)))
+        
+        # Aggressive step down if fill rate is critical
         step = 0.005
-        if fill_rate < 0.30:
+        if fill_rate < 0.10:
+            step = 0.015
+        elif fill_rate < 0.30:
+            step = 0.008
+            
+        if fill_rate < 0.25:
             cross_live -= step
             near_live -= step
-        if avg_slip is not None and float(avg_slip) > 20.0:
+        
+        # Only tighten thresholds if slippage is extreme RELATIVE to the spread.
+        # In 20,000 bps spreads, 3,000 bps slippage is an excellent fill.
+        slip_th = 500.0 # Base tolerance (5%)
+        if avg_spread is not None:
+            # Tolerant up to 25% of the spread (paying for speed/liquidity)
+            slip_th = max(slip_th, float(avg_spread) * 0.25)
+            
+        if avg_slip is not None and float(avg_slip) > slip_th:
             cross_live += step
             near_live += step
-        cross_live = max(0.05, min(0.10, cross_live))
-        near_live = max(0.05, min(0.10, near_live))
+            
+        # Wider bounds to allow extreme aggression on fast crypto books
+        cross_live = max(0.04, min(0.12, cross_live))
+        near_live = max(0.03, min(0.10, near_live))
         return cross_live, near_live
     except Exception:
         return cross_live, near_live
@@ -7151,7 +7195,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  {ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
                     continue
 
-            threshold, direction = _extract_strike(m)
+            threshold, direction, threshold_hi = _extract_strike(m)
             if threshold is None or direction is None:
                 # Skip: empirical and vol models both require a threshold (from title, API, or ticker)
                 print(f"  {ticker}: YES {yes_bid:.2f} | (no threshold) {title}")
@@ -7190,6 +7234,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _gemini_events_list_for_yf_ticker(gemini_events_by_asset, yf_ticker),
                     threshold,
                     direction,
+                    threshold_hi,
                 )
                 if gemini_match:
                     inter = _check_inter_arb(
@@ -7234,7 +7279,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 
                 # Market ticker for model city lookup
                 m_ticker = m.get("ticker", series)
-                hist_p = calculate_weather_probability(m_ticker, res_date_str, threshold, direction)
+                hist_p = calculate_weather_probability(m_ticker, res_date_str, threshold, direction, threshold_hi)
                 if hist_p is None:
                     print(f"      [Weather] Failed to calculate probability for {series} / {m_ticker}")
                     continue
@@ -7523,6 +7568,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _gemini_events_list_for_yf_ticker(gemini_events_by_asset, yf_ticker),
                         threshold,
                         direction,
+                        threshold_hi,
                     )
                     if gem_ref:
                         gem_ref_yes = get_yes_price(_get_yes_contract(gem_ref) or {})
@@ -7734,7 +7780,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n    {'·' * 60}")
             print(f"    {ticker}  [Kalshi]")
             print(f"    {(m.get('title') or title)[:70]}")
-            print(f"    ├─ Strike:       {_fmt_price(threshold)} (pays if {direction})")
+            if direction == "between" and threshold_hi is not None:
+                print(f"    ├─ Strike:       {_fmt_price(threshold)} – {_fmt_price(threshold_hi)} (pays if in range)")
+            else:
+                print(f"    ├─ Strike:       {_fmt_price(threshold)} (pays if {direction})")
             print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str}")
             print(f"    ├─ Resolves in:  {_dte_str}")
             if vol_p is not None:
@@ -8285,6 +8334,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 contract = mkt.get("contract")
                 g_ticker = mkt["ticker"]
                 threshold_g = mkt["threshold"]
+                threshold_hi_g = mkt.get("threshold_hi")
                 direction_g = mkt["direction"]
                 title = mkt["title"]
                 instrument_symbol = mkt.get("instrument_symbol")
@@ -8336,7 +8386,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 ):
                     print(f"  [Gemini] {g_ticker}: SKIP (threshold validation failed) | {title}")
                     continue
-                closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
+
+                if yf_ticker and yf_ticker.startswith("WEATHER:"):
+                    # resolution_date is in 'expiration_date' or 'close_time'
+                    res_date_raw = evt.get("expiration_date") or evt.get("close_time") or ""
+                    res_date_str = res_date_raw[:10]
+                    if not res_date_str:
+                         res_date_str = datetime.utcnow().strftime("%Y-%m-%d")
+                    # Use ticker for city lookup
+                    m_ticker = evt.get("ticker", g_ticker)
+                    hist_p_gem = calculate_weather_probability(m_ticker, res_date_str, threshold_g, direction_g, threshold_hi_g)
+                    if hist_p_gem is None:
+                        print(f"      [Weather] Failed to calculate probability for Gemini {g_ticker}")
+                        continue
+                    emp = hist_p_gem
+                    use_vol = False
+                else:
+                    closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
                 recent_w_g = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
                 if sp.empirical_multi_horizon_enabled:
                     emp = _empirical_probability_multi_horizon(
@@ -8583,14 +8649,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 cross_sanity_reason_g = ""
                 if sp.enable_cross_exchange_sanity_gate:
                     try:
-                        kalshi_ref = next(
-                            (
-                                mk
-                                for mk in mkt_list
-                                if _extract_strike(mk)[0] == threshold_g and _extract_strike(mk)[1] == direction_g
-                            ),
-                            None,
-                        )
+                        kalshi_ref = None
+                        for mk in mkt_list:
+                            s_k = _extract_strike(mk)
+                            if s_k[0] == threshold_g and s_k[1] == direction_g and s_k[2] == threshold_hi_g:
+                                kalshi_ref = mk
+                                break
                         if kalshi_ref:
                             kalshi_ref_yes = float(kalshi_ref.get("yes_bid_dollars") or 0) or float(
                                 kalshi_ref.get("last_price_dollars") or kalshi_ref.get("yes_ask_dollars") or 0
@@ -8799,7 +8863,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print(f"\n    {'·' * 60}")
                 print(f"    {evt.get('ticker','?')}  [Gemini]")
                 print(f"    {title[:70]}")
-                print(f"    ├─ Strike:       {_fmt_price(threshold_g)} (pays if {direction_g})")
+                if direction_g == "between" and threshold_hi_g is not None:
+                    print(f"    ├─ Strike:       {_fmt_price(threshold_g)} – {_fmt_price(threshold_hi_g)} (pays if in range)")
+                else:
+                    print(f"    ├─ Strike:       {_fmt_price(threshold_g)} (pays if {direction_g})")
                 print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str_g}")
                 print(f"    ├─ Resolves in:  {_dte_str_g}")
                 if vol_p_gem is not None:
@@ -9470,7 +9537,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
                             if closes:
                                     closes = apply_underlying_closes(cfg, series or "", closes)
-                                    threshold, direction = _extract_strike(m)
+                                    threshold, direction, threshold_hi = _extract_strike(m)
                                     if threshold is not None and direction is not None:
                                         yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                                         no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -9812,7 +9879,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 _series, _yf, closes, m = cached[:4]
                 current_price_cached = cached[4] if len(cached) > 4 else closes[-1]
-                threshold, direction = _extract_strike(m)
+                threshold, direction, threshold_hi = _extract_strike(m)
                 if threshold is None or direction is None:
                     continue
                 yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
