@@ -177,6 +177,16 @@ Root-level shim files (`kalshi_client.py`, `gemini_client.py`, etc.) re-export f
 
 See [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md) for the full roadmap. Implemented highlights include: **anti-hallucination pipeline** (Bayesian update, EWMA probability, vol Z-score dampening, adaptive edge scaling, EMA regime filter), **alpha engine** (Order Book Imbalance signal, markout PnL / toxic flow detection, volatility-adjusted Kelly sizing, lead-lag cross-asset signal), modular strategy engine wiring (`strategy_engine`), Student-t + EWMA/GARCH(auto-fallback) volatility modeling with Monte Carlo path simulation, continuous vol-ratio scaling (edge/dip/size), dynamic stability windows, cross-exchange sanity gating, directional parity penalties, emergency + defensive circuit breakers, position evaluation tracking, bet-vs-resolution accuracy tracking (distance metrics in daily reports), DTE-aware short-dated contract guards (volatility time floor, adaptive strike limits, empirical/vol blend decay), and slippage-aware synthetic backtesting with dwell-time + partial-fill realism.
 
+### Recent changes (2026-04-03)
+
+- **Weather range & bracket support:** The weather model now supports `between` directionality for range-based contracts (e.g., "Will the high be 61-62°?"). Probability is calculated as the integral $P(low < T < high)$ using the calibrated normal distribution. Strike extraction in `compare_historical.py` and `gemini_client.py` has been updated to parse range titles and Kalshi bracket tickers (e.g., `-B61.5`).
+- **Weather unit enforcement:** Weather data is strictly handled in **Fahrenheit** to ensure consistency with U.S. prediction market settlement standards (Kalshi and Gemini).
+- **Increased execution aggression:** Several parameters in `config.yaml` were tuned to improve fill rates in high-spread or illiquid markets:
+    - `limit_buy_medium_spread_fraction` increased (0.50 → 0.65).
+    - `limit_buy_wide_book_anchor_fraction` increased (0.60 → 0.70).
+    - `limit_buy_cross_spread_min_edge` reduced (0.08 → 0.075) and `limit_buy_near_market_min_edge` reduced (0.05 → 0.045).
+    - Slippage tolerance increased to **500 bps (5%)** or **25% of the spread** to prevent passive behavior in volatile regimes.
+
 ### Recent changes (2026-03-17)
 
 - **Gemini Exchange spot for crypto underlying prices:** `signals/yfinance_client.py` calls [Gemini public market data](https://docs.gemini.com/rest-api/market-data) first for BTC/ETH/SOL/XRP (`v2/ticker` for live snapshot, `v2/candles` for daily/hourly history) when `YFINANCE_CRYPTO_GEMINI` is on (default). **S&P 500** (`^GSPC` / `SPY`) now uses the SPY ETF as a proxy (converted ×10) and averages it with the index when `YFINANCE_SPY_AS_SP500` is enabled (default **on**). Disable the SPY proxy by setting `YFINANCE_SPY_AS_SP500=0` — the bot then relies on Yahoo’s `^GSPC` only. Order after Gemini fails: yfinance, then CoinGecko (BTC/ETH/SOL only). `get_aggs_as_of()` uses one candle request with a UTC end-of-day cutoff (no double-fetch). Disable Gemini spot with `YFINANCE_CRYPTO_GEMINI=0`; override base URL with `GEMINI_SPOT_API_BASE`; debug logs via `YFINANCE_DEBUG=1`.

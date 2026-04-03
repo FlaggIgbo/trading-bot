@@ -45,6 +45,8 @@
 - **Regime-aware volatility safety:** EWMA/Student-t flow now supports optional GARCH(1,1) in `vol_model: auto`, continuous vol-ratio scaling (edge/dip/size), and volatility-spike safety.
 - **Adaptive limit pricing:** `limit_dip_pct` is now ARR-inspired (`max(base_dip, 0.5 * avg_relative_move)`) so entries tighten in calm markets and widen in volatile markets. RSI-14 further modulates dip depth: oversold contracts tighten dip 40% (fill faster on bounce), overbought widen 40% (wait for correction).
 - **Layered mode passive dip pricing:** The `layered` limit order mode now places passive limits BELOW the bid using the full dip stack (`bid × (1 − dip)`) with staggered depth on re-buys, instead of penny-jumping above the bid. Fair-value cap prevents overpaying.
+- **Improved weather range & bracket support:** Weather model now supports `between` probability calculations ($P(low < T < high)$). Strike extraction parses range titles (e.g., "61-62°") and Kalshi bracket tickers (e.g., `-B61.5`).
+- **Increased execution aggression:** Parameters like `limit_buy_medium_spread_fraction` and `wide_book_anchor_fraction` have been tuned to improve fill rates. Slippage tolerance increased to **5%)** or **25% of the spread**.
 - **RSI signal model feature:** `rsi_norm` (Wilder RSI-14 on underlying closes, normalized to [0,1]) added to `build_signal_features()` with default weight −0.3 — provides mean-reversion signal to the probability model.
 - **High-fidelity synthetic backtest:** Synthetic mode supports dwell-time fill checks, partial-fill scaling from persisted depth fields, and per-trade liquidity friction in addition to slippage/spread realism.
 - **Circuit breaker safety:** New BUYs are blocked when 24h realized losses breach configured limits (`max_daily_loss_pct` / `max_daily_loss_cents`).
@@ -102,7 +104,7 @@ For each series (e.g. KXBTCD → Bitcoin):
 | Skip unsupported resolution | Non 5pm crypto / 4pm S&P intraday → skip                    | `compare_historical.py:1182` → `_should_skip_by_resolution()` |
 | Check intra-arb             | YES+NO < 1−fee on same market → BUY BOTH                    | `compare_historical.py:1169` → `_check_intra_arb_kalshi()`    |
 | Check inter-arb             | Kalshi YES + Gemini NO < 1−fee → hedge (balance-aware route selection can place cheaper leg on lower-balance account) | `compare_historical.py:1182` → `_check_inter_arb()`           |
-| Extract strike              | Parse "above $81,250" or "below $72,000" from title or ticker (e.g. -T82.9999) | `compare_historical.py:389` → `_extract_strike()`             |
+| Extract strike              | Parse "above $81,250", "below $72,000", or ranges like "61-62°" from title or ticker (e.g. -T82.9999, -B61.5) | `compare_historical.py:389` → `_extract_strike()`             |
 | Compute empirical P(YES)    | Recency-weighted/rolling empirical probability (NumPy path when installed) | `compare_historical.py` → `_empirical_probability()`      |
 | Compute volatility P(YES)   | Log-normal model with `vol_model` (`auto|ewma|garch|sample`), optional OTM smile; S0 uses live+close blend; Monte Carlo GBM blend when `mc_enabled`; T floors at `1e-6` years for numerical stability without inflating short-dated probabilities | `compare_historical.py` → `_volatility_probability_with_mc()` → `_volatility_probability()` + `_monte_carlo_probability()` |
 | Blend + score signals       | Dynamic empirical/vol blend (DTE-aware: empirical weight decays linearly to 0 when DTE < 1 day), optional sklearn calibration, then signal-model scoring | `compare_historical.py` → `_dynamic_empirical_weight()`, `_dte_adjusted_empirical_weight()`, `_fit_probability_calibrator()`, `_score_signal_model()` |
@@ -397,7 +399,8 @@ The repo uses an ML pipeline layout with `signals/`, `models/`, `execution/`, an
 | `lead_lag_edge_adjustment` | alpha_engine | `(signal, direction, rec, edge_bonus) -> float` | Edge bonus/penalty when leader asset has moved sharply. |
 | `_recommend` | compare_historical | `(hist_p, market_yes, min_edge, maker_fee, ...) -> str` | BUY YES if hist_p - market_yes - fee ≥ min_edge; BUY NO if (1-hist_p) - no_price - fee ≥ min_edge; else SKIP. Easy win (if `enable_easy_win`): when model+market both high-confidence, uses `min_edge_easy_win` instead of `min_edge`. Defensive preset keeps easy-win off. |
 | `_recommend_strict` | compare_historical | `(hist_p, market_yes, min_p_win, min_edge, fee) -> str` | Same as _recommend but also requires hist_p ≥ min_p_win for YES (or 1-hist_p ≥ min_p_win for NO). For non-standard intraday. |
-| `_extract_strike` | compare_historical | `(market) -> (threshold, direction)` | Parse floor/cap from market API or title regex ("above $X", "below $Y"). |
+| `_extract_strike` | compare_historical | `(market) -> (threshold, direction, threshold_hi)` | Parse floor/cap from market API or title regex. Supports ranges/brackets (`between`). |
+| `calculate_weather_probability` | weather_model | `(mean, std_dev, strike, direction, strike_hi) -> float` | Distributional probability for weather; supports `above`, `below`, and `between` ranges. |
 | `_get_closes_for_empirical` | compare_historical | `(yf_ticker, days_back, closes_daily, market, sp, cfg) -> list[float]` | For intraday + use_intraday_empirical: return intraday prices at resolution hour; else daily closes. |
 | `_compute_p_lose` | compare_historical | `(hist_p, yes_bid, no_bid, side, dte, sp) -> float` | P(our position loses). Blends model prob with market odds; market weight increases as dte→0 (half-life decay). |
 | `_ev_sell_threshold` | compare_historical | `(sell_price, maker_fee_rate, min_fee_per_order) -> float` | EV-optimal sell threshold for binary contracts. Returns breakeven P(lose) where selling now equals EV of holding: `1 − (sell_price − exit_fee)`. High bids → low threshold (~11% at 90¢); low bids → high threshold (~81% at 20¢). Clamped to [0.01, 0.99]. |
@@ -921,7 +924,7 @@ position_evaluations
 
 | Term                   | Meaning                                                                                      |
 | ---------------------- | -------------------------------------------------------------------------------------------- |
-| **Strike / threshold** | The price the bet is about, e.g. $81,250 in "Bitcoin above $81,250"                          |
+| **Strike / threshold** | The price/value the bet is about, e.g. $81,250 in "Bitcoin above $81,250" or "61°" in "temperature 61-62°" |
 | **hist_p**             | Our estimated probability of YES from history (and optionally volatility)                    |
 | **Edge**               | How much we think the market misprices — e.g. we say 30%, market says 15¢ → edge for BUY YES |
 | **Limit order**        | "Buy only if price ≤ X" — waits until someone matches                                        |
