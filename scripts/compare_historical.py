@@ -532,6 +532,7 @@ class _StrategyParams:
     # Simple EV mode: single net-edge gate, Kelly sizing, uncertainty/calibration → size only.
     simple_ev_decision_enabled: bool
     simple_ev_min_edge: float
+    simple_ev_min_edge_full: float
     simple_ev_kelly_dampen: float
     simple_ev_max_bankroll_fraction: float
     simple_ev_spread_wide_fraction: float
@@ -889,6 +890,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         resting_cancel_if_market_bid_above_limit_by=max(0.0, min(0.5, float(strategy.get("resting_cancel_if_market_bid_above_limit_by", 0.0)))),
         simple_ev_decision_enabled=bool((strategy.get("simple_ev_decision") or {}).get("enabled", False)),
         simple_ev_min_edge=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge", 0.03)))),
+        simple_ev_min_edge_full=max(0.0, min(0.5, float((strategy.get("simple_ev_decision") or {}).get("min_edge_full", 0.08)))),
         simple_ev_kelly_dampen=max(0.001, min(1.0, float((strategy.get("simple_ev_decision") or {}).get("kelly_dampen", 0.25)))),
         adaptive_edge_confidence_t_stat=max(0.0, float(strategy.get("adaptive_edge_confidence_t_stat", 1.5))),
         simple_ev_max_bankroll_fraction=max(0.001, min(0.25, float((strategy.get("simple_ev_decision") or {}).get("max_bankroll_fraction", 0.02)))),
@@ -8044,6 +8046,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _sf *= float(sp.simple_ev_spread_wide_size_mult)
                     if sp.simple_ev_edge_size_boost_edge > 0 and _ev_n >= float(sp.simple_ev_edge_size_boost_edge):
                         _sf *= float(sp.simple_ev_edge_size_boost_mult)
+                    
+                    # Weak-edge dampening: linear scale-down between min_edge (e.g. 2%) and min_edge_full (e.g. 8%)
+                    if sp.simple_ev_min_edge_full > sp.simple_ev_min_edge and _ev_n < float(sp.simple_ev_min_edge_full):
+                        _weak_mult = max(0.01, _ev_n / float(sp.simple_ev_min_edge_full))
+                        _sf *= _weak_mult
+
                     _sf *= _dynamic_kill_size_mult(series, series_pnl_kill, sp)
                     _cost_c = max(bid * 100.0, 1.0)
                     count_base = int(balance_cents * _sf / _cost_c)
@@ -9095,6 +9103,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             _sf_g *= float(sp.simple_ev_spread_wide_size_mult)
                         if sp.simple_ev_edge_size_boost_edge > 0 and _ev_ng >= float(sp.simple_ev_edge_size_boost_edge):
                             _sf_g *= float(sp.simple_ev_edge_size_boost_mult)
+
+                        # Weak-edge dampening (Gemini)
+                        if sp.simple_ev_min_edge_full > sp.simple_ev_min_edge and _ev_ng < float(sp.simple_ev_min_edge_full):
+                            _weak_mult_g = max(0.01, _ev_ng / float(sp.simple_ev_min_edge_full))
+                            _sf_g *= _weak_mult_g
+
                         _sf_g *= _dynamic_kill_size_mult(
                             (g_ticker or "").split("-")[0].strip().upper(),
                             series_pnl_kill,
