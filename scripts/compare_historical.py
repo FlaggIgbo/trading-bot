@@ -148,6 +148,7 @@ try:
         get_position_evaluation_stats,
     )
 except ImportError:
+    expire_unfilled_orders = get_calibration_stats = get_ewma_win_rate = get_fill_attribution_stats = get_last_snapshot_for_ticker = get_limit_order_analysis = get_limit_order_fill_rate_stats = get_loss_streak = get_market_snapshots_for_backtest = get_predictions_for_backtest = get_realized_pnl_stats = get_recent_performance = get_recent_performance_by_series = get_recent_stop_loss_cooldowns = get_seconds_since_last_resolved_trade = get_unresolved_predictions = get_ticker_entry_counts = None
     get_position_evaluation_stats = get_price_after_buy_from_snapshots = mark_prediction_cancelled = record_position_evaluation = record_prediction_from_fill = record_prediction_early_exit = record_limit_order = record_market_snapshot = record_markout_snapshot = record_order_cancel = record_prediction_outcome = record_resolved = resolve_position_evaluations = get_markout_history = get_filled_predictions_for_markout = get_nearest_market_snapshot = get_unresolved_contract_sums_by_platform_yf = update_stop_loss_book_weak_state = None
 from yfinance_client import (
     get_aggs as yf_get_aggs,
