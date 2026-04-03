@@ -246,7 +246,9 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7, sync: b
             fills = raw_fills
         else:
             r = client.get_fills(limit=500)
-            if isinstance(r, list):
+            if hasattr(client, "parse_fills_response"):
+                fills = client.parse_fills_response(r)
+            elif isinstance(r, list):
                 fills = r
             else:
                 fills = r.get("fills") or r.get("trades") or r.get("data") or []
@@ -255,23 +257,47 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7, sync: b
 
     # 3. Process
     trades = []
-    for f in fills:
-        if not isinstance(f, dict): continue
-        ts = _parse_ts(f.get("timestamp") or f.get("timestampms") or f.get("fillTime"))
+    for raw_f in fills:
+        if not isinstance(raw_f, dict): continue
+        # Robust flattening (matches execution/fill_reconciliation logic)
+        f = raw_f.copy()
+        for k in ("fill", "execution", "trade", "data", "details", "order"):
+            nested = raw_f.get(k)
+            if isinstance(nested, dict):
+                for nk, nv in nested.items():
+                    if f.get(nk) in (None, ""):
+                        f[nk] = nv
+
+        ts = _parse_ts(
+            f.get("timestamp") or f.get("timestampms") or f.get("fillTime") or 
+            f.get("createdAt") or f.get("created_at") or f.get("time")
+        )
         if ts > 0 and ts < min_ts: continue
         
-        side_exec = (f.get("side") or "").lower()
+        side_exec = (f.get("side") or f.get("orderSide") or f.get("executionSide") or "").lower()
         if side_exec == "sell": continue
         
-        sym = f.get("symbol")
-        outcome_side = (f.get("outcome") or "").lower()
-        qty = int(float(f.get("quantity") or f.get("amount") or 0))
-        price = _as_float(f.get("price") or 0)
+        sym = f.get("symbol") or f.get("instrumentSymbol") or f.get("marketSymbol")
+        outcome_side = (
+            f.get("outcome") or f.get("contractOutcome") or f.get("contractSide") or 
+            f.get("label") or f.get("position") or ""
+        ).lower()
+        
+        qty = int(float(
+            f.get("filledQuantity") or f.get("quantity") or f.get("fillQuantity") or 
+            f.get("executedAmount") or f.get("amount") or 0
+        ))
+        if qty <= 0: continue
+
+        price = _as_float(
+            f.get("avgExecutionPrice") or f.get("price") or f.get("avgPrice") or 
+            f.get("averagePrice") or f.get("fillPrice") or 0
+        )
         if price > 1.0: price /= 100.0
         price_cents = price * 100
         
         oid = f.get("orderId") or f.get("order_id")
-        fid = f.get("fillId") or f.get("fill_id") or f.get("tradeId") or f.get("trade_id")
+        fid = f.get("fillId") or f.get("fill_id") or f.get("tradeId") or f.get("trade_id") or f.get("executionId")
         
         # Sync to DB if requested
         db_id = None

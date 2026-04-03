@@ -584,6 +584,7 @@ class GeminiTradingClient(GeminiPredictionClient):
             "/v1/prediction-markets/fills",
             "/v1/prediction-markets/trades",
             "/v1/prediction-markets/orders/fills",
+            "/v1/prediction-markets/orders/history",
         ]
         for path in paths:
             try:
@@ -613,6 +614,7 @@ class GeminiTradingClient(GeminiPredictionClient):
             "/v1/prediction-markets/fills",
             "/v1/prediction-markets/trades",
             "/v1/prediction-markets/orders/fills",
+            "/v1/prediction-markets/orders/history",
         ]
         for path in paths:
             all_rows: list[dict] = []
