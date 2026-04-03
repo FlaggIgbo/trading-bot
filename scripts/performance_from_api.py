@@ -4,6 +4,7 @@ Performance report directly from Kalshi and Gemini APIs.
 Useful when local storage (SQLite) is unavailable or not synced.
 
 Fetches recent fills and matches them with settlement data to calculate PnL.
+Can also sync this data into the local SQLite database.
 """
 from __future__ import annotations
 
@@ -19,6 +20,19 @@ sys.path.insert(0, str(_ROOT))
 from config import get_config
 from signals.kalshi_client import KalshiClient
 from signals.gemini_client import GeminiTradingClient, _extract_threshold_from_title
+
+# Optional storage imports for --sync
+try:
+    from data.storage import (
+        record_prediction_from_fill,
+        record_prediction_outcome,
+        record_resolved,
+        resolve_signal_outcomes,
+        get_unresolved_predictions
+    )
+    STORAGE_AVAILABLE = True
+except ImportError:
+    STORAGE_AVAILABLE = False
 
 
 def _as_float(v, default=0.0) -> float:
@@ -57,7 +71,7 @@ def _parse_ts(val) -> float:
     return 0.0
 
 
-def fetch_kalshi_performance(client: KalshiClient, days: int = 7):
+def fetch_kalshi_performance(client: KalshiClient, days: int = 7, sync: bool = False, cfg: dict | None = None):
     print(f"[*] Fetching Kalshi performance (last {days} days)...")
     min_ts = int(time.time() - days * 86400)
     
@@ -75,7 +89,6 @@ def fetch_kalshi_performance(client: KalshiClient, days: int = 7):
             cursor = r.get("cursor") or ""
             if not cursor or not rows:
                 break
-            # Safety stop if we have enough
             if _parse_ts(rows[-1].get("settled_time")) < min_ts:
                 break
         except Exception as e:
@@ -105,39 +118,64 @@ def fetch_kalshi_performance(client: KalshiClient, days: int = 7):
         ticker = f.get("ticker")
         side = f.get("side")
         qty = int(float(f.get("count_fp") or f.get("count") or 0))
-        price_cents = int(_as_float(f.get("yes_price") or f.get("no_price") or f.get("price") or 0) * 100)
+        price_cents = _as_float(f.get("yes_price") or f.get("no_price") or f.get("price") or 0)
         if price_cents == 0:
-            # Try price_dollars
             pd = _as_float(f.get("yes_price_dollars") or f.get("no_price_dollars") or f.get("price_dollars") or 0)
-            price_cents = int(pd * 100)
+            price_cents = pd * 100
         
         ts = _parse_ts(f.get("created_time") or f.get("ts"))
+        oid = f.get("order_id")
+        fid = f.get("fill_id") or f.get("trade_id") or f.get("id")
         
+        # Sync to DB if requested
+        db_id = None
+        if sync and STORAGE_AVAILABLE:
+            res = record_prediction_from_fill(
+                platform="kalshi",
+                ticker=ticker,
+                side=side,
+                fill_id=str(fid),
+                order_id=str(oid) if oid else None,
+                entry_price=price_cents / 100.0,
+                count=qty,
+                fill_ts=ts,
+                config=cfg,
+                source="api_performance_sync"
+            )
+            db_id = res.get("id")
+
         settle = settlements.get(ticker)
         outcome = "open"
         pnl = 0.0
         if settle:
-            # payout is in cents
-            payout = int(settle.get("payout") or 0)
-            # If multiple fills for same ticker, this logic is a bit simple (assumes 1 settle per ticker)
-            # but usually it works for recent history.
-            # Revenue = Payout - Cost
-            # A winner pays 100, a loser pays 0.
-            # We need to check if this specific fill won.
-            # Kalshi settlement 'result' is 'yes' or 'no'
             res = (settle.get("result") or "").lower()
             if res:
+                yes_settled = (res == "yes")
                 won = (side == res)
                 outcome = "win" if won else "lose"
                 pnl = (100 - price_cents) * qty if won else (-price_cents * qty)
-        
+                
+                if sync and STORAGE_AVAILABLE:
+                    # If we just recorded it or it already existed, resolve it
+                    # We might need to find the prediction ID if db_id is None (duplicate)
+                    if db_id is None:
+                        # Need to find existing ID? record_prediction_outcome returns False if not found/already resolved
+                        # In simple sync, we'll try to resolve any unresolved for this ticker
+                        resolve_signal_outcomes(ticker, yes_settled, cfg)
+                        record_resolved(ticker=ticker, yes_settled=yes_settled, platform="kalshi", config=cfg)
+                        # We don't have the specific prediction ID easily here without extra query
+                    else:
+                        record_prediction_outcome(db_id, yes_settled, int(pnl), config=cfg)
+                        resolve_signal_outcomes(ticker, yes_settled, cfg)
+                        record_resolved(ticker=ticker, yes_settled=yes_settled, platform="kalshi", config=cfg)
+
         trades.append({
             "ts": ts,
             "platform": "Kalshi",
             "ticker": ticker,
             "side": side,
             "qty": qty,
-            "price": price_cents,
+            "price": int(price_cents),
             "outcome": outcome,
             "pnl_cents": pnl
         })
@@ -145,12 +183,12 @@ def fetch_kalshi_performance(client: KalshiClient, days: int = 7):
     return trades
 
 
-def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7):
+def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7, sync: bool = False, cfg: dict | None = None):
     print(f"[*] Fetching Gemini performance (last {days} days)...")
     min_ts = int(time.time() - days * 86400)
     
     # 1. Fetch settled events to get outcomes
-    settled_outcomes = {} # event_ticker -> {threshold: {res_side: 'yes'|'no'}}
+    settled_outcomes = {} 
     try:
         for cat in ("crypto", "commodities"):
             offset = 0
@@ -160,19 +198,17 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7):
                 for evt in data:
                     et = evt.get("ticker")
                     if not et: continue
-                    settled_outcomes[et] = {}
+                    settled_outcomes[et] = {"_raw": evt}
                     for c in evt.get("contracts") or []:
                         rs = (c.get("resolutionSide") or "").lower()
                         if rs in ("yes", "no"):
                             label = c.get("label") or c.get("abbreviatedName") or ""
                             thresh, _ = _extract_threshold_from_title(label)
                             sym = c.get("instrumentSymbol")
-                            settled_outcomes[et][sym] = rs
-                            if thresh:
-                                settled_outcomes[et][thresh] = rs
+                            if sym: settled_outcomes[et][sym] = rs
+                            if thresh: settled_outcomes[et][thresh] = rs
                 if len(data) < 200: break
                 offset += len(data)
-                # Don't go back too far
                 last_ts = _parse_ts(data[-1].get("expiryTime"))
                 if last_ts < min_ts - 86400: break
     except Exception as e:
@@ -181,7 +217,6 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7):
     # 2. Fetch fills
     fills = []
     try:
-        # Use get_fills_paginated if available
         if hasattr(client, "get_fills_paginated"):
             raw_fills, _ = client.get_fills_paginated(page_size=200, max_pages=10)
             fills = raw_fills
@@ -205,30 +240,61 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7):
         qty = int(float(f.get("quantity") or f.get("amount") or 0))
         price = _as_float(f.get("price") or 0)
         if price > 1.0: price /= 100.0
-        price_cents = int(price * 100)
+        price_cents = price * 100
         
+        oid = f.get("orderId") or f.get("order_id")
+        fid = f.get("fillId") or f.get("fill_id") or f.get("tradeId") or f.get("trade_id")
+        
+        # Sync to DB if requested
+        db_id = None
+        if sync and STORAGE_AVAILABLE:
+            # Note: Ticker mapping is tricky from just fills. 
+            # We'll use symbol as ticker fallback if mapping unknown.
+            res = record_prediction_from_fill(
+                platform="gemini",
+                ticker=sym, # Fallback
+                side=outcome_side,
+                fill_id=str(fid),
+                order_id=str(oid) if oid else None,
+                entry_price=price,
+                count=qty,
+                fill_ts=ts,
+                config=cfg,
+                source="api_performance_sync"
+            )
+            db_id = res.get("id")
+
         # Try to find outcome
         outcome = "open"
         pnl = 0.0
-        # Match by symbol in settled_outcomes
         found_res = None
+        event_ticker = None
         for et, contracts in settled_outcomes.items():
             if sym in contracts:
                 found_res = contracts[sym]
+                event_ticker = et
                 break
         
         if found_res:
+            yes_settled = (found_res == "yes")
             won = (outcome_side == found_res)
             outcome = "win" if won else "lose"
             pnl = (100 - price_cents) * qty if won else (-price_cents * qty)
-        
+            
+            if sync and STORAGE_AVAILABLE:
+                if db_id is not None:
+                    record_prediction_outcome(db_id, yes_settled, int(pnl), config=cfg)
+                if event_ticker:
+                    resolve_signal_outcomes(event_ticker, yes_settled, cfg)
+                    record_resolved(ticker=event_ticker, yes_settled=yes_settled, platform="gemini", config=cfg)
+
         trades.append({
             "ts": ts,
             "platform": "Gemini",
             "ticker": sym,
             "side": outcome_side,
             "qty": qty,
-            "price": price_cents,
+            "price": int(price_cents),
             "outcome": outcome,
             "pnl_cents": pnl
         })
@@ -240,21 +306,25 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--sync", action="store_true", help="Sync data to local SQLite database")
     args = parser.parse_args()
 
     cfg = get_config()
     
+    if args.sync and not STORAGE_AVAILABLE:
+        print("[!] Storage module not available; --sync will be ignored.")
+
     all_trades = []
     
     try:
         k_client = KalshiClient()
-        all_trades.extend(fetch_kalshi_performance(k_client, args.days))
+        all_trades.extend(fetch_kalshi_performance(k_client, args.days, args.sync, cfg))
     except Exception as e:
         print(f"[!] Could not init Kalshi: {e}")
 
     try:
         g_client = GeminiTradingClient()
-        all_trades.extend(fetch_gemini_performance(g_client, args.days))
+        all_trades.extend(fetch_gemini_performance(g_client, args.days, args.sync, cfg))
     except Exception as e:
         print(f"[!] Could not init Gemini: {e}")
 
@@ -290,6 +360,9 @@ def main():
     if (wins + losses) > 0:
         print(f"WIN RATE:  {wins/(wins+losses):.1%} ({wins}W, {losses}L)")
     print("="*80 + "\n")
+    
+    if args.sync:
+        print("[*] Sync completed. Local database updated.")
 
 
 if __name__ == "__main__":
