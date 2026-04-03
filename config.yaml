@@ -19,6 +19,28 @@ markets:
   - KXDOGED
   - KXBNB15M
   - KXHYPE15M
+  # Weather (Kalshi series → Open-Meteo handle below)
+  - KXHIGHCHI # Chicago High Temp
+  - KXHIGHTBOS # Boston High Temp
+  - KXHIGHTNYC # NYC High Temp
+  - KXLOWTCHI # Chicago Low Temp
+  - KXHIGHMIA # Miami
+  - KXHIGHLAX # LA
+  - KXHIGHAUS # Austin
+  - KXHIGHDAL # Dallas
+  - KXHIGHPHL # Philly
+  - KXHIGHPHX # Phoenix
+  - KXHIGHDEN # Denver
+  - KXHIGHSEA # Seattle
+  - KXHIGHSFO # San Francisco
+  - KXHIGHHOU # Houston
+  - KXHIGHLAS # Las Vegas
+  - KXHIGHTDC # DC
+  - KXHIGHATL # Atlanta
+  - KXHIGHMSP # Minneapolis
+  - KXHIGHMSY # New Orleans
+  - KXHIGHOKC # Oklahoma City
+  - KXHIGHSAT # San Antonio
   # Commodities & Nasdaq-100 (Kalshi series → Yahoo underlyings below)
   - KXWTI # WTI crude — https://kalshi.com/markets/kxwti/wti-oil-election-day
   - KXBRENTD # Brent oil daily — https://kalshi.com/markets/kxbrentd/brent-oil
@@ -58,6 +80,34 @@ yfinance_tickers:
   KXGOLDW: "GC=F" # Gold futures — https://finance.yahoo.com/quote/GC=F/
   KXCOPPERD: "HG=F" # COMEX copper continuous — https://finance.yahoo.com/quote/HG=F/
   KXAAAGASW: "RB=F" # RBOB gasoline futures (proxy for retail gas) — https://finance.yahoo.com/quote/RB=F/
+  # Weather mapping: Series -> Weather City
+  KXHIGHCHI: "WEATHER:CHI"
+  KXHIGHTBOS: "WEATHER:BOS"
+  KXHIGHTNYC: "WEATHER:NYC"
+  KXLOWTCHI: "WEATHER:CHI"
+  KXHIGHMIA: "WEATHER:MIA"
+  KXHIGHLAX: "WEATHER:LAX"
+  KXHIGHAUS: "WEATHER:AUS"
+  KXHIGHPHX: "WEATHER:PHX"
+  KXHIGHDEN: "WEATHER:DEN"
+  KXHIGHLAS: "WEATHER:LAS"
+  KXHIGHSEA: "WEATHER:SEA"
+  KXHIGHSFO: "WEATHER:SFO"
+  KXHIGHHOU: "WEATHER:HOU"
+  KXHIGHPHL: "WEATHER:PHL"
+  KXHIGHDAL: "WEATHER:DAL"
+  KXHIGHTDC: "WEATHER:DC"
+  KXHIGHATL: "WEATHER:ATL"
+  KXHIGHMSP: "WEATHER:MSP"
+  KXHIGHMSY: "WEATHER:MSY"
+  KXHIGHOKC: "WEATHER:OKC"
+  KXHIGHSAT: "WEATHER:SAT"
+  # Gemini Weather (Keyword mapping)
+  "NYC Snowfall": "WEATHER:NYC"
+  "Temperature in Chicago": "WEATHER:CHI"
+  "Temperature in Miami": "WEATHER:MIA"
+  "Temperature in Los Angeles": "WEATHER:LAX"
+  "Temperature in Boston": "WEATHER:BOS"
 
 # Shift Yahoo wholesale RBOB ($/gal) toward retail (e.g. AAA national) for model vs Kalshi strikes.
 # adjusted = yahoo_price * multiply + add. Tune add ~0.70–1.10 vs current RB=F–AAA gap.

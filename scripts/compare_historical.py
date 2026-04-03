@@ -106,6 +106,7 @@ from models.trading_edges import (
     net_edges_buy_legs as _net_edges_buy_legs,
     simple_ev_spend_fraction,
 )
+from models.weather_model import calculate_weather_probability
 
 try:
     from storage import (
@@ -6978,6 +6979,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         if not yt:
             return s, None, None, None, "no_map"
         try:
+            if yt.startswith("WEATHER:"):
+                # Warm weather cache if needed, but the model handles it fine
+                return s, yt, [], None, "ok"
             cl = yf_get_aggs(yt, days_back=args.days, config=cfg)
             if not cl:
                 return s, yt, None, None, "no_closes"
@@ -7004,29 +7008,47 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         if _pst == "no_map" or not yf_ticker:
             print(f"[{series}] No yfinance_tickers mapping - skip")
             continue
-        if _pst in ("no_closes", "err") or not closes:
-            print(f"[{series}] No close data for {yf_ticker}")
-            continue
-
-        # Blend live + closes[-1] when both available — use all signals, slightly prioritize live
-        last_close = float(closes[-1])
-        _snap = snap_pref if (sp.use_live_price and snap_pref is not None and snap_pref > 0) else None
-        if _snap is None and sp.use_live_price:
-            _snap = apply_underlying_price(cfg, series, yf_get_snapshot(yf_ticker))
-        if _snap is not None and _snap > 0:
-            live_f = float(_snap)
-            w = sp.live_price_weight
-            current_price = w * live_f + (1 - w) * last_close
-            live_note = " (blend live+close)"
+        if yf_ticker and yf_ticker.startswith("WEATHER:"):
+            from signals.weather_client import get_snapshot as get_wt_snap, LOCATIONS
+            city_code = yf_ticker.split(":")[1]
+            lat, lon = LOCATIONS.get(city_code, (0, 0))
+            live_temp = get_wt_snap(lat, lon)
+            if live_temp is not None:
+                current_price = float(live_temp)
+                last_close = current_price
+                closes = [current_price] * 2 # Enough to avoid some checks
+                live_note = " (weather snapshot)"
+            else:
+                current_price = 70.0 # dummy
+                last_close = 70.0
+                closes = [70.0] * 2
+                live_note = " (weather fallback)"
+            momentum_ret = 0.0
+            momentum_crash = False
         else:
-            current_price = last_close
-            live_note = ""
-        momentum_ret = ((current_price - last_close) / last_close) if last_close > 0 else 0.0
-        momentum_crash = (
-            sp.enable_momentum_protection
-            and yf_ticker in GEMINI_CRYPTO_YF
-            and momentum_ret <= sp.momentum_crash_threshold_pct
-        )
+            if _pst in ("no_closes", "err") or not closes:
+                print(f"[{series}] No close data for {yf_ticker}")
+                continue
+
+            # Blend live + closes[-1] when both available — use all signals, slightly prioritize live
+            last_close = float(closes[-1])
+            _snap = snap_pref if (sp.use_live_price and snap_pref is not None and snap_pref > 0) else None
+            if _snap is None and sp.use_live_price:
+                _snap = apply_underlying_price(cfg, series, yf_get_snapshot(yf_ticker))
+            if _snap is not None and _snap > 0:
+                live_f = float(_snap)
+                w = sp.live_price_weight
+                current_price = w * live_f + (1 - w) * last_close
+                live_note = " (blend live+close)"
+            else:
+                current_price = last_close
+                live_note = ""
+            momentum_ret = ((current_price - last_close) / last_close) if last_close > 0 else 0.0
+            momentum_crash = (
+                sp.enable_momentum_protection
+                and yf_ticker in GEMINI_CRYPTO_YF
+                and momentum_ret <= sp.momentum_crash_threshold_pct
+            )
         if momentum_crash:
             any_momentum_crash = True
         curr_vol, base_vol = _volatility_spike_metrics(closes)
@@ -7202,36 +7224,53 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 print()
                 continue
 
-            closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
-            recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
-            if sp.empirical_multi_horizon_enabled:
-                emp = _empirical_probability_multi_horizon(
-                    closes_for_emp,
-                    threshold,
-                    direction,
-                    short_days=sp.empirical_horizon_short_days,
-                    medium_days=sp.empirical_horizon_medium_days,
-                    long_days=sp.empirical_horizon_long_days,
-                    w_short=sp.empirical_horizon_w_short,
-                    w_medium=sp.empirical_horizon_w_medium,
-                    w_long=sp.empirical_horizon_w_long,
-                    recent_weight=recent_w,
-                    use_rolling_window=sp.empirical_use_rolling_window,
-                    weighting=sp.empirical_weighting,
-                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
-                )
+            if yf_ticker and yf_ticker.startswith("WEATHER:"):
+                # resolution_date is in 'close_time' or 'expiration_date'
+                res_date_raw = m.get("expiration_date") or m.get("expiration_time") or ""
+                res_date_str = res_date_raw[:10]
+                if not res_date_str:
+                     # Fallback to current date or something
+                     res_date_str = datetime.utcnow().strftime("%Y-%m-%d")
+                
+                # Market ticker for model city lookup
+                m_ticker = m.get("ticker", series)
+                hist_p = calculate_weather_probability(m_ticker, res_date_str, threshold, direction)
+                if hist_p is None:
+                    print(f"      [Weather] Failed to calculate probability for {series} / {m_ticker}")
+                    continue
+                emp = hist_p
+                use_vol = False # Weather model handles its own distribution
             else:
-                emp = _empirical_probability(
-                    closes_for_emp,
-                    threshold,
-                    direction,
-                    recent_days=sp.empirical_recent_days,
-                    recent_weight=recent_w,
-                    use_rolling_window=sp.empirical_use_rolling_window,
-                    weighting=sp.empirical_weighting,
-                    exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
-                )
-            hist_p = emp
+                closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
+                recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
+                if sp.empirical_multi_horizon_enabled:
+                    emp = _empirical_probability_multi_horizon(
+                        closes_for_emp,
+                        threshold,
+                        direction,
+                        short_days=sp.empirical_horizon_short_days,
+                        medium_days=sp.empirical_horizon_medium_days,
+                        long_days=sp.empirical_horizon_long_days,
+                        w_short=sp.empirical_horizon_w_short,
+                        w_medium=sp.empirical_horizon_w_medium,
+                        w_long=sp.empirical_horizon_w_long,
+                        recent_weight=recent_w,
+                        use_rolling_window=sp.empirical_use_rolling_window,
+                        weighting=sp.empirical_weighting,
+                        exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
+                    )
+                else:
+                    emp = _empirical_probability(
+                        closes_for_emp,
+                        threshold,
+                        direction,
+                        recent_days=sp.empirical_recent_days,
+                        recent_weight=recent_w,
+                        use_rolling_window=sp.empirical_use_rolling_window,
+                        weighting=sp.empirical_weighting,
+                        exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
+                    )
+                hist_p = emp
             dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             ewma_lambda_used = _ewma_lambda_for_market(sp, m, yf_ticker)
             vol_p = (
