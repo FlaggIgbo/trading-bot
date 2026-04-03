@@ -7318,7 +7318,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
-            if not sp.simple_ev_decision_enabled:
+            if True: # enabled for all paths including simple_ev
                 hist_p = apply_anti_hallucination_pipeline(
                     model_p=hist_p,
                     market_p=yes_bid,
@@ -8397,7 +8397,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 # --- Anti-hallucination pipeline (Gemini) ---
                 hist_p_gem_raw = hist_p_gem
-                if not sp.simple_ev_decision_enabled:
+                if True: # enabled for all paths including simple_ev
                     hist_p_gem = apply_anti_hallucination_pipeline(
                         model_p=hist_p_gem,
                         market_p=impl,

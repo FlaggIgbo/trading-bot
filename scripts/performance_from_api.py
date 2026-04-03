@@ -357,7 +357,7 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7, sync: b
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--days", type=float, default=7.0)
     parser.add_argument("--sync", action="store_true", help="Sync data to local SQLite database")
     args = parser.parse_args()
 

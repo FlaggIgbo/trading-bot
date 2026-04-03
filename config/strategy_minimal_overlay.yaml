@@ -39,11 +39,12 @@ strategy:
   enable_auto_signal_weight_fit: false
 
   anti_hallucination:
-    bayesian_enabled: false
-    ewma_prob_enabled: false
-    vol_zscore_enabled: false
-    adaptive_edge_enabled: false
-    regime_filter_enabled: false
+    bayesian_enabled: true
+    bayesian_market_strength: 5.0 # Stronger pull to market vs overconfidence
+    ewma_prob_enabled: true
+    vol_zscore_enabled: true
+    adaptive_edge_enabled: true
+    regime_filter_enabled: true
 
   simple_ev_decision:
     enabled: true
