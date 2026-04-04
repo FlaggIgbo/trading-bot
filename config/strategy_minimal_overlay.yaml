@@ -1,115 +1,102 @@
 # =============================================================================
 # Minimal baseline — merged on top of config.yaml by config.get_config() by default.
 # Disable: TRADING_BOT_MINIMAL_OVERLAY=0  (or false / no / off)
-# Goal: simpler P stack, single edge gate, conservative Kelly, fewer filters.
+# Goal: CONSERVATIVE DEFENSE — stops overconfident noise trading.
 # =============================================================================
 
 execution:
   price_strategy: aggressive
   limit_offset_cents: 1
   resting_cancel_if_market_bid_above_limit_by: 0.03
-  limit_buy_cross_spread_min_edge: 0.12
-  limit_buy_near_market_min_edge: 0.08
-  limit_buy_passive_only_below_edge: 0.08
+  limit_buy_cross_spread_min_edge: 0.20 # Increased hurdle
+  limit_buy_near_market_min_edge: 0.15 # Increased hurdle
+  limit_buy_passive_only_below_edge: 0.15
 
 recovery:
-  # Align with simple_ev min_edge so recovery merge does not re-tighten hurdles.
-  min_edge: 0.02 # Lowered from 0.10 to allow repeatable small edges (2-4%)
-  uncertainty_edge_mult: 0.0
-  vol_disagree_extra_edge: 0.0
-  ultra_short_min_edge_mult: 1.15 # Relaxed from 1.2-1.35
+  min_edge: 0.15
+  uncertainty_edge_mult: 1.0
+  vol_disagree_extra_edge: 0.05
+  ultra_short_min_edge_mult: 3.0 # BLOCK ultra-short unless massive edge
 
 strategy:
-  # Alias of vol_regime; documents that BUY/NO gates match default_threshold
   strategy_engine: vol_regime_threshold
-  # --- Probability (empirical + vol blend; drop extra smoothing layers) ---
-  vol_blend_weight: 0.25
+  vol_blend_weight: 0.20 # Trust model even less
   use_intraday_empirical: true
-  empirical_recent_days: 60
-  empirical_recent_weight: 2.0
-  # 1.0 = no shrink toward 0.5 (0.0 would collapse P to 50% when simple_ev is off)
-  model_probability_shrinkage: 1.0
+  empirical_recent_days: 45 # More recent focus
+  empirical_recent_weight: 2.5
+  
+  # 0.30 = extreme shrink toward 0.5 (stops hallucinating)
+  model_probability_shrinkage: 0.30
   enable_model_prob_hard_cap: true
-  model_prob_hard_lo: 0.02
-  model_prob_hard_hi: 0.98
-  use_bucket_penalty: false
-  use_calibration: false
+  model_prob_hard_lo: 0.10
+  model_prob_hard_hi: 0.90
+  
+  use_bucket_penalty: true
+  use_calibration: true
   use_sklearn_calibration: false
   enable_signal_model: false
   enable_auto_signal_weight_fit: false
 
   anti_hallucination:
     bayesian_enabled: true
-    bayesian_market_strength: 5.0 # Stronger pull to market vs overconfidence
+    bayesian_market_strength: 15.0 # Very strong pull to market
     ewma_prob_enabled: true
     vol_zscore_enabled: true
     adaptive_edge_enabled: true
     regime_filter_enabled: true
+    regime_block_buy_no_in_uptrend: true
+    regime_block_buy_yes_in_downtrend: true
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.02 # Lowered from 0.08 (allow 2% edges)
-    min_edge_full: 0.08 # New: Full size at 8% edge; linear dampening below
+    min_edge: 0.15 
+    min_edge_full: 0.25
     skip_p_win_mid_band_enabled: true
-    skip_p_win_mid_lo: 0.58
-    skip_p_win_mid_hi: 0.78
-    kelly_dampen: 0.28
-    max_bankroll_fraction: 0.024
-    edge_size_boost_edge: 0.14
-    edge_size_boost_mult: 1.18
-    spread_wide_fraction: 0.05
-    spread_wide_size_mult: 0.5
-    ultra_short_size_mult: 0.6
+    skip_p_win_mid_lo: 0.40
+    skip_p_win_mid_hi: 0.60
+    kelly_dampen: 0.10 # Max 10% of Kelly (extremely conservative)
+    max_bankroll_fraction: 0.01
+    edge_size_boost_edge: 0.30
+    edge_size_boost_mult: 1.02
+    spread_wide_fraction: 0.10
+    spread_wide_size_mult: 0.2
+    ultra_short_size_mult: 0.2 # Drastically reduce size on 15m noisy markets
 
   log_effective_min_edge: true
   log_decision_diagnostics: true
-  filter_disjoint_underlying_buys: false
-  max_bankroll_fraction_per_underlying: 0.30
-  max_bankroll_fraction_per_direction: 0.24
-  min_edge: 0.02
-  min_edge_easy_win: 0.02
+  filter_disjoint_underlying_buys: true
+  max_bankroll_fraction_per_underlying: 0.12
+  max_bankroll_fraction_per_direction: 0.10
+  min_edge: 0.15
+  min_edge_easy_win: 0.25
   enable_easy_win: false
   consensus_sniper_enabled: false
-  consensus_sniper_min_edge: 0.0
   barbell_enabled: false
-  barbell_soften_strict_intraday: false
 
-  uncertainty_edge_mult: 0.0
-  vol_disagree_extra_edge: 0.0
-  yes_overconfidence_extra_edge: 0.0
-  parity_penalty_enabled: false
-  adaptive_learning_enabled: false
+  uncertainty_edge_mult: 0.5
+  vol_disagree_extra_edge: 0.02
+  yes_overconfidence_extra_edge: 0.04
+  parity_penalty_enabled: true
+  adaptive_learning_enabled: true # Enable learning to react to losses
 
-  enable_vol_regime_scaling: false
-  enable_vol_spike_safety: false
-  enable_defensive_mode: false
-  dte_edge_scaling_enabled: false
-  ultra_short_min_edge_mult: 1.15
-  ultra_short_late_min_edge_mult: 1.1
+  enable_vol_regime_scaling: true
+  enable_vol_spike_safety: true
+  enable_defensive_mode: true
+  dte_edge_scaling_enabled: true
+  ultra_short_min_edge_mult: 3.0
+  ultra_short_late_min_edge_mult: 4.0 # Nearly impossible to trade very late 15m noise
 
   limit_order_mode: layered
   layered_order_levels: 2
-  limit_dip_pct: 0.03
-  max_dip_cap: 0.10
+  limit_dip_pct: 0.05 # Wait for deeper dips
+  max_dip_cap: 0.15
 
-  max_pct_of_book_volume: 0.25
-  min_order_book_depth: 10
-  stop_loss_pct: 0.20
-  stop_loss_min_model_conf: 0.70
-  stop_loss_spot_itm_min_pct: 0.01
-  stop_loss_book_persist_seconds: 60
-  stop_loss_near_expiry_extra_pct: 0.12
-  stop_loss_near_expiry_persist_mult: 2.0
-  stop_loss_near_expiry_hard_disable: false
-  stop_loss_gradient_max_extra_pct: 0.25
-  stop_loss_gradient_per_edge: 10.0
-  adaptive_loss_block_max_balance_loss_pct: 0.25
-  adaptive_loss_block_lookback_hours: 12.0
-
-  enable_disagreement_dip: false
-  enable_lottery_limits: false
-
+  max_pct_of_book_volume: 0.20
+  min_order_book_depth: 20 # Require more liquidity
+  stop_loss_pct: 0.15 # Tighter stop losses
+  
   alpha_engine:
-    obi_enabled: false
-    markout_enabled: false
-    lead_lag_enabled: false
+    obi_enabled: true
+    markout_enabled: true
+    lead_lag_enabled: true
+    vol_adjusted_kelly_enabled: true

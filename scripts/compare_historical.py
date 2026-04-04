@@ -6653,6 +6653,39 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     sp = _load_strategy_params(strategy)
+    # --- Global & Series Circuit Breakers ---
+    global_circuit_breaker_active = False
+    paper_only_series: set[str] = set()
+    
+    # 1. Global Breaker: stop all trades if recent bankroll loss is extreme (>20% in 12h)
+    if get_recent_performance:
+        try:
+            perf_12h = get_recent_performance(lookback_hours=12.0, config=cfg)
+            if perf_12h and perf_12h.get("total", 0) >= 5:
+                # Simple PnL breaker: if lost > 20% of current balance in 12h, or lost > $5.00
+                lost_cents = -int(perf_12h.get("pnl_cents", 0))
+                # Use min balance floor ($25) for pct check
+                bal_for_pct = max(balance_cents, 2500)
+                if lost_cents > 500 or (bal_for_pct > 0 and lost_cents > bal_for_pct * 0.20):
+                    global_circuit_breaker_active = True
+                    print(f"[Circuit Breaker] GLOBAL ACTIVE: Lost ${lost_cents/100:.2f} in last 12h. Freezing all BUYS.")
+        except Exception as e:
+            print(f"[Circuit Breaker] Error checking global performance: {e}")
+
+    # 2. Series Filter: disable BUYS for series with win rate < 25% or 5+ consecutive losses in 24h
+    if get_recent_performance_by_series:
+        try:
+            series_perf = get_recent_performance_by_series(lookback_hours=24.0, config=cfg)
+            for s_prefix, p in series_perf.items():
+                if p.get("total", 0) >= 5:
+                    wr = p.get("win_rate")
+                    cl = p.get("consecutive_losses", 0)
+                    if (wr is not None and wr < 0.25) or cl >= 5:
+                        paper_only_series.add(s_prefix)
+                        print(f"[Series Guard] {s_prefix} → PAPER ONLY (WR {wr:.1%}, {cl} consecutive losses)")
+        except Exception as e:
+            print(f"[Series Guard] Error checking series performance: {e}")
+            
     # Reconcile markouts (toxic flow data) if enabled
     if sp.ae_cfg.markout_enabled:
         try:
@@ -7666,12 +7699,28 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             )
                 except Exception:
                     pass
+            # --- Safeguard Gating ---
+            series_prefix = (ticker.split("-")[0] if "-" in ticker else ticker[:6])
+            is_paper_only = (series_prefix in paper_only_series)
+            
+            # Trust-aware calibration penalty: if this confidence bucket is historically overconfident,
+            # add an extra edge hurdle.
+            bucket_penalty = 0.0
+            if calibration_engine:
+                # Find which bucket hist_p falls into
+                b_stats = calibration_engine.get_bucket_for_prob(hist_p)
+                if b_stats and b_stats.get('calibration_gap', 0) < -0.10:
+                    # If WR is >10% lower than expected, add 50% of the gap as an edge penalty
+                    bucket_penalty = abs(b_stats['calibration_gap']) * 0.5
+                    if getattr(args, "verbose", False):
+                        print(f"  [Trust] {ticker}: overconfident bucket ({b_stats['lo']:.1f}-{b_stats['hi']:.1f}) → +{bucket_penalty:.3f} edge penalty")
+
             if sp.simple_ev_decision_enabled:
                 rec = _simple_ev_recommend(
                     hist_p,
                     yes_bid,
                     no_bid_early,
-                    effective_min,
+                    effective_min + bucket_penalty,
                     maker_fee_rate,
                     sp.min_fee_per_order,
                     sp,
@@ -7682,28 +7731,38 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         p_yes=hist_p,
                         market_yes=yes_bid,
                         min_p_win=min_p_win,
-                        min_edge=effective_min,
+                        min_edge=effective_min + bucket_penalty,
                         maker_fee_rate=maker_fee_rate,
                         min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes,
-                        min_edge_no=effective_min_no,
+                        min_edge_yes=effective_min_yes + bucket_penalty,
+                        min_edge_no=effective_min_no + bucket_penalty,
                         **_strategy_recommend_strict_extras(sp),
                     )
                     if _strict_intraday_evaluation(m, yf_ticker, sp)
                     else strategy_engine.recommend(
                         p_yes=hist_p,
                         market_yes=yes_bid,
-                        min_edge=effective_min,
+                        min_edge=effective_min + bucket_penalty,
                         maker_fee_rate=maker_fee_rate,
                         min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes,
-                        min_edge_no=effective_min_no,
+                        min_edge_yes=effective_min_yes + bucket_penalty,
+                        min_edge_no=effective_min_no + bucket_penalty,
                         min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                         easy_win_min_p_win=sp.easy_win_min_p_win,
                         easy_win_min_market_p=sp.easy_win_min_market_p,
                         **_strategy_recommend_extras(sp),
                     )
                 )
+
+            # Circuit Breaker / Paper-Only Block
+            if rec in (REC_BUY_YES, REC_BUY_NO):
+                if global_circuit_breaker_active:
+                    rec = REC_SKIP
+                    print(f"  [Circuit Breaker] {ticker} → SKIP (Global drawdown block)")
+                elif is_paper_only:
+                    rec = REC_SKIP
+                    print(f"  [Series Guard] {ticker} → SKIP (Series {series_prefix} in paper-only mode)")
+
             if getattr(args, "force_trades", False) and rec == REC_SKIP:
                 # Forced diagnostic mode: evaluate if model P favors YES or NO even if hurdle not cleared
                 if hist_p > yes_bid:
@@ -8768,12 +8827,24 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 )
                     except Exception:
                         pass
+                # --- Safeguard Gating (Gemini) ---
+                series_prefix_g = (yf_ticker or "GEMINI")
+                is_paper_only_g = (series_prefix_g in paper_only_series)
+                
+                bucket_penalty_g = 0.0
+                if calibration_engine:
+                    b_stats_g = calibration_engine.get_bucket_for_prob(hist_p_gem)
+                    if b_stats_g and b_stats_g.get('calibration_gap', 0) < -0.10:
+                        bucket_penalty_g = abs(b_stats_g['calibration_gap']) * 0.5
+                        if getattr(args, "verbose", False):
+                            print(f"  [Trust] {ticker_g}: overconfident bucket ({b_stats_g['lo']:.1f}-{b_stats_g['hi']:.1f}) → +{bucket_penalty_g:.3f} edge penalty")
+
                 if sp.simple_ev_decision_enabled:
                     rec = _simple_ev_recommend(
                         hist_p_gem,
                         impl,
                         no_bid_gem_early,
-                        effective_min_gem,
+                        effective_min_gem + bucket_penalty_g,
                         maker_fee_rate_gem,
                         sp.min_fee_per_order,
                         sp,
@@ -8784,28 +8855,38 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             p_yes=hist_p_gem,
                             market_yes=impl,
                             min_p_win=min_p_win_gem,
-                            min_edge=effective_min_gem,
+                            min_edge=effective_min_gem + bucket_penalty_g,
                             maker_fee_rate=maker_fee_rate_gem,
                             min_fee_per_order=sp.min_fee_per_order,
-                            min_edge_yes=effective_min_yes_g,
-                            min_edge_no=effective_min_no_g,
+                            min_edge_yes=effective_min_yes_g + bucket_penalty_g,
+                            min_edge_no=effective_min_no_g + bucket_penalty_g,
                             **_strategy_recommend_strict_extras(sp),
                         )
                         if _strict_intraday_evaluation(evt, yf_ticker, sp)
                         else strategy_engine.recommend(
                             p_yes=hist_p_gem,
                             market_yes=impl,
-                            min_edge=effective_min_gem,
+                            min_edge=effective_min_gem + bucket_penalty_g,
                             maker_fee_rate=maker_fee_rate_gem,
                             min_fee_per_order=sp.min_fee_per_order,
-                            min_edge_yes=effective_min_yes_g,
-                            min_edge_no=effective_min_no_g,
+                            min_edge_yes=effective_min_yes_g + bucket_penalty_g,
+                            min_edge_no=effective_min_no_g + bucket_penalty_g,
                             min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                             easy_win_min_p_win=sp.easy_win_min_p_win,
                             easy_win_min_market_p=sp.easy_win_min_market_p,
                             **_strategy_recommend_extras(sp),
                         )
                     )
+
+                # Circuit Breaker / Paper-Only Block
+                if rec in (REC_BUY_YES, REC_BUY_NO):
+                    if global_circuit_breaker_active:
+                        rec = REC_SKIP
+                        print(f"  [Circuit Breaker] {ticker_g} → SKIP (Global drawdown block)")
+                    elif is_paper_only_g:
+                        rec = REC_SKIP
+                        print(f"  [Series Guard] {ticker_g} → SKIP (Series {series_prefix_g} in paper-only mode)")
+
                 if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte_g is not None and float(dte_g) > sp.max_new_buy_dte_days:
                     rec = REC_SKIP
                 violates_rule_g = _violates_no_above_rule(current_price, threshold_g, direction_g, sp.no_above_cushion)

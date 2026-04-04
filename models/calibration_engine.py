@@ -59,6 +59,14 @@ class CalibrationEngine:
             })
         return stats
 
+    def get_bucket_for_prob(self, p_win: float, n_bins: int = 10) -> dict[str, Any] | None:
+        """Find the calibration stats for the bin containing p_win."""
+        buckets = self.get_bucketed_calibration(n_bins)
+        for b in buckets:
+            if b['lo'] <= p_win <= b['hi']:
+                return b
+        return None
+
     def compute_trust_score(self, min_samples: int = 10) -> float:
         """
         Trust Score = Realized Edge / Predicted Edge.

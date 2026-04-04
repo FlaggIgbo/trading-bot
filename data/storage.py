@@ -1252,7 +1252,7 @@ def get_unresolved_contract_sums_by_platform_yf(config: dict | None = None) -> d
         rows = conn.execute(
             """SELECT platform, yf_ticker, SUM(count) as total
                FROM predictions
-               WHERE (outcome IS NULL OR outcome NOT IN ('cancelled'))
+               WHERE (outcome IS NULL OR outcome = '')
                  AND yf_ticker IS NOT NULL AND TRIM(yf_ticker) != ''
                GROUP BY platform, yf_ticker"""
         ).fetchall()

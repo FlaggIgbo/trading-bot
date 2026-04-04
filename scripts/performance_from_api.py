@@ -227,7 +227,7 @@ def fetch_gemini_performance(client: GeminiTradingClient, days: int = 7, sync: b
                         rs = (c.get("resolutionSide") or "").lower()
                         if rs in ("yes", "no"):
                             label = c.get("label") or c.get("abbreviatedName") or ""
-                            thresh, _ = _extract_threshold_from_title(label)
+                            thresh, _, _ = _extract_threshold_from_title(label)
                             sym = c.get("instrumentSymbol")
                             if sym: settled_outcomes[et][sym] = rs
                             if thresh: settled_outcomes[et][thresh] = rs
