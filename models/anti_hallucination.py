@@ -286,6 +286,11 @@ def adaptive_min_edge(
     edge = float(base_edge)
     market_yes = max(0.01, min(0.99, float(market_yes)))
 
+    if current_price < 0.02 or market_yes < 0.02:
+        # Tight filter: require 0.35 net profit relative to $1.00 contract ($0.35/contract)
+        # to ensure execution slippage/fees don't destroy the edge.
+        edge = max(edge, 0.35)
+
     if market_yes < cheap_threshold:
         depth = (cheap_threshold - market_yes) / cheap_threshold
         edge *= 1.0 + (otm_base_mult - 1.0) * depth

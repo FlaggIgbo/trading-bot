@@ -84,7 +84,8 @@ class CalibrationEngine:
         if n < min_samples or total_p_win <= 0:
             return 1.0
             
-        return total_realized_win / total_p_win
+        score = total_realized_win / total_p_win
+        return min(1.5, score)
 
     def compute_brier_score(self) -> float | None:
         """Mean Squared Error of predictions. 0.0 = perfect, 1.0 = total failure."""

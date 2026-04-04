@@ -286,8 +286,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 8% base, 11% on 15m (× ultra_short_min_edge_mult). Tighter spread haircut on wide books.
-    min_edge: 0.08
+    # Net edge after maker fee; 13% base (was 8%)
+    min_edge: 0.13
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.60
@@ -296,7 +296,7 @@ strategy:
     cheap_band_price_lo: 0.00
     cheap_band_price_hi: 0.10
     cheap_band_min_net_edge: 0.15
-    kelly_dampen: 0.32 # Fraction of raw Kelly — modestly higher for PnL vs prior 0.25 (still capped per trade)
+    kelly_dampen: 0.16 # Fraction of raw Kelly — halved from 0.32 to reduce aggression
     max_bankroll_fraction: 0.024 # Hard cap on bankroll fraction per trade (was 0.01; scales +EV clips)
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
     edge_size_boost_edge: 0.16
@@ -315,10 +315,11 @@ strategy:
     enabled: true
     min_edge: 0.08
     bands:
-      - { lo: 0.00, hi: 0.15, min_edge: 0.15 } # Cheap tails: require higher edge to compensate for bid/ask friction
-      - { lo: 0.15, hi: 0.40, min_edge: 0.08 } # Standard 'sweet spot'
-      - { lo: 0.40, hi: 0.65, min_edge: 0.20 } # Coin-flip zone: high risk of churn, require extreme edge
-      - { lo: 0.65, hi: 1.00, min_edge: 0.08 } # Expensive consensus: slightly more than base
+      - { lo: 0.00, hi: 0.02, min_edge: 0.35 } # Ultra-cheap: require extreme edge (e.g. 35¢ profit potential)
+      - { lo: 0.02, hi: 0.15, min_edge: 0.18 } # Cheap tails: require slightly more than standard
+      - { lo: 0.15, hi: 0.40, min_edge: 0.13 } # Standard 'sweet spot'
+      - { lo: 0.40, hi: 0.65, min_edge: 0.25 } # Coin-flip zone: high risk of churn, require extreme edge
+      - { lo: 0.65, hi: 1.00, min_edge: 0.13 } # Expensive consensus: slightly more than base
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
@@ -328,7 +329,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.08
+  min_edge: 0.13
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: false
@@ -532,7 +533,7 @@ strategy:
   p_lose_blend_market_max_weight: 0.5 # At expiry, max weight given to market odds (0=model only; 0.5=50/50 at expiry; 1=100% market at expiry)
   p_lose_blend_market_half_life_days: 0.5 # Half-life in days; at dte=0.5 days (~12h to close), market weight = half of max
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
-  kelly_fraction: 0.10 # Lower fractional Kelly while strategy uncertainty is high
+  kelly_fraction: 0.05 # Lower fractional Kelly from 0.10 while calibration is poor
   dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
   dynamic_kelly_floor: 0.10 # Min Kelly fraction floor under stress
   dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
@@ -678,7 +679,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 5.0 # Trust market more when model disagrees (anti-hallucination)
+    bayesian_market_strength: 8.0 # Trust market even more to pull model toward price
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
     ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
