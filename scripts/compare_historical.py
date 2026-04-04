@@ -274,6 +274,7 @@ class _StrategyParams:
     min_fee_per_order: float
     min_yes_price: float
     min_no_price: float
+    kelly_fraction: float
     max_yes_price_for_buy: float
     max_buy_limit_price: float
     force_min_buy_contracts_one: bool
@@ -310,6 +311,7 @@ class _StrategyParams:
     min_calibration_samples: int
     calibration_min_win_rate_above_yes: float
     calibration_extra_edge_above_yes: float
+    calibration_loss_weight: float
     calibration_hard_block_above_yes_win_rate: float
     calibration_hard_block_above_yes_min_samples: int
     calibration_hard_block_above_yes_min_avg_entry: float
@@ -382,6 +384,7 @@ class _StrategyParams:
     max_bankroll_fraction_per_direction: float
     max_daily_loss_pct: float
     max_daily_loss_cents: int
+    max_trade_cents: float
     enable_vol_spike_safety: bool
     vol_spike_threshold_mult: float
     vol_spike_edge_multiplier: float
@@ -616,6 +619,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_fee_per_order=float(strategy.get("min_fee_per_order", 0.01)),
         min_yes_price=float(strategy.get("min_yes_price", 0.05)),
         min_no_price=float(strategy.get("min_no_price", 0.05)),
+        kelly_fraction=float(strategy.get("kelly_fraction", 0.25)),
         max_yes_price_for_buy=float(strategy.get("max_yes_price_for_buy", 0.90)),
         max_buy_limit_price=max(0.0, min(1.0, float(strategy.get("max_buy_limit_price", 0) or 0))),
         force_min_buy_contracts_one=bool(strategy.get("force_min_buy_contracts_one", False)),
@@ -651,6 +655,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         min_calibration_samples=int(strategy.get("min_calibration_samples", 5)),
         calibration_min_win_rate_above_yes=float(strategy.get("calibration_min_win_rate_above_yes", 0.45)),
         calibration_extra_edge_above_yes=float(strategy.get("calibration_extra_edge_above_yes", 0.05)),
+        calibration_loss_weight=float(strategy.get("calibration_loss_weight", 1.0)),
         calibration_hard_block_above_yes_win_rate=float(strategy.get("calibration_hard_block_above_yes_win_rate", 0.0)),
         calibration_hard_block_above_yes_min_samples=max(
             1, int(strategy.get("calibration_hard_block_above_yes_min_samples", 30))
@@ -732,6 +737,7 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         ),
         max_daily_loss_pct=float(strategy.get("max_daily_loss_pct", 0.10)),
         max_daily_loss_cents=int(strategy.get("max_daily_loss_cents", 0)),
+        max_trade_cents=float(strategy.get("max_trade_cents", 5000.0)),
         enable_vol_spike_safety=bool(strategy.get("enable_vol_spike_safety", True)),
         vol_spike_threshold_mult=float(strategy.get("vol_spike_threshold_mult", 2.0)),
         vol_spike_edge_multiplier=float(strategy.get("vol_spike_edge_multiplier", 2.0)),
@@ -6679,11 +6685,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         print()
 
     # Calibration & Trust Engine: learn from resolved performance
+    calibration = {}
+    if get_calibration_stats:
+        try:
+            calibration = get_calibration_stats(cfg)
+        except Exception:
+            pass
     calibration_engine: CalibrationEngine | None = None
     trust_scores: dict[str, float] = {}
-    if storage.get_predictions_for_backtest:
+    if get_predictions_for_backtest:
         try:
-            resolved_history = storage.get_predictions_for_backtest(config=cfg, resolved_only=True)
+            resolved_history = get_predictions_for_backtest(config=cfg, resolved_only=True)
             if resolved_history:
                 calibration_engine = CalibrationEngine(resolved_history)
                 trust_scores = calibration_engine.get_series_trust_matrix()
@@ -7223,6 +7235,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             joint_blend_pre: float | None = None
             joint_blend_post: float | None = None
             ticker = mkt.get("ticker", "?")
+            _series_prefix = ticker.split("-")[0] if ticker else ""
+            _fat_pitch_yes_g = False
             title = (mkt.get("title") or "")[:55]
             try:
                 full = kalshi.get_market(ticker)
@@ -7398,20 +7412,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if _is_intra and not sp.use_intraday_empirical:
                     hist_p = vol_p
                 elif _is_intra and sp.use_intraday_empirical:
-                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0, vol_ratio=vol_ratio_val)
+                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0, vol_ratio=vol_ratio)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     w_emp = max(w_emp, sp.intraday_min_empirical_weight)
                     joint_blend_pre, joint_blend_post = _vol_emp_blend_hist_p_with_joint_trace(
-                        emp, vol_p, w_emp, sp, vol_ratio=vol_ratio_val
+                        emp, vol_p, w_emp, sp, vol_ratio=vol_ratio
                     )
                     hist_p = joint_blend_post
                 elif sp.vol_blend_weight is not None:
-                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0, vol_ratio=vol_ratio_val)
+                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0, vol_ratio=vol_ratio)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     if _is_intra:
                         w_emp = max(w_emp, sp.intraday_min_empirical_weight)
                     joint_blend_pre, joint_blend_post = _vol_emp_blend_hist_p_with_joint_trace(
-                        emp, vol_p, w_emp, sp, vol_ratio=vol_ratio_val
+                        emp, vol_p, w_emp, sp, vol_ratio=vol_ratio
                     )
                     hist_p = joint_blend_post
                 else:
@@ -8225,7 +8239,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     balance_cents=float(balance_cents),
                     sp=sp,
                     use_kelly=use_kelly,
-                    kelly_fraction=sp.kelly_fraction,
+                    kelly_fraction=kelly_fraction_live,
                     min_contracts=min_contracts,
                     trust_score=_trust,
                     is_fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35))
@@ -8613,6 +8627,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _us_edge_detail_g: dict[str, Any] | None = None
                 _eff_after_simple_bundle_g: float | None = None
                 _proxy_edge_simple_g = 0.0
+                _fat_pitch_yes_g = False
                 if sp.simple_ev_decision_enabled:
                     _eff_after_simple_bundle_g, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(
                         sp, evt, yf_ticker, impl, no_bid_gem_early
@@ -8826,7 +8841,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _dte_too_short_g = dte_g is not None and dte_g < 0.1
                 if rec == REC_BUY_YES and direction_g == "above" and _eff_max_above_g > 0:
                     if threshold_g > current_price * (1 + _eff_max_above_g):
-                        vol_override_g = use_vol and vol_p_gem is not None and vol_p_gem >= sp.min_vol_confidence_far_otm and not _dte_too_short_g
+                        # Relax OTM block if EV is massive (fat pitch tail trade)
+                        _fat_pitch_yes_g = (hist_p_gem - impl - maker_fee_rate_gem) > 0.35
+                        vol_override_g = use_vol and vol_p_gem is not None and (vol_p_gem >= sp.min_vol_confidence_far_otm or _fat_pitch_yes_g) and not _dte_too_short_g
                         if not vol_override_g:
                             rec = REC_SKIP
                 # Skip BUY NO when market prices NO very low; override when vol model shows P(NO) ≥ 95%
@@ -9329,7 +9346,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             kelly_fraction=_kelly_frac_gem,
                             min_contracts=min_contracts,
                             trust_score=_trust,
-                            is_fat_pitch=(_fat_pitch_yes_g or (_rec_g == REC_BUY_NO and abs((1.0 - hist_p_gem) - _fq_r - _fn_r) > 0.35))
+                            is_fat_pitch=(_fat_pitch_yes_g or (rec == REC_BUY_NO and abs((1.0 - hist_p_gem) - _fq_r - _fn_r) > 0.35))
                         )
                         liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                         liq_mult *= depth_mult
