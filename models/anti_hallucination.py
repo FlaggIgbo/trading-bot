@@ -117,6 +117,7 @@ def bayesian_update(
     model_p: float,
     market_p: float,
     market_strength: float = 2.0,
+    liquidity_consistency: float = 1.0,
 ) -> float:
     """
     Bayesian update treating market price as a Beta-distributed prior and
@@ -126,15 +127,15 @@ def bayesian_update(
     Higher values = more trust in the market.  At strength=2 the market
     acts like having observed 2 pseudo-samples.
 
-    When model says 86% and market says 8%, with strength=2 the posterior
-    lands around 30% instead of blindly trusting 86%.
+    Now scales strength with liquidity_consistency: if the market is noisy
+    (low consistency), we reduce its strength as a prior.
     """
     model_p = max(1e-6, min(1 - 1e-6, float(model_p)))
     market_p = max(1e-6, min(1 - 1e-6, float(market_p)))
-    strength = max(0.0, float(market_strength))
-    if strength <= 0:
-        return model_p
-
+    
+    # Scale strength by consistency to avoid market 'crushing' model in illiquid tails
+    strength = max(0.1, float(market_strength) * float(liquidity_consistency))
+    
     alpha_prior = market_p * strength
     beta_prior = (1 - market_p) * strength
 
@@ -143,6 +144,7 @@ def bayesian_update(
 
     posterior = alpha_post / (alpha_post + beta_post)
     return max(0.01, min(0.99, posterior))
+
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +463,7 @@ def apply_anti_hallucination_pipeline(
     current_price: float,
     momentum_ret: float,
     cfg: AntiHallucinationConfig,
+    liquidity_consistency: float = 1.0,
 ) -> float:
     """
     Run all probability-adjustment layers and return the corrected P(YES).
@@ -494,6 +497,7 @@ def apply_anti_hallucination_pipeline(
         )
 
     if cfg.bayesian_enabled:
-        p = bayesian_update(p, market_p, cfg.bayesian_market_strength)
+        p = bayesian_update(p, market_p, cfg.bayesian_market_strength, liquidity_consistency=liquidity_consistency)
 
     return max(0.01, min(0.99, p))
+

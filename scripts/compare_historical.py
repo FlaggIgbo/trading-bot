@@ -97,6 +97,8 @@ from models.alpha_engine import (
     vol_adjusted_kelly,
 )
 from models.decision_diagnostics import build_required_edge_breakdown, print_decision_diagnostics_line
+from models.calibration_engine import CalibrationEngine
+from models.risk_engine import calculate_fractional_kelly_size, apply_fat_pitch_guardrail
 from models.trading_edges import (
     brier_score,
     expected_calibration_error,
@@ -2527,13 +2529,23 @@ def _empirical_ci_halfwidth(p_hat: float, n: int, z: float = 1.64) -> float:
     return z * math.sqrt(max(1e-9, p * (1 - p) / n))
 
 
-def _dynamic_empirical_weight(base_w: float | None, sample_n: int, n0: float) -> float:
-    """Dynamic empirical weight: more empirical with more samples, more vol with fewer."""
+def _dynamic_empirical_weight(base_w: float | None, sample_n: int, n0: float, vol_ratio: float = 1.0) -> float:
+    """Dynamic empirical weight: more empirical with more samples, more vol with fewer.
+    
+    When vol_ratio is high (atypical regime), historical data is less reliable so we
+    tilt further toward the volatility model.
+    """
     base = 0.5 if base_w is None else float(base_w)
     base = max(0.0, min(1.0, base))
     n = max(0.0, float(sample_n))
     n0 = max(1.0, float(n0))
     data_conf = n / (n + n0)
+    
+    # Bayesian adjustment: confidence in historical empirical data decreases in high-vol regimes.
+    if vol_ratio > 1.2:
+        # e.g. vol_ratio 2.0 -> mult ~0.35; empirical weight contribution is slashed.
+        data_conf *= max(0.1, 1.0 / (vol_ratio ** 1.5))
+    
     # Blend configured preference with data confidence.
     w = 0.5 * base + 0.5 * data_conf
     return max(0.1, min(0.9, w))
@@ -3184,11 +3196,14 @@ def _joint_dual_high_pessimism(
     """
     if not sp.joint_high_confidence_enabled or sp.joint_high_pull_to_half <= 0:
         return blended
-    t = float(sp.joint_high_emp_vol_threshold)
-    if min(float(emp), float(vol_p)) < t:
-        return blended
     lam = float(sp.joint_high_pull_to_half)
     b = float(blended)
+    # If BOTH paths say P=1.0, consensus is strong; reduce the pull to 0.5.
+    # A pull towards 0.5 is a 'shrinkage' toward ignorance. If consensus is high,
+    # we should likely stay at the high end.
+    consensus = min(emp, vol_p)
+    if consensus >= 0.95:
+        lam *= 0.2  # 80% reduction in pessimism when models agree perfectly at high confidence
     return b * (1.0 - lam) + 0.5 * lam
 
 
@@ -3197,8 +3212,11 @@ def _vol_emp_blend_hist_p_with_joint_trace(
     vol_p: float,
     w_emp: float,
     sp: _StrategyParams,
+    vol_ratio: float = 1.0,
 ) -> tuple[float, float]:
     """Empirical–vol dampened blend: (P before joint-high pull, P after)."""
+    # If vol_ratio is extremely low (stable regime), we might want to dampen vol_p more,
+    # but for now we focus on trusting vol_p more during high-vol regimes via w_emp scaling in the caller.
     blended = _vol_disagree_dampened_blend(
         emp, vol_p, w_emp, sp.vol_disagree_threshold, sp.vol_disagree_dampen_blend
     )
@@ -3211,11 +3229,12 @@ def _vol_emp_blend_hist_p(
     vol_p: float | None,
     w_emp: float,
     sp: _StrategyParams,
+    vol_ratio: float = 1.0,
 ) -> float:
     """Empirical–vol blend + vol-disagreement dampening + joint high-P pessimism."""
     if vol_p is None:
         return float(emp)
-    _, after = _vol_emp_blend_hist_p_with_joint_trace(emp, vol_p, w_emp, sp)
+    _, after = _vol_emp_blend_hist_p_with_joint_trace(emp, vol_p, w_emp, sp, vol_ratio=vol_ratio)
     return after
 
 
@@ -4338,14 +4357,19 @@ def _format_recommendation_reason(
     if violates_no_above and hist_p < market_yes + 0.10:
         parts.append(f"price above strike but no edge (model {hist_p:.1%} vs market {market_yes:.1%})")
     if market_yes < min_yes_price and rec == REC_SKIP:
-        parts.append(f"market YES {market_yes:.1%} < {min_yes_price:.0%} min (illiquid/far OTM)")
+        # Loosened tail filter: if there's enough edge at this price, we allow it (sizing will handle risk)
+        _edge_at_low_price = hist_p - market_yes - 0.02 # approx fee
+        if _edge_at_low_price < 0.10: # Still skip if edge is weak (< 10%)
+             parts.append(f"market YES {market_yes:.1%} < {min_yes_price:.0%} min (weak edge at tail)")
     if direction == "above" and max_buy_yes_strike_above_pct > 0:
         if threshold > current_price * (1 + max_buy_yes_strike_above_pct):
             vol_str = f"{vol_p:.1%}" if vol_p is not None else "n/a"
             parts.append(f"strike {_fmt_price(threshold)} >{max_buy_yes_strike_above_pct:.0%} above {_fmt_price(current_price)} (vol {vol_str} < 95%)")
     no_price = 1 - market_yes
-    if no_price < min_no_price:
-        parts.append(f"market NO {no_price:.1%} < {min_no_price:.0%} min")
+    if no_price < min_no_price and rec == REC_SKIP:
+        _edge_no_low = (1-hist_p) - no_price - 0.02
+        if _edge_no_low < 0.10:
+            parts.append(f"market NO {no_price:.1%} < {min_no_price:.0%} min")
     if (1 - hist_p) < (1 - market_yes) + 0.10 and hist_p < market_yes + 0.10:
         parts.append(f"no edge either way (model {hist_p:.1%}, market {market_yes:.1%})")
     return " · ".join(parts) if parts else f"model {hist_p:.1%} vs market {market_yes:.1%} — no edge"
@@ -4461,6 +4485,8 @@ def _format_reason(
     net_edge_no: float | None = None,
     req_yes: float | None = None,
     req_no: float | None = None,
+    trust_score: float | None = None,
+    fat_pitch: bool = False,
 ) -> str:
     """Build human-readable reasoning for the recommendation.
 
@@ -4521,6 +4547,12 @@ def _format_reason(
             parts.append(f"insufficient edge: YES gap {edge_yes:.1%}, NO gap {edge_no:.1%} (min {min_edge:.0%})")
         else:
             parts.append(f"model {hist_p:.1%} vs market {market_yes:.1%} — no clear mispricing")
+    
+    if trust_score is not None:
+        parts.append(f"[Trust {trust_score:.2f}]")
+    if fat_pitch:
+        parts.append("[FAT PITCH OVERRIDE]")
+        
     return "  ".join(parts) if parts else "no edge"
 
 
@@ -4560,6 +4592,8 @@ def _compute_buy_count(
     use_kelly: bool,
     kelly_fraction: float,
     min_contracts: int,
+    trust_score: float = 1.0,
+    is_fat_pitch: bool = False,
 ) -> int:
     """
     Compute contract count for a buy. When it's an "absolute winner" (very high P(win), very low
@@ -4579,11 +4613,28 @@ def _compute_buy_count(
             sp.absolute_winner_max_contracts,
         )
         return max(min_contracts, count)
-    if use_kelly:
-        return _kelly_count(
-            p_win, price, balance_cents, kelly_fraction, min_contracts
+        
+    # Use upgraded Calibration-aware Risk sizing
+    _total_risk_cents = calculate_fractional_kelly_size(
+        p_win=p_win,
+        price=price,
+        total_bankroll_cents=float(balance_cents),
+        fraction=float(kelly_fraction),
+        max_trade_cents=float(sp.max_trade_cents),
+        trust_score=float(trust_score)
+    )
+    
+    # Guardrails for OTM fat pitches
+    if is_fat_pitch:
+        _max_cents = apply_fat_pitch_guardrail(
+            net_edge=max(0.1, p_win - price), # rough proxy
+            market_price=price,
+            total_bankroll_cents=float(balance_cents)
         )
-    return 10
+        _total_risk_cents = min(_total_risk_cents, _max_cents)
+        
+    count = int(_total_risk_cents / (float(price) * 100)) if price > 0 else 0
+    return max(min_contracts, count)
 
 
 def _extract_actual_fill_price(result: dict | None, fallback: float) -> float:
@@ -6627,33 +6678,29 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         )
         print()
 
-    # Calibration: learn from resolved predictions (e.g. "above+YES" underperforming)
-    calibration: dict[str, Any] = {}
-    if get_calibration_stats:
+    # Calibration & Trust Engine: learn from resolved performance
+    calibration_engine: CalibrationEngine | None = None
+    trust_scores: dict[str, float] = {}
+    if storage.get_predictions_for_backtest:
         try:
-            calibration = get_calibration_stats(cfg) or {}
-            if calibration.get("enabled") and calibration.get("resolved_count", 0) > 0:
-                wr = calibration.get("win_rate")
-                wr_str = f"{wr:.1%}" if wr is not None else "N/A"
-                by_ds = calibration.get("by_direction_side", {})
-                above_yes = by_ds.get("above+yes", {})
-                above_yes_str = ""
-                if above_yes:
-                    ae = above_yes.get("avg_entry_price")
-                    ae_s = f", avg entry {float(ae):.1%}" if ae is not None else ""
-                    above_yes_str = (
-                        f" | above+YES: {above_yes.get('count',0)} trades, "
-                        f"{above_yes.get('win_rate',0):.1%} win rate{ae_s}"
-                    )
-                print(f"[Calibration] {calibration.get('resolved_count')} resolved | overall win rate {wr_str}{above_yes_str}")
-                pab = calibration.get("price_after_buy")
-                if pab and pab.get("count", 0) > 0:
-                    print(f"[Calibration] Price-after-buy: {pab['count']} w/ data | "
-                          f"{pab['pct_dipped']:.0f}% dipped lower after buy (avg {pab['avg_dip_pct']:.1f}%) | "
-                          f"{pab['pct_rose']:.0f}% rose after buy (avg {pab['avg_rise_pct']:.1f}%)")
+            resolved_history = storage.get_predictions_for_backtest(config=cfg, resolved_only=True)
+            if resolved_history:
+                calibration_engine = CalibrationEngine(resolved_history)
+                trust_scores = calibration_engine.get_series_trust_matrix()
+                brier = calibration_engine.compute_brier_score()
+                trust_overall = calibration_engine.compute_trust_score()
+                print(f"[Trust Engine] Overall Trust Score: {trust_overall:.2f} (Realized/Predicted EV) | Brier: {brier:.3f}")
+                
+                # Bucketed Accuracy Tracking
+                buckets = calibration_engine.get_bucketed_calibration()
+                if buckets:
+                    print(f"[Trust Engine] Bucketed Reliability (Win Rate vs Prediction):")
+                    for b in buckets:
+                        gap_dir = "UNDER" if b['calibration_gap'] > 0 else "OVER"
+                        print(f"  {b['lo']:.1f}-{b['hi']:.1f}: WR {b['win_rate']:.1%} vs Expected {b['expected_win_rate']:.1%} ({gap_dir} confident, N={b['count']})")
                 print()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Trust Engine] Warning: failed to load calibration history: {e}")
 
     if (
         sp.empirical_stress_recent_days > 0
@@ -7351,20 +7398,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if _is_intra and not sp.use_intraday_empirical:
                     hist_p = vol_p
                 elif _is_intra and sp.use_intraday_empirical:
-                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
+                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0, vol_ratio=vol_ratio_val)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     w_emp = max(w_emp, sp.intraday_min_empirical_weight)
                     joint_blend_pre, joint_blend_post = _vol_emp_blend_hist_p_with_joint_trace(
-                        emp, vol_p, w_emp, sp
+                        emp, vol_p, w_emp, sp, vol_ratio=vol_ratio_val
                     )
                     hist_p = joint_blend_post
                 elif sp.vol_blend_weight is not None:
-                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0)
+                    w_emp = _dynamic_empirical_weight(sp.vol_blend_weight, len(closes_for_emp), sp.vol_dynamic_n0, vol_ratio=vol_ratio_val)
                     w_emp = _dte_adjusted_empirical_weight(w_emp, dte)
                     if _is_intra:
                         w_emp = max(w_emp, sp.intraday_min_empirical_weight)
                     joint_blend_pre, joint_blend_post = _vol_emp_blend_hist_p_with_joint_trace(
-                        emp, vol_p, w_emp, sp
+                        emp, vol_p, w_emp, sp, vol_ratio=vol_ratio_val
                     )
                     hist_p = joint_blend_post
                 else:
@@ -7410,6 +7457,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
             if True: # enabled for all paths including simple_ev
+                # Calculate market consistency (sum of bids near 1.0)
+                m_yes_tmp = float(m.get("yes_bid") or 0)
+                m_no_tmp = float(m.get("no_bid_dollars") or 0) or (1.0 - m_yes_tmp)
+                lq_cons = 1.0 - abs((m_yes_tmp + m_no_tmp) - 1.0)
+                lq_cons = max(0.1, min(1.0, lq_cons))
+
                 hist_p = apply_anti_hallucination_pipeline(
                     model_p=hist_p,
                     market_p=yes_bid,
@@ -7419,6 +7472,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     current_price=current_price,
                     momentum_ret=momentum_ret,
                     cfg=sp.ah_cfg,
+                    liquidity_consistency=lq_cons,
                 )
             hist_p = _sanitize_model_probability(
                 hist_p,
@@ -7532,14 +7586,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 edge_bonus=sp.ae_cfg.lead_lag_edge_bonus,
                             )
                             break
-                # --- Adaptive learning: bump edge from recent performance & loss streaks ---
-                if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
-                    effective_min += adaptive_edge_bump
-                if sp.adaptive_learning_enabled and series_performance:
+                    # Learning Layer: discount edge based on Trust Score (Realized/Predicted EV)
                     _series_prefix = ticker.split("-")[0] if ticker else ""
-                    _sp_info = series_performance.get(_series_prefix)
-                    if _sp_info and _sp_info.get("consecutive_losses", 0) >= sp.series_cooldown_threshold:
-                        effective_min += sp.series_cooldown_extra_edge
+                    _trust = trust_scores.get(_series_prefix, 1.0)
+                    if _trust > 1.1:
+                        # Model is underconfident; discount required edge to take more trades
+                        discount = min(0.06, (_trust - 1.0) * 0.15)
+                        effective_min = max(0.015, effective_min - discount)
+                        if sp.debug:
+                            print(f"[Learning] Discounting edge by {discount:.1%} for {_series_prefix} (Trust {_trust:.2f})")
+                    elif _trust < 0.8:
+                        # Model is overconfident (hallucinating); bump required edge
+                        penalty = min(0.10, (1.0 - _trust) * 0.2)
+                        effective_min += penalty
+                        if sp.debug:
+                            print(f"[Learning] Penalizing edge by {penalty:.1%} for {_series_prefix} (Trust {_trust:.2f})")
                 if sp.dte_edge_scaling_enabled and dte is not None:
                     effective_min *= _dte_edge_scale_factor(float(dte), sp)
                 if _is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
@@ -7671,9 +7732,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # When DTE < 0.1 days (~2.4h), vol override is blocked — not enough time for large moves
             _eff_max_above = _dte_adjusted_strike_pct(sp.max_buy_yes_strike_above_pct, dte)
             _dte_too_short = dte is not None and dte < 0.1
+            _fat_pitch_yes = False
             if rec == REC_BUY_YES and direction == "above" and _eff_max_above > 0:
                 if threshold > current_price * (1 + _eff_max_above):
-                    vol_override = use_vol and vol_p is not None and vol_p >= sp.min_vol_confidence_far_otm and not _dte_too_short
+                    # Relax OTM block if EV is massive (fat pitch tail trade)
+                    _fat_pitch_yes = (hist_p - yes_bid - maker_fee_rate) > 0.35 # 35% net edge
+                    vol_override = use_vol and vol_p is not None and (vol_p >= sp.min_vol_confidence_far_otm or _fat_pitch_yes) and not _dte_too_short
                     if not vol_override:
                         rec = REC_SKIP
             # Skip BUY NO when market prices NO very low (market thinks our side unlikely); same override when vol shows high P(NO)
@@ -7918,6 +7982,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 net_edge_no=_net_no_r,
                 req_yes=effective_min_yes,
                 req_no=effective_min_no,
+                trust_score=trust_scores.get(_series_prefix),
+                fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35)),
             )
             if rec == REC_SKIP and momentum_crash:
                 reason = (
@@ -8149,20 +8215,29 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _cost_c = max(bid * 100.0, 1.0)
                     count_base = int(balance_cents * _sf / _cost_c)
                     count_base = max(min_contracts, count_base) if count_base > 0 else 0
-                    liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
-                    # Integrate new price-based liquidity multiplier
-                    _price_mult = _price_liquidity_mult(bid, sp.min_yes_price)
-                    liq_mult *= _price_mult
-                    
-                    liq_mult *= depth_mult
-                    liq_mult *= size_regime_mult
-                else:
-                    count_base = _compute_buy_count(
-                        p_win, price, balance_cents, sp, use_kelly, _kelly_frac_ticker, min_contracts
-                    )
-                    liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
-                    liq_mult *= depth_mult
-                    liq_mult *= size_regime_mult
+                # --- Improved Risk Sizing (Fractional Kelly + Trust + Guardrails) ---
+                _series_prefix = ticker.split("-")[0] if ticker else ""
+                _trust = trust_scores.get(_series_prefix, 1.0)
+                
+                count_base = _compute_buy_count(
+                    p_win=hist_p if rec == REC_BUY_YES else (1.0 - hist_p),
+                    price=bid,
+                    balance_cents=float(balance_cents),
+                    sp=sp,
+                    use_kelly=use_kelly,
+                    kelly_fraction=sp.kelly_fraction,
+                    min_contracts=min_contracts,
+                    trust_score=_trust,
+                    is_fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35))
+                )
+                
+                liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
+                # Integrate new price-based liquidity multiplier
+                _price_mult = _price_liquidity_mult(bid, sp.min_yes_price)
+                liq_mult *= _price_mult
+                
+                liq_mult *= depth_mult
+                liq_mult *= size_regime_mult
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
                 _bdv_k: float | None = None
                 if bid_size_side is not None:
@@ -8991,6 +9066,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _fq_r = no_bid_gem_early
                     _fy_r = _fee_per_contract(impl, maker_fee_rate_gem, sp.min_fee_per_order)
                     _fn_r = _fee_per_contract(_fq_r, maker_fee_rate_gem, sp.min_fee_per_order)
+                    _series_prefix = _event_to_asset(evt)
+                    _net_no_g = (1.0 - hist_p_gem) - _fq_r - _fn_r
                     _reason_g = _format_reason(
                         rec,
                         hist_p_gem,
@@ -9007,9 +9084,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         effective_min_gem,
                         use_vol,
                         net_edge_yes=hist_p_gem - impl - _fy_r,
-                        net_edge_no=(1.0 - hist_p_gem) - _fq_r - _fn_r,
+                        net_edge_no=_net_no_g,
                         req_yes=effective_min_yes_g,
                         req_no=effective_min_no_g,
+                        trust_score=trust_scores.get(_series_prefix, 1.0),
+                        fat_pitch=(_fat_pitch_yes_g or (rec == REC_BUY_NO and abs(_net_no_g) > 0.35)),
                     )
                 if _reason_g:
                     print(f"    └─ Reason:       {_reason_g}")
@@ -9237,14 +9316,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         liq_mult *= depth_mult
                         liq_mult *= size_regime_mult
                     else:
+                        # --- Improved Risk Sizing (Fractional Kelly + Trust + Guardrails) ---
+                        _series_prefix = _event_to_asset(evt)
+                        _trust = trust_scores.get(_series_prefix, 1.0)
+                        
                         count_base = _compute_buy_count(
-                            p_win,
-                            price,
-                            max(0, int(gemini_balance_for_arb)),
-                            sp,
-                            use_kelly,
-                            _kelly_frac_gem,
-                            min_contracts,
+                            p_win=p_win,
+                            price=price,
+                            balance_cents=max(0, int(gemini_balance_for_arb)),
+                            sp=sp,
+                            use_kelly=use_kelly,
+                            kelly_fraction=_kelly_frac_gem,
+                            min_contracts=min_contracts,
+                            trust_score=_trust,
+                            is_fat_pitch=(_fat_pitch_yes_g or (_rec_g == REC_BUY_NO and abs((1.0 - hist_p_gem) - _fq_r - _fn_r) > 0.35))
                         )
                         liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                         liq_mult *= depth_mult
