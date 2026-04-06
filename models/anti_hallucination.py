@@ -143,7 +143,7 @@ def bayesian_update(
     beta_post = beta_prior + (1 - model_p)
 
     posterior = alpha_post / (alpha_post + beta_post)
-    return max(0.01, min(0.99, posterior))
+    return max(1e-6, min(1 - 1e-6, posterior))
 
 
 
@@ -504,5 +504,5 @@ def apply_anti_hallucination_pipeline(
     if cfg.bayesian_enabled:
         p = bayesian_update(p, market_p, cfg.bayesian_market_strength, liquidity_consistency=liquidity_consistency)
 
-    return max(0.01, min(0.99, p))
+    return max(1e-6, min(1 - 1e-6, p))
 

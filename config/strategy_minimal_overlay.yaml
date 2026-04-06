@@ -25,11 +25,25 @@ strategy:
   empirical_recent_days: 45 # More recent focus
   empirical_recent_weight: 2.5
   
-  # 0.30 = extreme shrink toward 0.5 (stops hallucinating)
-  model_probability_shrinkage: 0.30
+  # 0.15 = extreme shrink toward 0.5 (stops hallucinating)
+  model_probability_shrinkage: 0.15
   enable_model_prob_hard_cap: true
-  model_prob_hard_lo: 0.10
-  model_prob_hard_hi: 0.90
+  model_prob_hard_lo: 0.001
+  model_prob_hard_hi: 0.999
+  tail_cutoff_min_p: 0.03
+  vol_model_zero_drift: true
+  
+  starting_balance_cents: 10000 # $100 baseline
+  balance_regime_medium_ratio: 0.5 # caution at <$50
+  balance_regime_low_ratio: 0.3 # survival at <$30
+  balance_regime_medium_kelly_mult: 0.5
+  balance_regime_low_kelly_mult: 0.1
+  balance_regime_medium_min_edge_add: 0.05
+  balance_regime_low_min_edge_add: 0.10
+  min_bet_size_bankroll_pct: 0.005 # 0.5% min bet
+  low_balance_min_price: 0.05 # No lottery tickets if low
+  drawdown_stop_trading_pct: 0.10 # Stop if 10% lost in 24h
+  drawdown_cooldown_hours: 24.0
   
   use_bucket_penalty: true
   use_calibration: true
@@ -39,7 +53,7 @@ strategy:
 
   anti_hallucination:
     bayesian_enabled: true
-    bayesian_market_strength: 15.0 # Very strong pull to market
+    bayesian_market_strength: 25.0 # Extremely strong pull to market
     ewma_prob_enabled: true
     vol_zscore_enabled: true
     adaptive_edge_enabled: true

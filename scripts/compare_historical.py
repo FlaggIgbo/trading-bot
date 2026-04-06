@@ -506,6 +506,8 @@ class _StrategyParams:
     enable_model_prob_hard_cap: bool
     model_prob_hard_lo: float
     model_prob_hard_hi: float
+    tail_cutoff_min_p: float
+    vol_model_zero_drift: bool
     # Execution / exits (optional; many merged from execution: in config)
     position_exit_min_net_edge: float
     position_min_hold_minutes: float
@@ -514,6 +516,18 @@ class _StrategyParams:
     position_exit_stale_minutes: float
     position_exit_stale_edge_floor: float
     skip_new_buy_when_unresolved_same_side: bool
+    # Balance-aware Survival Mode
+    starting_balance_cents: int
+    balance_regime_medium_ratio: float
+    balance_regime_low_ratio: float
+    balance_regime_medium_kelly_mult: float
+    balance_regime_low_kelly_mult: float
+    balance_regime_medium_min_edge_add: float
+    balance_regime_low_min_edge_add: float
+    min_bet_size_bankroll_pct: float
+    low_balance_min_price: float
+    drawdown_stop_trading_pct: float
+    drawdown_cooldown_hours: float
     limit_buy_edge_aggression_enabled: bool
     limit_buy_cross_spread_min_edge: float
     limit_buy_near_market_min_edge: float
@@ -861,6 +875,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         enable_model_prob_hard_cap=bool(strategy.get("enable_model_prob_hard_cap", True)),
         model_prob_hard_lo=max(1e-6, float(strategy.get("model_prob_hard_lo", 0.02))),
         model_prob_hard_hi=min(0.999, float(strategy.get("model_prob_hard_hi", 0.98))),
+        tail_cutoff_min_p=max(0.0, min(0.5, float(strategy.get("tail_cutoff_min_p", 0.0)))),
+        vol_model_zero_drift=bool(strategy.get("vol_model_zero_drift", False)),
         position_exit_min_net_edge=max(-0.5, min(0.5, float(strategy.get("position_exit_min_net_edge", 0.0)))),
         position_min_hold_minutes=max(0.0, float(strategy.get("position_min_hold_minutes", 0.0))),
         position_exit_strong_entry_edge=max(0.0, min(1.0, float(strategy.get("position_exit_strong_entry_edge", 0.0)))),
@@ -868,7 +884,20 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         position_exit_stale_minutes=max(0.0, float(strategy.get("position_exit_stale_minutes", 0.0))),
         position_exit_stale_edge_floor=max(-0.5, min(0.5, float(strategy.get("position_exit_stale_edge_floor", 0.0)))),
         skip_new_buy_when_unresolved_same_side=bool(strategy.get("skip_new_buy_when_unresolved_same_side", False)),
-        limit_buy_edge_aggression_enabled=bool(strategy.get("limit_buy_edge_aggression_enabled", False)),
+        # Balance-aware Survival Mode
+        starting_balance_cents=int(strategy.get("starting_balance_cents", 100_00)),
+        balance_regime_medium_ratio=float(strategy.get("balance_regime_medium_ratio", 0.5)),
+        balance_regime_low_ratio=float(strategy.get("balance_regime_low_ratio", 0.3)),
+        balance_regime_medium_kelly_mult=float(strategy.get("balance_regime_medium_kelly_mult", 0.5)),
+        balance_regime_low_kelly_mult=float(strategy.get("balance_regime_low_kelly_mult", 0.1)),
+        balance_regime_medium_min_edge_add=float(strategy.get("balance_regime_medium_min_edge_add", 0.05)),
+        balance_regime_low_min_edge_add=float(strategy.get("balance_regime_low_min_edge_add", 0.10)),
+        min_bet_size_bankroll_pct=float(strategy.get("min_bet_size_bankroll_pct", 0.005)),
+        low_balance_min_price=float(strategy.get("low_balance_min_price", 0.05)),
+        drawdown_stop_trading_pct=float(strategy.get("drawdown_stop_trading_pct", 0.10)),
+        drawdown_cooldown_hours=float(strategy.get("drawdown_cooldown_hours", 24.0)),
+        limit_buy_edge_aggression_enabled=bool(
+strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
         limit_buy_near_market_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_near_market_min_edge", 0.05)))),
         limit_buy_passive_only_below_edge=max(
@@ -1549,12 +1578,51 @@ def _cap_buy_count_by_book_pct(count: int, book_bid_size: float | None, max_pct:
     return min(count, cap)
 
 
-def _load_blacklist_extra_file(path: str | None) -> set[str]:
+def _check_drawdown_block(platform: str, balance_cents: int, sp: _StrategyParams, cfg: dict) -> bool:
+    """Returns True if the platform is currently in a drawdown-driven trading halt."""
+    if sp.drawdown_stop_trading_pct <= 0:
+        return False
+    if not get_recent_performance:
+        return False
+    try:
+        perf = get_recent_performance(
+            lookback_hours=sp.drawdown_cooldown_hours, platform=platform, config=cfg
+        )
+        pnl = int(perf.get("pnl_cents", 0))
+        if pnl < 0 and balance_cents > 0:
+            drawdown = abs(pnl) / float(balance_cents)
+            if drawdown >= sp.drawdown_stop_trading_pct:
+                print(
+                    f"[Risk] DRAWDOWN HALT ({platform}): Lost ${abs(pnl)/100:.2f} in {sp.drawdown_cooldown_hours}h "
+                    f"({drawdown:.1%} of balance) >= {sp.drawdown_stop_trading_pct:.1%}. Trading stopped."
+                )
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_balance_regime_adjustments(balance_cents: int, sp: _StrategyParams) -> tuple[float, float, str]:
+    """Returns (kelly_mult, min_edge_add, regime_name) based on current vs starting balance."""
+    if sp.starting_balance_cents <= 0:
+        return 1.0, 0.0, "normal"
+
+    ratio = balance_cents / float(sp.starting_balance_cents)
+    if ratio < sp.balance_regime_low_ratio:
+        return sp.balance_regime_low_kelly_mult, sp.balance_regime_low_min_edge_add, "survival"
+    if ratio < sp.balance_regime_medium_ratio:
+        return sp.balance_regime_medium_kelly_mult, sp.balance_regime_medium_min_edge_add, "caution"
+
+    return 1.0, 0.0, "normal"
+
+
+def _load_blacklist_extra_file(path_str: str | None) -> set[str]:
     """Series tickers (one per line) merged into strategy blacklist; # starts comment."""
     out: set[str] = set()
-    if not path or not str(path).strip():
+    if not path_str or not str(path_str).strip():
         return out
-    p = Path(str(path).strip()).expanduser()
+    p = Path(str(path_str).strip()).expanduser()
+
     if not p.is_file():
         return out
     try:
@@ -2929,6 +2997,7 @@ def _volatility_probability(
     otm_smile_max_mult: float = 2.0,
     distribution: str = "normal",
     t_df: float = 6.0,
+    zero_drift: bool = False,
 ) -> float | None:
     """
     Log-normal / Black-Scholes style: P(price above/below K at expiry) using historical vol.
@@ -2975,8 +3044,11 @@ def _volatility_probability(
     T = max(1e-6, days_to_expiry / 365.0)
     if sigma_annual < 1e-8:
         return None
-    # d = (ln(S0/K) - sigma^2*T/2) / (sigma*sqrt(T))
-    d = (math.log(S0 / threshold) - 0.5 * sigma_annual**2 * T) / (sigma_annual * (T ** 0.5))
+    if zero_drift:
+        d = (math.log(S0 / threshold)) / (sigma_annual * (T ** 0.5))
+    else:
+        # Standard d2 formula: ln(S/K) - sigma^2*T/2 / (sigma*sqrt(T))
+        d = (math.log(S0 / threshold) - 0.5 * sigma_annual**2 * T) / (sigma_annual * (T ** 0.5))
     dist = (distribution or "normal").strip().lower()
     if dist in ("student_t", "student-t", "t"):
         # Heavy-tail model for crypto: preserves more probability mass in extremes.
@@ -3009,6 +3081,7 @@ def _monte_carlo_probability(
     n_paths: int = 10000,
     distribution: str = "normal",
     t_df: float = 6.0,
+    zero_drift: bool = False,
 ) -> float:
     """
     Monte Carlo GBM simulation: run n_paths price paths and return fraction
@@ -3019,7 +3092,7 @@ def _monte_carlo_probability(
         return 0.5
     n_steps = max(1, round(T * 365))
     dt = T / n_steps
-    drift = -0.5 * sigma_annual ** 2 * dt
+    drift = 0.0 if zero_drift else (-0.5 * sigma_annual ** 2 * dt)
     diffusion = sigma_annual * math.sqrt(dt)
     dist = (distribution or "normal").strip().lower()
     use_t = dist in ("student_t", "student-t", "t")
@@ -3073,6 +3146,7 @@ def _volatility_probability_with_mc(
     t_df: float = 6.0,
     mc_paths: int = 10000,
     mc_blend_weight: float = 0.3,
+    zero_drift: bool = False,
 ) -> float | None:
     """
     Blended analytical + Monte Carlo volatility probability.
@@ -3090,6 +3164,7 @@ def _volatility_probability_with_mc(
         otm_smile_strength=otm_smile_strength,
         otm_smile_max_mult=otm_smile_max_mult,
         distribution=distribution, t_df=t_df,
+        zero_drift=zero_drift,
     )
     if analytical is None:
         return None
@@ -3127,6 +3202,7 @@ def _volatility_probability_with_mc(
     mc = _monte_carlo_probability(
         S0, sigma_annual, T, threshold, direction,
         n_paths=mc_paths, distribution=distribution, t_df=t_df,
+        zero_drift=zero_drift,
     )
     w = max(0.0, min(1.0, mc_blend_weight))
     return (1.0 - w) * analytical + w * mc
@@ -6467,6 +6543,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         gemini_balance_for_arb = int(gt_route.get_balance().get("balance", 0) or 0)
     except Exception:
         gemini_balance_for_arb = 0
+
     to_date = datetime.utcnow()
     from_date = to_date - timedelta(days=args.days)
     from_ts, to_ts = from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d")
@@ -6653,6 +6730,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception:
             pass
     sp = _load_strategy_params(strategy)
+    
+    # --- Balance-Aware Regime & Drawdown Checks ---
+    k_kelly_mult, k_edge_add, k_regime = _get_balance_regime_adjustments(balance_cents, sp)
+    g_kelly_mult, g_edge_add, g_regime = _get_balance_regime_adjustments(gemini_balance_for_arb, sp)
+    
+    k_drawdown_halt = _check_drawdown_block(PLATFORM_KALSHI, balance_cents, sp, cfg)
+    g_drawdown_halt = _check_drawdown_block(PLATFORM_GEMINI, gemini_balance_for_arb, sp, cfg)
+
+    if k_regime != "normal":
+        print(f"[Balance] Kalshi Regime: {k_regime.upper()} (Kelly x{k_kelly_mult:.2f}, Edge +{k_edge_add:.2f})")
+    if g_regime != "normal":
+        print(f"[Balance] Gemini Regime: {g_regime.upper()} (Kelly x{g_kelly_mult:.2f}, Edge +{g_edge_add:.2f})")
     # --- Global & Series Circuit Breakers ---
     global_circuit_breaker_active = False
     paper_only_series: set[str] = set()
@@ -7435,6 +7524,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     t_df=sp.vol_t_df,
                     mc_paths=sp.mc_paths if sp.mc_enabled else 0,
                     mc_blend_weight=sp.mc_blend_weight,
+                    zero_drift=sp.vol_model_zero_drift,
                 )
                 if use_vol else None
             )
@@ -7476,7 +7566,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
             if probability_calibrator:
                 hist_p = probability_calibrator(hist_p)
-            if not sp.simple_ev_decision_enabled and sp.model_probability_shrinkage < 1.0:
+            if sp.model_probability_shrinkage < 1.0:
                 hist_p = 0.5 + sp.model_probability_shrinkage * (hist_p - 0.5)
             no_bid_signal = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             yes_ask_signal = float(m.get("yes_ask_dollars") or 0) or None
@@ -7503,7 +7593,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
-            if True: # enabled for all paths including simple_ev
+            # Tail cutoff: skip extremely low probability consensus or lottery picks
+            if sp.tail_cutoff_min_p > 0 and min(hist_p, 1.0 - hist_p) < sp.tail_cutoff_min_p:
+                rec = REC_SKIP
+                print(f"  [Tail Cutoff] {ticker} → SKIP (Model P {min(hist_p, 1.0 - hist_p):.1%} < {sp.tail_cutoff_min_p:.1%})")
+            elif True: # enabled for all paths including simple_ev
                 # Calculate market consistency (sum of bids near 1.0)
                 m_yes_tmp = float(m.get("yes_bid") or 0)
                 m_no_tmp = float(m.get("no_bid_dollars") or 0) or (1.0 - m_yes_tmp)
@@ -7715,12 +7809,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if getattr(args, "verbose", False):
                         print(f"  [Trust] {ticker}: overconfident bucket ({b_stats['lo']:.1f}-{b_stats['hi']:.1f}) → +{bucket_penalty:.3f} edge penalty")
 
+            if k_drawdown_halt:
+                rec = REC_SKIP
+                print(f"  [Drawdown] {ticker} → SKIP (Kalshi drawdown halt active)")
+            
+            # Survival Mode: Skip low-probability "lottery" bets on low balance
+            if k_regime == "survival" and rec != REC_SKIP and yes_bid < sp.low_balance_min_price:
+                rec = REC_SKIP
+                print(f"  [Survival Mode] {ticker} → SKIP (Price {yes_bid:.2f} < {sp.low_balance_min_price:.2f})")
+
             if sp.simple_ev_decision_enabled:
                 rec = _simple_ev_recommend(
                     hist_p,
                     yes_bid,
                     no_bid_early,
-                    effective_min + bucket_penalty,
+                    effective_min + bucket_penalty + k_edge_add,
                     maker_fee_rate,
                     sp.min_fee_per_order,
                     sp,
@@ -7731,22 +7834,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         p_yes=hist_p,
                         market_yes=yes_bid,
                         min_p_win=min_p_win,
-                        min_edge=effective_min + bucket_penalty,
+                        min_edge=effective_min + bucket_penalty + k_edge_add,
                         maker_fee_rate=maker_fee_rate,
                         min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes + bucket_penalty,
-                        min_edge_no=effective_min_no + bucket_penalty,
+                        min_edge_yes=effective_min_yes + bucket_penalty + k_edge_add,
+                        min_edge_no=effective_min_no + bucket_penalty + k_edge_add,
                         **_strategy_recommend_strict_extras(sp),
                     )
                     if _strict_intraday_evaluation(m, yf_ticker, sp)
                     else strategy_engine.recommend(
                         p_yes=hist_p,
                         market_yes=yes_bid,
-                        min_edge=effective_min + bucket_penalty,
+                        min_edge=effective_min + bucket_penalty + k_edge_add,
                         maker_fee_rate=maker_fee_rate,
                         min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes + bucket_penalty,
-                        min_edge_no=effective_min_no + bucket_penalty,
+                        min_edge_yes=effective_min_yes + bucket_penalty + k_edge_add,
+                        min_edge_no=effective_min_no + bucket_penalty + k_edge_add,
                         min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                         easy_win_min_p_win=sp.easy_win_min_p_win,
                         easy_win_min_market_p=sp.easy_win_min_market_p,
@@ -8298,7 +8401,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     balance_cents=float(balance_cents),
                     sp=sp,
                     use_kelly=use_kelly,
-                    kelly_fraction=kelly_fraction_live,
+                    kelly_fraction=kelly_fraction_live * k_kelly_mult,
                     min_contracts=min_contracts,
                     trust_score=_trust,
                     is_fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35))
@@ -8312,6 +8415,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 liq_mult *= depth_mult
                 liq_mult *= size_regime_mult
                 count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
+
+                # --- Minimum Bet Size Skip (Protection for small accounts) ---
+                if count > 0 and sp.min_bet_size_bankroll_pct > 0:
+                    _bet_value_cents = count * bid * 100.0
+                    _min_allowed_cents = sp.min_bet_size_bankroll_pct * balance_cents
+                    if _bet_value_cents < _min_allowed_cents:
+                        print(f"    [Min Bet] SKIP: bet ${(_bet_value_cents/100):.2f} < ${(_min_allowed_cents/100):.2f} (0.5% bankroll)")
+                        count = 0
                 _bdv_k: float | None = None
                 if bid_size_side is not None:
                     try:
@@ -8604,6 +8715,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         t_df=sp.vol_t_df,
                         mc_paths=sp.mc_paths if sp.mc_enabled else 0,
                         mc_blend_weight=sp.mc_blend_weight,
+                        zero_drift=sp.vol_model_zero_drift,
                     )
                     if use_vol else None
                 )
@@ -8637,7 +8749,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 if probability_calibrator:
                     hist_p_gem = probability_calibrator(hist_p_gem)
-                if not sp.simple_ev_decision_enabled and sp.model_probability_shrinkage < 1.0:
+                if sp.model_probability_shrinkage < 1.0:
                     hist_p_gem = 0.5 + sp.model_probability_shrinkage * (hist_p_gem - 0.5)
                 yes_ask_sig_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
                 spread_bps_sig_g = None
@@ -8663,7 +8775,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 # --- Anti-hallucination pipeline (Gemini) ---
                 hist_p_gem_raw = hist_p_gem
-                if True: # enabled for all paths including simple_ev
+                # Tail cutoff: skip extremely low probability consensus or lottery picks
+                if sp.tail_cutoff_min_p > 0 and min(hist_p_gem, 1.0 - hist_p_gem) < sp.tail_cutoff_min_p:
+                    rec = REC_SKIP
+                    print(f"  [Tail Cutoff] {ticker_g} → SKIP (Model P {min(hist_p_gem, 1.0 - hist_p_gem):.1%} < {sp.tail_cutoff_min_p:.1%})")
+                elif True: # enabled for all paths including simple_ev
                     hist_p_gem = apply_anti_hallucination_pipeline(
                         model_p=hist_p_gem,
                         market_p=impl,
@@ -8839,12 +8955,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         if getattr(args, "verbose", False):
                             print(f"  [Trust] {ticker_g}: overconfident bucket ({b_stats_g['lo']:.1f}-{b_stats_g['hi']:.1f}) → +{bucket_penalty_g:.3f} edge penalty")
 
+                if g_drawdown_halt:
+                    rec = REC_SKIP
+                    print(f"  [Drawdown] {g_ticker} → SKIP (Gemini drawdown halt active)")
+                
+                # Survival Mode: Skip low-probability "lottery" bets on low balance
+                if g_regime == "survival" and rec != REC_SKIP and impl < sp.low_balance_min_price:
+                    rec = REC_SKIP
+                    print(f"  [Survival Mode] {g_ticker} → SKIP (Price {impl:.2f} < {sp.low_balance_min_price:.2f})")
+
                 if sp.simple_ev_decision_enabled:
                     rec = _simple_ev_recommend(
                         hist_p_gem,
                         impl,
                         no_bid_gem_early,
-                        effective_min_gem + bucket_penalty_g,
+                        effective_min_gem + bucket_penalty_g + g_edge_add,
                         maker_fee_rate_gem,
                         sp.min_fee_per_order,
                         sp,
@@ -8855,22 +8980,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             p_yes=hist_p_gem,
                             market_yes=impl,
                             min_p_win=min_p_win_gem,
-                            min_edge=effective_min_gem + bucket_penalty_g,
+                            min_edge=effective_min_gem + bucket_penalty_g + g_edge_add,
                             maker_fee_rate=maker_fee_rate_gem,
                             min_fee_per_order=sp.min_fee_per_order,
-                            min_edge_yes=effective_min_yes_g + bucket_penalty_g,
-                            min_edge_no=effective_min_no_g + bucket_penalty_g,
+                            min_edge_yes=effective_min_yes_g + bucket_penalty_g + g_edge_add,
+                            min_edge_no=effective_min_no_g + bucket_penalty_g + g_edge_add,
                             **_strategy_recommend_strict_extras(sp),
                         )
                         if _strict_intraday_evaluation(evt, yf_ticker, sp)
                         else strategy_engine.recommend(
                             p_yes=hist_p_gem,
                             market_yes=impl,
-                            min_edge=effective_min_gem + bucket_penalty_g,
+                            min_edge=effective_min_gem + bucket_penalty_g + g_edge_add,
                             maker_fee_rate=maker_fee_rate_gem,
                             min_fee_per_order=sp.min_fee_per_order,
-                            min_edge_yes=effective_min_yes_g + bucket_penalty_g,
-                            min_edge_no=effective_min_no_g + bucket_penalty_g,
+                            min_edge_yes=effective_min_yes_g + bucket_penalty_g + g_edge_add,
+                            min_edge_no=effective_min_no_g + bucket_penalty_g + g_edge_add,
                             min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
                             easy_win_min_p_win=sp.easy_win_min_p_win,
                             easy_win_min_market_p=sp.easy_win_min_market_p,
@@ -9402,6 +9527,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             series_pnl_kill,
                             sp,
                         )
+                        # Apply regime multiplier
+                        _sf_g *= g_kelly_mult
+                        
                         _cost_cg = max(bid * 100.0, 1.0)
                         _gem_sz_bal = max(0, int(gemini_balance_for_arb))
                         count_base = int(_gem_sz_bal * _sf_g / _cost_cg)
@@ -9424,7 +9552,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             balance_cents=max(0, int(gemini_balance_for_arb)),
                             sp=sp,
                             use_kelly=use_kelly,
-                            kelly_fraction=_kelly_frac_gem,
+                            kelly_fraction=_kelly_frac_gem * g_kelly_mult,
                             min_contracts=min_contracts,
                             trust_score=_trust,
                             is_fat_pitch=(_fat_pitch_yes_g or (rec == REC_BUY_NO and abs((1.0 - hist_p_gem) - _fq_r - _fn_r) > 0.35))
@@ -9433,6 +9561,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         liq_mult *= depth_mult
                         liq_mult *= size_regime_mult
                     count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
+
+                    # --- Minimum Bet Size Skip (Protection for small accounts) ---
+                    if count > 0 and sp.min_bet_size_bankroll_pct > 0:
+                        _gem_bal_cents = max(0, int(gemini_balance_for_arb))
+                        _bet_value_cents_g = count * bid * 100.0
+                        _min_allowed_cents_g = sp.min_bet_size_bankroll_pct * _gem_bal_cents
+                        if _bet_value_cents_g < _min_allowed_cents_g:
+                            print(f"    [Min Bet] SKIP (Gemini): bet ${(_bet_value_cents_g/100):.2f} < ${(_min_allowed_cents_g/100):.2f} (0.5% bankroll)")
+                            count = 0
                     _bdv_g: float | None = None
                     if bid_size_side is not None:
                         try:

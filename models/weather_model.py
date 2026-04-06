@@ -105,6 +105,16 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
     if lat is None:
         return None
         
+    # Determine days to resolution
+    try:
+        res_dt = datetime.strptime(resolution_date, "%Y-%m-%d")
+    except Exception:
+        return None
+    now_dt = datetime.utcnow()
+    # Ensure non-negative and cap at 14 days for forecast window
+    days_to_res = (res_dt - now_dt).days + (res_dt - now_dt).seconds / 86400.0
+    days_to_res = max(0.01, min(14.0, days_to_res))
+
     # Determine if we want High/Max or Low/Min
     is_low = any(x in ticker.upper() for x in ("LOW", "MIN", "COLD"))
     
@@ -142,7 +152,15 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
                 f_mean = daily.get("temperature_2m_max", [])[idx]
                 
     # 2. Ensemble Forecast (uncertainty proxy)
-    e_std_dev = 2.0 
+    # 1 day -> 1.2, 5 days -> 2.5, 10 days -> 4.5
+    if days_to_res <= 1.0:
+        e_std_dev = 1.2
+    elif days_to_res <= 5.0:
+        # Linear interp between 1.2 and 2.5
+        e_std_dev = 1.2 + (2.5 - 1.2) * (days_to_res - 1.0) / 4.0
+    else:
+        # Linear interp between 2.5 and 4.5
+        e_std_dev = 2.5 + (4.5 - 2.5) * (days_to_res - 5.0) / 5.0
         
     # 3. Seasonality
     month_day = resolution_date[5:] # "MM-DD"
@@ -152,45 +170,41 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
         s_data = seasonality.get("min" if is_low else "max")
         if s_data:
             s_mean = s_data.get("mean")
-            s_std_dev = s_data.get("std")
-        if s_data:
-            s_mean = s_data["mean"]
-            s_std_dev = s_data["std_dev"]
+            s_std_dev = s_data.get("std_dev") or s_data.get("std")
 
     # 4. Blending
-    try:
-        res_dt = datetime.strptime(resolution_date, "%Y-%m-%d")
-    except Exception:
-        return None
-    now_dt = datetime.utcnow()
-    days_to_res = (res_dt - now_dt).days + (res_dt - now_dt).seconds / 86400.0
-    
-    if days_to_res <= 1:
-        w_f, w_s = 0.9, 0.1
+    if days_to_res <= 1.5:
+        w_f, w_s = 0.95, 0.05
     elif days_to_res <= 5:
-        w_f, w_s = 0.6, 0.4
+        w_f, w_s = 0.75, 0.25
     else:
-        w_f, w_s = 0.3, 0.7
+        w_f, w_s = 0.4, 0.6
         
     if f_mean is None and s_mean is None:
         return None
         
     if f_mean is not None and s_mean is not None:
         final_mean = w_f * f_mean + w_s * s_mean
-        final_std_dev = w_f * e_std_dev + w_s * (s_std_dev or 4.0)
+        # Standard deviation also blended
+        final_std_dev = w_f * e_std_dev + w_s * (s_std_dev or 5.0)
     elif f_mean is not None:
         final_mean = f_mean
         final_std_dev = e_std_dev
     else:
         final_mean = s_mean
-        final_std_dev = s_std_dev or 4.0
+        final_std_dev = s_std_dev or 5.0
         
     if days_to_res < 0.5:
         current_temp = get_snapshot(lat, lon)
         if current_temp is not None:
-            if "HIGH" in ticker:
+            # Anchor mean to current temp + small drift towards daily max/min
+            if "HIGH" in ticker or not is_low:
                 final_mean = max(final_mean, current_temp + 0.5)
-                final_std_dev *= 0.7
+                # Shrink variance as we get closer to settlement
+                final_std_dev *= 0.6
+            else:
+                final_mean = min(final_mean, current_temp - 0.5)
+                final_std_dev *= 0.6
     
     return final_mean, final_std_dev
 
@@ -199,11 +213,28 @@ def calculate_weather_probability(ticker: str, resolution_date: str, strike: flo
     direction: 'above' | 'below' | 'between'
     If 'between', strike_hi must be provided (or inferred if strike encodes a range).
     """
+    # 1. Determine time to resolution
+    try:
+        res_dt = datetime.strptime(resolution_date, "%Y-%m-%d")
+        days_to_res = (res_dt - datetime.utcnow()).days + (res_dt - datetime.utcnow()).seconds / 86400.0
+    except Exception:
+        days_to_res = 1.0
+
     dist = get_weather_distribution(ticker, resolution_date)
     if not dist:
         return None
         
     mean, std_dev = dist
+    
+    # 2. Hard Anti-Stupidity Filters for Weather
+    # Weather is not fat-tailed like BTC. 4-sigma is basically impossible.
+    # Skip if strike is > 5.5F from mean for short-dated trades.
+    dist_from_mean = abs(strike - mean)
+    if days_to_res < 2.0 and dist_from_mean > 5.5:
+        return None # SKIP trade entirely
+    if days_to_res < 5.0 and dist_from_mean > 8.0:
+        return None # SKIP
+        
     if std_dev <= 0:
         if direction == 'above': return 1.0 if mean > strike else 0.0
         if direction == 'below': return 1.0 if mean < strike else 0.0
@@ -211,13 +242,22 @@ def calculate_weather_probability(ticker: str, resolution_date: str, strike: flo
             return 1.0 if strike <= mean <= strike_hi else 0.0
         return 0.0
         
+    p = None
     if direction == 'above':
-        return 1 - norm_cdf(strike, loc=mean, scale=std_dev)
+        p = 1 - norm_cdf(strike, loc=mean, scale=std_dev)
     elif direction == 'below':
-        return norm_cdf(strike, loc=mean, scale=std_dev)
+        p = norm_cdf(strike, loc=mean, scale=std_dev)
     elif direction == 'between' and strike_hi is not None:
         p_lo = norm_cdf(strike, loc=mean, scale=std_dev)
         p_hi = norm_cdf(strike_hi, loc=mean, scale=std_dev)
-        return max(0.0, p_hi - p_lo)
+        p = max(0.0, p_hi - p_lo)
     
-    return None
+    if p is None:
+        return None
+        
+    # 3. Tail Cutoff: If model says < 2% or > 98%, it's likely a tail we don't want to bet on
+    # given weather forecasts can have systemic biases.
+    if p < 0.02 or p > 0.98:
+        return None # SKIP
+        
+    return p
