@@ -7354,6 +7354,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         for mkt in mkt_list or []:
             barbell_bucket = ""
             barbell_blocked = False
+            rec = None # Initialize recommendation
             joint_blend_pre: float | None = None
             joint_blend_post: float | None = None
             ticker = mkt.get("ticker", "?")
@@ -7593,11 +7594,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
-            # Tail cutoff: skip extremely low probability consensus or lottery picks
-            if sp.tail_cutoff_min_p > 0 and min(hist_p, 1.0 - hist_p) < sp.tail_cutoff_min_p:
-                rec = REC_SKIP
-                print(f"  [Tail Cutoff] {ticker} → SKIP (Model P {min(hist_p, 1.0 - hist_p):.1%} < {sp.tail_cutoff_min_p:.1%})")
-            elif True: # enabled for all paths including simple_ev
+            if True: # enabled for all paths including simple_ev
                 # Calculate market consistency (sum of bids near 1.0)
                 m_yes_tmp = float(m.get("yes_bid") or 0)
                 m_no_tmp = float(m.get("no_bid_dollars") or 0) or (1.0 - m_yes_tmp)
@@ -7813,49 +7810,55 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 rec = REC_SKIP
                 print(f"  [Drawdown] {ticker} → SKIP (Kalshi drawdown halt active)")
             
+            # Tail cutoff: skip extremely low probability consensus or lottery picks
+            if rec is None and sp.tail_cutoff_min_p > 0 and min(hist_p, 1.0 - hist_p) < sp.tail_cutoff_min_p:
+                rec = REC_SKIP
+                print(f"  [Tail Cutoff] {ticker} → SKIP (Model P {min(hist_p, 1.0 - hist_p):.1%} < {sp.tail_cutoff_min_p:.1%})")
+
             # Survival Mode: Skip low-probability "lottery" bets on low balance
-            if k_regime == "survival" and rec != REC_SKIP and yes_bid < sp.low_balance_min_price:
+            if rec is None and k_regime == "survival" and yes_bid < sp.low_balance_min_price:
                 rec = REC_SKIP
                 print(f"  [Survival Mode] {ticker} → SKIP (Price {yes_bid:.2f} < {sp.low_balance_min_price:.2f})")
 
-            if sp.simple_ev_decision_enabled:
-                rec = _simple_ev_recommend(
-                    hist_p,
-                    yes_bid,
-                    no_bid_early,
-                    effective_min + bucket_penalty + k_edge_add,
-                    maker_fee_rate,
-                    sp.min_fee_per_order,
-                    sp,
-                )
-            else:
-                rec = (
-                    strategy_engine.recommend_strict(
-                        p_yes=hist_p,
-                        market_yes=yes_bid,
-                        min_p_win=min_p_win,
-                        min_edge=effective_min + bucket_penalty + k_edge_add,
-                        maker_fee_rate=maker_fee_rate,
-                        min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes + bucket_penalty + k_edge_add,
-                        min_edge_no=effective_min_no + bucket_penalty + k_edge_add,
-                        **_strategy_recommend_strict_extras(sp),
+            if rec is None:
+                if sp.simple_ev_decision_enabled:
+                    rec = _simple_ev_recommend(
+                        hist_p,
+                        yes_bid,
+                        no_bid_early,
+                        effective_min + bucket_penalty + k_edge_add,
+                        maker_fee_rate,
+                        sp.min_fee_per_order,
+                        sp,
                     )
-                    if _strict_intraday_evaluation(m, yf_ticker, sp)
-                    else strategy_engine.recommend(
-                        p_yes=hist_p,
-                        market_yes=yes_bid,
-                        min_edge=effective_min + bucket_penalty + k_edge_add,
-                        maker_fee_rate=maker_fee_rate,
-                        min_fee_per_order=sp.min_fee_per_order,
-                        min_edge_yes=effective_min_yes + bucket_penalty + k_edge_add,
-                        min_edge_no=effective_min_no + bucket_penalty + k_edge_add,
-                        min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
-                        easy_win_min_p_win=sp.easy_win_min_p_win,
-                        easy_win_min_market_p=sp.easy_win_min_market_p,
-                        **_strategy_recommend_extras(sp),
+                else:
+                    rec = (
+                        strategy_engine.recommend_strict(
+                            p_yes=hist_p,
+                            market_yes=yes_bid,
+                            min_p_win=min_p_win,
+                            min_edge=effective_min + bucket_penalty + k_edge_add,
+                            maker_fee_rate=maker_fee_rate,
+                            min_fee_per_order=sp.min_fee_per_order,
+                            min_edge_yes=effective_min_yes + bucket_penalty + k_edge_add,
+                            min_edge_no=effective_min_no + bucket_penalty + k_edge_add,
+                            **_strategy_recommend_strict_extras(sp),
+                        )
+                        if _strict_intraday_evaluation(m, yf_ticker, sp)
+                        else strategy_engine.recommend(
+                            p_yes=hist_p,
+                            market_yes=yes_bid,
+                            min_edge=effective_min + bucket_penalty + k_edge_add,
+                            maker_fee_rate=maker_fee_rate,
+                            min_fee_per_order=sp.min_fee_per_order,
+                            min_edge_yes=effective_min_yes + bucket_penalty + k_edge_add,
+                            min_edge_no=effective_min_no + bucket_penalty + k_edge_add,
+                            min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                            easy_win_min_p_win=sp.easy_win_min_p_win,
+                            easy_win_min_market_p=sp.easy_win_min_market_p,
+                            **_strategy_recommend_extras(sp),
+                        )
                     )
-                )
 
             # Circuit Breaker / Paper-Only Block
             if rec in (REC_BUY_YES, REC_BUY_NO):
@@ -8592,6 +8595,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             for mkt in gemini_markets:
                 barbell_bucket_g = ""
                 barbell_blocked_g = False
+                rec = None # Initialize recommendation
                 joint_blend_pre_g: float | None = None
                 joint_blend_post_g: float | None = None
                 evt = mkt["event"]
@@ -8775,11 +8779,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 # --- Anti-hallucination pipeline (Gemini) ---
                 hist_p_gem_raw = hist_p_gem
-                # Tail cutoff: skip extremely low probability consensus or lottery picks
-                if sp.tail_cutoff_min_p > 0 and min(hist_p_gem, 1.0 - hist_p_gem) < sp.tail_cutoff_min_p:
-                    rec = REC_SKIP
-                    print(f"  [Tail Cutoff] {ticker_g} → SKIP (Model P {min(hist_p_gem, 1.0 - hist_p_gem):.1%} < {sp.tail_cutoff_min_p:.1%})")
-                elif True: # enabled for all paths including simple_ev
+                if True: # enabled for all paths including simple_ev
                     hist_p_gem = apply_anti_hallucination_pipeline(
                         model_p=hist_p_gem,
                         market_p=impl,
@@ -8959,49 +8959,55 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     rec = REC_SKIP
                     print(f"  [Drawdown] {g_ticker} → SKIP (Gemini drawdown halt active)")
                 
+                # Tail cutoff: skip extremely low probability consensus or lottery picks
+                if rec is None and sp.tail_cutoff_min_p > 0 and min(hist_p_gem, 1.0 - hist_p_gem) < sp.tail_cutoff_min_p:
+                    rec = REC_SKIP
+                    print(f"  [Tail Cutoff] {g_ticker} → SKIP (Model P {min(hist_p_gem, 1.0 - hist_p_gem):.1%} < {sp.tail_cutoff_min_p:.1%})")
+
                 # Survival Mode: Skip low-probability "lottery" bets on low balance
-                if g_regime == "survival" and rec != REC_SKIP and impl < sp.low_balance_min_price:
+                if rec is None and g_regime == "survival" and impl < sp.low_balance_min_price:
                     rec = REC_SKIP
                     print(f"  [Survival Mode] {g_ticker} → SKIP (Price {impl:.2f} < {sp.low_balance_min_price:.2f})")
 
-                if sp.simple_ev_decision_enabled:
-                    rec = _simple_ev_recommend(
-                        hist_p_gem,
-                        impl,
-                        no_bid_gem_early,
-                        effective_min_gem + bucket_penalty_g + g_edge_add,
-                        maker_fee_rate_gem,
-                        sp.min_fee_per_order,
-                        sp,
-                    )
-                else:
-                    rec = (
-                        strategy_engine.recommend_strict(
-                            p_yes=hist_p_gem,
-                            market_yes=impl,
-                            min_p_win=min_p_win_gem,
-                            min_edge=effective_min_gem + bucket_penalty_g + g_edge_add,
-                            maker_fee_rate=maker_fee_rate_gem,
-                            min_fee_per_order=sp.min_fee_per_order,
-                            min_edge_yes=effective_min_yes_g + bucket_penalty_g + g_edge_add,
-                            min_edge_no=effective_min_no_g + bucket_penalty_g + g_edge_add,
-                            **_strategy_recommend_strict_extras(sp),
+                if rec is None:
+                    if sp.simple_ev_decision_enabled:
+                        rec = _simple_ev_recommend(
+                            hist_p_gem,
+                            impl,
+                            no_bid_gem_early,
+                            effective_min_gem + bucket_penalty_g + g_edge_add,
+                            maker_fee_rate_gem,
+                            sp.min_fee_per_order,
+                            sp,
                         )
-                        if _strict_intraday_evaluation(evt, yf_ticker, sp)
-                        else strategy_engine.recommend(
-                            p_yes=hist_p_gem,
-                            market_yes=impl,
-                            min_edge=effective_min_gem + bucket_penalty_g + g_edge_add,
-                            maker_fee_rate=maker_fee_rate_gem,
-                            min_fee_per_order=sp.min_fee_per_order,
-                            min_edge_yes=effective_min_yes_g + bucket_penalty_g + g_edge_add,
-                            min_edge_no=effective_min_no_g + bucket_penalty_g + g_edge_add,
-                            min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
-                            easy_win_min_p_win=sp.easy_win_min_p_win,
-                            easy_win_min_market_p=sp.easy_win_min_market_p,
-                            **_strategy_recommend_extras(sp),
+                    else:
+                        rec = (
+                            strategy_engine.recommend_strict(
+                                p_yes=hist_p_gem,
+                                market_yes=impl,
+                                min_p_win=min_p_win_gem,
+                                min_edge=effective_min_gem + bucket_penalty_g + g_edge_add,
+                                maker_fee_rate=maker_fee_rate_gem,
+                                min_fee_per_order=sp.min_fee_per_order,
+                                min_edge_yes=effective_min_yes_g + bucket_penalty_g + g_edge_add,
+                                min_edge_no=effective_min_no_g + bucket_penalty_g + g_edge_add,
+                                **_strategy_recommend_strict_extras(sp),
+                            )
+                            if _strict_intraday_evaluation(evt, yf_ticker, sp)
+                            else strategy_engine.recommend(
+                                p_yes=hist_p_gem,
+                                market_yes=impl,
+                                min_edge=effective_min_gem + bucket_penalty_g + g_edge_add,
+                                maker_fee_rate=maker_fee_rate_gem,
+                                min_fee_per_order=sp.min_fee_per_order,
+                                min_edge_yes=effective_min_yes_g + bucket_penalty_g + g_edge_add,
+                                min_edge_no=effective_min_no_g + bucket_penalty_g + g_edge_add,
+                                min_edge_easy_win=sp.min_edge_easy_win if sp.enable_easy_win else None,
+                                easy_win_min_p_win=sp.easy_win_min_p_win,
+                                easy_win_min_market_p=sp.easy_win_min_market_p,
+                                **_strategy_recommend_extras(sp),
+                            )
                         )
-                    )
 
                 # Circuit Breaker / Paper-Only Block
                 if rec in (REC_BUY_YES, REC_BUY_NO):
@@ -11563,9 +11569,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
 def _reconcile_and_record_markouts(cfg: dict, ae_cfg: AlphaEngineConfig) -> None:
     """
     For filled predictions, check if 1m, 5m, or 15m windows have elapsed.
@@ -11626,3 +11629,7 @@ def _reconcile_and_record_markouts(cfg: dict, ae_cfg: AlphaEngineConfig) -> None
             recorded_count += 1
     if recorded_count > 0:
         print(f"[Markouts] Recorded {recorded_count} new markout observations across recent fills.")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
