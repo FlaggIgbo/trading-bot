@@ -135,8 +135,13 @@ def bayesian_update(
     
     # Scale strength by consistency to avoid market 'crushing' model in illiquid tails
     strength = max(0.1, float(market_strength) * float(liquidity_consistency))
-    
+
+    # Rule 3: Trust market more at extremes (80%+ or <20%)
+    if market_p > 0.80 or market_p < 0.20:
+        strength *= 1.5
+
     alpha_prior = market_p * strength
+
     beta_prior = (1 - market_p) * strength
 
     alpha_post = alpha_prior + model_p

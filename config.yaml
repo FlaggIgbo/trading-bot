@@ -535,8 +535,8 @@ strategy:
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
   kelly_fraction: 0.05 # Lower fractional Kelly from 0.10 while calibration is poor
   dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
-  dynamic_kelly_floor: 0.10 # Min Kelly fraction floor under stress
-  dynamic_kelly_stress_fraction: 0.10 # Kelly target when calibration win rate is in stress regime
+  dynamic_kelly_floor: 0.02 # Min Kelly fraction floor under stress (capped at kelly_fraction)
+  dynamic_kelly_stress_fraction: 0.03 # Kelly target when calibration win rate is in stress regime
   dynamic_kelly_stress_win_rate: 0.45 # If calibration win rate <= this, use stressed Kelly
   dynamic_kelly_recovery_win_rate: 0.55 # If calibration win rate >= this, restore base Kelly
   # Per-venue circuit breaker: Kalshi realized PnL vs Kalshi balance; Gemini vs Gemini — independent.

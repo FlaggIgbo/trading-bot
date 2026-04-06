@@ -1,47 +1,53 @@
 # =============================================================================
 # Minimal baseline — merged on top of config.yaml by config.get_config() by default.
-# Disable: TRADING_BOT_MINIMAL_OVERLAY=0  (or false / no / off)
 # Goal: CONSERVATIVE DEFENSE — stops overconfident noise trading.
+# UPDATED: Addressing non-monotonic calibration, convexity shorting, and execution friction.
 # =============================================================================
 
 execution:
   price_strategy: aggressive
   limit_offset_cents: 1
   resting_cancel_if_market_bid_above_limit_by: 0.03
-  limit_buy_cross_spread_min_edge: 0.20 # Increased hurdle
-  limit_buy_near_market_min_edge: 0.15 # Increased hurdle
-  limit_buy_passive_only_below_edge: 0.15
+  limit_buy_cross_spread_min_edge: 0.25 # Increased hurdle
+  limit_buy_near_market_min_edge: 0.20 # Increased hurdle
+  limit_buy_passive_only_below_edge: 0.18
 
 recovery:
-  min_edge: 0.15
-  uncertainty_edge_mult: 1.0
-  vol_disagree_extra_edge: 0.05
-  ultra_short_min_edge_mult: 3.0 # BLOCK ultra-short unless massive edge
+  min_edge: 0.18
+  uncertainty_edge_mult: 1.5 # More conservative uncertainty
+  vol_disagree_extra_edge: 0.08
+  yes_overconfidence_extra_edge: 0.05 # Add to recovery too
+  ultra_short_min_edge_mult: 4.0 # BLOCK ultra-short unless massive edge
 
 strategy:
   strategy_engine: vol_regime_threshold
-  vol_blend_weight: 0.20 # Trust model even less
+  vol_blend_weight: 0.15 # Trust model even less
   use_intraday_empirical: true
-  empirical_recent_days: 45 # More recent focus
-  empirical_recent_weight: 2.5
+  empirical_recent_days: 30 # Even more recent focus
+  empirical_recent_weight: 3.5
   
-  # 0.15 = extreme shrink toward 0.5 (stops hallucinating)
-  model_probability_shrinkage: 0.15
+  # Structural Convexity Protection (NO side is fragile)
+  no_trade_penalty: 0.12 # Add +12% edge requirement for NO trades
+  yes_bias_bonus: 0.02   # Small bonus for YES trades
+  
+  # Aggressive probability shrinkage to counter overconfidence
+  # 0.50 = 50% pull toward 0.5 (stops high-confidence hallucinations)
+  model_probability_shrinkage: 0.50
   enable_model_prob_hard_cap: true
-  model_prob_hard_lo: 0.001
-  model_prob_hard_hi: 0.999
-  tail_cutoff_min_p: 0.03
+  model_prob_hard_lo: 0.05 # Never trust <5%
+  model_prob_hard_hi: 0.95 # Never trust >95%
+  tail_cutoff_min_p: 0.05
   vol_model_zero_drift: true
   
   starting_balance_cents: 10000 # $100 baseline
   balance_regime_medium_ratio: 0.5 # caution at <$50
   balance_regime_low_ratio: 0.3 # survival at <$30
-  balance_regime_medium_kelly_mult: 0.5
-  balance_regime_low_kelly_mult: 0.1
-  balance_regime_medium_min_edge_add: 0.05
-  balance_regime_low_min_edge_add: 0.10
+  balance_regime_medium_kelly_mult: 0.4
+  balance_regime_low_kelly_mult: 0.05 # Aggressively cut size in survival
+  balance_regime_medium_min_edge_add: 0.08
+  balance_regime_low_min_edge_add: 0.15 # Massive hurdle in survival
   min_bet_size_bankroll_pct: 0.005 # 0.5% min bet
-  low_balance_min_price: 0.05 # No lottery tickets if low
+  low_balance_min_price: 0.10 # No tiny lottery tickets if low
   drawdown_stop_trading_pct: 0.10 # Stop if 10% lost in 24h
   drawdown_cooldown_hours: 24.0
   
@@ -51,9 +57,13 @@ strategy:
   enable_signal_model: false
   enable_auto_signal_weight_fit: false
 
+  # Kill "Fat Pitch" logic (Stop fighting the market)
+  enable_disagreement_dip: false
+  max_model_vs_market_diff: 0.15 # Clamp disagreement
+
   anti_hallucination:
     bayesian_enabled: true
-    bayesian_market_strength: 25.0 # Extremely strong pull to market
+    bayesian_market_strength: 75.0 # Extremely strong pull to market price
     ewma_prob_enabled: true
     vol_zscore_enabled: true
     adaptive_edge_enabled: true
@@ -63,51 +73,60 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.15 
-    min_edge_full: 0.25
+    min_edge: 0.18
+    min_edge_full: 0.30
     skip_p_win_mid_band_enabled: true
-    skip_p_win_mid_lo: 0.40
-    skip_p_win_mid_hi: 0.60
-    kelly_dampen: 0.10 # Max 10% of Kelly (extremely conservative)
-    max_bankroll_fraction: 0.01
-    edge_size_boost_edge: 0.30
-    edge_size_boost_mult: 1.02
-    spread_wide_fraction: 0.10
-    spread_wide_size_mult: 0.2
-    ultra_short_size_mult: 0.2 # Drastically reduce size on 15m noisy markets
+    skip_p_win_mid_lo: 0.35 # Widen the skip band
+    skip_p_win_mid_hi: 0.65
+    kelly_dampen: 0.05 # Only 5% of Kelly
+    max_bankroll_fraction: 0.008
+    edge_size_boost_edge: 0.35
+    edge_size_boost_mult: 1.01
+    spread_wide_fraction: 0.08
+    spread_wide_size_mult: 0.1 # Drastically cut size in wide books
+    ultra_short_size_mult: 0.1
 
   log_effective_min_edge: true
   log_decision_diagnostics: true
   filter_disjoint_underlying_buys: true
-  max_bankroll_fraction_per_underlying: 0.12
-  max_bankroll_fraction_per_direction: 0.10
-  min_edge: 0.15
-  min_edge_easy_win: 0.25
-  enable_easy_win: false
-  consensus_sniper_enabled: false
-  barbell_enabled: false
+  max_bankroll_fraction_per_underlying: 0.10
+  max_bankroll_fraction_per_direction: 0.08
+  min_edge: 0.18
+  
+  # Execution Friction Gates
+  max_spread_pct: 0.12 # Cap spread at 12% (was 20%)
+  min_order_book_depth: 50 # Require more liquidity (was 20)
+  taker_edge_threshold: 0.45 # Only take if edge is massive
 
-  uncertainty_edge_mult: 0.5
-  vol_disagree_extra_edge: 0.02
-  yes_overconfidence_extra_edge: 0.04
+  uncertainty_edge_mult: 0.8
+  vol_disagree_extra_edge: 0.05
+  yes_overconfidence_extra_edge: 0.05 # Rule 4: Penalize YES at high prices
   parity_penalty_enabled: true
-  adaptive_learning_enabled: true # Enable learning to react to losses
+  adaptive_learning_enabled: true 
+
+  # Rule 2: Scale edge requirement with probability (Higher edge at extremes)
+  tiered_min_edge:
+    enabled: true
+    bands:
+      - { lo: 0.00, hi: 0.15, min_edge: 0.28 } # OTM tails: require high edge
+      - { lo: 0.15, hi: 0.40, min_edge: 0.18 } # Sweet spot
+      - { lo: 0.40, hi: 0.65, min_edge: 0.25 } # Coin-flip churn zone
+      - { lo: 0.65, hi: 0.80, min_edge: 0.20 } # Near-consensus
+      - { lo: 0.80, hi: 1.00, min_edge: 0.35 } # Extreme consensus (80%+): Rule 2
 
   enable_vol_regime_scaling: true
   enable_vol_spike_safety: true
   enable_defensive_mode: true
   dte_edge_scaling_enabled: true
-  ultra_short_min_edge_mult: 3.0
-  ultra_short_late_min_edge_mult: 4.0 # Nearly impossible to trade very late 15m noise
+  ultra_short_min_edge_mult: 4.0
+  ultra_short_late_min_edge_mult: 5.0 
 
-  limit_order_mode: layered
-  layered_order_levels: 2
-  limit_dip_pct: 0.05 # Wait for deeper dips
-  max_dip_cap: 0.15
+  limit_order_mode: dynamic_tick
+  limit_dip_pct: 0.02 # Stay closer to the bid
+  max_dip_cap: 0.10
 
-  max_pct_of_book_volume: 0.20
-  min_order_book_depth: 20 # Require more liquidity
-  stop_loss_pct: 0.15 # Tighter stop losses
+  max_pct_of_book_volume: 0.15
+  stop_loss_pct: 0.12 # Tighter stop losses
   
   alpha_engine:
     obi_enabled: true

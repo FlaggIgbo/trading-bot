@@ -353,8 +353,8 @@ def main() -> int:
         if v < lo or v > hi:
             errors.append(f"`strategy.{key}` must be in [{lo}, {hi}].")
     ultra_mult = _as_float(strategy.get("ultra_short_min_edge_mult"), 1.0)
-    if ultra_mult < 1.0 or ultra_mult > 3.0:
-        errors.append("`strategy.ultra_short_min_edge_mult` must be in [1.0, 3.0].")
+    if ultra_mult < 1.0 or ultra_mult > 5.0:
+        errors.append("`strategy.ultra_short_min_edge_mult` must be in [1.0, 5.0].")
 
     trading = cfg.get("trading") or {}
     dust_max = _as_int(trading.get("dust_trade_max_balance_cents"), 0)

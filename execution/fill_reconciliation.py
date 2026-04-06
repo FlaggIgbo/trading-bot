@@ -147,14 +147,15 @@ def _gemini_execution_side(fill: dict[str, Any]) -> str:
         or fill.get("order_side")
         or fill.get("executionSide")
         or fill.get("execution_side")
+        or fill.get("exec_side")
         or fill.get("action")
         or fill.get("type")
         or ""
     )
     sl = str(s).lower().strip()
-    if sl in ("buy", "bid", "b", "purchase", "long"):
+    if sl in ("buy", "bid", "b", "purchase", "long", "maker_buy", "taker_buy"):
         return "buy"
-    if sl in ("sell", "ask", "s", "short"):
+    if sl in ("sell", "ask", "s", "short", "maker_sell", "taker_sell"):
         return "sell"
     return sl
 
@@ -170,6 +171,7 @@ def _gemini_contract_outcome(fill: dict[str, Any]) -> str:
         or fill.get("legOutcome")
         or fill.get("leg_outcome")
         or fill.get("position")
+        or fill.get("side") # Some Gemini endpoints put YES/NO in 'side'
         or ""
     )
     s = str(o).lower().strip()
