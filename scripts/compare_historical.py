@@ -482,6 +482,9 @@ class _StrategyParams:
     adaptive_edge_idle_decay_halflife_hours: float
     adaptive_stress_size_edge_threshold: float
     adaptive_stress_size_min_mult: float
+    # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
+    force_exploration_reduction: float
+    force_exploration_hours: float
     # Barbell: base = high-P consensus; alpha = cheap + large net edge; middle zone skipped when enabled.
     barbell_enabled: bool
     barbell_base_min_market_yes: float
@@ -850,6 +853,8 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
         adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
         adaptive_stress_size_min_mult=max(0.05, min(1.0, float(strategy.get("adaptive_stress_size_min_mult", 0.60)))),
+        force_exploration_reduction=max(0.0, min(1.0, float(strategy.get("force_exploration_reduction", 0.0)))),
+        force_exploration_hours=max(0.0, float(strategy.get("force_exploration_hours", 0.0))),
         barbell_enabled=bool(strategy.get("barbell_enabled", False)),
         barbell_base_min_market_yes=max(0.0, min(1.0, float(strategy.get("barbell_base_min_market_yes", 0.70)))),
         barbell_base_min_model_p=max(0.0, min(1.0, float(strategy.get("barbell_base_min_model_p", 0.78)))),
@@ -3499,11 +3504,12 @@ def _simple_ev_recommend(
 
 
 def _simple_ev_net_min_edge_bundle(
-    sp: _StrategyParams, 
-    market_or_event: dict | str, 
-    yf_ticker: str, 
+    sp: _StrategyParams,
+    market_or_event: dict | str,
+    yf_ticker: str,
     yes_bid: float | None = None,
     no_bid: float | None = None,
+    force_exploration_active: bool = False,
 ) -> tuple[float, dict[str, Any]]:
     """
     Base simple_ev min_edge; extra × on ultra-short horizons; optional × when very close to resolution.
@@ -3520,6 +3526,9 @@ def _simple_ev_net_min_edge_bundle(
                 base = float(band.get("min_edge", base))
                 break
 
+    if force_exploration_active and sp.force_exploration_reduction > 0:
+        base *= (1.0 - sp.force_exploration_reduction)
+
     detail: dict[str, Any] = {
         "ultra_short": False,
         "horizon_mult": 1.0,  # Legacy field for log compatibility
@@ -3527,8 +3536,8 @@ def _simple_ev_net_min_edge_bundle(
         "minutes_left": None,
         "base": base,
         "spread": None,
-    }
-    
+        "force_exploration_active": force_exploration_active,
+    }    
     us = _is_ultra_short_horizon(market_or_event, yf_ticker, sp)
     detail["ultra_short"] = us
     mins = _minutes_until_resolution_unified(market_or_event, yf_ticker)
@@ -5715,8 +5724,8 @@ def _adaptive_execution_thresholds(
             near_live += step
             
         # Wider bounds to allow extreme aggression on fast crypto books
-        cross_live = max(0.04, min(0.12, cross_live))
-        near_live = max(0.03, min(0.10, near_live))
+        cross_live = max(0.04, min(0.30, cross_live))
+        near_live = max(0.03, min(0.20, near_live))
         return cross_live, near_live
     except Exception:
         return cross_live, near_live
@@ -6806,6 +6815,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         )
         print()
 
+    # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
+    force_exploration_active = False
+    if sp.force_exploration_hours > 0 and get_limit_order_fill_rate_stats:
+        try:
+            stats_2h = get_limit_order_fill_rate_stats(config=cfg, days=sp.force_exploration_hours / 24.0)
+            if stats_2h and stats_2h.get("n_filled", 0) == 0:
+                force_exploration_active = True
+                print(f"[Exploration] No fills in last {sp.force_exploration_hours:.1f}h. Active: -{sp.force_exploration_reduction:.0%} edge.")
+        except Exception as e:
+            print(f"[Exploration] Error checking recent fills: {e}")
+
     # Calibration & Trust Engine: learn from resolved performance
     calibration = {}
     if get_calibration_stats:
@@ -7625,7 +7645,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             _eff_after_simple_bundle: float | None = None
             _proxy_edge_simple = 0.0
             if sp.simple_ev_decision_enabled:
-                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(sp, m, yf_ticker, yes_bid, no_bid_early)
+                _eff_after_simple_bundle, _us_edge_detail = _simple_ev_net_min_edge_bundle(
+                    sp, m, yf_ticker, yes_bid, no_bid_early, force_exploration_active=force_exploration_active
+                )
                 _proxy_edge_simple = float(proxy_basis_extra_min_edge(cfg, series))
                 effective_min = float(_eff_after_simple_bundle) + _proxy_edge_simple
                 if _proxy_edge_simple > 0.0 and _us_edge_detail is not None:
@@ -7814,11 +7836,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if rec is None and sp.tail_cutoff_min_p > 0 and min(hist_p, 1.0 - hist_p) < sp.tail_cutoff_min_p:
                 rec = REC_SKIP
                 print(f"  [Tail Cutoff] {ticker} → SKIP (Model P {min(hist_p, 1.0 - hist_p):.1%} < {sp.tail_cutoff_min_p:.1%})")
-
-            # Survival Mode: Skip low-probability "lottery" bets on low balance
-            if rec is None and k_regime == "survival" and yes_bid < sp.low_balance_min_price:
-                rec = REC_SKIP
-                print(f"  [Survival Mode] {ticker} → SKIP (Price {yes_bid:.2f} < {sp.low_balance_min_price:.2f})")
 
             if rec is None:
                 if sp.simple_ev_decision_enabled:
@@ -8805,7 +8822,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _fat_pitch_yes_g = False
                 if sp.simple_ev_decision_enabled:
                     _eff_after_simple_bundle_g, _us_edge_detail_g = _simple_ev_net_min_edge_bundle(
-                        sp, evt, yf_ticker, impl, no_bid_gem_early
+                        sp, evt, yf_ticker, impl, no_bid_gem_early, force_exploration_active=force_exploration_active
                     )
                     _proxy_edge_simple_g = float(proxy_basis_extra_min_edge(cfg, series))
                     effective_min_gem = float(_eff_after_simple_bundle_g) + _proxy_edge_simple_g
@@ -8963,11 +8980,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if rec is None and sp.tail_cutoff_min_p > 0 and min(hist_p_gem, 1.0 - hist_p_gem) < sp.tail_cutoff_min_p:
                     rec = REC_SKIP
                     print(f"  [Tail Cutoff] {g_ticker} → SKIP (Model P {min(hist_p_gem, 1.0 - hist_p_gem):.1%} < {sp.tail_cutoff_min_p:.1%})")
-
-                # Survival Mode: Skip low-probability "lottery" bets on low balance
-                if rec is None and g_regime == "survival" and impl < sp.low_balance_min_price:
-                    rec = REC_SKIP
-                    print(f"  [Survival Mode] {g_ticker} → SKIP (Price {impl:.2f} < {sp.low_balance_min_price:.2f})")
 
                 if rec is None:
                     if sp.simple_ev_decision_enabled:

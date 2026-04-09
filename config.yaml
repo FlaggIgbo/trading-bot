@@ -229,12 +229,12 @@ execution:
   limit_buy_weak_bid_min_edge: 0.03
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.65
+  limit_buy_medium_spread_fraction: 0.75 # Increased aggression (was 0.65)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.075
-  limit_buy_near_market_min_edge: 0.045
+  limit_buy_cross_spread_min_edge: 0.07 # Aligned with strategy min_edge (was 0.075)
+  limit_buy_near_market_min_edge: 0.04 # (was 0.045)
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
-  limit_buy_passive_only_below_edge: 0.065
+  limit_buy_passive_only_below_edge: 0.06
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
   limit_buy_escalation_price_enabled: true
   limit_buy_escalate_after_minutes_1: 5
@@ -272,7 +272,7 @@ recovery:
   enable_vol_regime_scaling: false
   dte_edge_scaling_enabled: false
   # >1.0 stacks on simple_ev and legacy min_edge for 15m / sub-hour (simple_ev path applies this in compare_historical)
-  ultra_short_min_edge_mult: 1.35
+  ultra_short_min_edge_mult: 1.10 # Capped at 1.1 (was 1.35)
   # Hourly / non–5pm crypto (and non–4pm S&P) use strict mode: model P(win) must exceed these AND edge — funding wallets does not change that.
   intraday_other_min_p_win: 0.70 # Loosened with global circuit breaker as backstop
   intraday_other_min_p_win_with_vol: 0.62 # Paired with vol path
@@ -286,8 +286,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 13% base (was 8%)
-    min_edge: 0.13
+    # Net edge after maker fee; 9% base (was 13%)
+    min_edge: 0.09
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.60
@@ -295,7 +295,7 @@ strategy:
     # 0–10¢ legs must clear this net edge (blocks weak edge at penny prices; 0 = off).
     cheap_band_price_lo: 0.00
     cheap_band_price_hi: 0.10
-    cheap_band_min_net_edge: 0.15
+    cheap_band_min_net_edge: 0.10
     kelly_dampen: 0.16 # Fraction of raw Kelly — halved from 0.32 to reduce aggression
     max_bankroll_fraction: 0.024 # Hard cap on bankroll fraction per trade (was 0.01; scales +EV clips)
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
@@ -315,11 +315,11 @@ strategy:
     enabled: true
     min_edge: 0.08
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.35 } # Ultra-cheap: require extreme edge (e.g. 35¢ profit potential)
-      - { lo: 0.02, hi: 0.15, min_edge: 0.18 } # Cheap tails: require slightly more than standard
-      - { lo: 0.15, hi: 0.40, min_edge: 0.13 } # Standard 'sweet spot'
-      - { lo: 0.40, hi: 0.65, min_edge: 0.25 } # Coin-flip zone: high risk of churn, require extreme edge
-      - { lo: 0.65, hi: 1.00, min_edge: 0.13 } # Expensive consensus: slightly more than base
+      - { lo: 0.00, hi: 0.02, min_edge: 0.25 } # Ultra-cheap: require edge (was 35¢)
+      - { lo: 0.02, hi: 0.15, min_edge: 0.12 } # Cheap tails: require slightly more than standard
+      - { lo: 0.15, hi: 0.40, min_edge: 0.09 } # Standard 'sweet spot'
+      - { lo: 0.40, hi: 0.65, min_edge: 0.15 } # Coin-flip zone: high risk of churn (was 0.25)
+      - { lo: 0.65, hi: 1.00, min_edge: 0.09 } # Expensive consensus: slightly more than base
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
@@ -329,7 +329,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.13
+  min_edge: 0.09
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: false
@@ -340,12 +340,12 @@ strategy:
   barbell_base_max_no_price: 0.96 # Same for BUY NO (NO bid cap)
   barbell_alpha_max_cheap_price: 0.20 # Alpha leg: market bid ≤ this
   barbell_alpha_min_model_p: 0.28 # Alpha: model P(win) floor on bought side
-  barbell_alpha_min_net_edge: 0.18 # Alpha: net edge after maker fee floor must clear this hurdle
+  barbell_alpha_min_net_edge: 0.15 # Alpha: net edge floor (was 0.18)
   barbell_base_kelly_mult: 1.0 # Scale fractional Kelly for base layer (1.0 = unchanged)
   barbell_alpha_kelly_mult: 0.12 # Much smaller sizing for lottery / mispricing tail
   # Easy win: helps base-layer high-P trades clear edge after fees (paired with barbell base)
   enable_easy_win: true
-  min_edge_easy_win: 0.08 # Must stay <= strategy.min_edge (0.08)
+  min_edge_easy_win: 0.06 # Must stay <= strategy.min_edge (was 0.08)
   easy_win_min_p_win: 0.91 # Slightly below 0.93 so rare “aligned very high” lines can clear; consensus sniper handles barbell-base tape agreement
   easy_win_min_market_p: 0.75 # Easier easy-win gate → more high-confidence tape clears min_edge_easy_win path
   # Consensus sniper: when barbell is on, trades matching barbell_base_* use this net-edge hurdle (can be slightly negative to absorb maker fee when p≈bid)
@@ -371,7 +371,7 @@ strategy:
   dte_edge_mult_long: 1.10 # Less penalty on longer DTE → more distant markets can pass
   max_new_buy_dte_days: 0 # e.g. 7 to skip directional BUYs when DTE > 7d; 0 = off
   yes_overconfidence_extra_edge: 0.008 # Tiny YES hurdle; monitor for YES bias
-  model_probability_shrinkage: 0.50 # Less pull to 50% than 0.40 → stronger model P → more edge when you trust vol/empirical
+  model_probability_shrinkage: 0.40 # Pull to 50% (was 0.50) → fast fix for overconfidence
   # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
   max_buy_yes_strike_above_pct: 0.08
   max_buy_no_strike_above_pct: 0.08
@@ -379,6 +379,9 @@ strategy:
   days_back: 730 # ~2y historical for P(above/below); launchd passes --days 730 to match
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
+  # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
+  force_exploration_reduction: 0.30
+  force_exploration_hours: 2.0
   # Refined strategy params from agent review
   taker_edge_threshold: 0.35 # Cross the spread (pay the ask) if net edge clears this extreme hurdle
   ultra_short_k_spread: 0.4 # Sensitivity to spread in the additive edge hurdle
@@ -489,10 +492,10 @@ strategy:
   ultra_short_min_p_win: 0.93 # Harden 15m crypto books (DOGE/BNB/HYPE/BTC15M) vs overconfidence
   ultra_short_min_p_win_with_vol: 0.88
   # 15m / sub-hour: extra × on required min_edge (simple_ev path uses this; recovery can override)
-  ultra_short_min_edge_mult: 1.85
+  ultra_short_min_edge_mult: 1.20 # Capped at 1.2 (was 1.85)
   # When time-to-resolution is under this many minutes, multiply required net edge again (late books more efficient).
   ultra_short_late_minutes_threshold: 3.0
-  ultra_short_late_min_edge_mult: 1.3
+  ultra_short_late_min_edge_mult: 1.2 # Capped at 1.2 (was 1.3)
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
   kalshi_sp500_maker_fee_rate: 0.00875 # Lower maker fee assumption for S&P 500-style index markets

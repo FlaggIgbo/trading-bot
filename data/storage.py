@@ -1796,7 +1796,7 @@ def get_limit_order_fill_rate_stats(
     if not conn:
         return {"enabled": False}
     try:
-        since = time.time() - max(1, int(days)) * 86400
+        since = time.time() - max(0.001, float(days)) * 86400
         row = conn.execute(
             """
             SELECT
