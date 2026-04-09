@@ -255,7 +255,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.08
+  min_edge: 0.06
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -286,8 +286,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 9% base (was 13%)
-    min_edge: 0.09
+    # Net edge after maker fee; 6% base (was 9%)
+    min_edge: 0.06
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.60
@@ -373,8 +373,8 @@ strategy:
   yes_overconfidence_extra_edge: 0.008 # Tiny YES hurdle; monitor for YES bias
   model_probability_shrinkage: 0.40 # Pull to 50% (was 0.50) → fast fix for overconfidence
   # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
-  max_buy_yes_strike_above_pct: 0.08
-  max_buy_no_strike_above_pct: 0.08
+  max_buy_yes_strike_above_pct: 0.05
+  max_buy_no_strike_above_pct: 0.05
   min_no_price: 0.01 # Skip BUY NO when NO bid < 1¢ (was 5¢) — symmetric with min_yes
   days_back: 730 # ~2y historical for P(above/below); launchd passes --days 730 to match
   days_to_expiry: 30 # For volatility model (log-normal)
@@ -382,6 +382,11 @@ strategy:
   # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
   force_exploration_reduction: 0.30
   force_exploration_hours: 2.0
+  # Market probability filters (skip deep OTM/ITM tails)
+  market_prob_lo: 0.10
+  market_prob_hi: 0.90
+  # Max contracts per underlying in a single evaluation run (forced diversification)
+  max_contracts_per_underlying: 5
   # Refined strategy params from agent review
   taker_edge_threshold: 0.35 # Cross the spread (pay the ask) if net edge clears this extreme hurdle
   ultra_short_k_spread: 0.4 # Sensitivity to spread in the additive edge hurdle

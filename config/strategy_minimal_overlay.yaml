@@ -14,7 +14,7 @@ execution:
   limit_buy_medium_spread_fraction: 0.30 # Increased from 0.12 (as per "cross_spread" feedback)
 
 recovery:
-  min_edge: 0.08
+  min_edge: 0.06
   uncertainty_edge_mult: 0.25 # Lowered from 1.5
   vol_disagree_extra_edge: 0.02
   yes_overconfidence_extra_edge: 0.01
@@ -27,6 +27,15 @@ strategy:
   empirical_recent_days: 90
   empirical_recent_weight: 3.0
   
+  # Market probability filters (skip deep OTM/ITM tails)
+  market_prob_lo: 0.10
+  market_prob_hi: 0.90
+  # Max contracts per underlying in a single evaluation run (forced diversification)
+  max_contracts_per_underlying: 5
+  # Prefer strikes within ~5% of spot
+  max_buy_yes_strike_above_pct: 0.05
+  max_buy_no_strike_above_pct: 0.05
+
   # Structural Convexity Protection (loosen)
   no_trade_penalty: 0.05
   yes_bias_bonus: 0.01
@@ -73,7 +82,7 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.09
+    min_edge: 0.06
     min_edge_full: 0.15
     skip_p_win_mid_band_enabled: true
     skip_p_win_mid_lo: 0.60
@@ -91,7 +100,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   max_bankroll_fraction_per_underlying: 0.28
   max_bankroll_fraction_per_direction: 0.22
-  min_edge: 0.09
+  min_edge: 0.06
   
   # Execution Friction Gates (loosen)
   max_spread_pct: 0.20

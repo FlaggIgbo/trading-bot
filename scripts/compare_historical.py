@@ -291,6 +291,9 @@ class _StrategyParams:
     ultra_short_k_spread: float
     ultra_short_latency_risk: float
     passive_bid_chase_refresh_minutes: int
+    market_prob_lo: float
+    market_prob_hi: float
+    max_contracts_per_underlying: int
     max_buy_yes_strike_above_pct: float
     max_buy_no_strike_above_pct: float
     enable_intra_arb: bool
@@ -652,6 +655,9 @@ def _load_strategy_params(strategy: dict) -> _StrategyParams:
         ultra_short_k_spread=float(strategy.get("ultra_short_k_spread", 0.4)),
         ultra_short_latency_risk=float(strategy.get("ultra_short_latency_risk", 0.01)),
         passive_bid_chase_refresh_minutes=max(0, int(strategy.get("passive_bid_chase_refresh_minutes", 0) or 0)),
+        market_prob_lo=float(strategy.get("market_prob_lo", 0.10)),
+        market_prob_hi=float(strategy.get("market_prob_hi", 0.90)),
+        max_contracts_per_underlying=int(strategy.get("max_contracts_per_underlying", 5)),
         max_buy_yes_strike_above_pct=float(strategy.get("max_buy_yes_strike_above_pct", 0.05)),
         max_buy_no_strike_above_pct=float(strategy.get("max_buy_no_strike_above_pct", 0.05)),
         enable_intra_arb=bool(strategy.get("enable_intra_arb", True)),
@@ -4514,8 +4520,11 @@ def _fmt_dte(dte_days: float | None) -> str:
     return f"{dte_days:.1f} days"
 
 
-def _fmt_price(v: float) -> str:
-    """Format a price/threshold with appropriate decimals: $81,250 vs $1.24."""
+def _fmt_price(v: float, is_weather: bool = False) -> str:
+    """Format a price/threshold with appropriate decimals: $81,250 vs $1.24, or 72.5° for weather."""
+    if is_weather:
+        # Weather values are usually temperatures in F (standard for Kalshi/Gemini)
+        return f"{v:,.1f}°"
     if v >= 100:
         return f"${v:,.0f}"
     if v >= 1:
@@ -4523,13 +4532,13 @@ def _fmt_price(v: float) -> str:
     return f"${v:,.4f}"
 
 
-def _fmt_distance(current_price: float, threshold: float, direction: str) -> str:
+def _fmt_distance(current_price: float, threshold: float, direction: str, is_weather: bool = False) -> str:
     """Human-readable distance between current price and the threshold."""
     if current_price <= 0 or threshold <= 0:
         return ""
     diff = threshold - current_price
     pct = abs(diff / current_price) * 100
-    d = _fmt_price(abs(diff)) if abs(diff) >= 0.005 else "$0.00"
+    d = _fmt_price(abs(diff), is_weather=is_weather) if abs(diff) >= 0.005 else ("0.0°" if is_weather else "$0.00")
     if direction == "above":
         if diff > 0:
             return f"{d} below strike ({pct:.2f}% gap to cover)"
@@ -4541,10 +4550,10 @@ def _fmt_distance(current_price: float, threshold: float, direction: str) -> str
 
 
 def _fmt_rec_plain(rec: str, side: str | None, direction: str, threshold: float,
-                   current_price: float, dte_days: float | None) -> str:
+                   current_price: float, dte_days: float | None, is_weather: bool = False) -> str:
     """One-line plain-English explanation of a recommendation."""
     dte_str = _fmt_dte(dte_days)
-    thresh = _fmt_price(threshold)
+    thresh = _fmt_price(threshold, is_weather=is_weather)
     if rec == REC_BUY_YES and direction == "above":
         return f"Betting the price WILL be above {thresh} (resolves in {dte_str})"
     if rec == REC_BUY_YES and direction == "below":
@@ -4578,6 +4587,7 @@ def _format_reason(
     req_no: float | None = None,
     trust_score: float | None = None,
     fat_pitch: bool = False,
+    is_weather: bool = False,
 ) -> str:
     """Build human-readable reasoning for the recommendation.
 
@@ -4586,7 +4596,7 @@ def _format_reason(
     """
     if rec == REC_BUY_YES:
         if violates_rule:
-            return f"Price {_fmt_price(current_price)} above strike {_fmt_price(threshold)} → favor YES (edge {hist_p - market_yes:.1%})"
+            return f"Price {_fmt_price(current_price, is_weather)} above strike {_fmt_price(threshold, is_weather)} → favor YES (edge {hist_p - market_yes:.1%})"
         return f"Model P(YES) {hist_p:.1%} > market {market_yes:.1%} by {hist_p - market_yes:.1%} (min {min_edge:.0%})"
     if rec == REC_BUY_NO:
         p_no = 1 - hist_p
@@ -4607,7 +4617,7 @@ def _format_reason(
     ):
         vol_conf = f"{vol_p:.1%}" if vol_p is not None else "N/A"
         parts.append(
-            f"strike {_fmt_price(threshold)} >{max_buy_yes_strike_above_pct:.0%} above current {_fmt_price(current_price)} "
+            f"strike {_fmt_price(threshold, is_weather)} >{max_buy_yes_strike_above_pct:.0%} above current {_fmt_price(current_price, is_weather)} "
             f"(vol model {vol_conf} < 95% required)"
         )
     if violates_rule and hist_p < market_yes + min_edge:
@@ -6493,6 +6503,20 @@ def _run(args) -> int:
     if blacklist:
         markets_list = [m for m in markets_list if m.strip().upper() not in {s.upper() for s in blacklist}]
 
+    # Prioritize Weather, Indices, Commodities (forced diversification)
+    def _market_priority(series_name: str) -> int:
+        s = series_name.strip().upper()
+        yt = str(yf_mapping.get(s, "")).upper()
+        if yt.startswith("WEATHER") or "WEATHER" in s:
+            return 0
+        if any(x in s for x in ("INX", "SPY", "NDX", "NASDAQ", "DJI")):
+            return 1
+        if any(x in s for x in ("WTI", "OIL", "GAS", "CL=F", "BZ=F")):
+            return 2
+        return 10
+
+    markets_list.sort(key=_market_priority)
+
     if not markets_list or not yf_mapping:
         print("Configure markets and yfinance_tickers in config.yaml")
         return 1
@@ -7343,8 +7367,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(
                 f"  Proxy basis: +{_px_cfg:.2%} extra min edge (model vs settlement source)"
             )
-        print(f"  Current Price:  ${current_price:,.2f}{live_note}  ({_chg_sign}{_daily_chg:.2f}% vs last close)")
-        print(f"  20-Day Range:   ${_lo:,.2f} – ${_hi:,.2f}")
+        is_weather = bool(yf_ticker and yf_ticker.startswith("WEATHER:"))
+        print(f"  Current Price:  {_fmt_price(current_price, is_weather)}{live_note}  ({_chg_sign}{_daily_chg:.2f}% vs last close)")
+        print(f"  20-Day Range:   {_fmt_price(_lo, is_weather)} – {_fmt_price(_hi, is_weather)}")
         print(f"  History:        {len(closes)} daily closes loaded")
         if sp.enable_vol_regime_scaling and vol_ratio > 1.0:
             print(
@@ -7371,7 +7396,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         mkt_list = kalshi_markets_by_series.get(series, [])
 
         gemini_used_in_arb: set[str] = set()
+        contracts_evaluated = 0
         for mkt in mkt_list or []:
+            if sp.max_contracts_per_underlying > 0 and contracts_evaluated >= sp.max_contracts_per_underlying:
+                break
+            contracts_evaluated += 1
             barbell_bucket = ""
             barbell_blocked = False
             rec = None # Initialize recommendation
@@ -7395,6 +7424,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if yes_bid <= 0:
                 yes_bid = float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
 
+            # --- Market Probability Filter: Skip deep OTM/ITM tails ---
+            if sp.market_prob_lo > 0 and yes_bid < sp.market_prob_lo:
+                print(f"  {ticker}: SKIP (market prob {yes_bid:.1%} < {sp.market_prob_lo:.1%}) | {title}")
+                continue
+            if sp.market_prob_hi > 0 and yes_bid > sp.market_prob_hi:
+                print(f"  {ticker}: SKIP (market prob {yes_bid:.1%} > {sp.market_prob_hi:.1%}) | {title}")
+                continue
+
             # --- Maximum Spread Cap: Skip illiquid/toxic books ---
             _y_ask = float(m.get("yes_ask_dollars") or 0)
             if _y_ask > yes_bid > 0:
@@ -7408,6 +7445,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # Skip: empirical and vol models both require a threshold (from title, API, or ticker)
                 print(f"  {ticker}: YES {yes_bid:.2f} | (no threshold) {title}")
                 continue
+
+            # --- Near-the-Money Filter: Focus on contracts within tight gap of spot ---
+            if sp.max_buy_yes_strike_above_pct > 0:
+                _gap = abs(threshold - current_price) / current_price
+                if _gap > sp.max_buy_yes_strike_above_pct:
+                    print(f"  {ticker}: SKIP (strike gap {_gap:.1%} > {sp.max_buy_yes_strike_above_pct:.1%}) | {title}")
+                    continue
+
             if sp.enable_strike_validation and not _validate_threshold_with_market(
                 threshold=threshold,
                 direction=direction,
@@ -8039,17 +8084,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 }
             )
 
-            _dist_str = _fmt_distance(current_price, threshold, direction)
+            _dist_str = _fmt_distance(current_price, threshold, direction, is_weather=is_weather)
             _dte_str = _fmt_dte(dte)
-            _rec_plain = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction, threshold, current_price, dte)
+            _rec_plain = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction, threshold, current_price, dte, is_weather=is_weather)
             print(f"\n    {'·' * 60}")
             print(f"    {ticker}  [Kalshi]")
             print(f"    {(m.get('title') or title)[:70]}")
             if direction == "between" and threshold_hi is not None:
-                print(f"    ├─ Strike:       {_fmt_price(threshold)} – {_fmt_price(threshold_hi)} (pays if in range)")
+                print(f"    ├─ Strike:       {_fmt_price(threshold, is_weather)} – {_fmt_price(threshold_hi, is_weather)} (pays if in range)")
             else:
-                print(f"    ├─ Strike:       {_fmt_price(threshold)} (pays if {direction})")
-            print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str}")
+                print(f"    ├─ Strike:       {_fmt_price(threshold, is_weather)} (pays if {direction})")
+            print(f"    ├─ Current:      {_fmt_price(current_price, is_weather)}  →  {_dist_str}")
             print(f"    ├─ Resolves in:  {_dte_str}")
             if vol_p is not None:
                 emp_kalshi = _empirical_probability(
@@ -8180,6 +8225,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 req_no=effective_min_no,
                 trust_score=trust_scores.get(_series_prefix),
                 fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35)),
+                is_weather=is_weather,
             )
             if rec == REC_SKIP and momentum_crash:
                 reason = (
@@ -8202,7 +8248,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if getattr(args, "verbose", False):
                 mn, mx = min(closes), max(closes)
                 n = sum(1 for c in closes if (c > threshold if direction == "above" else c < threshold))
-                print(f"       (closes {_fmt_price(mn)}–{_fmt_price(mx)}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
+                print(f"       (closes {_fmt_price(mn, is_weather)}–{_fmt_price(mx, is_weather)}; {n}/{len(closes)} days {'above' if direction == 'above' else 'below'} threshold)")
             try:
                 from storage import record_market_snapshot
                 no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -8609,7 +8655,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if args.markets > 0:
                 gemini_markets = gemini_markets[: args.markets]
             use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
+            gemini_contracts_evaluated = 0
             for mkt in gemini_markets:
+                if sp.max_contracts_per_underlying > 0 and gemini_contracts_evaluated >= sp.max_contracts_per_underlying:
+                    break
+                gemini_contracts_evaluated += 1
                 barbell_bucket_g = ""
                 barbell_blocked_g = False
                 rec = None # Initialize recommendation
@@ -8627,6 +8677,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue  # Already used in ARB_INTER with Kalshi
                 impl = get_yes_price(contract) if contract else get_yes_price(_get_yes_contract(evt) or {})
 
+                # --- Market Probability Filter: Skip deep OTM/ITM tails ---
+                if sp.market_prob_lo > 0 and impl < sp.market_prob_lo:
+                    print(f"  [Gemini] {g_ticker}: SKIP (market prob {impl:.1%} < {sp.market_prob_lo:.1%}) | {title}")
+                    continue
+                if sp.market_prob_hi > 0 and impl > sp.market_prob_hi:
+                    print(f"  [Gemini] {g_ticker}: SKIP (market prob {impl:.1%} > {sp.market_prob_hi:.1%}) | {title}")
+                    continue
+
                 # --- Maximum Spread Cap: Skip illiquid/toxic books ---
                 if contract:
                     no_p = get_no_price(contract)
@@ -8641,6 +8699,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     spread_pct = (_yes_ask_gem - impl) / impl
                     if spread_pct > sp.max_spread_pct:
                         print(f"  [Gemini] {g_ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
+                        continue
+
+                # --- Near-the-Money Filter: Focus on contracts within tight gap of spot ---
+                if sp.max_buy_yes_strike_above_pct > 0:
+                    _gap_g = abs(threshold_g - current_price) / current_price
+                    if _gap_g > sp.max_buy_yes_strike_above_pct:
+                        print(f"  [Gemini] {g_ticker}: SKIP (strike gap {_gap_g:.1%} > {sp.max_buy_yes_strike_above_pct:.1%}) | {title}")
                         continue
 
                 if _should_skip_by_resolution(evt, yf_ticker):
@@ -9178,17 +9243,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "barbell": barbell_bucket_g,
                     }
                 )
-                _dist_str_g = _fmt_distance(current_price, threshold_g, direction_g)
+                _dist_str_g = _fmt_distance(current_price, threshold_g, direction_g, is_weather=is_weather)
                 _dte_str_g = _fmt_dte(dte_g)
-                _rec_plain_g = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction_g, threshold_g, current_price, dte_g)
+                _rec_plain_g = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction_g, threshold_g, current_price, dte_g, is_weather=is_weather)
                 print(f"\n    {'·' * 60}")
                 print(f"    {evt.get('ticker','?')}  [Gemini]")
                 print(f"    {title[:70]}")
                 if direction_g == "between" and threshold_hi_g is not None:
-                    print(f"    ├─ Strike:       {_fmt_price(threshold_g)} – {_fmt_price(threshold_hi_g)} (pays if in range)")
+                    print(f"    ├─ Strike:       {_fmt_price(threshold_g, is_weather)} – {_fmt_price(threshold_hi_g, is_weather)} (pays if in range)")
                 else:
-                    print(f"    ├─ Strike:       {_fmt_price(threshold_g)} (pays if {direction_g})")
-                print(f"    ├─ Current:      ${current_price:,.2f}  →  {_dist_str_g}")
+                    print(f"    ├─ Strike:       {_fmt_price(threshold_g, is_weather)} (pays if {direction_g})")
+                print(f"    ├─ Current:      {_fmt_price(current_price, is_weather)}  →  {_dist_str_g}")
                 print(f"    ├─ Resolves in:  {_dte_str_g}")
                 if vol_p_gem is not None:
                     print(f"    ├─ Empirical P:  {emp:.1%}  (historical frequency)")
@@ -9330,6 +9395,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         req_no=effective_min_no_g,
                         trust_score=trust_scores.get(_series_prefix, 1.0),
                         fat_pitch=(_fat_pitch_yes_g or (rec == REC_BUY_NO and abs(_net_no_g) > 0.35)),
+                        is_weather=is_weather,
                     )
                 if _reason_g:
                     print(f"    └─ Reason:       {_reason_g}")
@@ -11177,7 +11243,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['ticker']}")
             print(f"         {(o.get('title') or '')[:65]}")
             if _thresh and _bet_dir:
-                print(f"         Bet: price {_bet_dir} {_fmt_price(_thresh)}  |  Resolves in: {_fmt_dte(_dte_o)}")
+                _is_weather_o = bool(o.get("yf_ticker") and o.get("yf_ticker").startswith("WEATHER:"))
+                print(f"         Bet: price {_bet_dir} {_fmt_price(_thresh, _is_weather_o)}  |  Resolves in: {_fmt_dte(_dte_o)}")
             print(f"         Side: {o['rec'].replace('BUY_', '')}  |  Count: {_count}  |  Limit: ${o['price']:.2f}  |  Total cost: ${_cost:.2f}")
             print(f"         Edge: {o['edge']:.1%}  |  P(win): {_p_win:.1%}  |  EV/contract: {'+' if _ev >= 0 else ''}${_ev:.2f}")
             if use_llm:
@@ -11510,7 +11577,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"\n  BUY {i}. [{o['platform'].upper()}] {o['ticker']}")
             print(f"         {(o.get('title') or '')[:65]}")
             if _thresh and _bet_dir_prev:
-                print(f"         Bet: price {_bet_dir_prev} {_fmt_price(_thresh)}  |  Resolves in: {_fmt_dte(_dte_prev)}")
+                _is_weather_prev = bool(o.get("yf_ticker") and o.get("yf_ticker").startswith("WEATHER:"))
+                print(f"         Bet: price {_bet_dir_prev} {_fmt_price(_thresh, _is_weather_prev)}  |  Resolves in: {_fmt_dte(_dte_prev)}")
             print(f"         Side: {o['rec'].replace('BUY_', '')}  |  Count: {_count}  |  Limit: ${o['price']:.2f}  |  Total cost: ${_cost:.2f}")
             print(f"         Edge: {o['edge']:.1%}  |  P(win): {_p_win_prev:.1%}")
             if o["platform"] == PLATFORM_KALSHI:
