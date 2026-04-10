@@ -39,6 +39,21 @@ def build_strategy_engine_by_name(name: str) -> BaseStrategy:
     return cls()
 
 
+def build_strategy_engine(strategy_cfg: dict) -> BaseStrategy:
+    """
+    Build pluggable recommendation strategy from config.
+
+    Default remains the production path (``vol_regime`` or alias ``vol_regime_threshold``).
+    Both use VolRegimeStrategy: same threshold logic as DefaultThresholdStrategy; vol
+    regime scaling is applied in compare_historical, not inside recommend().
+    """
+    name = str(strategy_cfg.get("strategy_engine", "vol_regime")).strip().lower()
+    try:
+        return build_strategy_engine_by_name(name)
+    except ValueError:
+        return VolRegimeStrategy()
+
+
 def list_strategies() -> list[str]:
     """Distinct public names for UI / CLI."""
     return sorted({"vol_regime", "vol_regime_threshold", "default_threshold", "strict_threshold"})

@@ -174,3 +174,26 @@ def get_snapshot(lat: float, lon: float) -> float | None:
         return data.get("current_weather", {}).get("temperature")
     except Exception:
         return None
+
+
+def get_recent_history(lat: float, lon: float, days: int = 31) -> dict | None:
+    """Get recent historical temperatures (up to 31 past days)."""
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "past_days": days,
+        "daily": "temperature_2m_max,temperature_2m_min",
+        "temperature_unit": "fahrenheit",
+        "timezone": "America/New_York",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("daily", {})
+    except Exception as e:
+        if _DEBUG:
+            print(f"[weather_client] Recent history failed for ({lat}, {lon}): {e}")
+        return None
+

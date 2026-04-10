@@ -86,6 +86,17 @@ from models.anti_hallucination import (
     directional_regime_should_skip,
     load_anti_hallucination_config,
 )
+from models.strategy_config import (
+    StrategyParams,
+    load_strategy_params,
+    get_effective_strategy_dict,
+    get_strategy_recommend_extras,
+    get_strategy_recommend_strict_extras,
+    get_effective_passive_limit_quote,
+    sanitize_model_probability,
+    display_model_probability,
+)
+from models.strategy_registry import build_strategy_engine
 from models.alpha_engine import (
     AlphaEngineConfig,
     compute_obi,
@@ -95,10 +106,74 @@ from models.alpha_engine import (
     obi_edge_adjustment,
     toxic_flow_edge_penalty,
     vol_adjusted_kelly,
+    SignalFeatures,
+    fit_signal_model_weights,
+    build_signal_features,
+    score_signal_model,
 )
 from models.decision_diagnostics import build_required_edge_breakdown, print_decision_diagnostics_line
-from models.calibration_engine import CalibrationEngine
-from models.risk_engine import calculate_fractional_kelly_size, apply_fat_pitch_guardrail
+from models.calibration_engine import CalibrationEngine, fit_probability_calibrator
+from models.risk_engine import (
+    calculate_fractional_kelly_size,
+    apply_fat_pitch_guardrail,
+    check_drawdown_block,
+    get_balance_regime_adjustments,
+    calculate_inventory_skew_factor,
+    get_adaptive_kelly_fraction,
+    get_dynamic_kill_size_multiplier,
+    get_adaptive_stress_size_multiplier,
+    get_simple_ev_calibration_size_multiplier,
+    get_dte_edge_scale_factor,
+    cap_buy_count_by_book_pct,
+    compute_limit_price,
+    allocate_budget_to_orders,
+    cap_cross_platform_exposure,
+    cap_bankroll_exposure_buckets,
+)
+from models.market_policy import (
+    GEMINI_CRYPTO_YF, GEMINI_ASSET_KEY_FOR_YFIN_TICKER,
+    yf_is_us_equity_index, yf_is_commodity_future,
+    gemini_events_list_for_yf_ticker, is_intraday_market,
+    is_ultra_short_horizon, should_skip_by_resolution,
+    is_other_intraday, strict_intraday_evaluation,
+    is_intraday_or_ultra_short,
+    extract_strike,
+    maker_fee_rate_for_market,
+    apply_inter_arb_group_preflight,
+    find_gemini_event,
+)
+from utils.market_time import (
+    ET, UTC, get_title, get_resolution_hour_from_title,
+    parse_iso8601_utc, resolution_utc_from_market_or_event,
+    parse_resolution_datetime_from_title, hours_until_resolution,
+    hours_until_resolution_unified, minutes_until_resolution_unified,
+    get_days_to_expiry_from_market, is_weekend_et,
+    get_resolution_key_for_order
+)
+from utils.market_analysis import (
+    calculate_adaptive_limit_dip,
+    compute_rsi,
+    calculate_rsi_dip_adjustment,
+    calculate_dte_confidence_dip,
+    calculate_volatility_spike_metrics,
+    calculate_vol_ratio,
+    calculate_dynamic_stability_seconds,
+    empirical_probability,
+    empirical_probability_multi_horizon,
+    volatility_probability,
+    monte_carlo_probability,
+    volatility_probability_with_mc,
+    ewma_variance,
+    sample_variance,
+    garch_variance,
+    compute_macro_signal_24h,
+    compute_lottery_limit_price,
+    clip_price,
+    wide_book_lift_passive_raw_price,
+    resolve_passive_quote_price,
+    is_midprice_stable,
+    limit_buy_wide_book_conservative,
+)
 from models.trading_edges import (
     brier_score,
     expected_calibration_error,
@@ -220,16 +295,10 @@ GEMINI_ASSET_KEY_FOR_YFIN_TICKER: dict[str, str] = {
 _US_EQUITY_INDEX_YF_TICKERS = frozenset({"^GSPC", "GSPC", "^NDX", "NDX"})
 # Yahoo continuous futures for Kalshi WTI / Brent / metals / RBOB (gas proxy) — allow titled intraday times.
 _COMMODITY_FUTURES_YF_TICKERS = frozenset({"CL=F", "BZ=F", "GC=F", "SI=F", "HG=F", "RB=F"})
-# Kalshi maker fee override (index-like); match _maker_fee_rate_for_market.
+# Kalshi maker fee override (index-like); match maker_fee_rate_for_market.
 _KALSHI_INDEX_MAKER_FEE_YF = frozenset({"^GSPC", "GSPC", "^NDX", "NDX", "SPY", "QQQ"})
 
 
-def _yf_is_us_equity_index(yf_ticker: str) -> bool:
-    return (yf_ticker or "").strip().upper() in _US_EQUITY_INDEX_YF_TICKERS
-
-
-def _yf_is_commodity_future(yf_ticker: str) -> bool:
-    return (yf_ticker or "").strip().upper() in _COMMODITY_FUTURES_YF_TICKERS
 
 
 def _gemini_events_list_for_yf_ticker(events_by_asset: dict[str, list], yf_ticker: str) -> list:
@@ -241,7 +310,7 @@ _GARCH_VAR_CACHE: dict[tuple[int, int, int], float] = {}
 
 
 @dataclass
-class _StrategyParams:
+class StrategyParams:
     """Consolidated strategy config from config.yaml. Load once, use throughout _run_impl."""
 
     days_to_expiry: float
@@ -611,8 +680,8 @@ class _StrategyParams:
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
 
-def _load_strategy_params(strategy: dict) -> _StrategyParams:
-    return _StrategyParams(
+def _load_strategy_params(strategy: dict) -> StrategyParams:
+    return StrategyParams(
         days_to_expiry=float(strategy.get("days_to_expiry", 30)),
         no_above_cushion=float(strategy.get("skip_buy_no_above_cushion", 0.01)),
         sell_losing_pct=float(strategy.get("sell_losing_pct", 0.55)),
@@ -1025,7 +1094,7 @@ strategy.get("limit_buy_edge_aggression_enabled", False)),
     )
 
 
-def _strategy_recommend_extras(sp: _StrategyParams) -> dict[str, Any]:
+def _strategy_recommend_extras(sp: StrategyParams) -> dict[str, Any]:
     """Forwarded to strategy_engine.recommend; consensus sniper only active when barbell is on."""
     if sp.simple_ev_decision_enabled:
         return {
@@ -1049,7 +1118,7 @@ def _strategy_recommend_extras(sp: _StrategyParams) -> dict[str, Any]:
     }
 
 
-def _strategy_recommend_strict_extras(sp: _StrategyParams) -> dict[str, Any]:
+def _strategy_recommend_strict_extras(sp: StrategyParams) -> dict[str, Any]:
     """
     When barbell_soften_strict_intraday: apply easy-win + consensus sniper edge floors and
     relaxed min P(win) for barbell-base-shaped lines on strict intraday / ultra-short path.
@@ -1097,7 +1166,7 @@ def _print_multi_strategy_compare_line(
     effective_min_yes: float,
     effective_min_no: float,
     is_strict_intraday: bool,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> None:
     """Same model P(hist_p); alternate strategy engines only change recommend() thresholds."""
     raw = (compare_strategies_arg or "").strip()
@@ -1202,7 +1271,7 @@ def _dte_confidence_dip(
     base_dip: float,
     p_win: float,
     dte_days: float | None,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> float:
     """
     Scale limit order dip depth based on DTE × confidence interaction.
@@ -1260,127 +1329,6 @@ def _extract_book_fields(market: dict, yes_bid: float, no_bid: float) -> dict[st
     }
 
 
-def _clip_price(v: float) -> float:
-    return max(0.01, min(0.99, float(v)))
-
-
-def _limit_buy_wide_book_conservative(
-    ticker: str,
-    yf_ticker: str | None,
-    substrings: list[str],
-    yf_exact: list[str],
-) -> bool:
-    """
-    When True, skip wide-book limit coalesce / EV touch-lift (stay deep passive).
-    """
-    t = (ticker or "").upper()
-    for s in substrings:
-        su = (s or "").strip().upper()
-        if su and su in t:
-            return True
-    yf = (yf_ticker or "").strip().upper()
-    for x in yf_exact:
-        if (x or "").strip().upper() == yf:
-            return True
-    return False
-
-
-def _wide_book_lift_passive_raw_price(
-    *,
-    bid: float,
-    ask: float | None,
-    fair_cap: float,
-    raw_price: float,
-    enabled: bool,
-    conservative: bool,
-    spread_rel_threshold: float,
-    anchor_fraction: float,
-) -> float:
-    """
-    On wide (ask-bid)/bid books, raise dip-based raw_price toward bid + anchor×(ask-bid),
-    capped by fair_cap — avoids lottery bids far below the working side when the book is gapped.
-    """
-    if not enabled or conservative or ask is None:
-        return raw_price
-    b = float(bid)
-    a = float(ask)
-    if b <= 0 or a <= b + 1e-9:
-        return raw_price
-    rel = (a - b) / b
-    thr = max(0.0, float(spread_rel_threshold))
-    if rel < thr:
-        return raw_price
-    frac = max(0.0, min(1.0, float(anchor_fraction)))
-    anchor = b + frac * (a - b)
-    cap = max(0.01, min(0.99, float(fair_cap)))
-    lift = min(anchor, cap)
-    return max(float(raw_price), lift)
-
-
-def _compute_lottery_limit_price(
-    *,
-    sp: _StrategyParams,
-    side: str,
-    yes_bid: float,
-    no_bid: float,
-    yes_ask: float | None,
-    no_ask: float | None,
-) -> float:
-    """
-    Lottery resting bids: fixed micro price, or penny_jump (best bid on that side + 1¢).
-    When the working bid is below lottery_penny_jump_apply_cap_bid_below, clip to
-    lottery_limit_max_price so cheap-leg lotteries stay small; high-priced legs skip the cap.
-    """
-    mode = (sp.lottery_limit_price_mode or "fixed").strip().lower()
-    if mode in ("", "fixed", "absolute"):
-        return _clip_price(float(sp.lottery_limit_price))
-    if mode not in ("penny_jump", "bid_plus_tick", "bid_plus_one_tick", "jump"):
-        return _clip_price(float(sp.lottery_limit_price))
-    tick = 0.01
-    if side.lower() == "yes":
-        bid = float(yes_bid)
-        ask = yes_ask
-    else:
-        bid = float(no_bid)
-        ask = no_ask
-    # Match passive bid_plus_tick: front-of-queue without crossing the ask
-    px = bid + tick
-    if ask is not None and float(ask) > 0:
-        px = min(px, max(bid, float(ask) - tick))
-    th = float(sp.lottery_penny_jump_apply_cap_bid_below)
-    if bid < th:
-        px = min(px, float(sp.lottery_limit_max_price))
-    return _clip_price(px)
-
-
-def _resolve_passive_quote_price(
-    *,
-    passive_quote: str,
-    bid: float,
-    ask: float | None,
-    dip_based_price: float,
-    fair_cap: float,
-) -> float:
-    """
-    Micro-balance / maker-friendly quotes: default keeps dip-based passive limits;
-    'mid' uses (bid+ask)/2 capped by fair edge; 'bid_plus_tick' is bid+1¢ (tighter than deep dip).
-    """
-    pq = (passive_quote or "dip").strip().lower()
-    if pq in ("", "dip", "default", "below_bid", "layered"):
-        return _clip_price(min(float(dip_based_price), float(fair_cap)))
-    fc = max(0.01, min(0.99, float(fair_cap)))
-    if pq == "mid":
-        if ask is not None and float(ask) > 0 and float(bid) > 0:
-            mid = (float(bid) + float(ask)) / 2.0
-            return _clip_price(min(mid, fc))
-        return _clip_price(min(float(bid), fc))
-    if pq in ("bid_plus_tick", "bid_plus_one_tick"):
-        tick = 0.01
-        j = float(bid) + tick
-        if ask is not None and float(ask) > 0:
-            j = min(j, max(float(bid), float(ask) - tick))
-        return _clip_price(min(j, fc))
-    return _clip_price(min(float(dip_based_price), fc))
 
 
 def _sanitize_model_probability(p: float, *, lo: float, hi: float, enabled: bool) -> float:
@@ -1395,7 +1343,7 @@ def _sanitize_model_probability(p: float, *, lo: float, hi: float, enabled: bool
     return max(lo_f, min(hi_f, x))
 
 
-def _display_model_probability(p: float | None, sp: _StrategyParams) -> float | None:
+def _display_model_probability(p: float | None, sp: StrategyParams) -> float | None:
     """Log-friendly P: same hard cap as sizing so logs don't show misleading '100%'."""
     if p is None:
         return None
@@ -1559,7 +1507,7 @@ def _merge_execution_into_strategy(cfg: dict) -> dict:
     return strategy
 
 
-def _effective_passive_limit_quote(sp: _StrategyParams, dte_days: float | None) -> str:
+def _effective_passive_limit_quote(sp: StrategyParams, dte_days: float | None) -> str:
     """
     When resolution is very soon, prefer dip-style limits so penny books actually fill (PnL > maker queue risk).
     """
@@ -1577,23 +1525,8 @@ def _effective_passive_limit_quote(sp: _StrategyParams, dte_days: float | None) 
     return base
 
 
-def _cap_buy_count_by_book_pct(count: int, book_bid_size: float | None, max_pct: float) -> int:
-    """Cap order size vs visible same-side depth to reduce adverse selection and book impact."""
-    if count <= 0 or max_pct <= 0:
-        return count
-    if book_bid_size is None:
-        return count
-    try:
-        depth = float(book_bid_size)
-    except (TypeError, ValueError):
-        return count
-    if depth <= 0:
-        return count
-    cap = max(1, int(depth * max_pct))
-    return min(count, cap)
 
-
-def _check_drawdown_block(platform: str, balance_cents: int, sp: _StrategyParams, cfg: dict) -> bool:
+def _check_drawdown_block(platform: str, balance_cents: int, sp: StrategyParams, cfg: dict) -> bool:
     """Returns True if the platform is currently in a drawdown-driven trading halt."""
     if sp.drawdown_stop_trading_pct <= 0:
         return False
@@ -1617,7 +1550,7 @@ def _check_drawdown_block(platform: str, balance_cents: int, sp: _StrategyParams
     return False
 
 
-def _get_balance_regime_adjustments(balance_cents: int, sp: _StrategyParams) -> tuple[float, float, str]:
+def _get_balance_regime_adjustments(balance_cents: int, sp: StrategyParams) -> tuple[float, float, str]:
     """Returns (kelly_mult, min_edge_add, regime_name) based on current vs starting balance."""
     if sp.starting_balance_cents <= 0:
         return 1.0, 0.0, "normal"
@@ -1660,252 +1593,9 @@ def _inventory_skew_factor(held_count: int, max_skew_pct: float) -> float:
     return min(float(max_skew_pct), (held_count / 100.0) * float(max_skew_pct))
 
 
-def _is_midprice_stable(
-    *,
-    ticker: str,
-    platform: str,
-    cfg: dict,
-    min_stability_seconds: int,
-    max_mid_move_pct: float = 0.03,
-    skip_in_preview: bool = False,
-) -> bool:
-    """
-    Anti-sniping guard: require recent mid-price to remain within a tight range
-    for at least min_stability_seconds.
-    In --preview mode, skip this check so proposed orders are shown.
-    """
-    if skip_in_preview or min_stability_seconds <= 0 or not get_market_snapshots_for_backtest:
-        return True
-    end_ts = time.time()
-    start_ts = end_ts - max(float(min_stability_seconds + 60), 300.0)
-    snaps = get_market_snapshots_for_backtest(
-        start_ts=start_ts,
-        end_ts=end_ts,
-        platform=platform,
-        config=cfg,
-    ) or []
-    mids: list[tuple[float, float]] = []
-    for s in snaps:
-        if str(s.get("ticker") or "") != str(ticker):
-            continue
-        y = s.get("yes_bid")
-        n = s.get("no_bid")
-        try:
-            yf = float(y) if y is not None else None
-            nf = float(n) if n is not None else None
-        except (TypeError, ValueError):
-            continue
-        if yf is None or nf is None or yf <= 0 or nf <= 0:
-            continue
-        mids.append((float(s.get("ts") or 0.0), (yf + nf) / 2.0))
-    if len(mids) < 2:
-        return False
-    mids.sort(key=lambda x: x[0])
-    if mids[-1][0] - mids[0][0] < float(min_stability_seconds):
-        return False
-    vals = [m for _, m in mids]
-    lo, hi = min(vals), max(vals)
-    move_pct = (hi - lo) / max(0.01, vals[-1])
-    return move_pct <= max(0.0, float(max_mid_move_pct))
 
 
-def _compute_limit_price(
-    *,
-    bid: float,
-    ask: float | None,
-    p_win: float,
-    maker_fee_rate: float,
-    min_fee_per_order: float,
-    mode: str,
-    base_dip: float,
-    tick_offset: int,
-    held_same_side: int,
-    held_opp_side: int,
-    max_inventory_skew_pct: float,
-    layered_order_levels: int,
-    order_count: int,
-    max_dip_cap: float = 0.25,
-    passive_quote: str = "dip",
-    net_edge: float | None = None,
-    edge_aggression_enabled: bool = False,
-    cross_spread_min_edge: float = 0.10,
-    near_market_min_edge: float = 0.05,
-    passive_only_below_edge: float = 0.0,
-    ev_tier_pricing: bool = True,
-    weak_bid_min_edge: float = 0.03,
-    skip_below_weak_edge: bool = True,
-    medium_quote_mode: str = "spread_fraction",
-    medium_spread_fraction: float = 0.25,
-    resting_order_age_minutes: float | None = None,
-    escalation_price_enabled: bool = False,
-    escalate_after_minutes_1: float = 5.0,
-    escalate_after_minutes_2: float = 10.0,
-    wide_book_coalesce_enabled: bool = False,
-    wide_book_conservative: bool = False,
-    wide_book_spread_rel: float = 0.22,
-    wide_book_anchor_fraction: float = 0.38,
-) -> tuple[float | None, float]:
-    """
-    Returns (limit_price, dip_used_proxy). limit_price is None when EV-tier policy skips the quote.
-    dip_used_proxy is for logging/analysis; dynamic modes may return 0.
-    When edge_aggression_enabled and net_edge is set, quote by edge tier (strong→ask, medium→mid/spread,
-    weak→bid) instead of only deep dip bids. If passive_only_below_edge > 0 and net_edge is below it,
-    aggression is skipped (maker-style limits). Set ev_tier_pricing=False for legacy bid+tick / ask−1¢ tiers.
-    wide_book_*: on wide (ask−bid)/bid, lift passive quotes toward the touch (capped by fair_cap); optional
-    EV touch-lift when quote sits below bid but fair_cap still allows paying the bid.
-    """
-    mode_norm = (mode or "fixed_pct").strip().lower()
-    if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
-        mode_norm = "fixed_pct"
-
-    fair_cap = _clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
-
-    _po = max(0.0, float(passive_only_below_edge or 0.0))
-    _ne_ok = net_edge is not None and float(net_edge) > 0
-    if _po > 0 and _ne_ok and float(net_edge) < _po:
-        _ne_ok = False
-    if edge_aggression_enabled and _ne_ok and fair_cap > 0:
-        ne = float(net_edge)
-        tick = max(1, int(tick_offset)) * 0.01
-        cross_th = max(0.0, float(cross_spread_min_edge))
-        near_th = max(0.0, float(near_market_min_edge))
-        weak_th = max(0.0, float(weak_bid_min_edge))
-        if near_th > cross_th:
-            near_th = cross_th
-        if weak_th > near_th:
-            weak_th = near_th
-
-        if ev_tier_pricing:
-            base_px_ev: float | None = None
-            if ne >= cross_th:
-                if ask is not None and float(ask) > 0:
-                    base_px_ev = min(float(ask), fair_cap)
-                else:
-                    base_px_ev = min(float(bid) + tick, fair_cap)
-            elif ne >= near_th:
-                spread_v = 0.0
-                if ask is not None and float(ask) > float(bid):
-                    spread_v = float(ask) - float(bid)
-                mode_m = (medium_quote_mode or "spread_fraction").strip().lower()
-                if mode_m == "mid" and ask is not None and float(ask) > float(bid):
-                    mid_px = (float(bid) + float(ask)) / 2.0
-                    base_px_ev = min(mid_px, fair_cap)
-                else:
-                    frac = max(0.0, min(1.0, float(medium_spread_fraction)))
-                    base_px_ev = float(bid) + frac * spread_v
-                    base_px_ev = min(max(0.01, base_px_ev), fair_cap)
-                if ask is not None and float(ask) > 0:
-                    base_px_ev = min(float(base_px_ev), float(ask))
-            elif ne >= weak_th:
-                base_px_ev = min(float(bid), fair_cap)
-            elif skip_below_weak_edge:
-                return None, 0.0
-
-            if base_px_ev is not None:
-                px_esc = float(base_px_ev)
-                if escalation_price_enabled and resting_order_age_minutes is not None:
-                    age = float(resting_order_age_minutes)
-                    extra_ticks = 0
-                    if age >= float(escalate_after_minutes_1):
-                        extra_ticks += 1
-                    if age >= float(escalate_after_minutes_2):
-                        extra_ticks += 1
-                    px_esc += extra_ticks * 0.01
-                    px_esc = min(px_esc, fair_cap)
-                    if ask is not None and float(ask) > 0:
-                        px_esc = min(px_esc, float(ask))
-                if (
-                    wide_book_coalesce_enabled
-                    and not wide_book_conservative
-                    and float(bid) > 0
-                    and px_esc + 1e-9 < float(bid)
-                    and float(fair_cap) + 1e-9 >= float(bid)
-                ):
-                    px_esc = min(float(fair_cap), float(bid))
-                return _clip_price(px_esc), 0.0
-        else:
-            if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
-                aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
-                px_leg = float(aggressive)
-                if (
-                    wide_book_coalesce_enabled
-                    and not wide_book_conservative
-                    and float(bid) > 0
-                    and px_leg + 1e-9 < float(bid)
-                    and float(fair_cap) + 1e-9 >= float(bid)
-                ):
-                    px_leg = min(float(fair_cap), float(bid))
-                return _clip_price(px_leg), 0.0
-            if ne >= float(near_market_min_edge):
-                jump = float(bid) + tick
-                if ask is not None and ask > 0:
-                    jump = min(jump, max(0.01, float(ask) - 0.01))
-                near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
-                px_near = float(near_px)
-                if (
-                    wide_book_coalesce_enabled
-                    and not wide_book_conservative
-                    and float(bid) > 0
-                    and px_near + 1e-9 < float(bid)
-                    and float(fair_cap) + 1e-9 >= float(bid)
-                ):
-                    px_near = min(float(fair_cap), float(bid))
-                return _clip_price(px_near), 0.0
-
-    if mode_norm == "fixed_pct":
-        dip = max(0.0, min(max_dip_cap, float(base_dip)))
-        raw_price = bid * (1.0 - dip) if dip > 0 else bid
-    elif mode_norm == "dynamic_tick":
-        tick = max(1, int(tick_offset)) * 0.01
-        jump_price = bid + tick
-        if ask is not None and ask > 0:
-            jump_price = min(jump_price, max(0.01, float(ask) - 0.01))
-        raw_price = min(jump_price, fair_cap)
-        dip = 0.0
-    else:
-        # Layered: place passive limits BELOW bid using the dip to catch transient
-        # price drops instead of penny-jumping above bid.
-        dip = max(0.0, min(max_dip_cap, float(base_dip)))
-        base_price = bid * (1.0 - dip) if dip > 0 else bid
-
-        # Stagger deeper when we already hold same-side inventory (additional
-        # re-buys target even cheaper levels for better avg cost).
-        levels = max(1, int(layered_order_levels))
-        if levels > 1 and order_count > 1:
-            level_idx = min(order_count - 1, levels - 1)
-            depth_per_level = max(0.01, bid * dip * 0.5) if dip > 0 else 0.01
-            base_price -= level_idx * depth_per_level
-
-        raw_price = min(base_price, fair_cap)
-
-    if mode_norm in ("fixed_pct", "layered"):
-        raw_price = _wide_book_lift_passive_raw_price(
-            bid=bid,
-            ask=ask,
-            fair_cap=float(fair_cap),
-            raw_price=float(raw_price),
-            enabled=wide_book_coalesce_enabled,
-            conservative=wide_book_conservative,
-            spread_rel_threshold=wide_book_spread_rel,
-            anchor_fraction=wide_book_anchor_fraction,
-        )
-
-    # Inventory-based quote skew: less aggressive on same-side inventory, slightly
-    # more aggressive when holding opposite side (helps rebalance exposure).
-    same_skew = _inventory_skew_factor(int(held_same_side), max_inventory_skew_pct)
-    opp_skew = _inventory_skew_factor(int(held_opp_side), max_inventory_skew_pct) * 0.5
-    skewed = raw_price * (1.0 - same_skew + opp_skew)
-    merged = _resolve_passive_quote_price(
-        passive_quote=passive_quote,
-        bid=bid,
-        ask=ask,
-        dip_based_price=skewed,
-        fair_cap=fair_cap,
-    )
-    return merged, float(dip)
-
-
-def _adaptive_kelly_fraction(base_kelly: float, calibration: dict[str, Any], sp: _StrategyParams) -> float:
+def _adaptive_kelly_fraction(base_kelly: float, calibration: dict[str, Any], sp: StrategyParams) -> float:
     """Scale Kelly down when recent calibration quality degrades."""
     base = max(0.01, float(base_kelly))
     if not sp.dynamic_kelly_enabled:
@@ -1925,186 +1615,14 @@ def _adaptive_kelly_fraction(base_kelly: float, calibration: dict[str, Any], sp:
     return floor_k + alpha * (base - floor_k)
 
 
-def _compute_macro_signal_24h(cfg: dict, sp: _StrategyParams) -> float:
-    """
-    Macro risk-on/risk-off feature from major indices.
-    Returns average 24h return across configured tickers.
-    """
-    if not sp.macro_signal_enabled:
-        return 0.0
-    rets: list[float] = []
-    for tk in sp.macro_signal_tickers:
-        try:
-            closes = yf_get_aggs(str(tk), days_back=5, config=cfg)
-            if closes and len(closes) >= 2 and closes[-2] > 0:
-                rets.append((float(closes[-1]) / float(closes[-2])) - 1.0)
-        except Exception:
-            continue
-    if not rets:
-        return 0.0
-    return max(-0.10, min(0.10, sum(rets) / len(rets)))
 
 
-# ---------------------------------------------------------------------------
-# Intraday vs daily-close: supported resolution times
-# ---------------------------------------------------------------------------
-# We only evaluate intraday markets that match our supported times:
-# - Crypto (BTC, ETH, SOL, …): 5pm ET (typical crypto settlement)
-# - US equity indices (^GSPC, ^NDX): 4pm ET (regular session close)
-# - Listed commodity futures (CL=F, BZ=F, GC=F, SI=F, HG=F, RB=F): any titled hour (16–17 ET = “standard” lenient path)
-# All other intraday times on unsupported underlyings (e.g. 7pm EDT) are skipped.
-_RESOLUTION_HOUR_PATTERN = re.compile(
-    r"(?:(?:today|tomorrow)\s+at|@|\bat)\s+(\d{1,2})(?::\d{2})?\s*(am|pm)\b",
-    re.I,
-)
 
 
-def _get_resolution_hour_from_title(title: str) -> int | None:
-    """
-    Parse intraday resolution hour from title. Returns 24h hour (16=4pm, 17=5pm) or None if no intraday.
-    """
-    m = _RESOLUTION_HOUR_PATTERN.search(title)
-    if not m:
-        return None
-    hour_str = m.group(1)
-    am_pm = (m.group(2) or "").lower()
-    if not hour_str or not am_pm:
-        return None
-    hour = int(hour_str)
-    if "pm" in am_pm and hour < 12:
-        hour += 12
-    elif "am" in am_pm and hour == 12:
-        hour = 0
-    return hour
-
-
-def _get_title(market_or_title: dict | str) -> str:
-    """Extract full title string from market dict or raw string."""
-    if isinstance(market_or_title, dict):
-        title = (
-            (market_or_title.get("title") or market_or_title.get("yes_sub_title") or "")
-            + (market_or_title.get("no_sub_title") or "")
-        )
-    else:
-        title = str(market_or_title)
-    return title
-
-
-def _should_skip_by_resolution(market_or_title: dict | str, yf_ticker: str) -> bool:
-    """
-    True if we should SKIP this market (never evaluate). We evaluate:
-    - Daily-close markets (no intraday time in title)
-    - Crypto, US equity indices (^GSPC, ^NDX), and listed commodity futures at ANY intraday time
-      - 5pm crypto / 4pm index: use standard min_edge
-      - Commodity futures: 4pm or 5pm ET = standard; other titled hours → strict
-      - Other times (e.g. 8pm ET): use strict intraday_other_min_p_win (only buy when almost certain)
-    - Non–supported underlyings with intraday → skip (no supported time)
-    """
-    title = _get_title(market_or_title)
-    hour = _get_resolution_hour_from_title(title)
-    if hour is None:
-        return False  # No intraday time → treat as daily close, don't skip
-
-    is_idx = _yf_is_us_equity_index(yf_ticker)
-    is_crypto = yf_ticker in GEMINI_CRYPTO_YF
-    is_cfu = _yf_is_commodity_future(yf_ticker)
-    if is_idx or is_crypto or is_cfu:
-        return False  # Evaluate (strict threshold for non-standard hours where applicable)
-    return True
-
-
-def _is_intraday_market(market_or_title: dict | str, yf_ticker: str) -> bool:
-    """True if market settles at a specific time (5pm, 4pm, etc.) — not daily close.
-    For intraday, empirical P(daily close above X) is wrong; prefer volatility model."""
-    title = _get_title(market_or_title)
-    hour = _get_resolution_hour_from_title(title)
-    if hour is None:
-        return False
-    return (
-        _yf_is_us_equity_index(yf_ticker)
-        or yf_ticker in GEMINI_CRYPTO_YF
-        or _yf_is_commodity_future(yf_ticker)
-    )
-
-
-def _is_other_intraday(market_or_title: dict | str, yf_ticker: str) -> bool:
-    """
-    True if this is an intraday market at a time OTHER than our standard 5pm crypto / 4pm US index
-    / 4–5pm commodity futures window.
-    E.g. "Bitcoin today at 8pm ET" → use strict "almost certain" threshold (intraday_other_min_p_win).
-    """
-    title = _get_title(market_or_title)
-    hour = _get_resolution_hour_from_title(title)
-    if hour is None:
-        return False
-
-    is_idx = _yf_is_us_equity_index(yf_ticker)
-    is_crypto = yf_ticker in GEMINI_CRYPTO_YF
-    is_cfu = _yf_is_commodity_future(yf_ticker)
-    if is_idx and hour == 16:
-        return False  # Standard 4pm US equity index
-    if is_crypto and hour == 17:
-        return False  # Standard 5pm crypto
-    if is_cfu and hour in (16, 17):
-        return False  # US cash-session close window for futures-backed titles
-    # Has intraday time but not standard → other intraday
-    return is_idx or is_crypto or is_cfu
-
-
-_ULTRA_SHORT_TITLE_RE = re.compile(
-    r"(?i)\b15\s*min|15m\b|next\s+fifteen|up\s+in\s+next\s+15",
-)
-
-
-def _hours_until_resolution_unified(market_or_title: dict | str, yf_ticker: str) -> float | None:
-    """Hours until resolution from API fields (Kalshi/Gemini) or parsed title. None if unknown."""
-    if isinstance(market_or_title, dict):
-        res_dt = _resolution_utc_from_market_or_event(market_or_title)
-        if res_dt is not None:
-            return (res_dt - datetime.now(UTC)).total_seconds() / 3600.0
-    title = _get_title(market_or_title)
-    res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
-    if res_dt is None:
-        return None
-    if res_dt.tzinfo is None:
-        res_dt = res_dt.replace(tzinfo=ET)
-    return (res_dt.astimezone(UTC) - datetime.now(UTC)).total_seconds() / 3600.0
-
-
-def _minutes_until_resolution_unified(market_or_title: dict | str, yf_ticker: str) -> float | None:
-    """Minutes until resolution; None if unknown."""
-    h = _hours_until_resolution_unified(market_or_title, yf_ticker)
-    if h is None:
-        return None
-    return max(0.0, h * 60.0)
-
-
-def _is_ultra_short_horizon(
-    market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
-) -> bool:
-    """
-    True for sub-hour style contracts: title hints (15m) or time-to-expiry <= ultra_short_dte_hours.
-    When ultra_short_dte_hours <= 0, only title / ticker patterns trigger (e.g. Kalshi KX*15M, Gemini *15M).
-    """
-    if isinstance(market_or_title, dict):
-        ser = str(market_or_title.get("series") or "")
-        tkr = str(market_or_title.get("ticker") or "")
-        # Kalshi: KXBTC15M, KXDOGE15M, …; Gemini event tickers often *15M*
-        if re.search(r"(?i)KX[A-Z0-9]*15M|[A-Z]{2,10}15M", f"{ser} {tkr}"):
-            return True
-    title = _get_title(market_or_title)
-    if _ULTRA_SHORT_TITLE_RE.search(title):
-        return True
-    if sp.ultra_short_dte_hours <= 0:
-        return False
-    h = _hours_until_resolution_unified(market_or_title, yf_ticker)
-    if h is None:
-        return False
-    return 0 < h <= sp.ultra_short_dte_hours
 
 
 def _strict_intraday_evaluation(
-    market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
+    market_or_title: dict | str, yf_ticker: str, sp: StrategyParams
 ) -> bool:
     """
     Use recommend_strict for non-5pm/4pm intraday or ultra-short horizons.
@@ -2112,18 +1630,18 @@ def _strict_intraday_evaluation(
     When barbell_soften_strict_intraday and barbell_enabled, strict calls also apply
     easy-win / consensus-sniper edge floors and barbell_strict_relaxed_min_p_win for base-shaped lines.
     """
-    if _is_other_intraday(market_or_title, yf_ticker):
+    if is_other_intraday(market_or_title, yf_ticker):
         return True
-    return _is_ultra_short_horizon(market_or_title, yf_ticker, sp)
+    return is_ultra_short_horizon(market_or_title, yf_ticker, sp)
 
 
 def _is_intraday_or_ultra_short(
-    market_or_title: dict | str, yf_ticker: str, sp: _StrategyParams
+    market_or_title: dict | str, yf_ticker: str, sp: StrategyParams
 ) -> bool:
     """Intraday-style vol cap / EWMA / blend: clock intraday OR ultra-short (e.g. Kalshi KXBTC15M)."""
-    if _is_intraday_market(market_or_title, yf_ticker):
+    if is_intraday_market(market_or_title, yf_ticker):
         return True
-    return _is_ultra_short_horizon(market_or_title, yf_ticker, sp)
+    return is_ultra_short_horizon(market_or_title, yf_ticker, sp)
 
 
 # ---------------------------------------------------------------------------
@@ -2134,443 +1652,8 @@ def _is_intraday_or_ultra_short(
 
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
-_MONTHS = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-}
-# today/tomorrow at 5pm / 5:00pm (optional ET/EDT/EST)
-_RELATIVE_TIME = re.compile(
-    r"(today|tomorrow)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?",
-    re.I,
-)
-# at 5pm (assume today)
-_AT_TIME_ONLY = re.compile(
-    r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?",
-    re.I,
-)
-# on March 16 / on Mar 16 / March 16 at 5pm
-_DATE_PATTERN = re.compile(
-    r"(?:on\s+)?"
-    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+"
-    r"(\d{1,2})"
-    r"(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?)?",
-    re.I,
-)
-# "Mar 23, 2026 at 4pm" — explicit date + year + time (try before _AT_TIME_ONLY to avoid "today")
-_DATE_WITH_YEAR_PATTERN = re.compile(
-    r"(?:on\s+)?"
-    r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+"
-    r"(\d{1,2})\s*,\s*(\d{4})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*(?:ET|EDT|EST|Eastern))?",
-    re.I,
-)
 
-
-def _parse_resolution_datetime_from_title(title: str, yf_ticker: str) -> datetime | None:
-    """
-    Parse resolution datetime from title (e.g. "tomorrow at 5pm ET", "on March 16 at 5pm").
-    Returns timezone-aware datetime in UTC, or None if unparseable.
-    Uses ET (America/New_York) for all times; crypto defaults to 5pm, S&P to 4pm for date-only.
-    """
-    if not title:
-        return None
-    title_lower = title.lower()
-    now_et = datetime.now(ET).date()
-
-    # 1. "today at 5pm" / "tomorrow at 5pm"
-    m = _RELATIVE_TIME.search(title)
-    if m:
-        rel, h_str, min_str, am_pm = m.group(1), m.group(2), m.group(3), m.group(4)
-        hour = int(h_str)
-        minute = int(min_str) if min_str else 0
-        if "pm" in am_pm.lower() and hour < 12:
-            hour += 12
-        elif "am" in am_pm.lower() and hour == 12:
-            hour = 0
-        base_date = now_et
-        if "tomorrow" in rel.lower():
-            base_date = base_date + timedelta(days=1)
-        try:
-            dt_et = datetime(base_date.year, base_date.month, base_date.day, hour, minute, 0, tzinfo=ET)
-            return dt_et.astimezone(UTC)
-        except (ValueError, TypeError):
-            return None
-
-    # 2. "on Mar 23, 2026 at 4pm" — explicit date + year (must run before _AT_TIME_ONLY)
-    m2a = _DATE_WITH_YEAR_PATTERN.search(title)
-    if m2a:
-        mon_str, day_str, year_str, h_str, min_str, am_pm = (
-            m2a.group(1), m2a.group(2), m2a.group(3),
-            m2a.group(4), m2a.group(5), m2a.group(6),
-        )
-        month = _MONTHS.get(mon_str[:3].lower())
-        if month is not None:
-            day = int(day_str)
-            year = int(year_str)
-            hour = int(h_str)
-            minute = int(min_str) if min_str else 0
-            if "pm" in (am_pm or "").lower() and hour < 12:
-                hour += 12
-            elif "am" in (am_pm or "").lower() and hour == 12:
-                hour = 0
-            try:
-                dt_et = datetime(year, month, day, hour, minute, 0, tzinfo=ET)
-                return dt_et.astimezone(UTC)
-            except (ValueError, TypeError):
-                pass
-
-    # 3. "at 5pm" (no today/tomorrow/explicit date) - assume today
-    m2 = _AT_TIME_ONLY.search(title)
-    if m2:
-        h_str, min_str, am_pm = m2.group(1), m2.group(2), m2.group(3)
-        hour = int(h_str)
-        minute = int(min_str) if min_str else 0
-        if "pm" in am_pm.lower() and hour < 12:
-            hour += 12
-        elif "am" in am_pm.lower() and hour == 12:
-            hour = 0
-        try:
-            dt_et = datetime(now_et.year, now_et.month, now_et.day, hour, minute, 0, tzinfo=ET)
-            return dt_et.astimezone(UTC)
-        except (ValueError, TypeError):
-            return None
-
-    # 4. "on March 16" / "March 16 at 5pm" - explicit date (no year)
-    m3 = _DATE_PATTERN.search(title)
-    if m3:
-        mon_str, day_str = m3.group(1), m3.group(2)
-        month = _MONTHS.get(mon_str[:3].lower())
-        if not month:
-            return None
-        day = int(day_str)
-        year = now_et.year
-        # If date has passed this year, assume next year
-        try:
-            cand = datetime(year, month, day, tzinfo=ET)
-        except ValueError:
-            return None
-        if cand.date() < now_et:
-            year += 1
-        # Hour: from "at 5pm" in match, or default 16 (4pm) US index / 17 (5pm) crypto & others
-        default_hour = 16 if _yf_is_us_equity_index(yf_ticker) else 17
-        if m3.group(3) is not None:
-            h_str, min_str, am_pm = m3.group(3), m3.group(4), m3.group(5)
-            hour = int(h_str)
-            minute = int(min_str) if min_str else 0
-            if "pm" in (am_pm or "").lower() and hour < 12:
-                hour += 12
-            elif "am" in (am_pm or "").lower() and hour == 12:
-                hour = 0
-        else:
-            hour, minute = default_hour, 0
-        try:
-            dt_et = datetime(year, month, day, hour, minute, 0, tzinfo=ET)
-            return dt_et.astimezone(UTC)
-        except (ValueError, TypeError):
-            return None
-
-    return None
-
-
-def _parse_iso8601_utc(value: str | None) -> datetime | None:
-    """Parse API timestamps (Kalshi close_time, Gemini expiryDate) to UTC-aware datetime."""
-    if not value or not str(value).strip():
-        return None
-    s = str(value).strip().replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
-
-
-def _resolution_utc_from_market_or_event(obj: dict) -> datetime | None:
-    """
-    Best-effort resolution instant from Kalshi market dict, Gemini event, or wrapped {market: ...}.
-    Prefers close_time / expected_expiration_time (Kalshi) and expiryDate (Gemini).
-    """
-    if not isinstance(obj, dict):
-        return None
-    inner = obj.get("market", obj)
-    for key in ("close_time", "expected_expiration_time", "expiration_time", "expiryDate", "latest_expiration_time"):
-        raw = inner.get(key)
-        if raw:
-            dt = _parse_iso8601_utc(str(raw))
-            if dt is not None:
-                return dt
-    for c in inner.get("contracts") or []:
-        raw = c.get("expiryDate")
-        if raw:
-            dt = _parse_iso8601_utc(str(raw))
-            if dt is not None:
-                return dt
-    return None
-
-
-def _get_days_to_expiry_from_market(
-    market_or_title: dict | str, yf_ticker: str, default_days: float = 30.0
-) -> float:
-    """
-    Compute days (or fraction) until resolution.
-    Uses API timestamps when present (critical for KXBTC15M / sub-hour titles without clock text),
-    else _parse_resolution_datetime_from_title.
-    """
-    if isinstance(market_or_title, dict):
-        res_dt = _resolution_utc_from_market_or_event(market_or_title)
-        if res_dt is not None:
-            now_utc = datetime.now(UTC)
-            days = (res_dt - now_utc).total_seconds() / 86400.0
-            return max(0.0007, days)  # ~1 min floor for very short-dated contracts
-
-    title = _get_title(market_or_title)
-    res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
-    if res_dt is None:
-        return default_days
-    if res_dt.tzinfo is None:
-        res_dt = res_dt.replace(tzinfo=ET)
-    now_utc = datetime.now(UTC)
-    res_utc = res_dt.astimezone(UTC)
-    delta = res_utc - now_utc
-    days = delta.total_seconds() / 86400.0
-    return max(0.01, days)  # Minimum 0.01 days (~15 min) for numerical stability
-
-
-def _hours_until_resolution(title: str, yf_ticker: str) -> float | None:
-    """Hours until resolution (positive = future, negative = past). None if unparseable."""
-    res_dt = _parse_resolution_datetime_from_title(title, yf_ticker)
-    if res_dt is None:
-        return None
-    now_utc = datetime.now(UTC)
-    res_utc = res_dt.astimezone(UTC)
-    return (res_utc - now_utc).total_seconds() / 3600.0
-
-
-# ---------------------------------------------------------------------------
-# Strike/threshold extraction (Kalshi vs Gemini)
-# ---------------------------------------------------------------------------
-
-
-def _extract_strike(market: dict) -> tuple[float | None, str | None, float | None]:
-    """
-    Extract threshold, direction, and optional high-threshold for ranges from Kalshi market.
-    Returns (threshold, direction, threshold_hi) - direction: 'above'|'below'|'between'|None.
-    """
-    m = market.get("market", market)
-    strike_type = (m.get("strike_type") or "").lower()
-    floor = m.get("floor_strike")
-    cap = m.get("cap_strike")
-    threshold, direction, threshold_hi = None, None, None
-    
-    if strike_type == "between" and floor is not None and cap is not None:
-        threshold, direction, threshold_hi = float(floor), "between", float(cap)
-    elif floor is not None and strike_type in ("greater", "greater_or_equal"):
-        threshold, direction = float(floor), "above"
-    elif cap is not None and strike_type in ("less", "less_or_equal"):
-        threshold, direction = float(cap), "below"
-    elif floor is not None:
-        threshold, direction = float(floor), "above"
-    elif cap is not None:
-        threshold, direction = float(cap), "below"
-
-    if threshold is None:
-        title = (m.get("title") or m.get("yes_sub_title") or "") + " " + (m.get("no_sub_title") or "")
-        # Range/Bracket: "61-62°" or "between 50 and 60"
-        range_match = re.search(r"([\d.,]+)\s*-\s*([\d.,]+)°", title)
-        if not range_match:
-            range_match = re.search(r"between\s*([\d.,]+)\s*and\s*([\d.,]+)", title, re.I)
-        if range_match:
-            threshold = float(range_match.group(1).replace(",", ""))
-            threshold_hi = float(range_match.group(2).replace(",", ""))
-            direction = "between"
-        else:
-            for pattern, dir_ in [
-                (r"above\s*\$?([\d,]+(?:\.\d+)?)", "above"),
-                (r">\s*\$?([\d,]+(?:\.\d+)?)", "above"),
-                (r"over\s*\$?([\d,]+(?:\.\d+)?)", "above"),
-                (r"below\s*\$?([\d,]+(?:\.\d+)?)", "below"),
-                (r"<\s*\$?([\d,]+(?:\.\d+)?)", "below"),
-            ]:
-                match = re.search(pattern, title, re.I)
-                if match:
-                    threshold = float(match.group(1).replace(",", ""))
-                    direction = dir_
-                    break
-                    
-    # Fallback: parse strike from Kalshi ticker
-    ticker = m.get("ticker") or ""
-    if threshold is None:
-        # Bracket: -B61.5 -> [61, 62] (center +/- 0.5)
-        b_match = re.search(r"-B([\d.]+)$", ticker)
-        if b_match:
-            center = float(b_match.group(1))
-            threshold = center - 0.5
-            threshold_hi = center + 0.5
-            direction = "between"
-        else:
-            t_match = re.search(r"-T([\d.]+)$", ticker)
-            if t_match:
-                threshold = float(t_match.group(1))
-                direction = "above"
-                
-    return threshold, direction, threshold_hi
-
-
-# ---------------------------------------------------------------------------
-# Probability models
-# ---------------------------------------------------------------------------
-def _empirical_probability(
-    closes: list[float],
-    threshold: float,
-    direction: str,
-    *,
-    recent_days: int = 90,
-    recent_weight: float = 3.0,
-    use_rolling_window: bool = True,
-    weighting: str = "step_recent",
-    exponential_halflife_bars: int = 14,
-) -> float:
-    """P(close above/below threshold) from historical closes with recency weighting.
-
-    - If use_rolling_window, keep only the most recent `recent_days`.
-    - weighting ``step_recent``: extra weight on the most recent `recent_days` slice (legacy).
-    - weighting ``exponential``: exponentially decay weights toward older bars (halflife in bars).
-    """
-    if not closes:
-        return 0.0
-    data = closes[-recent_days:] if (use_rolling_window and recent_days > 0) else closes
-    n = len(data)
-    if n == 0:
-        return 0.0
-    wmode = (weighting or "step_recent").strip().lower()
-    if wmode == "exponential":
-        hl = max(1.0, float(exponential_halflife_bars))
-        lam = math.log(2) / hl
-        if np is not None:
-            arr = np.asarray(data, dtype=float)
-            # Newest observation gets highest weight: index n-1 has age 0
-            ages = np.arange(n - 1, -1, -1, dtype=float)
-            w = np.exp(-lam * ages)
-            w = w / max(1e-12, float(w.sum()))
-            if direction == "above":
-                hits = (arr > threshold).astype(float)
-            else:
-                hits = (arr < threshold).astype(float)
-            return float(np.dot(hits, w))
-        tw = 0.0
-        wins = 0.0
-        for i, c in enumerate(data):
-            age = n - 1 - i
-            wi = math.exp(-lam * age)
-            tw += wi
-            if direction == "above":
-                wins += wi if c > threshold else 0.0
-            else:
-                wins += wi if c < threshold else 0.0
-        return float(wins / tw) if tw > 0 else 0.0
-    if np is not None:
-        arr = np.asarray(data, dtype=float)
-        if recent_days <= 0 or recent_weight <= 1.0:
-            if direction == "above":
-                return float(np.mean(arr > threshold))
-            return float(np.mean(arr < threshold))
-        weights = np.ones(n, dtype=float)
-        cutoff = max(0, n - recent_days)
-        weights[cutoff:] = float(recent_weight)
-        if direction == "above":
-            wins = np.where(arr > threshold, weights, 0.0).sum()
-        else:
-            wins = np.where(arr < threshold, weights, 0.0).sum()
-        total_w = float(weights.sum())
-        return float(wins / total_w) if total_w > 0 else 0.0
-
-    if recent_days <= 0 or recent_weight <= 1.0:
-        if direction == "above":
-            return sum(1 for c in data if c > threshold) / n
-        return sum(1 for c in data if c < threshold) / n
-
-    cutoff = max(0, n - recent_days)
-    wins = 0.0
-    total_w = 0.0
-    for i, c in enumerate(data):
-        w = recent_weight if i >= cutoff else 1.0
-        total_w += w
-        if direction == "above":
-            wins += w if c > threshold else 0.0
-        else:
-            wins += w if c < threshold else 0.0
-    return wins / total_w if total_w > 0 else 0.0
-
-
-def _empirical_probability_multi_horizon(
-    closes: list[float],
-    threshold: float,
-    direction: str,
-    *,
-    short_days: int,
-    medium_days: int,
-    long_days: int,
-    w_short: float,
-    w_medium: float,
-    w_long: float,
-    recent_weight: float,
-    use_rolling_window: bool,
-    weighting: str,
-    exponential_halflife_bars: int,
-) -> float:
-    """Blend empirical P from short / medium / long lookbacks (same weighting mode each)."""
-    wsum = w_short + w_medium + w_long
-    if wsum <= 0 or not closes:
-        return _empirical_probability(
-            closes,
-            threshold,
-            direction,
-            recent_days=max(short_days, 5),
-            recent_weight=recent_weight,
-            use_rolling_window=use_rolling_window,
-            weighting=weighting,
-            exponential_halflife_bars=exponential_halflife_bars,
-        )
-    n = len(closes)
-    rd_s = max(5, min(short_days, n))
-    rd_m = max(5, min(medium_days, n))
-    rd_l = max(5, min(long_days, n))
-    p_s = _empirical_probability(
-        closes,
-        threshold,
-        direction,
-        recent_days=rd_s,
-        recent_weight=recent_weight,
-        use_rolling_window=use_rolling_window,
-        weighting=weighting,
-        exponential_halflife_bars=exponential_halflife_bars,
-    )
-    p_m = _empirical_probability(
-        closes,
-        threshold,
-        direction,
-        recent_days=rd_m,
-        recent_weight=recent_weight,
-        use_rolling_window=use_rolling_window,
-        weighting=weighting,
-        exponential_halflife_bars=exponential_halflife_bars,
-    )
-    p_l = _empirical_probability(
-        closes,
-        threshold,
-        direction,
-        recent_days=rd_l,
-        recent_weight=recent_weight,
-        use_rolling_window=use_rolling_window,
-        weighting=weighting,
-        exponential_halflife_bars=exponential_halflife_bars,
-    )
-    return (w_short * p_s + w_medium * p_m + w_long * p_l) / wsum
-
-
-def _dynamic_kill_size_mult(series: str, series_pnl: dict[str, dict], sp: _StrategyParams) -> float:
+def _dynamic_kill_size_mult(series: str, series_pnl: dict[str, dict], sp: StrategyParams) -> float:
     if not sp.dynamic_kill_switch_enabled or not series_pnl:
         return 1.0
     key = (series or "").strip().upper()
@@ -2586,7 +1669,7 @@ def _dynamic_kill_size_mult(series: str, series_pnl: dict[str, dict], sp: _Strat
 
 
 def _effective_stop_loss_persist_seconds(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     *,
     side: str,
     closes: list[float] | None,
@@ -2640,144 +1723,11 @@ def _dynamic_empirical_weight(base_w: float | None, sample_n: int, n0: float, vo
     return max(0.1, min(0.9, w))
 
 
-@dataclass
-class _SignalFeatures:
-    """Normalized feature set passed to the signal model."""
-
-    emp_p: float
-    vol_p: float
-    market_yes: float
-    edge_yes: float
-    edge_no: float
-    moneyness: float
-    dte_norm: float
-    spread_norm: float
-    liquidity_consistency: float
-
 
 def _clip01(v: float) -> float:
     return max(0.0, min(1.0, float(v)))
 
 
-def _fit_probability_calibrator(
-    sp: _StrategyParams,
-    cfg: dict,
-) -> callable | None:
-    """
-    Fit a lightweight sklearn calibrator on resolved predictions (hist_p -> outcome).
-    Returns callable p->calibrated_p or None if unavailable/insufficient data.
-    """
-    if not sp.use_sklearn_calibration or not get_predictions_for_backtest:
-        return None
-    if (IsotonicRegression is None) or (LogisticRegression is None):
-        return None
-    try:
-        rows = get_predictions_for_backtest(resolved_only=True, config=cfg) or []
-        train = [
-            r for r in rows
-            if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
-        ]
-        if len(train) < max(10, sp.sklearn_calibration_min_samples):
-            return None
-        x = [float(r["hist_p"]) for r in train]
-        y = [1 if r["outcome"] == "win" else 0 for r in train]
-        method = (sp.sklearn_calibration_method or "isotonic").strip().lower()
-        if method == "platt":
-            lr = LogisticRegression(solver="lbfgs")
-            x2 = [[v] for v in x]
-            lr.fit(x2, y)
-
-            def _calibrate(p: float) -> float:
-                return _clip01(float(lr.predict_proba([[float(p)]])[0][1]))
-
-            return _calibrate
-        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-        iso.fit(x, y)
-
-        def _calibrate(p: float) -> float:
-            return _clip01(float(iso.predict([float(p)])[0]))
-
-        return _calibrate
-    except Exception:
-        return None
-
-
-def _fit_signal_model_weights(
-    sp: _StrategyParams,
-    cfg: dict,
-) -> dict[str, float] | None:
-    """
-    Learn signal-model feature weights from resolved predictions.
-
-    Uses logistic regression on available prediction columns. Features that are not
-    historically stored (e.g. moneyness, dte_norm) remain at default runtime weights.
-    """
-    if (
-        not sp.enable_auto_signal_weight_fit
-        or not get_predictions_for_backtest
-        or LogisticRegression is None
-    ):
-        return None
-    try:
-        rows = get_predictions_for_backtest(resolved_only=True, config=cfg) or []
-        train = [
-            r for r in rows
-            if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
-        ]
-        if len(train) < max(30, sp.signal_weight_fit_min_samples):
-            return None
-
-        # Feature schema mirrors the runtime scorer where possible.
-        feat_names = [
-            "emp_p",
-            "vol_p",
-            "market_yes",
-            "edge_yes",
-            "edge_no",
-            "spread_norm",
-            "liquidity_consistency",
-            "macro_24h_ret",
-        ]
-        x_rows: list[list[float]] = []
-        y_rows: list[int] = []
-
-        for r in train:
-            emp_p = _clip01(float(r.get("hist_p") or 0.5))
-            vol_p = _clip01(float(r.get("vol_p") if r.get("vol_p") is not None else emp_p))
-            market_yes = r.get("bid_at_place")
-            if market_yes is None:
-                market_yes = r.get("theoretical_price")
-            if market_yes is None:
-                market_yes = r.get("entry_price")
-            m = _clip01(float(market_yes or 0.5))
-            spread_bps = float(r.get("spread_bps_at_place") or 0.0)
-            spread_norm = _clip01(spread_bps / 10_000.0)
-
-            edge_yes = max(-1.0, min(1.0, emp_p - m))
-            edge_no = max(-1.0, min(1.0, (1.0 - emp_p) - (1.0 - m)))
-            liq_consistency = 1.0  # Not persisted historically; neutral default.
-
-            # Historical rows currently do not persist macro features, so keep neutral 0.0.
-            x_rows.append([emp_p, vol_p, m, edge_yes, edge_no, spread_norm, liq_consistency, 0.0])
-            y_rows.append(1 if r.get("outcome") == "win" else 0)
-
-        if len(x_rows) < max(30, sp.signal_weight_fit_min_samples):
-            return None
-
-        lr = LogisticRegression(
-            solver="lbfgs",
-            max_iter=1000,
-            C=max(1e-4, float(sp.signal_weight_fit_l2_c)),
-            class_weight="balanced",
-        )
-        lr.fit(x_rows, y_rows)
-        coefs = lr.coef_[0]
-        learned = {"bias": float(lr.intercept_[0])}
-        for i, name in enumerate(feat_names):
-            learned[name] = float(coefs[i])
-        return learned
-    except Exception:
-        return None
 
 
 def _build_signal_features(
@@ -2790,7 +1740,7 @@ def _build_signal_features(
     dte_days: float | None,
     spread_bps: float | None,
     no_bid: float | None,
-) -> _SignalFeatures:
+) -> SignalFeatures:
     vol = _clip01(vol_p if vol_p is not None else emp_p)
     mkt = _clip01(market_yes)
     edge_yes = emp_p - mkt
@@ -2804,7 +1754,7 @@ def _build_signal_features(
     consistency = 1.0
     if no_bid is not None:
         consistency = 1.0 - abs((mkt + _clip01(float(no_bid))) - 1.0)
-    return _SignalFeatures(
+    return SignalFeatures(
         emp_p=_clip01(emp_p),
         vol_p=vol,
         market_yes=mkt,
@@ -2816,40 +1766,6 @@ def _build_signal_features(
         liquidity_consistency=_clip01(consistency),
     )
 
-
-def _score_signal_model(features: _SignalFeatures, sp: _StrategyParams) -> float:
-    """
-    Simple interpretable signal model: weighted logistic over normalized features.
-    Weights are fully configurable in strategy.signal_model_weights.
-    """
-    w = {
-        "bias": 0.0,
-        "emp_p": 1.8,
-        "vol_p": 1.3,
-        "market_yes": 0.3,
-        "edge_yes": 1.2,
-        "edge_no": -0.8,
-        "moneyness": 0.2,
-        "dte_norm": 0.1,
-        "spread_norm": -0.5,
-        "liquidity_consistency": 0.3,
-    }
-    w.update(sp.signal_model_weights or {})
-    z = (
-        float(w["bias"])
-        + float(w["emp_p"]) * features.emp_p
-        + float(w["vol_p"]) * features.vol_p
-        + float(w["market_yes"]) * features.market_yes
-        + float(w["edge_yes"]) * features.edge_yes
-        + float(w["edge_no"]) * features.edge_no
-        + float(w["moneyness"]) * features.moneyness
-        + float(w["dte_norm"]) * features.dte_norm
-        + float(w["spread_norm"]) * features.spread_norm
-        + float(w["liquidity_consistency"]) * features.liquidity_consistency
-    )
-    if np is not None:
-        return _clip01(float(1.0 / (1.0 + np.exp(-z))))
-    return _clip01(1.0 / (1.0 + math.exp(-z)))
 
 
 def _regime_adjusted_recent_weight(
@@ -2909,13 +1825,13 @@ def _get_closes_for_empirical(
     days_back: int,
     closes_daily: list[float],
     market_or_title: dict | str,
-    sp: "_StrategyParams",
+    sp: "StrategyParams",
     cfg: dict,
     kalshi_series: str | None = None,
 ) -> list[float]:
     """For intraday + use_intraday_empirical: return prices at resolution hour; else daily closes."""
     if _is_intraday_or_ultra_short(market_or_title, yf_ticker, sp) and sp.use_intraday_empirical:
-        hour = _get_resolution_hour_from_title(_get_title(market_or_title))
+        hour = get_resolution_hour_from_title(get_title(market_or_title))
         if hour is not None:
             intraday = yf_get_intraday_aggs(yf_ticker, days_back, hour, cfg)
             if intraday:
@@ -2923,44 +1839,13 @@ def _get_closes_for_empirical(
     return closes_daily
 
 
-def _ewma_lambda_for_market(sp: "_StrategyParams", market_or_title: dict | str, yf_ticker: str) -> float:
+def _ewma_lambda_for_market(sp: "StrategyParams", market_or_title: dict | str, yf_ticker: str) -> float:
     """Use a faster EWMA decay for intraday contracts when configured."""
     if _is_intraday_or_ultra_short(market_or_title, yf_ticker, sp):
         return float(sp.intraday_ewma_lambda)
     return float(sp.ewma_lambda)
 
 
-def _ewma_variance(returns: list[float], lam: float = 0.94) -> float:
-    """
-    EWMA variance: sigma²_t = lam * sigma²_{t-1} + (1 - lam) * r²_t.
-    Initialize with sample variance of first returns. lam ~ 0.94 is common (RiskMetrics).
-    """
-    if not returns or lam <= 0 or lam >= 1:
-        return 0.0
-    n = len(returns)
-    if n < 3:
-        return 0.0
-    if np is not None:
-        arr = np.asarray(returns, dtype=float)
-        init_n = min(20, max(3, n // 2))
-        var = float(np.mean(arr[:init_n] ** 2))
-        for i in range(init_n, n):
-            var = lam * var + (1 - lam) * float(arr[i] ** 2)
-        return var
-    # Initialize with sample variance of first half (or first 20)
-    init_n = min(20, max(3, n // 2))
-    init_var = sum(r**2 for r in returns[:init_n]) / init_n
-    var = init_var
-    for i in range(init_n, n):
-        var = lam * var + (1 - lam) * (returns[i] ** 2)
-    return var
-
-
-def _sample_variance(returns: list[float]) -> float:
-    if len(returns) < 3:
-        return 0.0
-    mean_return = sum(returns) / len(returns)
-    return sum((r - mean_return) ** 2 for r in returns) / len(returns)
 
 
 def _garch_cache_key(returns: list[float]) -> tuple[int, int, int]:
@@ -2972,255 +1857,8 @@ def _garch_cache_key(returns: list[float]) -> tuple[int, int, int]:
     return (len(returns), first, last)
 
 
-def _garch_variance(returns: list[float], min_returns: int = 80) -> float | None:
-    """
-    One-step-ahead GARCH(1,1) conditional variance estimate.
-    Returns None when dependency/model fitting is unavailable.
-    """
-    if arch_model is None or len(returns) < max(30, int(min_returns)):
-        return None
-    key = _garch_cache_key(returns)
-    cached = _GARCH_VAR_CACHE.get(key)
-    if cached is not None:
-        return cached
-    try:
-        series = [float(r) * 100.0 for r in returns]  # stabilize optimizer scale
-        model = arch_model(series, p=1, q=1, mean="Zero", vol="GARCH", dist="normal", rescale=False)
-        fit = model.fit(disp="off")
-        forecast = fit.forecast(horizon=1)
-        var_pct2 = float(forecast.variance.values[-1, 0])
-        variance = max(0.0, var_pct2 / 10_000.0)
-        _GARCH_VAR_CACHE[key] = variance
-        return variance
-    except Exception:
-        return None
 
 
-def _volatility_probability(
-    closes: list[float],
-    threshold: float,
-    direction: str,
-    days_to_expiry: float = 30.0,
-    use_ewma: bool = False,
-    ewma_lambda: float = 0.94,
-    current_price: float | None = None,
-    *,
-    vol_model: str = "auto",
-    garch_min_returns: int = 80,
-    enable_otm_smile_adjustment: bool = True,
-    otm_smile_strength: float = 0.35,
-    otm_smile_max_mult: float = 2.0,
-    distribution: str = "normal",
-    t_df: float = 6.0,
-    zero_drift: bool = False,
-) -> float | None:
-    """
-    Log-normal / Black-Scholes style: P(price above/below K at expiry) using historical vol.
-    use_ewma: if True, use EWMA variance instead of sample variance (time-varying vol).
-    current_price: if provided and >0, use as S0 (live price) instead of closes[-1]; reflects
-        very recent moves for better safety. Fallback to closes[-1] when None.
-    Returns None if insufficient data.
-    """
-    if not closes or len(closes) < 5 or threshold <= 0:
-        return None
-    S0 = float(current_price) if (current_price is not None and current_price > 0) else float(closes[-1])
-    if S0 <= 0:
-        return None
-    # Log returns
-    returns = []
-    for i in range(1, len(closes)):
-        if closes[i - 1] > 0:
-            r = math.log(closes[i] / closes[i - 1])
-            returns.append(r)
-    if len(returns) < 3:
-        return None
-    model = (vol_model or "auto").strip().lower()
-    variance = 0.0
-    if model in {"garch", "auto"}:
-        garch_var = _garch_variance(returns, min_returns=garch_min_returns)
-        if garch_var is not None and garch_var > 0:
-            variance = garch_var
-    if variance <= 0 and (use_ewma or model in {"ewma", "auto"}):
-        variance = _ewma_variance(returns, ewma_lambda)
-    if variance <= 0:
-        variance = _sample_variance(returns)
-    sigma_daily = variance ** 0.5
-    sigma_annual = sigma_daily * (252 ** 0.5)
-    # OTM smile adjustment: increase vol for OTM strikes so tail probabilities are less understated.
-    if enable_otm_smile_adjustment and sigma_annual > 0:
-        m = math.log(max(1e-12, threshold / S0))
-        is_otm_for_yes = (direction == "above" and threshold > S0) or (
-            direction == "below" and threshold < S0
-        )
-        if is_otm_for_yes:
-            mult = 1.0 + max(0.0, otm_smile_strength) * abs(m)
-            mult = min(max(1.0, mult), max(1.0, otm_smile_max_mult))
-            sigma_annual *= mult
-    T = max(1e-6, days_to_expiry / 365.0)
-    if sigma_annual < 1e-8:
-        return None
-    if zero_drift:
-        d = (math.log(S0 / threshold)) / (sigma_annual * (T ** 0.5))
-    else:
-        # Standard d2 formula: ln(S/K) - sigma^2*T/2 / (sigma*sqrt(T))
-        d = (math.log(S0 / threshold) - 0.5 * sigma_annual**2 * T) / (sigma_annual * (T ** 0.5))
-    dist = (distribution or "normal").strip().lower()
-    if dist in ("student_t", "student-t", "t"):
-        # Heavy-tail model for crypto: preserves more probability mass in extremes.
-        df = max(2.1, float(t_df))
-        if scipy_t is not None:
-            phi_d = float(scipy_t.cdf(d, df=df))
-        elif scipy_norm is not None:
-            # Approximate fallback if scipy t-distribution isn't available.
-            scale = math.sqrt(df / max(1.0, (df - 2.0)))
-            phi_d = float(scipy_norm.cdf(d / scale))
-        else:
-            phi_d = 0.5 * (1 + math.erf((d / math.sqrt(df / max(1.0, (df - 2.0)))) / (2 ** 0.5)))
-    elif scipy_norm is not None:
-        phi_d = float(scipy_norm.cdf(d))
-    else:
-        # Φ(x) = (1 + erf(x/sqrt(2))) / 2
-        phi_d = 0.5 * (1 + math.erf(d / (2 ** 0.5)))
-    phi_d = max(0.0, min(1.0, phi_d))
-    if direction == "above":
-        return phi_d
-    return 1.0 - phi_d
-
-
-def _monte_carlo_probability(
-    S0: float,
-    sigma_annual: float,
-    T: float,
-    threshold: float,
-    direction: str,
-    n_paths: int = 10000,
-    distribution: str = "normal",
-    t_df: float = 6.0,
-    zero_drift: bool = False,
-) -> float:
-    """
-    Monte Carlo GBM simulation: run n_paths price paths and return fraction
-    where S_T crosses threshold. Multi-step (daily) to capture path-dependent
-    effects; Student-t innovations for heavy-tail realism.
-    """
-    if S0 <= 0 or sigma_annual < 1e-8 or T <= 0 or threshold <= 0:
-        return 0.5
-    n_steps = max(1, round(T * 365))
-    dt = T / n_steps
-    drift = 0.0 if zero_drift else (-0.5 * sigma_annual ** 2 * dt)
-    diffusion = sigma_annual * math.sqrt(dt)
-    dist = (distribution or "normal").strip().lower()
-    use_t = dist in ("student_t", "student-t", "t")
-    df = max(2.1, float(t_df)) if use_t else 0.0
-    t_scale = math.sqrt((df - 2.0) / df) if use_t and df > 2.0 else 1.0
-
-    if np is not None:
-        rng = np.random.default_rng()
-        if use_t and scipy_t is not None:
-            innovations = scipy_t.rvs(df, size=(n_paths, n_steps), random_state=rng) * t_scale
-        elif use_t:
-            innovations = rng.standard_normal((n_paths, n_steps)) * t_scale
-        else:
-            innovations = rng.standard_normal((n_paths, n_steps))
-        log_returns = drift + diffusion * innovations
-        log_S_T = math.log(S0) + np.sum(log_returns, axis=1)
-        S_T = np.exp(log_S_T)
-        if direction == "above":
-            return float(np.mean(S_T >= threshold))
-        return float(np.mean(S_T <= threshold))
-
-    hits = 0
-    for _ in range(n_paths):
-        log_s = math.log(S0)
-        for _ in range(n_steps):
-            z = random.gauss(0, t_scale)
-            log_s += drift + diffusion * z
-        S_T = math.exp(log_s)
-        if direction == "above":
-            hits += (S_T >= threshold)
-        else:
-            hits += (S_T <= threshold)
-    return hits / n_paths
-
-
-def _volatility_probability_with_mc(
-    closes: list[float],
-    threshold: float,
-    direction: str,
-    days_to_expiry: float = 30.0,
-    use_ewma: bool = False,
-    ewma_lambda: float = 0.94,
-    current_price: float | None = None,
-    *,
-    vol_model: str = "auto",
-    garch_min_returns: int = 80,
-    enable_otm_smile_adjustment: bool = True,
-    otm_smile_strength: float = 0.35,
-    otm_smile_max_mult: float = 2.0,
-    distribution: str = "normal",
-    t_df: float = 6.0,
-    mc_paths: int = 10000,
-    mc_blend_weight: float = 0.3,
-    zero_drift: bool = False,
-) -> float | None:
-    """
-    Blended analytical + Monte Carlo volatility probability.
-    Runs _volatility_probability for the analytical CDF result, then
-    _monte_carlo_probability for a simulation-based estimate, and returns
-    the weighted blend. mc_blend_weight controls MC influence (0 = pure
-    analytical, 1 = pure MC).
-    """
-    analytical = _volatility_probability(
-        closes, threshold, direction, days_to_expiry,
-        use_ewma=use_ewma, ewma_lambda=ewma_lambda,
-        current_price=current_price,
-        vol_model=vol_model, garch_min_returns=garch_min_returns,
-        enable_otm_smile_adjustment=enable_otm_smile_adjustment,
-        otm_smile_strength=otm_smile_strength,
-        otm_smile_max_mult=otm_smile_max_mult,
-        distribution=distribution, t_df=t_df,
-        zero_drift=zero_drift,
-    )
-    if analytical is None:
-        return None
-    if mc_paths <= 0 or mc_blend_weight <= 0:
-        return analytical
-    S0 = float(current_price) if (current_price is not None and current_price > 0) else float(closes[-1])
-    returns = []
-    for i in range(1, len(closes)):
-        if closes[i - 1] > 0:
-            returns.append(math.log(closes[i] / closes[i - 1]))
-    if len(returns) < 3:
-        return analytical
-    model = (vol_model or "auto").strip().lower()
-    variance = 0.0
-    if model in {"garch", "auto"}:
-        gv = _garch_variance(returns, min_returns=garch_min_returns)
-        if gv is not None and gv > 0:
-            variance = gv
-    if variance <= 0 and (use_ewma or model in {"ewma", "auto"}):
-        variance = _ewma_variance(returns, ewma_lambda)
-    if variance <= 0:
-        variance = _sample_variance(returns)
-    sigma_daily = variance ** 0.5
-    sigma_annual = sigma_daily * (252 ** 0.5)
-    if enable_otm_smile_adjustment and sigma_annual > 0:
-        m = math.log(max(1e-12, threshold / S0))
-        is_otm_for_yes = (direction == "above" and threshold > S0) or (
-            direction == "below" and threshold < S0
-        )
-        if is_otm_for_yes:
-            mult = 1.0 + max(0.0, otm_smile_strength) * abs(m)
-            mult = min(max(1.0, mult), max(1.0, otm_smile_max_mult))
-            sigma_annual *= mult
-    T = max(1e-6, days_to_expiry / 365.0)
-    mc = _monte_carlo_probability(
-        S0, sigma_annual, T, threshold, direction,
-        n_paths=mc_paths, distribution=distribution, t_df=t_df,
-        zero_drift=zero_drift,
-    )
-    w = max(0.0, min(1.0, mc_blend_weight))
-    return (1.0 - w) * analytical + w * mc
 
 
 def _dte_adjusted_strike_pct(base_pct: float, dte_days: float, reference_days: float = 1.0) -> float:
@@ -3285,7 +1923,7 @@ def _joint_dual_high_pessimism(
     blended: float,
     emp: float,
     vol_p: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> float:
     """
     When empirical and vol paths *both* sit at extreme high P, disagreement dampening
@@ -3308,7 +1946,7 @@ def _vol_emp_blend_hist_p_with_joint_trace(
     emp: float,
     vol_p: float,
     w_emp: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
     vol_ratio: float = 1.0,
 ) -> tuple[float, float]:
     """Empirical–vol dampened blend: (P before joint-high pull, P after)."""
@@ -3325,7 +1963,7 @@ def _vol_emp_blend_hist_p(
     emp: float,
     vol_p: float | None,
     w_emp: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
     vol_ratio: float = 1.0,
 ) -> float:
     """Empirical–vol blend + vol-disagreement dampening + joint high-P pessimism."""
@@ -3336,7 +1974,7 @@ def _vol_emp_blend_hist_p(
 
 
 def _print_barbell_joint_blend_diagnostic(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     *,
     emp: float,
     vol_p: float,
@@ -3381,7 +2019,7 @@ def _print_barbell_joint_blend_diagnostic(
     )
 
 
-def _adaptive_stress_size_multiplier(bump: float, sp: _StrategyParams) -> float:
+def _adaptive_stress_size_multiplier(bump: float, sp: StrategyParams) -> float:
     """Shrink Kelly sizing when adaptive edge bump is large (edge strictness + smaller risk)."""
     if not sp.adaptive_learning_enabled or bump <= 0:
         return 1.0
@@ -3411,7 +2049,7 @@ def _violates_no_above_rule(
 def _apply_bucket_penalty(
     hist_p: float,
     calibration: dict[str, Any],
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> float:
     """
     Dampen hist_p when its bucket has lower win rate than expected (overconfidence).
@@ -3440,7 +2078,7 @@ def _get_effective_min_edge(
     min_edge: float,
     direction: str,
     calibration: dict[str, Any],
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> float:
     """Apply calibration-based min_edge adjustments (overall + above+yes)."""
     if not sp.use_calibration or not calibration:
@@ -3469,7 +2107,7 @@ def _simple_ev_recommend(
     min_edge_net: float,
     maker_fee_rate: float,
     min_fee_per_order: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> str:
     """Single-threshold BUY YES / NO / SKIP from net edge after maker fee (symmetric legs)."""
     if yes_bid <= 0:
@@ -3520,7 +2158,7 @@ def _simple_ev_recommend(
 
 
 def _simple_ev_net_min_edge_bundle(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     market_or_event: dict | str,
     yf_ticker: str,
     yes_bid: float | None = None,
@@ -3554,9 +2192,9 @@ def _simple_ev_net_min_edge_bundle(
         "spread": None,
         "force_exploration_active": force_exploration_active,
     }    
-    us = _is_ultra_short_horizon(market_or_event, yf_ticker, sp)
+    us = is_ultra_short_horizon(market_or_event, yf_ticker, sp)
     detail["ultra_short"] = us
-    mins = _minutes_until_resolution_unified(market_or_event, yf_ticker)
+    mins = minutes_until_resolution_unified(market_or_event, yf_ticker)
     detail["minutes_left"] = mins
     
     if not us:
@@ -3584,7 +2222,7 @@ def _simple_ev_net_min_edge_bundle(
     return eff, detail
 
 
-def _simple_ev_calibration_size_mult(calibration: dict[str, Any] | None, sp: _StrategyParams) -> float:
+def _simple_ev_calibration_size_mult(calibration: dict[str, Any] | None, sp: StrategyParams) -> float:
     if not sp.use_calibration or not calibration:
         return 1.0
     resolved = int(calibration.get("resolved_count", 0) or 0)
@@ -3597,7 +2235,7 @@ def _simple_ev_calibration_size_mult(calibration: dict[str, Any] | None, sp: _St
 
 
 def _print_effective_edge_trace(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     min_edge_cfg: float,
     *,
     simple_mode: bool,
@@ -3664,7 +2302,7 @@ def _print_effective_edge_trace(
         )
 
 
-def _dte_edge_scale_factor(dte_days: float, sp: _StrategyParams) -> float:
+def _dte_edge_scale_factor(dte_days: float, sp: StrategyParams) -> float:
     """
     Scale required min_edge: easier hurdle when DTE is short (less time for model error),
     harder when DTE is long ("dead zone" contracts).
@@ -3712,7 +2350,7 @@ def _vol_ratio(curr_vol: float | None, base_vol: float | None) -> float:
     return max(0.0, float(curr_vol) / float(base_vol))
 
 
-def _dynamic_stability_seconds(sp: "_StrategyParams", vol_ratio: float) -> int:
+def _dynamic_stability_seconds(sp: "StrategyParams", vol_ratio: float) -> int:
     base = max(0, int(sp.min_stability_duration_seconds))
     if base <= 0 or not sp.enable_dynamic_stability_window:
         return base
@@ -3723,7 +2361,7 @@ def _dynamic_stability_seconds(sp: "_StrategyParams", vol_ratio: float) -> int:
 
 
 def _cross_exchange_sanity_block_side(
-    sp: "_StrategyParams",
+    sp: "StrategyParams",
     *,
     momentum_ret: float,
     local_yes: float,
@@ -3750,7 +2388,7 @@ def _cross_exchange_sanity_block_side(
 
 
 def _compute_directional_parity_penalty(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     cfg: dict,
 ) -> tuple[float, float]:
     """
@@ -3805,7 +2443,7 @@ def _should_downgrade_buy_yes_above(
     yes_bid: float,
     min_edge: float,
     calibration: dict[str, Any],
-    sp: _StrategyParams,
+    sp: StrategyParams,
     maker_fee_rate: float,
 ) -> bool:
     """If BUY YES on 'above' and above+yes underperforms, require extra edge or downgrade to SKIP."""
@@ -3851,7 +2489,7 @@ def _barbell_yes_bucket(
     hist_p: float,
     yes_bid: float,
     maker_fee_rate: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> str | None:
     """Classify a potential BUY YES leg: base (high-P consensus) | alpha (cheap + edge) | None."""
     if not sp.barbell_enabled:
@@ -3881,7 +2519,7 @@ def _barbell_no_bucket(
     hist_p: float,
     no_bid: float,
     maker_fee_rate: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> str | None:
     """Classify a potential BUY NO leg: base | alpha | None."""
     if not sp.barbell_enabled:
@@ -3918,14 +2556,6 @@ def _barbell_status_for_log(bucket: str, blocked: bool, rec: str) -> str:
     return "—"
 
 
-def _maker_fee_rate_for_market(sp: _StrategyParams, platform: str, yf_ticker: str | None) -> float:
-    """Platform-specific maker fee with index override support."""
-    if platform == PLATFORM_KALSHI and (yf_ticker or "").strip().upper() in _KALSHI_INDEX_MAKER_FEE_YF:
-        return max(0.0, float(sp.kalshi_sp500_maker_fee_rate))
-    if platform == PLATFORM_GEMINI:
-        return max(0.0, float(sp.gemini_maker_fee_rate))
-    return max(0.0, float(sp.kalshi_maker_fee_rate))
-
 
 def _compute_p_lose(
     hist_p: float,
@@ -3933,7 +2563,7 @@ def _compute_p_lose(
     no_bid: float,
     side: str,
     days_to_expiry: float | None,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> float:
     """
     P(our position loses). Blends model (hist_p) with market odds; market gets more
@@ -3995,7 +2625,7 @@ def _position_held_side_model_edge(
 
 
 def _position_flip_sell_allowed(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     *,
     hist_p: float,
     yes_bid: float,
@@ -4020,7 +2650,7 @@ def _position_flip_sell_allowed(
 
 
 def _hold_winner_skip_discretionary_sells(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     *,
     current_price: float,
     threshold: float,
@@ -4054,7 +2684,7 @@ def _hold_winner_skip_discretionary_sells(
 
 
 def _underlying_spot_itm_suppresses_book_stop(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     *,
     spot: float | None,
     threshold: float | None,
@@ -4112,14 +2742,14 @@ def _favorable_spot_edge_frac(
     return None
 
 
-def _stop_loss_near_expiry_active(sp: _StrategyParams, dte_days: float | None) -> bool:
+def _stop_loss_near_expiry_active(sp: StrategyParams, dte_days: float | None) -> bool:
     win = max(0.0, float(sp.stop_loss_near_expiry_within_hours))
     if win <= 0 or dte_days is None:
         return False
     return float(dte_days) * 24.0 < win
 
 
-def _clear_stop_loss_weak_state(platform: str, ticker: str, side: str, sp: _StrategyParams, cfg: dict) -> None:
+def _clear_stop_loss_weak_state(platform: str, ticker: str, side: str, sp: StrategyParams, cfg: dict) -> None:
     if update_stop_loss_book_weak_state is None:
         return
     update_stop_loss_book_weak_state(
@@ -4133,7 +2763,7 @@ def _clear_stop_loss_weak_state(platform: str, ticker: str, side: str, sp: _Stra
 
 
 def _should_fire_book_stop_loss(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     *,
     platform: str,
     ticker: str,
@@ -4230,7 +2860,7 @@ def _should_fire_book_stop_loss(
 
 
 def _min_hold_blocks_exit(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     entry_ts: float | None,
     now_ts: float,
 ) -> bool:
@@ -4242,7 +2872,7 @@ def _min_hold_blocks_exit(
 
 
 def _effective_edge_exit_floor(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     entry_edge: float | None,
 ) -> float:
     """Return the edge-exit floor, widened for high-conviction entries."""
@@ -4258,7 +2888,7 @@ def _effective_edge_exit_floor(
 
 
 def _stale_position_should_exit(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     entry_ts: float | None,
     now_ts: float,
     held_net_edge: float,
@@ -4277,7 +2907,7 @@ def _stale_position_should_exit(
 
 
 def _maybe_add_reentry_order(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     min_edge: float,
     pending_orders: list[dict],
     platform: str,
@@ -4699,7 +3329,7 @@ def _compute_buy_count(
     p_win: float,
     price: float,
     balance_cents: float,
-    sp: _StrategyParams,
+    sp: StrategyParams,
     use_kelly: bool,
     kelly_fraction: float,
     min_contracts: int,
@@ -4814,7 +3444,7 @@ def _gemini_no_ask(event: dict | None) -> float | None:
 def _liquidity_size_multiplier(
     bid: float,
     ask: float | None,
-    sp: _StrategyParams,
+    sp: StrategyParams,
 ) -> tuple[float, float | None]:
     """
     Return (size_mult, spread_bps). Wide spreads reduce size.
@@ -4838,14 +3468,6 @@ def _liquidity_size_multiplier(
     frac = (spread_bps - soft) / (hard - soft)
     return 1.0 - frac * (1.0 - floor), spread_bps
 
-
-def _find_gemini_event(gemini_events_by_asset: dict, ticker: str) -> dict:
-    """Find Gemini event by ticker across all assets. Returns {} if not found."""
-    for events in gemini_events_by_asset.values():
-        for evt in events:
-            if evt.get("ticker") == ticker:
-                return evt
-    return {}
 
 
 def _check_intra_arb_gemini(evt: dict, min_arb_fee: float) -> tuple[float, float, float] | None:
@@ -5237,83 +3859,6 @@ def _ensure_min_buy_count_if_affordable(
     return count
 
 
-def _allocate_budget_to_orders(
-    pending_orders: list[dict],
-    balance_cents: int,
-    max_pct: float,
-    filter_zero: bool = True,
-) -> None:
-    """
-    Adjust order counts so total cost fits budget. Prefer buying 1 of many
-    contracts over blowing the budget on a few. Modifies pending_orders in place.
-    filter_zero: if True, remove orders with count 0 from the list; if False, keep them.
-    """
-    if not pending_orders:
-        return
-
-    def _trace(stage: str, o: dict, before: int, after: int, note: str = "") -> None:
-        if before == after:
-            return
-        traces = o.setdefault("_sizing_trace", [])
-        traces.append({
-            "stage": stage,
-            "before": int(before),
-            "after": int(after),
-            "note": note,
-        })
-
-    def _capital_efficiency_score(o: dict) -> float:
-        """Edge-first ranking with soft liquidity/time modifiers."""
-        edge = max(0.0, float(o.get("edge", 0.0)))
-        spread_bps = float(o.get("spread_bps_at_place", 100.0) or 100.0)
-        liquidity_score = max(0.25, min(1.0, 1.0 - (max(0.0, spread_bps) / 10000.0)))
-        ttl_h = o.get("expected_hours_to_resolution")
-        if ttl_h is None:
-            title = str(o.get("title") or "")
-            yf = str(o.get("yf_ticker") or "")
-            parsed = _hours_until_resolution(title, yf) if title else None
-            ttl_h = parsed
-        ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
-        time_decay = 1.0 / (1.0 + (ttl_h / 24.0))
-        return edge * liquidity_score * time_decay
-
-    available_cents = int(balance_cents * max_pct)
-    total_cost_cents = sum(
-        o.get("count", 10) * int(float(o.get("price", 0)) * 100)
-        for o in pending_orders
-    )
-    if total_cost_cents <= available_cents:
-        return
-    # Scale down: prefer 1 of each for diversification
-    cost_if_1_each = sum(int(float(o.get("price", 0)) * 100) for o in pending_orders)
-    if cost_if_1_each <= available_cents:
-        for o in pending_orders:
-            before = int(o.get("count", 0) or 0)
-            o["count"] = 1
-            _trace("budget_one_each", o, before, 1, "force diversification under budget")
-        return
-    # Can't afford 1 of each: keep highest capital-efficiency trades first
-    by_edge = sorted(
-        pending_orders,
-        key=lambda x: (
-            -_capital_efficiency_score(x),
-            -float(x.get("edge", 0)),
-        ),
-    )
-    running_cents = 0
-    for o in by_edge:
-        cost_1 = int(float(o.get("price", 0)) * 100)
-        before = int(o.get("count", 0) or 0)
-        if running_cents + cost_1 <= available_cents:
-            o["count"] = 1
-            running_cents += cost_1
-            _trace("budget_rank_trim", o, before, 1, "ranked keep under max_total_buy_pct")
-        else:
-            o["count"] = 0
-            _trace("budget_rank_trim", o, before, 0, "ranked out by budget")
-    if filter_zero:
-        pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
-
 
 def _promote_zero_count_buys_if_affordable(
     orders: list[dict],
@@ -5481,7 +4026,7 @@ def _filter_pending_buys_by_min_payout_ratio(
         pending_orders[:] = kept
 
 
-def _pending_order_is_ultra_short_horizon(o: dict, ultra_short_dte_hours: float) -> bool:
+def _pending_orderis_ultra_short_horizon(o: dict, ultra_short_dte_hours: float) -> bool:
     """
     True when a pending BUY looks like a sub-hour / 15m-style contract for open-cap purposes.
     Uses ticker/title patterns (KX*15M, *15M*) and optional DTE in days vs ultra_short_dte_hours.
@@ -5511,7 +4056,7 @@ def _effective_open_contract_cap_for_order(
     """Per-order cap: optional higher (or lower) limit for ultra-short horizons."""
     if base_cap <= 0:
         return 0
-    if ultra_short_cap > 0 and _pending_order_is_ultra_short_horizon(o, ultra_short_dte_hours):
+    if ultra_short_cap > 0 and _pending_orderis_ultra_short_horizon(o, ultra_short_dte_hours):
         return int(ultra_short_cap)
     return int(base_cap)
 
@@ -5623,7 +4168,7 @@ def _capital_efficiency_score_order(o: dict) -> float:
     if ttl_h is None:
         title = str(o.get("title") or "")
         yf = str(o.get("yf_ticker") or "")
-        parsed = _hours_until_resolution(title, yf) if title else None
+        parsed = hours_until_resolution(title, yf) if title else None
         ttl_h = parsed
     ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
     time_decay = 1.0 / (1.0 + (ttl_h / 24.0))
@@ -5703,7 +4248,7 @@ def _print_sizing_trace(pending_orders: list[dict], *, logger=print, max_rows: i
 
 
 def _adaptive_execution_thresholds(
-    sp: _StrategyParams,
+    sp: StrategyParams,
     fill_stats: dict[str, Any] | None,
 ) -> tuple[float, float]:
     """
@@ -5795,238 +4340,14 @@ def _print_edge_bucket_kpis(cfg: dict, *, lookback_days: int = 30) -> None:
         pass
 
 
-def _cap_bankroll_exposure_buckets(
-    pending_orders: list[dict],
-    total_balance_cents: int,
-    *,
-    max_frac_per_direction: float,
-    max_frac_per_underlying: float,
-    logger=print,
-) -> None:
-    """
-    Bankroll-% risk buckets (Kalshi+Gemini combined notionals in this batch).
-    - Per (yf_ticker, YES|NO): cap stacked directional exposure.
-    - Per yf_ticker: cap total new exposure across strikes/resolutions.
-    Direction caps run first, then underlying caps (EV-friendly vs disjoint logical filters).
-    """
-    if not pending_orders or total_balance_cents <= 0:
-        return
-    fd = max(0.0, min(1.0, float(max_frac_per_direction)))
-    fu = max(0.0, min(1.0, float(max_frac_per_underlying)))
-    if fd <= 0 and fu <= 0:
-        return
 
-    def _risk_orders() -> list[dict]:
-        out: list[dict] = []
-        for o in pending_orders:
-            if o.get("rec") not in (REC_BUY_YES, REC_BUY_NO):
-                continue
-            if not str(o.get("yf_ticker") or "").strip():
-                continue
-            if int(o.get("count", 0) or 0) <= 0:
-                continue
-            out.append(o)
-        return out
-
-    touched = False
-    if fd > 0:
-        cap_d = int(total_balance_cents * fd)
-        if cap_d > 0:
-            by_dir: dict[tuple[str, str], list[dict]] = {}
-            for o in _risk_orders():
-                yf = str(o.get("yf_ticker")).strip()
-                side = "yes" if o.get("rec") == REC_BUY_YES else "no"
-                by_dir.setdefault((yf, side), []).append(o)
-            for grp in by_dir.values():
-                if _trim_order_group_to_notional_cap(grp, cap_d):
-                    touched = True
-    if fu > 0:
-        cap_u = int(total_balance_cents * fu)
-        if cap_u > 0:
-            by_yf: dict[str, list[dict]] = {}
-            for o in _risk_orders():
-                yf = str(o.get("yf_ticker")).strip()
-                by_yf.setdefault(yf, []).append(o)
-            for grp in by_yf.values():
-                if _trim_order_group_to_notional_cap(grp, cap_u):
-                    touched = True
-    if touched:
-        logger(
-            "[Risk] Bankroll exposure buckets: trimmed pending BUY notionals "
-            f"(per-direction cap={fd:.0%}, per-underlying cap={fu:.0%} of combined balance)."
-        )
-
-
-def _cap_cross_platform_exposure(
-    pending_orders: list[dict],
-    total_balance_cents: int,
-    max_cross_platform_exposure: float,
-) -> None:
-    """
-    Cap combined (Kalshi + Gemini) exposure per (yf_ticker, resolution key).
-    Prevents over-concentrating the same thesis across both exchanges.
-    """
-    if not pending_orders or total_balance_cents <= 0:
-        return
-    cap_pct = max(0.0, min(1.0, float(max_cross_platform_exposure)))
-    if cap_pct <= 0:
-        return
-    cap_cents = int(total_balance_cents * cap_pct)
-    if cap_cents <= 0:
-        return
-
-    grouped: dict[tuple[str, str], list[dict]] = {}
-    for o in pending_orders:
-        yf = o.get("yf_ticker")
-        res_key = _get_resolution_key_for_order(o)
-        if not yf or not res_key:
-            continue
-        grouped.setdefault((str(yf), str(res_key)), []).append(o)
-
-    for _, orders in grouped.items():
-        _trim_order_group_to_notional_cap(orders, cap_cents)
-
-
-def _apply_inter_arb_group_preflight(
-    pending_orders: list[dict],
-    *,
-    sp: _StrategyParams,
-    kalshi_balance_cents: int,
-    gemini_balance_cents: int,
-    max_pct_of_balance: float,
-    gemini_ready: bool,
-    logger=print,
-) -> None:
-    """
-    Ensure REC_ARB_INTER orders execute as balanced pairs.
-    By default, drops incomplete/unfunded groups; optional fallback can keep
-    one funded highest-likelihood leg when pair funding is not possible.
-    """
-    if not pending_orders or not sp.enable_inter_arb or not sp.arb_inter_require_group_preflight:
-        return
-
-    groups: dict[str, list[dict]] = {}
-    for o in pending_orders:
-        if o.get("rec") != REC_ARB_INTER:
-            continue
-        gid = str(o.get("arb_group") or "")
-        if gid:
-            groups.setdefault(gid, []).append(o)
-    if not groups:
-        return
-
-    dropped_groups: set[str] = set()
-    single_leg_fallback_groups: dict[str, dict] = {}
-    resized_legs = 0
-    max_pct = max(0.0, float(max_pct_of_balance))
-
-    def _leg_max_count(leg: dict) -> int:
-        price_c = int(max(1, round(float(leg.get("price", 0.0)) * 100)))
-        if price_c <= 0:
-            return 0
-        platform = str(leg.get("platform") or "")
-        bal = gemini_balance_cents if platform == PLATFORM_GEMINI else kalshi_balance_cents
-        spend = int(max(0, int(bal)) * max_pct)
-        return max(0, spend // price_c)
-
-    def _select_single_leg_fallback(gid: str, legs: list[dict], reason: str) -> bool:
-        if not sp.arb_inter_allow_single_leg_fallback:
-            dropped_groups.add(gid)
-            logger(f"[Arb Preflight] Drop {gid}: {reason}.")
-            return False
-        candidates: list[tuple[float, int, float, dict]] = []
-        for leg in legs:
-            requested = max(0, int(leg.get("count", 0)))
-            affordable = _leg_max_count(leg)
-            keep_count = min(requested, affordable)
-            if keep_count <= 0:
-                continue
-            # "Most likely bid": higher contract price implies higher implied win probability.
-            implied_win = max(0.0, min(1.0, float(leg.get("price", 0.0))))
-            edge = float(leg.get("edge", 0.0))
-            candidates.append((implied_win, keep_count, edge, leg))
-        if not candidates:
-            dropped_groups.add(gid)
-            logger(f"[Arb Preflight] Drop {gid}: {reason}; no funded fallback leg available.")
-            return False
-        _, keep_count, _, keep_leg = max(candidates, key=lambda t: (t[0], t[1], t[2]))
-        keep_leg["count"] = keep_count
-        keep_leg["rec"] = REC_BUY_YES if str(keep_leg.get("side", "")) == "yes" else REC_BUY_NO
-        keep_leg["arb_single_leg_fallback"] = True
-        keep_leg["arb_fallback_reason"] = reason
-        for leg in legs:
-            if leg is keep_leg:
-                continue
-            leg["count"] = 0
-        single_leg_fallback_groups[gid] = keep_leg
-        logger(
-            f"[Arb Preflight] Fallback {gid}: keeping single leg "
-            f"{keep_leg.get('platform')} {str(keep_leg.get('side')).upper()} "
-            f"@ ${float(keep_leg.get('price', 0.0)):.2f} x {keep_count} ({reason})."
-        )
-        return True
-
-    for gid, legs in groups.items():
-        platforms = {str(l.get("platform") or "") for l in legs}
-        if platforms != {PLATFORM_KALSHI, PLATFORM_GEMINI}:
-            _select_single_leg_fallback(
-                gid,
-                legs,
-                f"missing cross-exchange pair (platforms={sorted(platforms)})",
-            )
-            continue
-        if not gemini_ready:
-            _select_single_leg_fallback(
-                gid,
-                legs,
-                "Gemini client unavailable for paired inter-arb execution",
-            )
-            continue
-        requested = [max(0, int(l.get("count", 0))) for l in legs]
-        affordable = [_leg_max_count(l) for l in legs]
-        paired_count = min(requested + affordable)
-        if paired_count <= 0:
-            _select_single_leg_fallback(
-                gid,
-                legs,
-                f"insufficient paired balance (requested={requested}, affordable={affordable})",
-            )
-            continue
-        for leg in legs:
-            old = max(0, int(leg.get("count", 0)))
-            if old != paired_count:
-                resized_legs += 1
-            leg["count"] = paired_count
-
-    if dropped_groups:
-        before = len(pending_orders)
-        pending_orders[:] = [
-            o
-            for o in pending_orders
-            if not (o.get("rec") == REC_ARB_INTER and str(o.get("arb_group") or "") in dropped_groups)
-        ]
-        removed = before - len(pending_orders)
-        if removed > 0:
-            logger(f"[Arb Preflight] Removed {removed} inter-arb legs that could not be executed as full pairs.")
-    # Remove zero-count inter-arb legs, including the dropped side of fallback groups.
-    pending_orders[:] = [
-        o
-        for o in pending_orders
-        if not (o.get("rec") == REC_ARB_INTER and int(o.get("count", 0) or 0) <= 0)
-    ]
-    if single_leg_fallback_groups:
-        logger(
-            f"[Arb Preflight] Enabled single-leg fallback for {len(single_leg_fallback_groups)} inter-arb group(s)."
-        )
-    if resized_legs > 0:
-        logger(f"[Arb Preflight] Resized {resized_legs} inter-arb legs to matched paired counts.")
 
 
 def _maybe_add_two_sided_quotes(
     pending_orders: list[dict],
     candidates: list[dict],
     *,
-    sp: _StrategyParams,
+    sp: StrategyParams,
     balance_cents: int,
     use_kelly: bool,
     kelly_fraction: float,
@@ -6080,8 +4401,8 @@ def _maybe_add_two_sided_quotes(
             dip = _dte_confidence_dip(dip, p_win, c.get("dte"), sp)
             ask_side = c.get("yes_ask") if side == "yes" else c.get("no_ask")
             dip_price = max(0.01, min(0.99, bid * (1.0 - dip))) if dip else bid
-            mf_q = _maker_fee_rate_for_market(sp, str(c.get("platform") or ""), str(c.get("yf_ticker") or ""))
-            fair_cap_q = _clip_price(float(p_win) - _fee_per_contract(float(p_win), mf_q, sp.min_fee_per_order))
+            mf_q = maker_fee_rate_for_market(sp, str(c.get("platform") or ""), str(c.get("yf_ticker") or ""))
+            fair_cap_q = clip_price(float(p_win) - _fee_per_contract(float(p_win), mf_q, sp.min_fee_per_order))
             ask_f: float | None = None
             if ask_side is not None:
                 try:
@@ -6089,7 +4410,7 @@ def _maybe_add_two_sided_quotes(
                     ask_f = af if af > 0 else None
                 except (TypeError, ValueError):
                     pass
-            price = _resolve_passive_quote_price(
+            price = resolve_passive_quote_price(
                 passive_quote=_effective_passive_limit_quote(sp, c.get("dte")),
                 bid=bid,
                 ask=ask_f,
@@ -6108,7 +4429,7 @@ def _maybe_add_two_sided_quotes(
                     _bdv = float(_bsz)
                 except (TypeError, ValueError):
                     _bdv = None
-            count = _cap_buy_count_by_book_pct(count, _bdv, sp.max_pct_of_book_volume)
+            count = cap_buy_count_by_book_pct(count, _bdv, sp.max_pct_of_book_volume)
             if count <= 0:
                 continue
             order = {
@@ -6182,7 +4503,7 @@ def _sync_kalshi_settlements(kalshi: KalshiClient, cfg: dict) -> None:
         side = (p.get("side") or "").lower()
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
         yf_ticker = p.get("yf_ticker")
-        fee_rate = _maker_fee_rate_for_market(
+        fee_rate = maker_fee_rate_for_market(
             sp_sync,
             PLATFORM_KALSHI,
             str(yf_ticker or ""),
@@ -6328,7 +4649,7 @@ def _sync_gemini_settlements(gemini: GeminiPredictionClient, cfg: dict) -> None:
         side = (p.get("side") or "").lower()
         won = (side == "yes" and yes_settled) or (side == "no" and not yes_settled)
         yf_ticker = p.get("yf_ticker")
-        fee_rate = _maker_fee_rate_for_market(
+        fee_rate = maker_fee_rate_for_market(
             sp_sync,
             PLATFORM_GEMINI,
             str(yf_ticker or ""),
@@ -7033,7 +5354,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         extra_risk = f" (adaptive stress ×{stress_sz:.2f})" if stress_sz < 1.0 else ""
         print(f"[Risk] Kelly fraction: base={kelly_fraction:.2f} adaptive={kelly_fraction_live:.2f}{extra_risk}")
         print()
-    macro_signal_24h = _compute_macro_signal_24h(cfg, sp)
+    macro_signal_24h = compute_macro_signal_24h(sp, cfg)
     if sp.macro_signal_enabled:
         print(f"[Macro] 24h macro signal={macro_signal_24h:+.2%} from {', '.join(sp.macro_signal_tickers)}")
         print()
@@ -7089,8 +5410,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
         except Exception:
             series_pnl_kill = {}
-    probability_calibrator = _fit_probability_calibrator(sp, cfg)
-    learned_signal_weights = _fit_signal_model_weights(sp, cfg)
+    probability_calibrator = fit_probability_calibrator(sp, cfg)
+    learned_signal_weights = fit_signal_model_weights(sp, cfg)
     if learned_signal_weights:
         merged = dict(sp.signal_model_weights or {})
         merged.update(learned_signal_weights)
@@ -7426,7 +5747,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             except Exception:
                 m = mkt
 
-            if _should_skip_by_resolution(m, yf_ticker):
+            if should_skip_by_resolution(m, yf_ticker):
                 print(f"  {ticker}: SKIP (unsupported resolution — use 5pm ET crypto / 4pm ET S&P) | {title}")
                 continue
 
@@ -7450,7 +5771,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     print(f"  {ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
                     continue
 
-            threshold, direction, threshold_hi = _extract_strike(m)
+            threshold, direction, threshold_hi = extract_strike(m)
             if threshold is None or direction is None:
                 # Skip: empirical and vol models both require a threshold (from title, API, or ticker)
                 print(f"  {ticker}: YES {yes_bid:.2f} | (no threshold) {title}")
@@ -7553,7 +5874,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
                 recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
                 if sp.empirical_multi_horizon_enabled:
-                    emp = _empirical_probability_multi_horizon(
+                    emp = empirical_probability_multi_horizon(
                         closes_for_emp,
                         threshold,
                         direction,
@@ -7569,7 +5890,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                     )
                 else:
-                    emp = _empirical_probability(
+                    emp = empirical_probability(
                         closes_for_emp,
                         threshold,
                         direction,
@@ -7580,10 +5901,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                     )
                 hist_p = emp
-            dte = _get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
+            dte = get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             ewma_lambda_used = _ewma_lambda_for_market(sp, m, yf_ticker)
             vol_p = (
-                _volatility_probability_with_mc(
+                volatility_probability_with_mc(
                     closes,
                     threshold,
                     direction,
@@ -7693,7 +6014,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 hi=sp.model_prob_hard_hi,
                 enabled=sp.enable_model_prob_hard_cap,
             )
-            maker_fee_rate = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
+            maker_fee_rate = maker_fee_rate_for_market(sp, PLATFORM_KALSHI, yf_ticker)
             no_bid_early = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             effective_min_core_trace: float | None = None
             _us_edge_detail: dict[str, Any] | None = None
@@ -7818,7 +6139,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             print(f"[Learning] Penalizing edge by {penalty:.1%} for {_series_prefix} (Trust {_trust:.2f})")
                 if sp.dte_edge_scaling_enabled and dte is not None:
                     effective_min *= _dte_edge_scale_factor(float(dte), sp)
-                if _is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                if is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
                     effective_min *= float(sp.ultra_short_min_edge_mult)
                 effective_min_core_trace = float(effective_min)
                 effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
@@ -7834,7 +6155,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
-            if _is_ultra_short_horizon(m, yf_ticker, sp):
+            if is_ultra_short_horizon(m, yf_ticker, sp):
                 _up = (
                     sp.ultra_short_min_p_win_with_vol
                     if (use_vol and vol_p is not None)
@@ -8107,7 +6428,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"    ├─ Current:      {_fmt_price(current_price, is_weather)}  →  {_dist_str}")
             print(f"    ├─ Resolves in:  {_dte_str}")
             if vol_p is not None:
-                emp_kalshi = _empirical_probability(
+                emp_kalshi = empirical_probability(
                     closes,
                     threshold,
                     direction,
@@ -8138,7 +6459,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             else:
                 print(f"    ├─ Model P(YES): {hist_p:.1%}")
             print(f"    ├─ Market YES:   {yes_bid:.1%}  (what the market is pricing)")
-            if _is_ultra_short_horizon(m, yf_ticker, sp):
+            if is_ultra_short_horizon(m, yf_ticker, sp):
                 _usm = float(sp.ultra_short_min_edge_mult)
                 _us_note = " (no extra ×)" if _usm <= 1.0 else ""
                 print(
@@ -8349,7 +6670,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             )
                             print()
                             continue
-                if not _is_midprice_stable(
+                if not is_midprice_stable(
                     ticker=ticker,
                     platform=PLATFORM_KALSHI,
                     cfg=cfg,
@@ -8368,13 +6689,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _fee_le = _fee_per_contract(bid, maker_fee_rate, sp.min_fee_per_order)
                 _net_edge_le = _chosen_net_k
                 _age_k = resting_buy_age_minutes.get((PLATFORM_KALSHI, ticker, side))
-                _wbc_k = _limit_buy_wide_book_conservative(
+                _wbc_k = limit_buy_wide_book_conservative(
                     ticker,
                     yf_ticker,
                     sp.limit_buy_wide_book_conservative_substrings,
                     sp.limit_buy_wide_book_conservative_yf_tickers,
                 )
-                price, dip_used = _compute_limit_price(
+                price, dip_used = compute_limit_price(
                     bid=bid,
                     ask=ask_side,
                     p_win=p_win,
@@ -8443,7 +6764,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         kelly_dampen=sp.simple_ev_kelly_dampen,
                         max_bankroll_fraction=sp.simple_ev_max_bankroll_fraction,
                     )
-                    if _is_ultra_short_horizon(m, yf_ticker, sp):
+                    if is_ultra_short_horizon(m, yf_ticker, sp):
                         _sf *= float(sp.simple_ev_ultra_short_size_mult)
                     _sf *= _simple_ev_calibration_size_mult(calibration, sp)
                     if vol_p is not None and abs(float(emp) - float(vol_p)) > float(
@@ -8505,7 +6826,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         _bdv_k = float(bid_size_side)
                     except (TypeError, ValueError):
                         _bdv_k = None
-                count = _cap_buy_count_by_book_pct(count, _bdv_k, sp.max_pct_of_book_volume)
+                count = cap_buy_count_by_book_pct(count, _bdv_k, sp.max_pct_of_book_volume)
                 count = _ensure_min_buy_count_if_affordable(
                     count,
                     rec=rec,
@@ -8565,7 +6886,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             min(sp.disagreement_dip_max_price, bid_dip * sp.disagreement_dip_pct_of_bid),
                         )
                         price_dip = round(price_dip, 2)
-                        if price_dip >= 0.01 and _is_midprice_stable(
+                        if price_dip >= 0.01 and is_midprice_stable(
                             ticker=ticker, platform=PLATFORM_KALSHI, cfg=cfg, min_stability_seconds=dynamic_stability_seconds,
                             skip_in_preview=getattr(args, "preview", False),
                         ):
@@ -8607,13 +6928,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if p_win_yes >= sp.lottery_limit_min_p_win or p_win_no >= sp.lottery_limit_min_p_win:
                     side_lot = "yes" if p_win_yes >= p_win_no else "no"
                     p_win_lot = p_win_yes if side_lot == "yes" else p_win_no
-                    if p_win_lot >= sp.lottery_limit_min_p_win and _is_midprice_stable(
+                    if p_win_lot >= sp.lottery_limit_min_p_win and is_midprice_stable(
                         ticker=ticker, platform=PLATFORM_KALSHI, cfg=cfg, min_stability_seconds=dynamic_stability_seconds,
                         skip_in_preview=getattr(args, "preview", False),
                     ):
                         bid_lot = yes_bid if side_lot == "yes" else (float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
                         _book_lot = _extract_book_fields(m, yes_bid, float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid))
-                        _lot_px = _compute_lottery_limit_price(
+                        _lot_px = compute_lottery_limit_price(
                             sp=sp,
                             side=side_lot,
                             yes_bid=yes_bid,
@@ -8718,7 +7039,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  [Gemini] {g_ticker}: SKIP (strike gap {_gap_g:.1%} > {sp.max_buy_yes_strike_above_pct:.1%}) | {title}")
                         continue
 
-                if _should_skip_by_resolution(evt, yf_ticker):
+                if should_skip_by_resolution(evt, yf_ticker):
                     print(f"  [Gemini] {g_ticker}: SKIP (unsupported resolution — use 5pm ET) | {title}")
                     continue
                 # Intra-exchange arb: binary only (categorical contracts have per-strike yes/no)
@@ -8765,7 +7086,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
                 recent_w_g = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
                 if sp.empirical_multi_horizon_enabled:
-                    emp = _empirical_probability_multi_horizon(
+                    emp = empirical_probability_multi_horizon(
                         closes_for_emp_g,
                         threshold_g,
                         direction_g,
@@ -8781,7 +7102,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                     )
                 else:
-                    emp = _empirical_probability(
+                    emp = empirical_probability(
                         closes_for_emp_g,
                         threshold_g,
                         direction_g,
@@ -8791,10 +7112,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         weighting=sp.empirical_weighting,
                         exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                     )
-                dte_g = _get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
+                dte_g = get_days_to_expiry_from_market(evt, yf_ticker, sp.days_to_expiry)
                 ewma_lambda_used_g = _ewma_lambda_for_market(sp, evt, yf_ticker)
                 vol_p_gem = (
-                    _volatility_probability_with_mc(
+                    volatility_probability_with_mc(
                         closes,
                         threshold_g,
                         direction_g,
@@ -8888,7 +7209,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hi=sp.model_prob_hard_hi,
                     enabled=sp.enable_model_prob_hard_cap,
                 )
-                maker_fee_rate_gem = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
+                maker_fee_rate_gem = maker_fee_rate_for_market(sp, PLATFORM_GEMINI, yf_ticker)
                 no_bid_gem_early = _gemini_no_bid_from_event(evt, impl)
                 effective_min_core_trace_g: float | None = None
                 _us_edge_detail_g: dict[str, Any] | None = None
@@ -8984,7 +7305,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             effective_min_gem += sp.series_cooldown_extra_edge
                     if sp.dte_edge_scaling_enabled and dte_g is not None:
                         effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
-                    if _is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                    if is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
                         effective_min_gem *= float(sp.ultra_short_min_edge_mult)
                     effective_min_core_trace_g = float(effective_min_gem)
                     effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
@@ -9000,7 +7321,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
-                if _is_ultra_short_horizon(evt, yf_ticker, sp):
+                if is_ultra_short_horizon(evt, yf_ticker, sp):
                     _ug = (
                         sp.ultra_short_min_p_win_with_vol
                         if (use_vol and vol_p_gem is not None)
@@ -9013,7 +7334,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     try:
                         kalshi_ref = None
                         for mk in mkt_list:
-                            s_k = _extract_strike(mk)
+                            s_k = extract_strike(mk)
                             if s_k[0] == threshold_g and s_k[1] == direction_g and s_k[2] == threshold_hi_g:
                                 kalshi_ref = mk
                                 break
@@ -9285,7 +7606,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 else:
                     print(f"    ├─ Model P(YES): {hist_p_gem:.1%}")
                 print(f"    ├─ Market YES:   {impl:.1%}  (what the market is pricing)")
-                if _is_ultra_short_horizon(evt, yf_ticker, sp):
+                if is_ultra_short_horizon(evt, yf_ticker, sp):
                     _usm_g = float(sp.ultra_short_min_edge_mult)
                     _us_note_g = " (no extra ×)" if _usm_g <= 1.0 else ""
                     print(
@@ -9499,7 +7820,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 )
                                 print()
                                 continue
-                    if not _is_midprice_stable(
+                    if not is_midprice_stable(
                         ticker=evt.get("ticker", "?"),
                         platform=PLATFORM_GEMINI,
                         cfg=cfg,
@@ -9521,13 +7842,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _net_edge_leg = _chosen_net_g
                     _sym_g = get_instrument_symbol(evt, side) or ""
                     _age_g = resting_buy_age_minutes.get((PLATFORM_GEMINI, _sym_g, side)) if _sym_g else None
-                    _wbc_g = _limit_buy_wide_book_conservative(
+                    _wbc_g = limit_buy_wide_book_conservative(
                         str(evt.get("ticker", "?") or ""),
                         yf_ticker,
                         sp.limit_buy_wide_book_conservative_substrings,
                         sp.limit_buy_wide_book_conservative_yf_tickers,
                     )
-                    price, dip_used = _compute_limit_price(
+                    price, dip_used = compute_limit_price(
                         bid=bid,
                         ask=ask_side,
                         p_win=p_win,
@@ -9596,7 +7917,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             kelly_dampen=sp.simple_ev_kelly_dampen,
                             max_bankroll_fraction=sp.simple_ev_max_bankroll_fraction,
                         )
-                        if _is_ultra_short_horizon(evt, yf_ticker, sp):
+                        if is_ultra_short_horizon(evt, yf_ticker, sp):
                             _sf_g *= float(sp.simple_ev_ultra_short_size_mult)
                         _sf_g *= _simple_ev_calibration_size_mult(calibration, sp)
                         if vol_p_gem is not None and abs(float(emp) - float(vol_p_gem)) > float(
@@ -9670,7 +7991,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             _bdv_g = float(bid_size_side)
                         except (TypeError, ValueError):
                             _bdv_g = None
-                    count = _cap_buy_count_by_book_pct(count, _bdv_g, sp.max_pct_of_book_volume)
+                    count = cap_buy_count_by_book_pct(count, _bdv_g, sp.max_pct_of_book_volume)
                     count = _ensure_min_buy_count_if_affordable(
                         count,
                         rec=rec,
@@ -9734,7 +8055,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                 min(sp.disagreement_dip_max_price, bid_dip * sp.disagreement_dip_pct_of_bid),
                             )
                             price_dip = round(price_dip, 2)
-                            if price_dip >= 0.01 and _is_midprice_stable(
+                            if price_dip >= 0.01 and is_midprice_stable(
                                 ticker=evt.get("ticker", "?"),
                                 platform=PLATFORM_GEMINI,
                                 cfg=cfg,
@@ -9784,7 +8105,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if p_win_yes_g >= sp.lottery_limit_min_p_win or p_win_no_g >= sp.lottery_limit_min_p_win:
                         side_lot = "yes" if p_win_yes_g >= p_win_no_g else "no"
                         p_win_lot = p_win_yes_g if side_lot == "yes" else p_win_no_g
-                        if p_win_lot >= sp.lottery_limit_min_p_win and _is_midprice_stable(
+                        if p_win_lot >= sp.lottery_limit_min_p_win and is_midprice_stable(
                             ticker=evt.get("ticker", "?"),
                             platform=PLATFORM_GEMINI,
                             cfg=cfg,
@@ -9794,7 +8115,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             bid_lot = impl if side_lot == "yes" else (1.0 - impl)
                             _yes_ask_g = _gemini_yes_ask(contract if contract else (_get_yes_contract(evt) or {}))
                             _no_ask_g = _gemini_no_ask(evt)
-                            _lot_px_g = _compute_lottery_limit_price(
+                            _lot_px_g = compute_lottery_limit_price(
                                 sp=sp,
                                 side=side_lot,
                                 yes_bid=float(impl),
@@ -9936,7 +8257,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         break
                         pos_yf = yf_mapping.get(series.upper()) if series else None
                         # Unsupported intraday (e.g. 7pm) → sell to exit
-                        if pos_yf and _should_skip_by_resolution(m, pos_yf):
+                        if pos_yf and should_skip_by_resolution(m, pos_yf):
                             yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                             no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                             sell_price = yes_bid if side == "yes" else no_bid
@@ -9956,7 +8277,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
                             if closes:
                                     closes = apply_underlying_closes(cfg, series or "", closes)
-                                    threshold, direction, threshold_hi = _extract_strike(m)
+                                    threshold, direction, threshold_hi = extract_strike(m)
                                     if threshold is not None and direction is not None:
                                         yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                                         no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
@@ -9964,7 +8285,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             pos_yf, args.days, closes, m, sp, cfg, kalshi_series=series or ""
                                         )
                                         recent_w_pos = _regime_adjusted_recent_weight(closes_for_emp_pos, sp.empirical_recent_weight)
-                                        emp_pos = _empirical_probability(
+                                        emp_pos = empirical_probability(
                                             closes_for_emp_pos,
                                             threshold,
                                             direction,
@@ -9975,7 +8296,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                             exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                                         )
                                         hist_p = emp_pos
-                                        dte_pos = _get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
+                                        dte_pos = get_days_to_expiry_from_market(m, pos_yf, sp.days_to_expiry)
                                         ewma_lambda_pos = _ewma_lambda_for_market(sp, m, pos_yf)
                                         last_close_pos = float(closes[-1])
                                         _snap_pos = (
@@ -9988,7 +8309,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         else:
                                             current_price_pos = last_close_pos
                                         vol_p = (
-                                            _volatility_probability_with_mc(
+                                            volatility_probability_with_mc(
                                                 closes,
                                                 threshold,
                                                 direction,
@@ -10041,12 +8362,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         hi=sp.model_prob_hard_hi,
                                         enabled=sp.enable_model_prob_hard_cap,
                                     )
-                                    maker_fee_pos = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
+                                    maker_fee_pos = maker_fee_rate_for_market(sp, PLATFORM_KALSHI, pos_yf)
                                     eff_pos = _get_effective_min_edge(min_edge, direction, calibration, sp)
                                     eff_pos += proxy_basis_extra_min_edge(cfg, series or "")
                                     if sp.dte_edge_scaling_enabled and dte_pos is not None:
                                         eff_pos *= _dte_edge_scale_factor(float(dte_pos), sp)
-                                    if _is_ultra_short_horizon(m, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                                    if is_ultra_short_horizon(m, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
                                         eff_pos *= float(sp.ultra_short_min_edge_mult)
                                     if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                                         eff_pos += adaptive_edge_bump
@@ -10057,7 +8378,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         if (use_vol and vol_p is not None)
                                         else sp.intraday_other_min_p_win
                                     )
-                                    if _is_ultra_short_horizon(m, pos_yf, sp):
+                                    if is_ultra_short_horizon(m, pos_yf, sp):
                                         _upp = (
                                             sp.ultra_short_min_p_win_with_vol
                                             if (use_vol and vol_p is not None)
@@ -10298,13 +8619,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 _series, _yf, closes, m = cached[:4]
                 current_price_cached = cached[4] if len(cached) > 4 else closes[-1]
-                threshold, direction, threshold_hi = _extract_strike(m)
+                threshold, direction, threshold_hi = extract_strike(m)
                 if threshold is None or direction is None:
                     continue
                 yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                 closes_for_emp_cached = _get_closes_for_empirical(_yf, args.days, closes, m, sp, cfg, kalshi_series=_series)
                 recent_w_cached = _regime_adjusted_recent_weight(closes_for_emp_cached, sp.empirical_recent_weight)
-                emp_cached = _empirical_probability(
+                emp_cached = empirical_probability(
                     closes_for_emp_cached,
                     threshold,
                     direction,
@@ -10315,10 +8636,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                 )
                 hist_p = emp_cached
-                dte_cached = _get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
+                dte_cached = get_days_to_expiry_from_market(m, _yf, sp.days_to_expiry)
                 ewma_lambda_cached = _ewma_lambda_for_market(sp, m, _yf)
                 vol_p = (
-                    _volatility_probability_with_mc(
+                    volatility_probability_with_mc(
                         closes,
                         threshold,
                         direction,
@@ -10352,11 +8673,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         hist_p = _vol_emp_blend_hist_p(emp_cached, vol_p, w_emp_cached, sp)
                     else:
                         hist_p = max(emp_cached, vol_p)
-                maker_fee_cached = _maker_fee_rate_for_market(sp, PLATFORM_KALSHI, _yf)
+                maker_fee_cached = maker_fee_rate_for_market(sp, PLATFORM_KALSHI, _yf)
                 eff_cached = _get_effective_min_edge(min_edge, direction, calibration, sp)
                 if sp.dte_edge_scaling_enabled and dte_cached is not None:
                     eff_cached *= _dte_edge_scale_factor(float(dte_cached), sp)
-                if _is_ultra_short_horizon(m, _yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                if is_ultra_short_horizon(m, _yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
                     eff_cached *= float(sp.ultra_short_min_edge_mult)
                 if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                     eff_cached += adaptive_edge_bump
@@ -10367,7 +8688,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if (use_vol and vol_p is not None)
                     else sp.intraday_other_min_p_win
                 )
-                if _is_ultra_short_horizon(m, _yf, sp):
+                if is_ultra_short_horizon(m, _yf, sp):
                     _uc = (
                         sp.ultra_short_min_p_win_with_vol
                         if (use_vol and vol_p is not None)
@@ -10637,7 +8958,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         title = (info.get("title") or evt.get("title") or "")[:55]
                         ticker_g = info.get("ticker") or evt.get("ticker", "?")
                         side = outcome
-                        if _should_skip_by_resolution(evt, pos_yf or ""):
+                        if should_skip_by_resolution(evt, pos_yf or ""):
                             impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
                             no_price_g = 1.0 - impl if 0 < impl < 1 else impl
                             sell_price = impl if side == "yes" else no_price_g
@@ -10671,7 +8992,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         no_price_g = 1.0 - impl if 0 < impl < 1 else impl
                         closes_for_emp_g = _get_closes_for_empirical(pos_yf, args.days, closes, evt, sp, cfg)
                         recent_w_gp = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
-                        emp_g = _empirical_probability(
+                        emp_g = empirical_probability(
                             closes_for_emp_g,
                             threshold_g,
                             direction_g,
@@ -10681,10 +9002,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             weighting=sp.empirical_weighting,
                             exponential_halflife_bars=sp.empirical_exponential_halflife_bars,
                         )
-                        dte_g = _get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
+                        dte_g = get_days_to_expiry_from_market(evt, pos_yf, sp.days_to_expiry)
                         ewma_lambda_g = _ewma_lambda_for_market(sp, evt, pos_yf)
                         vol_p_g = (
-                            _volatility_probability_with_mc(
+                            volatility_probability_with_mc(
                                 closes,
                                 threshold_g,
                                 direction_g,
@@ -10720,18 +9041,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             else:
                                 hist_p_g = max(emp_g, vol_p_g)
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
-                        if _is_ultra_short_horizon(evt, pos_yf, sp):
+                        if is_ultra_short_horizon(evt, pos_yf, sp):
                             _ugp = (
                                 sp.ultra_short_min_p_win_with_vol
                                 if (use_vol and vol_p_g is not None)
                                 else sp.ultra_short_min_p_win
                             )
                             min_p_win_g = max(min_p_win_g, _ugp)
-                        maker_fee_pos_g = _maker_fee_rate_for_market(sp, PLATFORM_GEMINI, pos_yf)
+                        maker_fee_pos_g = maker_fee_rate_for_market(sp, PLATFORM_GEMINI, pos_yf)
                         pos_min_edge_g = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                         if sp.dte_edge_scaling_enabled and dte_g is not None:
                             pos_min_edge_g *= _dte_edge_scale_factor(float(dte_g), sp)
-                        if _is_ultra_short_horizon(evt, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                        if is_ultra_short_horizon(evt, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
                             pos_min_edge_g *= float(sp.ultra_short_min_edge_mult)
                         if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                             pos_min_edge_g += adaptive_edge_bump
@@ -11055,7 +9376,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     # Budget-aware allocation per platform (Kalshi and Gemini have separate balances)
     kalshi_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_KALSHI]
     gemini_orders = [o for o in pending_orders if o.get("platform") == PLATFORM_GEMINI]
-    _allocate_budget_to_orders(kalshi_orders, balance_cents, max_total_buy_pct)
+    allocate_budget_to_orders(kalshi_orders, balance_cents, max_total_buy_pct)
     gemini_balance_cents = 0
     if gemini_orders:
         try:
@@ -11063,7 +9384,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             gemini_balance_cents = int(_gt.get_balance().get("balance", 0) or 0)
         except Exception:
             pass
-    _allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct, filter_zero=False)
+    allocate_budget_to_orders(gemini_orders, gemini_balance_cents, max_total_buy_pct, filter_zero=False)
     dust_on = bool(trading.get("dust_trade_enabled", False))
     dust_max_bc = int(trading.get("dust_trade_max_balance_cents", 0) or 0)
     if dust_on and dust_max_bc > 0:
@@ -11104,12 +9425,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         )
     # Keep Gemini orders with count=0 so we can re-allocate after cancels free up balance
     pending_orders[:] = [o for o in kalshi_orders if o.get("count", 0) > 0] + gemini_orders
-    _cap_cross_platform_exposure(
+    cap_cross_platform_exposure(
         pending_orders,
         int(balance_cents) + int(gemini_balance_cents),
         sp.max_cross_platform_exposure,
+        get_resolution_key_for_order,
     )
-    _cap_bankroll_exposure_buckets(
+    cap_bankroll_exposure_buckets(
         pending_orders,
         int(balance_cents) + int(gemini_balance_cents),
         max_frac_per_direction=sp.max_bankroll_fraction_per_direction,
@@ -11307,7 +9629,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             platform_kalshi=PLATFORM_KALSHI,
             platform_gemini=PLATFORM_GEMINI,
             gemini_events_by_asset=gemini_events_by_asset,
-            find_gemini_event=_find_gemini_event,
+            find_gemini_event=find_gemini_event,
             get_instrument_symbol=get_instrument_symbol,
             record_order_cancel=record_order_cancel,
             mark_prediction_cancelled=mark_prediction_cancelled,
@@ -11345,7 +9667,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  Placed SELL {s['side'].upper()} {s['ticker']} x {s['count']}")
                         sells_placed += 1
                         if record_prediction_early_exit:
-                            sell_rate = _maker_fee_rate_for_market(
+                            sell_rate = maker_fee_rate_for_market(
                                 sp, PLATFORM_KALSHI, str(s.get("yf_ticker") or "")
                             )
                             record_prediction_early_exit(
@@ -11366,7 +9688,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             elif s["platform"] == PLATFORM_GEMINI and gemini_trading:
                 sym = s.get("instrument_symbol")
                 if not sym:
-                    gemini_evt = s.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
+                    gemini_evt = s.get("gemini_evt") or find_gemini_event(gemini_events_by_asset, s.get("ticker", ""))
                     sym = get_instrument_symbol(gemini_evt, s["side"]) if gemini_evt else None
                 if sym and (sym, s["side"]) in gemini_keep_sells:
                     print(f"  (skip SELL (Gemini) {s['ticker']} — already have open limit order at same/better price)")
@@ -11379,7 +9701,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  Placed SELL {s['side'].upper()} (Gemini) {s['ticker']} x {s['count']}")
                         sells_placed += 1
                         if record_prediction_early_exit:
-                            sell_rate = _maker_fee_rate_for_market(
+                            sell_rate = maker_fee_rate_for_market(
                                 sp, PLATFORM_GEMINI, str(s.get("yf_ticker") or "")
                             )
                             record_prediction_early_exit(
@@ -11398,19 +9720,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
         # Re-allocate Gemini budget after cancels+sells — freed balance may now allow buys
         gemini_orders_in_pending = [o for o in pending_orders if o.get("platform") == PLATFORM_GEMINI]
-        gemini_balance_after = 0  # Used by _apply_inter_arb_group_preflight; 0 when no Gemini
+        gemini_balance_after = 0  # Used by apply_inter_arb_group_preflight; 0 when no Gemini
         if gemini_trading and gemini_orders_in_pending:
             try:
                 gemini_balance_after = int(gemini_trading.get_balance().get("balance", 0) or 0)
-                _allocate_budget_to_orders(
+                allocate_budget_to_orders(
                     gemini_orders_in_pending, gemini_balance_after, max_total_buy_pct, filter_zero=False
                 )
-                _cap_cross_platform_exposure(
+                cap_cross_platform_exposure(
                     pending_orders,
                     int(balance_cents) + int(gemini_balance_after),
                     sp.max_cross_platform_exposure,
+                    get_resolution_key_for_order,
                 )
-                _cap_bankroll_exposure_buckets(
+                cap_bankroll_exposure_buckets(
                     pending_orders,
                     int(balance_cents) + int(gemini_balance_after),
                     max_frac_per_direction=sp.max_bankroll_fraction_per_direction,
@@ -11421,7 +9744,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 pass
 
         # Inter-exchange ARB safety: only keep groups that can execute both legs together.
-        _apply_inter_arb_group_preflight(
+        apply_inter_arb_group_preflight(
             pending_orders,
             sp=sp,
             kalshi_balance_cents=balance_cents,
@@ -11490,7 +9813,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 sym = o.get("instrument_symbol")
                 if not sym:
-                    gemini_evt = o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
+                    gemini_evt = o.get("gemini_evt") or find_gemini_event(gemini_events_by_asset, o["ticker"])
                     sym = get_instrument_symbol(gemini_evt, o["side"]) if gemini_evt else None
                 if not sym:
                     print(f"  (skip BUY Gemini {o['ticker']} — no instrumentSymbol for {o['side']}; check contract structure)")
@@ -11607,10 +9930,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     continue
                 sym = o.get("instrument_symbol") or (
                     get_instrument_symbol(
-                        o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"]),
+                        o.get("gemini_evt") or find_gemini_event(gemini_events_by_asset, o["ticker"]),
                         o["side"],
                     )
-                    if o.get("gemini_evt") or _find_gemini_event(gemini_events_by_asset, o["ticker"])
+                    if o.get("gemini_evt") or find_gemini_event(gemini_events_by_asset, o["ticker"])
                     else None
                 )
                 if sym:

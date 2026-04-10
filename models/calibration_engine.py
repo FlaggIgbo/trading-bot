@@ -7,7 +7,55 @@ based on actual historical performance across probability buckets.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable
+
+
+def clip01(v: float) -> float:
+    return max(0.0, min(1.0, float(v)))
+
+
+def fit_probability_calibrator(
+    sp: Any,  # StrategyParams
+    rows: list[dict],
+) -> Callable[[float], float] | None:
+    """
+    Fit a lightweight sklearn calibrator on resolved predictions (hist_p -> outcome).
+    Returns callable p->calibrated_p or None if unavailable/insufficient data.
+    """
+    try:
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.linear_model import LogisticRegression
+    except ImportError:
+        return None
+
+    try:
+        train = [
+            r for r in rows
+            if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
+        ]
+        if len(train) < max(10, sp.sklearn_calibration_min_samples):
+            return None
+        x = [float(r["hist_p"]) for r in train]
+        y = [1 if r["outcome"] == "win" else 0 for r in train]
+        method = (sp.sklearn_calibration_method or "isotonic").strip().lower()
+        if method == "platt":
+            lr = LogisticRegression(solver="lbfgs")
+            x2 = [[v] for v in x]
+            lr.fit(x2, y)
+
+            def _calibrate(p: float) -> float:
+                return clip01(float(lr.predict_proba([[float(p)]])[0][1]))
+
+            return _calibrate
+        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso.fit(x, y)
+
+        def _calibrate(p: float) -> float:
+            return clip01(float(iso.predict([float(p)])[0]))
+
+        return _calibrate
+    except Exception:
+        return None
 
 
 class CalibrationEngine:

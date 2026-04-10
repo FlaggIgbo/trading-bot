@@ -324,3 +324,172 @@ def lead_lag_edge_adjustment(
         elif direction == "below":
             return -edge_bonus if signal > 0 else edge_bonus
     return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Layer 5: Machine Learning Signal Model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalFeatures:
+    emp_p: float
+    vol_p: float
+    market_yes: float
+    edge_yes: float
+    edge_no: float
+    moneyness: float
+    dte_norm: float
+    spread_norm: float
+    liquidity_consistency: float
+
+
+def fit_signal_model_weights(
+    sp: Any,  # StrategyParams
+    rows: list[dict],
+) -> dict[str, float] | None:
+    """
+    Learn signal-model feature weights from resolved predictions.
+
+    Uses logistic regression on available prediction columns. Features that are not
+    historically stored (e.g. moneyness, dte_norm) remain at default runtime weights.
+    """
+    try:
+        from sklearn.linear_model import LogisticRegression
+    except ImportError:
+        return None
+
+    try:
+        train = [
+            r for r in rows
+            if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
+        ]
+        if len(train) < max(30, sp.signal_weight_fit_min_samples):
+            return None
+
+        # Feature schema mirrors the runtime scorer where possible.
+        feat_names = [
+            "emp_p",
+            "vol_p",
+            "market_yes",
+            "edge_yes",
+            "edge_no",
+            "spread_norm",
+            "liquidity_consistency",
+            "macro_24h_ret",
+        ]
+        x_rows: list[list[float]] = []
+        y_rows: list[int] = []
+
+        for r in train:
+            emp_p = max(0.0, min(1.0, float(r.get("hist_p") or 0.5)))
+            vol_p = max(0.0, min(1.0, float(r.get("vol_p") if r.get("vol_p") is not None else emp_p)))
+            market_yes = r.get("bid_at_place")
+            if market_yes is None:
+                market_yes = r.get("theoretical_price")
+            if market_yes is None:
+                market_yes = r.get("entry_price")
+            m = max(0.0, min(1.0, float(market_yes or 0.5)))
+            spread_bps = float(r.get("spread_bps_at_place") or 0.0)
+            spread_norm = max(0.0, min(1.0, spread_bps / 10_000.0))
+
+            edge_yes = max(-1.0, min(1.0, emp_p - m))
+            edge_no = max(-1.0, min(1.0, (1.0 - emp_p) - (1.0 - m)))
+            liq_consistency = 1.0  # Not persisted historically; neutral default.
+
+            # Historical rows currently do not persist macro features, so keep neutral 0.0.
+            x_rows.append([emp_p, vol_p, m, edge_yes, edge_no, spread_norm, liq_consistency, 0.0])
+            y_rows.append(1 if r.get("outcome") == "win" else 0)
+
+        if len(x_rows) < max(30, sp.signal_weight_fit_min_samples):
+            return None
+
+        lr = LogisticRegression(
+            solver="lbfgs",
+            max_iter=1000,
+            C=max(1e-4, float(sp.signal_weight_fit_l2_c)),
+            class_weight="balanced",
+        )
+        lr.fit(x_rows, y_rows)
+        coefs = lr.coef_[0]
+        learned = {"bias": float(lr.intercept_[0])}
+        for i, name in enumerate(feat_names):
+            learned[name] = float(coefs[i])
+        return learned
+    except Exception:
+        return None
+
+
+def build_signal_features(
+    *,
+    emp_p: float,
+    vol_p: float | None,
+    market_yes: float,
+    threshold: float,
+    current_price: float,
+    dte_days: float | None,
+    spread_bps: float | None,
+    no_bid: float | None,
+) -> SignalFeatures:
+    def _clip01(v: float) -> float:
+        return max(0.0, min(1.0, float(v)))
+
+    vol = _clip01(vol_p if vol_p is not None else emp_p)
+    mkt = _clip01(market_yes)
+    edge_yes = emp_p - mkt
+    edge_no = (1.0 - emp_p) - (1.0 - mkt)
+    if threshold > 0 and current_price > 0:
+        moneyness = math.log(max(1e-9, current_price / threshold))
+    else:
+        moneyness = 0.0
+    dte_norm = _clip01((float(dte_days or 0.0)) / 30.0)
+    spread_norm = _clip01((float(spread_bps or 0.0)) / 10_000.0)
+    consistency = 1.0
+    if no_bid is not None:
+        consistency = 1.0 - abs((mkt + _clip01(float(no_bid))) - 1.0)
+    return SignalFeatures(
+        emp_p=_clip01(emp_p),
+        vol_p=vol,
+        market_yes=mkt,
+        edge_yes=max(-1.0, min(1.0, edge_yes)),
+        edge_no=max(-1.0, min(1.0, edge_no)),
+        moneyness=max(-2.0, min(2.0, moneyness)),
+        dte_norm=dte_norm,
+        spread_norm=spread_norm,
+        liquidity_consistency=_clip01(consistency),
+    )
+
+
+def score_signal_model(features: SignalFeatures, sp: Any) -> float:
+    """
+    Simple interpretable signal model: weighted logistic over normalized features.
+    Weights are fully configurable in strategy.signal_model_weights.
+    """
+    w = {
+        "bias": 0.0,
+        "emp_p": 1.8,
+        "vol_p": 1.3,
+        "market_yes": 0.3,
+        "edge_yes": 1.2,
+        "edge_no": -0.8,
+        "moneyness": 0.4,
+        "dte_norm": 0.2,
+        "spread_norm": -0.5,
+        "liquidity_consistency": 0.6,
+        "macro_24h_ret": 0.3,
+    }
+    # Update with strategy overrides
+    w.update(sp.signal_model_weights or {})
+
+    score = w["bias"]
+    score += features.emp_p * w["emp_p"]
+    score += features.vol_p * w["vol_p"]
+    score += features.market_yes * w["market_yes"]
+    score += features.edge_yes * w["edge_yes"]
+    score += features.edge_no * w["edge_no"]
+    score += features.moneyness * w["moneyness"]
+    score += features.dte_norm * w["dte_norm"]
+    score += features.spread_norm * w["spread_norm"]
+    score += features.liquidity_consistency * w["liquidity_consistency"]
+    
+    # Sigmoid to get probability-like value
+    return 1.0 / (1.0 + math.exp(-score))

@@ -7,6 +7,12 @@ fractional Kelly sizing with confidence-aware multipliers.
 from __future__ import annotations
 
 import math
+from typing import Any, Callable
+
+from constants import REC_BUY_YES, REC_BUY_NO
+from models.strategy_config import StrategyParams
+from models.trading_edges import maker_fee_per_contract as _fee_per_contract
+from utils.market_analysis import clip_price, wide_book_lift_passive_raw_price, resolve_passive_quote_price
 
 
 def calculate_fractional_kelly_size(
@@ -62,3 +68,535 @@ def apply_fat_pitch_guardrail(
         return cap_cents
     
     return total_bankroll_cents * 0.10 # Standard 10% cap
+
+
+def check_drawdown_block(
+    platform: str,
+    balance_cents: int,
+    sp: StrategyParams,
+    cfg: dict,
+    get_recent_performance_fn: Callable | None = None,
+    ignore_drawdown: bool = False,
+) -> bool:
+    """Returns True if the platform is currently in a drawdown-driven trading halt."""
+    if ignore_drawdown:
+        return False
+    if sp.drawdown_stop_trading_pct <= 0:
+        return False
+    if get_recent_performance_fn is None:
+        return False
+    try:
+        perf = get_recent_performance_fn(
+            lookback_hours=sp.drawdown_cooldown_hours, platform=platform, config=cfg
+        )
+        pnl = int(perf.get("pnl_cents", 0))
+        if pnl < 0 and balance_cents > 0:
+            drawdown = abs(pnl) / float(balance_cents)
+            if drawdown >= sp.drawdown_stop_trading_pct:
+                print(
+                    f"[Risk] DRAWDOWN HALT ({platform}): Lost ${abs(pnl)/100:.2f} in {sp.drawdown_cooldown_hours}h "
+                    f"({drawdown:.1%} of balance) >= {sp.drawdown_stop_trading_pct:.1%}. Trading stopped."
+                )
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def get_balance_regime_adjustments(
+    balance_cents: int, sp: StrategyParams
+) -> tuple[float, float, str]:
+    """Returns (kelly_mult, min_edge_add, regime_name) based on current vs starting balance."""
+    if sp.starting_balance_cents <= 0:
+        return 1.0, 0.0, "normal"
+
+    ratio = balance_cents / float(sp.starting_balance_cents)
+    if ratio < sp.balance_regime_low_ratio:
+        return sp.balance_regime_low_kelly_mult, sp.balance_regime_low_min_edge_add, "survival"
+    if ratio < sp.balance_regime_medium_ratio:
+        return sp.balance_regime_medium_kelly_mult, sp.balance_regime_medium_min_edge_add, "caution"
+
+    return 1.0, 0.0, "normal"
+
+
+def calculate_inventory_skew_factor(held_count: int, max_skew_pct: float) -> float:
+    """
+    Linear risk-aversion skew: every 100 held contracts adds skew up to max_skew_pct.
+    """
+    if held_count <= 0 or max_skew_pct <= 0:
+        return 0.0
+    return min(float(max_skew_pct), (held_count / 100.0) * float(max_skew_pct))
+
+
+def get_adaptive_kelly_fraction(
+    base_kelly: float, calibration: dict[str, Any], sp: StrategyParams
+) -> float:
+    """Scale Kelly down when recent calibration quality degrades."""
+    base = max(0.01, float(base_kelly))
+    if not sp.dynamic_kelly_enabled:
+        return base
+    wr = calibration.get("win_rate")
+    n = int(calibration.get("resolved_count", 0) or 0)
+    if wr is None or n < max(10, sp.min_calibration_samples_overall):
+        return base
+    stress_wr = float(sp.dynamic_kelly_stress_win_rate)
+    recover_wr = max(stress_wr + 1e-6, float(sp.dynamic_kelly_recovery_win_rate))
+    floor_k = max(0.01, min(base, float(sp.dynamic_kelly_floor), float(sp.dynamic_kelly_stress_fraction)))
+    if wr <= stress_wr:
+        return floor_k
+    if wr >= recover_wr:
+        return base
+    alpha = (float(wr) - stress_wr) / (recover_wr - stress_wr)
+    return floor_k + alpha * (base - floor_k)
+
+
+def get_dynamic_kill_size_multiplier(
+    series: str, series_pnl: dict[str, dict], sp: StrategyParams
+) -> float:
+    if not sp.dynamic_kill_switch_enabled or not series_pnl:
+        return 1.0
+    key = (series or "").strip().upper()
+    perf = series_pnl.get(key)
+    if not perf:
+        return 1.0
+    if int(perf.get("total", 0) or 0) < int(sp.dynamic_kill_min_trades):
+        return 1.0
+    pnl = int(perf.get("pnl_cents", 0) or 0)
+    if pnl < int(sp.dynamic_kill_pnl_cents_floor):
+        return float(sp.dynamic_kill_poor_pnl_size_mult)
+    return 1.0
+
+
+def get_adaptive_stress_size_multiplier(bump: float, sp: StrategyParams) -> float:
+    """Shrink Kelly sizing when adaptive edge bump is large (edge strictness + smaller risk)."""
+    if not sp.adaptive_learning_enabled or bump <= 0:
+        return 1.0
+    thresh = float(sp.adaptive_stress_size_edge_threshold)
+    if bump < thresh:
+        return 1.0
+    cap = max(1e-6, float(sp.adaptive_edge_max_extra) + float(sp.loss_streak_max_extra))
+    floor_m = float(sp.adaptive_stress_size_min_mult)
+    span = max(1e-6, cap - thresh)
+    t = min(1.0, max(0.0, (float(bump) - thresh) / span))
+    return 1.0 - t * (1.0 - floor_m)
+
+
+def get_simple_ev_calibration_size_multiplier(
+    calibration: dict[str, Any] | None, sp: StrategyParams
+) -> float:
+    if not sp.use_calibration or not calibration:
+        return 1.0
+    resolved = int(calibration.get("resolved_count", 0) or 0)
+    wr = calibration.get("win_rate")
+    if resolved < sp.min_calibration_samples_overall or wr is None:
+        return 1.0
+    if float(wr) < float(sp.simple_ev_calibration_wr_threshold):
+        return float(sp.simple_ev_calibration_poor_size_mult)
+    return 1.0
+
+
+def get_dte_edge_scale_factor(dte_days: float, sp: StrategyParams) -> float:
+    """
+    Scale required min_edge: easier hurdle when DTE is short (less time for model error),
+    harder when DTE is long ("dead zone" contracts).
+    """
+    if not sp.dte_edge_scaling_enabled:
+        return 1.0
+    d = max(0.0, float(dte_days))
+    s_days = float(sp.dte_edge_short_threshold_days)
+    l_days = max(s_days + 1e-6, float(sp.dte_edge_long_threshold_days))
+    sm = float(sp.dte_edge_mult_short)
+    lm = float(sp.dte_edge_mult_long)
+    if d <= s_days:
+        return sm
+    if d >= l_days:
+        return lm
+    t = (d - s_days) / (l_days - s_days)
+    return sm + t * (lm - sm)
+
+
+def cap_buy_count_by_book_pct(count: int, book_bid_size: float | None, max_pct: float) -> int:
+    """Cap order size vs visible same-side depth to reduce adverse selection and book impact."""
+    if count <= 0 or max_pct <= 0:
+        return count
+    if book_bid_size is None:
+        return count
+    try:
+        depth = float(book_bid_size)
+    except (TypeError, ValueError):
+        return count
+    if depth <= 0:
+        return count
+    cap = max(1, int(depth * max_pct))
+    return min(count, cap)
+
+
+def compute_limit_price(
+    *,
+    bid: float,
+    ask: float | None,
+    p_win: float,
+    maker_fee_rate: float,
+    min_fee_per_order: float,
+    mode: str,
+    base_dip: float,
+    tick_offset: int,
+    held_same_side: int,
+    held_opp_side: int,
+    max_inventory_skew_pct: float,
+    layered_order_levels: int,
+    order_count: int,
+    max_dip_cap: float = 0.25,
+    passive_quote: str = "dip",
+    net_edge: float | None = None,
+    edge_aggression_enabled: bool = False,
+    cross_spread_min_edge: float = 0.10,
+    near_market_min_edge: float = 0.05,
+    passive_only_below_edge: float = 0.0,
+    ev_tier_pricing: bool = True,
+    weak_bid_min_edge: float = 0.03,
+    skip_below_weak_edge: bool = True,
+    medium_quote_mode: str = "spread_fraction",
+    medium_spread_fraction: float = 0.25,
+    resting_order_age_minutes: float | None = None,
+    escalation_price_enabled: bool = False,
+    escalate_after_minutes_1: float = 5.0,
+    escalate_after_minutes_2: float = 10.0,
+    wide_book_coalesce_enabled: bool = False,
+    wide_book_conservative: bool = False,
+    wide_book_spread_rel: float = 0.22,
+    wide_book_anchor_fraction: float = 0.38,
+) -> tuple[float | None, float]:
+    """
+    Returns (limit_price, dip_used_proxy).
+    """
+    mode_norm = (mode or "fixed_pct").strip().lower()
+    if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
+        mode_norm = "fixed_pct"
+
+    fair_cap = clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
+
+    _po = max(0.0, float(passive_only_below_edge or 0.0))
+    _ne_ok = net_edge is not None and float(net_edge) > 0
+    if _po > 0 and _ne_ok and float(net_edge) < _po:
+        _ne_ok = False
+    if edge_aggression_enabled and _ne_ok and fair_cap > 0:
+        ne = float(net_edge)
+        tick = max(1, int(tick_offset)) * 0.01
+        cross_th = max(0.0, float(cross_spread_min_edge))
+        near_th = max(0.0, float(near_market_min_edge))
+        weak_th = max(0.0, float(weak_bid_min_edge))
+        if near_th > cross_th:
+            near_th = cross_th
+        if weak_th > near_th:
+            weak_th = near_th
+
+        if ev_tier_pricing:
+            base_px_ev: float | None = None
+            if ne >= cross_th:
+                if ask is not None and float(ask) > 0:
+                    base_px_ev = min(float(ask), fair_cap)
+                else:
+                    base_px_ev = min(float(bid) + tick, fair_cap)
+            elif ne >= near_th:
+                spread_v = 0.0
+                if ask is not None and float(ask) > float(bid):
+                    spread_v = float(ask) - float(bid)
+                mode_m = (medium_quote_mode or "spread_fraction").strip().lower()
+                if mode_m == "mid" and ask is not None and float(ask) > float(bid):
+                    mid_px = (float(bid) + float(ask)) / 2.0
+                    base_px_ev = min(mid_px, fair_cap)
+                else:
+                    frac = max(0.0, min(1.0, float(medium_spread_fraction)))
+                    base_px_ev = float(bid) + frac * spread_v
+                    base_px_ev = min(max(0.01, base_px_ev), fair_cap)
+                if ask is not None and float(ask) > 0:
+                    base_px_ev = min(float(base_px_ev), float(ask))
+            elif ne >= weak_th:
+                base_px_ev = min(float(bid), fair_cap)
+            elif skip_below_weak_edge:
+                return None, 0.0
+
+            if base_px_ev is not None:
+                px_esc = float(base_px_ev)
+                if escalation_price_enabled and resting_order_age_minutes is not None:
+                    age = float(resting_order_age_minutes)
+                    extra_ticks = 0
+                    if age >= float(escalate_after_minutes_1):
+                        extra_ticks += 1
+                    if age >= float(escalate_after_minutes_2):
+                        extra_ticks += 1
+                    px_esc += extra_ticks * 0.01
+                    px_esc = min(px_esc, fair_cap)
+                    if ask is not None and float(ask) > 0:
+                        px_esc = min(px_esc, float(ask))
+                if (
+                    wide_book_coalesce_enabled
+                    and not wide_book_conservative
+                    and float(bid) > 0
+                    and px_esc + 1e-9 < float(bid)
+                    and float(fair_cap) + 1e-9 >= float(bid)
+                ):
+                    px_esc = min(float(fair_cap), float(bid))
+                return clip_price(px_esc), 0.0
+        else:
+            if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
+                aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
+                px_leg = float(aggressive)
+                if (
+                    wide_book_coalesce_enabled
+                    and not wide_book_conservative
+                    and float(bid) > 0
+                    and px_leg + 1e-9 < float(bid)
+                    and float(fair_cap) + 1e-9 >= float(bid)
+                ):
+                    px_leg = min(float(fair_cap), float(bid))
+                return clip_price(px_leg), 0.0
+            if ne >= float(near_market_min_edge):
+                jump = float(bid) + tick
+                if ask is not None and ask > 0:
+                    jump = min(jump, max(0.01, float(ask) - 0.01))
+                near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
+                px_near = float(near_px)
+                if (
+                    wide_book_coalesce_enabled
+                    and not wide_book_conservative
+                    and float(bid) > 0
+                    and px_near + 1e-9 < float(bid)
+                    and float(fair_cap) + 1e-9 >= float(bid)
+                ):
+                    px_near = min(float(fair_cap), float(bid))
+                return clip_price(px_near), 0.0
+
+    if mode_norm == "fixed_pct":
+        dip = max(0.0, min(max_dip_cap, float(base_dip)))
+        raw_price = bid * (1.0 - dip) if dip > 0 else bid
+    elif mode_norm == "dynamic_tick":
+        tick = max(1, int(tick_offset)) * 0.01
+        jump_price = bid + tick
+        if ask is not None and ask > 0:
+            jump_price = min(jump_price, max(0.01, float(ask) - 0.01))
+        raw_price = min(jump_price, fair_cap)
+        dip = 0.0
+    else:
+        # Layered: place passive limits BELOW bid
+        dip = max(0.0, min(max_dip_cap, float(base_dip)))
+        base_price = bid * (1.0 - dip) if dip > 0 else bid
+
+        levels = max(1, int(layered_order_levels))
+        if levels > 1 and order_count > 1:
+            level_idx = min(order_count - 1, levels - 1)
+            depth_per_level = max(0.01, bid * dip * 0.5) if dip > 0 else 0.01
+            base_price -= level_idx * depth_per_level
+
+        raw_price = min(base_price, fair_cap)
+
+    if mode_norm in ("fixed_pct", "layered"):
+        raw_price = wide_book_lift_passive_raw_price(
+            bid=bid,
+            ask=ask,
+            fair_cap=float(fair_cap),
+            raw_price=float(raw_price),
+            enabled=wide_book_coalesce_enabled,
+            conservative=wide_book_conservative,
+            spread_rel_threshold=wide_book_spread_rel,
+            anchor_fraction=wide_book_anchor_fraction,
+        )
+
+    same_skew = calculate_inventory_skew_factor(int(held_same_side), max_inventory_skew_pct)
+    opp_skew = calculate_inventory_skew_factor(int(held_opp_side), max_inventory_skew_pct) * 0.5
+    skewed = raw_price * (1.0 - same_skew + opp_skew)
+    merged = resolve_passive_quote_price(
+        passive_quote=passive_quote,
+        bid=bid,
+        ask=ask,
+        dip_based_price=skewed,
+        fair_cap=fair_cap,
+    )
+    return merged, float(dip)
+
+
+def allocate_budget_to_orders(
+    pending_orders: list[dict],
+    balance_cents: int,
+    max_pct: float,
+    filter_zero: bool = True,
+) -> None:
+    """
+    Adjust order counts so total cost fits budget. Prefer buying 1 of many
+    contracts over blowing the budget on a few. Modifies pending_orders in place.
+    """
+    if not pending_orders:
+        return
+
+    def _trace(stage: str, o: dict, before: int, after: int, note: str = "") -> None:
+        if before == after:
+            return
+        traces = o.setdefault("_sizing_trace", [])
+        traces.append({
+            "stage": stage,
+            "before": int(before),
+            "after": int(after),
+            "note": note,
+        })
+
+    available_cents = int(balance_cents * max_pct)
+    total_cost_cents = sum(
+        o.get("count", 10) * int(float(o.get("price", 0)) * 100)
+        for o in pending_orders
+    )
+    if total_cost_cents <= available_cents:
+        return
+    # Scale down: prefer 1 of each for diversification
+    cost_if_1_each = sum(int(float(o.get("price", 0)) * 100) for o in pending_orders)
+    if cost_if_1_each <= available_cents:
+        for o in pending_orders:
+            before = int(o.get("count", 0) or 0)
+            o["count"] = 1
+            _trace("budget_one_each", o, before, 1, "force diversification under budget")
+        return
+    # Can't afford 1 of each: keep highest edge trades first (simplified ranking here)
+    by_edge = sorted(
+        pending_orders,
+        key=lambda x: -float(x.get("edge", 0.0)),
+    )
+    running_cents = 0
+    for o in by_edge:
+        cost_1 = int(float(o.get("price", 0)) * 100)
+        before = int(o.get("count", 0) or 0)
+        if running_cents + cost_1 <= available_cents:
+            o["count"] = 1
+            running_cents += cost_1
+            _trace("budget_rank_trim", o, before, 1, "ranked keep under max_total_buy_pct")
+        else:
+            o["count"] = 0
+            _trace("budget_rank_trim", o, before, 0, "ranked out by budget")
+    if filter_zero:
+        pending_orders[:] = [o for o in by_edge if o.get("count", 0) > 0]
+
+
+def cap_cross_platform_exposure(
+    pending_orders: list[dict],
+    total_balance_cents: int,
+    max_cross_platform_exposure: float,
+    get_resolution_key_fn: Callable[[dict], str | None],
+) -> None:
+    """
+    Cap combined (Kalshi + Gemini) exposure per (yf_ticker, resolution key).
+    """
+    if not pending_orders or total_balance_cents <= 0:
+        return
+    cap_pct = max(0.0, min(1.0, float(max_cross_platform_exposure)))
+    if cap_pct <= 0:
+        return
+    cap_cents = int(total_balance_cents * cap_pct)
+    if cap_cents <= 0:
+        return
+
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for o in pending_orders:
+        yf = o.get("yf_ticker")
+        res_key = get_resolution_key_fn(o)
+        if not yf or not res_key:
+            continue
+        grouped.setdefault((str(yf), str(res_key)), []).append(o)
+
+    for _, orders in grouped.items():
+        _trim_order_group_to_notional_cap(orders, cap_cents)
+
+
+def cap_bankroll_exposure_buckets(
+    pending_orders: list[dict],
+    total_balance_cents: int,
+    *,
+    max_frac_per_direction: float,
+    max_frac_per_underlying: float,
+    logger: Any = print,
+) -> None:
+    """
+    Bankroll-% risk buckets (Kalshi+Gemini combined notionals in this batch).
+    """
+    if not pending_orders or total_balance_cents <= 0:
+        return
+    fd = max(0.0, min(1.0, float(max_frac_per_direction)))
+    fu = max(0.0, min(1.0, float(max_frac_per_underlying)))
+    if fd <= 0 and fu <= 0:
+        return
+
+    def _risk_orders() -> list[dict]:
+        out: list[dict] = []
+        for o in pending_orders:
+            if o.get("rec") not in (REC_BUY_YES, REC_BUY_NO):
+                continue
+            if not str(o.get("yf_ticker") or "").strip():
+                continue
+            if int(o.get("count", 0) or 0) <= 0:
+                continue
+            out.append(o)
+        return out
+
+    touched = False
+    if fd > 0:
+        cap_d = int(total_balance_cents * fd)
+        if cap_d > 0:
+            by_dir: dict[tuple[str, str], list[dict]] = {}
+            for o in _risk_orders():
+                yf = str(o.get("yf_ticker")).strip()
+                side = "yes" if o.get("rec") == REC_BUY_YES else "no"
+                by_dir.setdefault((yf, side), []).append(o)
+            for grp in by_dir.values():
+                if _trim_order_group_to_notional_cap(grp, cap_d):
+                    touched = True
+    if fu > 0:
+        cap_u = int(total_balance_cents * fu)
+        if cap_u > 0:
+            by_yf: dict[str, list[dict]] = {}
+            for o in _risk_orders():
+                yf = str(o.get("yf_ticker")).strip()
+                by_yf.setdefault(yf, []).append(o)
+            for grp in by_yf.values():
+                if _trim_order_group_to_notional_cap(grp, cap_u):
+                    touched = True
+    if touched:
+        logger(
+            "[Risk] Bankroll exposure buckets: trimmed pending BUY notionals "
+            f"(per-direction cap={fd:.0%}, per-underlying cap={fu:.0%} of combined balance)."
+        )
+
+
+def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> bool:
+    """Shrink counts so sum(price*count) <= cap_cents. Returns True if any count changed."""
+    if cap_cents <= 0 or not orders:
+        return False
+    total_cost = sum(
+        int(float(o.get("price", 0)) * 100) * max(0, int(o.get("count", 0)))
+        for o in orders
+    )
+    if total_cost <= cap_cents:
+        return False
+    # Sort by edge for ranking
+    ranked = sorted(
+        orders,
+        key=lambda x: -float(x.get("edge", 0.0)),
+    )
+    used = 0
+    changed = False
+    for o in ranked:
+        price_c = max(1, int(float(o.get("price", 0)) * 100))
+        curr = max(0, int(o.get("count", 0)))
+        if curr <= 0:
+            continue
+        room = max(0, cap_cents - used)
+        max_count = room // price_c
+        if curr > max_count:
+            o["count"] = max_count
+            changed = True
+            traces = o.setdefault("_sizing_trace", [])
+            traces.append({
+                "stage": "notional_cap_trim",
+                "before": int(curr),
+                "after": int(max_count),
+                "note": f"group cap ${cap_cents/100:.2f}",
+            })
+        used += price_c * max(0, int(o.get("count", 0)))
+    return changed
