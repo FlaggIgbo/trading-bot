@@ -152,15 +152,43 @@ def get_weather_distribution(ticker: str, resolution_date: str) -> tuple[float, 
                 f_mean = daily.get("temperature_2m_max", [])[idx]
                 
     # 2. Ensemble Forecast (uncertainty proxy)
-    # 1 day -> 1.2, 5 days -> 2.5, 10 days -> 4.5
-    if days_to_res <= 1.0:
-        e_std_dev = 1.2
-    elif days_to_res <= 5.0:
-        # Linear interp between 1.2 and 2.5
-        e_std_dev = 1.2 + (2.5 - 1.2) * (days_to_res - 1.0) / 4.0
-    else:
-        # Linear interp between 2.5 and 4.5
-        e_std_dev = 2.5 + (4.5 - 2.5) * (days_to_res - 5.0) / 5.0
+    ensemble = get_ensemble_forecast(lat, lon)
+    e_std_dev = None
+    if ensemble:
+        hourly = ensemble.get("hourly", {})
+        h_times = hourly.get("time", [])
+        # Ensemble provides multiple members. Standard deviation across members for the target hour.
+        # Find target hour index
+        target_ts = f"{resolution_date}T12:00:00" # Mid-day proxy if specific hour not available
+        if "TEMPNYCH" in ticker:
+            hour_match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})', ticker)
+            if hour_match:
+                target_hour = int(hour_match.group(4))
+                target_ts = f"{resolution_date}T{target_hour:02d}:00"
+        
+        # Open-Meteo ensemble returns members as temperature_2m_member00, etc.
+        member_temps = []
+        for k, v in hourly.items():
+            if "member" in k and target_ts in h_times:
+                idx = h_times.index(target_ts)
+                if idx < len(v) and v[idx] is not None:
+                    member_temps.append(v[idx])
+        
+        if len(member_temps) > 1:
+            mean_m = sum(member_temps) / len(member_temps)
+            var_m = sum((m - mean_m)**2 for m in member_temps) / len(member_temps)
+            e_std_dev = math.sqrt(var_m)
+            # Add baseline floor for ensemble spread
+            e_std_dev = max(1.5, e_std_dev)
+
+    if e_std_dev is None:
+        # Fallback to distance-based heuristic if ensemble fails
+        if days_to_res <= 1.0:
+            e_std_dev = 1.8 # Increased baseline uncertainty
+        elif days_to_res <= 5.0:
+            e_std_dev = 1.8 + (3.5 - 1.8) * (days_to_res - 1.0) / 4.0
+        else:
+            e_std_dev = 3.5 + (6.0 - 3.5) * (days_to_res - 5.0) / 5.0
         
     # 3. Seasonality
     month_day = resolution_date[5:] # "MM-DD"

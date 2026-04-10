@@ -231,8 +231,8 @@ execution:
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
   limit_buy_medium_spread_fraction: 0.75 # Increased aggression (was 0.65)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.07 # Aligned with strategy min_edge (was 0.075)
-  limit_buy_near_market_min_edge: 0.04 # (was 0.045)
+  limit_buy_cross_spread_min_edge: 0.05 # Aligned with strategy min_edge (was 0.07)
+  limit_buy_near_market_min_edge: 0.03 # (was 0.04)
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
   limit_buy_passive_only_below_edge: 0.06
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
@@ -802,3 +802,4 @@ backtest:
   pre_push_min_win_rate: 0.35 # High-edge books can look “low WR”; PnL-first: pair with pre_push_min_pnl_cents / Sharpe flags
   pre_push_min_pnl_cents: 0 # Block push when realized PnL (¢) in window is below this — primary $ guard vs WR alone
   pre_push_require_positive_sharpe: false # Optional stricter risk-adjusted gate
+  taker_edge_threshold: 0.40
