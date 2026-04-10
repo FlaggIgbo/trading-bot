@@ -548,6 +548,8 @@ class _StrategyParams:
     limit_buy_skip_below_weak_edge: bool
     limit_buy_medium_quote_mode: str
     limit_buy_medium_spread_fraction: float
+    no_trade_zone_width: float
+    buy_no_extra_min_edge: float
     limit_buy_escalation_price_enabled: bool
     limit_buy_escalate_after_minutes_1: float
     limit_buy_escalate_after_minutes_2: float
@@ -923,6 +925,8 @@ strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_skip_below_weak_edge=bool(strategy.get("limit_buy_skip_below_weak_edge", True)),
         limit_buy_medium_quote_mode=str(strategy.get("limit_buy_medium_quote_mode", "spread_fraction")).strip().lower(),
         limit_buy_medium_spread_fraction=max(0.0, min(1.0, float(strategy.get("limit_buy_medium_spread_fraction", 0.25)))),
+        no_trade_zone_width=max(0.0, min(0.5, float(strategy.get("no_trade_zone_width", 0.0)))),
+        buy_no_extra_min_edge=max(0.0, min(0.5, float(strategy.get("buy_no_extra_min_edge", 0.0)))),
         limit_buy_escalation_price_enabled=bool(strategy.get("limit_buy_escalation_price_enabled", True)),
         limit_buy_escalate_after_minutes_1=max(0.0, float(strategy.get("limit_buy_escalate_after_minutes_1", 5.0))),
         limit_buy_escalate_after_minutes_2=max(0.0, float(strategy.get("limit_buy_escalate_after_minutes_2", 10.0))),
@@ -3480,7 +3484,13 @@ def _simple_ev_recommend(
     )
     req_base = float(min_edge_net)
     req_yes = req_base
-    req_no = req_base
+    req_no = req_base + float(sp.buy_no_extra_min_edge)
+    
+    # Margin of safety (No-Trade Zone)
+    if sp.no_trade_zone_width > 0:
+        if abs(float(p_yes) - float(yes_bid)) < sp.no_trade_zone_width:
+            return REC_SKIP
+
     c_lo = min(sp.simple_ev_cheap_band_lo, sp.simple_ev_cheap_band_hi)
     c_hi = max(sp.simple_ev_cheap_band_lo, sp.simple_ev_cheap_band_hi)
     cheap_floor = float(sp.simple_ev_cheap_band_min_net_edge)

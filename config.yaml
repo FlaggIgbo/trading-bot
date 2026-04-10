@@ -290,9 +290,13 @@ strategy:
     min_edge: 0.06
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: true
-    skip_p_win_mid_lo: 0.60
-    skip_p_win_mid_hi: 0.80
+    skip_p_win_mid_lo: 0.45
+    skip_p_win_mid_hi: 0.55
+    # New proposed fields:
+    no_trade_zone_width: 0.08
+    buy_no_extra_min_edge: 0.05
     # 0–10¢ legs must clear this net edge (blocks weak edge at penny prices; 0 = off).
+
     cheap_band_price_lo: 0.00
     cheap_band_price_hi: 0.10
     cheap_band_min_net_edge: 0.10
