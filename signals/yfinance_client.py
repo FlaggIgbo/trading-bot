@@ -371,6 +371,7 @@ _TICKER_FALLBACKS: dict[str, list[str]] = {
 def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     """
     Drop corrupted SQLite rows (e.g. index prices stored under a futures ticker).
+    Commonly happens when S&P 500 (^GSPC ~5000) data leaks into Copper (HG=F ~4) or Silver (SI=F ~30).
     """
     if not closes:
         return False
@@ -378,16 +379,31 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     tail = closes[-min(120, len(closes)) :]
     mx = max(tail)
     mn = min(tail)
+    
     if mn <= 0:
         return False
+        
+    # Validation thresholds:
+    # Commodities should not be at S&P 500 scale (4000-6000) unless there's hyperinflation.
+    # Note: Copper (HG=F) is usually ~4.50 (dollars) or ~450 (cents).
+    # If it's 4500 (milli-dollars), it still shouldn't be confused with ^GSPC.
     if t in ("RB=F", "CL=F", "BZ=F"):
-        return mx < 500.0  # $/gal or $/bbl — not index scale
+        if mx > 1000.0:
+            print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0) — index scale overlap?")
+            return False
     if t == "SI=F":
-        return mx < 500.0  # silver $/oz
+        if mx > 1000.0:
+            print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0)")
+            return False
     if t == "HG=F":
-        return mx < 500.0  # copper $/lb — not index scale
+        # Copper usually ~450 cents. If it hits 4500 (milli-dollars), it is close to S&P.
+        # However, 10x move is more likely data corruption than a real commodity price.
+        if mx > 2000.0:
+            print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 2000.0) — likely index cross-pollination")
+            return False
     if t == "GC=F":
-        return mx < 50_000.0  # gold $/oz
+        if mx > 50_000.0: # Gold is ~$2500, shouldn't be 50k
+            return False
     return True
 
 

@@ -1632,7 +1632,7 @@ def _strict_intraday_evaluation(
     """
     if is_other_intraday(market_or_title, yf_ticker):
         return True
-    return is_ultra_short_horizon(market_or_title, yf_ticker, sp)
+    return is_ultra_short_horizon(market_or_title, yf_ticker, sp.ultra_short_dte_hours)
 
 
 def _is_intraday_or_ultra_short(
@@ -1641,7 +1641,7 @@ def _is_intraday_or_ultra_short(
     """Intraday-style vol cap / EWMA / blend: clock intraday OR ultra-short (e.g. Kalshi KXBTC15M)."""
     if is_intraday_market(market_or_title, yf_ticker):
         return True
-    return is_ultra_short_horizon(market_or_title, yf_ticker, sp)
+    return is_ultra_short_horizon(market_or_title, yf_ticker, sp.ultra_short_dte_hours)
 
 
 # ---------------------------------------------------------------------------
@@ -2192,7 +2192,7 @@ def _simple_ev_net_min_edge_bundle(
         "spread": None,
         "force_exploration_active": force_exploration_active,
     }    
-    us = is_ultra_short_horizon(market_or_event, yf_ticker, sp)
+    us = is_ultra_short_horizon(market_or_event, yf_ticker, sp.ultra_short_dte_hours)
     detail["ultra_short"] = us
     mins = minutes_until_resolution_unified(market_or_event, yf_ticker)
     detail["minutes_left"] = mins
@@ -4026,7 +4026,7 @@ def _filter_pending_buys_by_min_payout_ratio(
         pending_orders[:] = kept
 
 
-def _pending_orderis_ultra_short_horizon(o: dict, ultra_short_dte_hours: float) -> bool:
+def _pending_order_is_ultra_short_horizon(o: dict, ultra_short_dte_hours: float) -> bool:
     """
     True when a pending BUY looks like a sub-hour / 15m-style contract for open-cap purposes.
     Uses ticker/title patterns (KX*15M, *15M*) and optional DTE in days vs ultra_short_dte_hours.
@@ -4056,7 +4056,7 @@ def _effective_open_contract_cap_for_order(
     """Per-order cap: optional higher (or lower) limit for ultra-short horizons."""
     if base_cap <= 0:
         return 0
-    if ultra_short_cap > 0 and _pending_orderis_ultra_short_horizon(o, ultra_short_dte_hours):
+    if ultra_short_cap > 0 and _pending_order_is_ultra_short_horizon(o, ultra_short_dte_hours):
         return int(ultra_short_cap)
     return int(base_cap)
 
@@ -5613,22 +5613,42 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             print(f"[{series}] No yfinance_tickers mapping - skip")
             continue
         if yf_ticker and yf_ticker.startswith("WEATHER:"):
-            from signals.weather_client import get_snapshot as get_wt_snap, LOCATIONS
+            from signals.weather_client import get_snapshot as get_wt_snap, get_recent_history, LOCATIONS
             city_code = yf_ticker.split(":")[1]
             lat, lon = LOCATIONS.get(city_code, (0, 0))
             live_temp = get_wt_snap(lat, lon)
+            
             if live_temp is not None:
                 current_price = float(live_temp)
                 last_close = current_price
-                closes = [current_price] * 2 # Enough to avoid some checks
                 live_note = " (weather snapshot)"
+                
+                # Fetch recent history (max 31 days) to enable momentum and volatility checks
+                hist_raw = get_recent_history(lat, lon, days=min(31, max(7, args.days)))
+                if hist_raw:
+                    # Determine if we need HIGH or LOW series based on the ticker
+                    is_low = "LOW" in series.upper() or "MIN" in series.upper()
+                    key = "temperature_2m_min" if is_low else "temperature_2m_max"
+                    closes_raw = hist_raw.get(key, [])
+                    # Filter out None and ensure we have at least some data
+                    closes = [float(x) for x in closes_raw if x is not None]
+                    if closes:
+                        last_close = float(closes[-1])
+                    else:
+                        closes = [current_price] * 2
+                else:
+                    closes = [current_price] * 2
             else:
                 current_price = 70.0 # dummy
                 last_close = 70.0
                 closes = [70.0] * 2
                 live_note = " (weather fallback)"
-            momentum_ret = 0.0
-            momentum_crash = False
+            
+            momentum_ret = ((current_price - last_close) / last_close) if last_close > 0 else 0.0
+            momentum_crash = (
+                sp.enable_momentum_protection
+                and momentum_ret <= sp.momentum_crash_threshold_pct
+            )
         else:
             if _pst in ("no_closes", "err") or not closes:
                 print(f"[{series}] No close data for {yf_ticker}")
@@ -5641,6 +5661,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _snap = apply_underlying_price(cfg, series, yf_get_snapshot(yf_ticker))
             if _snap is not None and _snap > 0:
                 live_f = float(_snap)
+                # Detection: if live price deviates by >5x or <0.2x from last close, it's almost certainly a unit mismatch (e.g. cents vs dollars)
+                if last_close > 0:
+                    discrepancy = live_f / last_close
+                    if discrepancy > 5.0 or discrepancy < 0.2:
+                        print(f"  !!! DATA WARNING: {yf_ticker} live ({live_f:,.2f}) vs history ({last_close:,.2f}) ratio {discrepancy:.2f}x. Likely unit mismatch or stale cache. !!!")
+                
                 w = sp.live_price_weight
                 current_price = w * live_f + (1 - w) * last_close
                 live_note = " (blend live+close)"
@@ -5747,8 +5773,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             except Exception:
                 m = mkt
 
-            if should_skip_by_resolution(m, yf_ticker):
-                print(f"  {ticker}: SKIP (unsupported resolution — use 5pm ET crypto / 4pm ET S&P) | {title}")
+            skip_res, res_reason = should_skip_by_resolution(m, yf_ticker)
+            if skip_res:
+                print(f"  {ticker}: {res_reason} | {title}")
                 continue
 
             yes_bid = float(m.get("yes_bid_dollars") or 0)
@@ -6139,7 +6166,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             print(f"[Learning] Penalizing edge by {penalty:.1%} for {_series_prefix} (Trust {_trust:.2f})")
                 if sp.dte_edge_scaling_enabled and dte is not None:
                     effective_min *= _dte_edge_scale_factor(float(dte), sp)
-                if is_ultra_short_horizon(m, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                if is_ultra_short_horizon(m, yf_ticker, sp.ultra_short_dte_hours) and sp.ultra_short_min_edge_mult > 1.0:
                     effective_min *= float(sp.ultra_short_min_edge_mult)
                 effective_min_core_trace = float(effective_min)
                 effective_min_yes = effective_min + yes_parity_penalty + obi_adj_yes + ll_adj_yes + sp.yes_overconfidence_extra_edge
@@ -6155,7 +6182,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
             # For non-standard intraday (e.g. 8pm ET): use relaxed threshold when volatility model available
             min_p_win = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p is not None) else sp.intraday_other_min_p_win
-            if is_ultra_short_horizon(m, yf_ticker, sp):
+            if is_ultra_short_horizon(m, yf_ticker, sp.ultra_short_dte_hours):
                 _up = (
                     sp.ultra_short_min_p_win_with_vol
                     if (use_vol and vol_p is not None)
@@ -6459,7 +6486,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             else:
                 print(f"    ├─ Model P(YES): {hist_p:.1%}")
             print(f"    ├─ Market YES:   {yes_bid:.1%}  (what the market is pricing)")
-            if is_ultra_short_horizon(m, yf_ticker, sp):
+            if is_ultra_short_horizon(m, yf_ticker, sp.ultra_short_dte_hours):
                 _usm = float(sp.ultra_short_min_edge_mult)
                 _us_note = " (no extra ×)" if _usm <= 1.0 else ""
                 print(
@@ -6764,7 +6791,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         kelly_dampen=sp.simple_ev_kelly_dampen,
                         max_bankroll_fraction=sp.simple_ev_max_bankroll_fraction,
                     )
-                    if is_ultra_short_horizon(m, yf_ticker, sp):
+                    if is_ultra_short_horizon(m, yf_ticker, sp.ultra_short_dte_hours):
                         _sf *= float(sp.simple_ev_ultra_short_size_mult)
                     _sf *= _simple_ev_calibration_size_mult(calibration, sp)
                     if vol_p is not None and abs(float(emp) - float(vol_p)) > float(
@@ -7039,8 +7066,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         print(f"  [Gemini] {g_ticker}: SKIP (strike gap {_gap_g:.1%} > {sp.max_buy_yes_strike_above_pct:.1%}) | {title}")
                         continue
 
-                if should_skip_by_resolution(evt, yf_ticker):
-                    print(f"  [Gemini] {g_ticker}: SKIP (unsupported resolution — use 5pm ET) | {title}")
+                skip_res, res_reason = should_skip_by_resolution(evt, yf_ticker)
+                if skip_res:
+                    print(f"  [Gemini] {g_ticker}: {res_reason} | {title}")
                     continue
                 # Intra-exchange arb: binary only (categorical contracts have per-strike yes/no)
                 arb_used_g = False
@@ -7305,7 +7333,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             effective_min_gem += sp.series_cooldown_extra_edge
                     if sp.dte_edge_scaling_enabled and dte_g is not None:
                         effective_min_gem *= _dte_edge_scale_factor(float(dte_g), sp)
-                    if is_ultra_short_horizon(evt, yf_ticker, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                    if is_ultra_short_horizon(evt, yf_ticker, sp.ultra_short_dte_hours) and sp.ultra_short_min_edge_mult > 1.0:
                         effective_min_gem *= float(sp.ultra_short_min_edge_mult)
                     effective_min_core_trace_g = float(effective_min_gem)
                     effective_min_yes_g = effective_min_gem + yes_parity_penalty + obi_adj_yes_g + sp.yes_overconfidence_extra_edge
@@ -7321,7 +7349,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
                 # For non-standard intraday: use relaxed threshold when volatility model available
                 min_p_win_gem = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_gem is not None) else sp.intraday_other_min_p_win
-                if is_ultra_short_horizon(evt, yf_ticker, sp):
+                if is_ultra_short_horizon(evt, yf_ticker, sp.ultra_short_dte_hours):
                     _ug = (
                         sp.ultra_short_min_p_win_with_vol
                         if (use_vol and vol_p_gem is not None)
@@ -7606,7 +7634,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 else:
                     print(f"    ├─ Model P(YES): {hist_p_gem:.1%}")
                 print(f"    ├─ Market YES:   {impl:.1%}  (what the market is pricing)")
-                if is_ultra_short_horizon(evt, yf_ticker, sp):
+                if is_ultra_short_horizon(evt, yf_ticker, sp.ultra_short_dte_hours):
                     _usm_g = float(sp.ultra_short_min_edge_mult)
                     _us_note_g = " (no extra ×)" if _usm_g <= 1.0 else ""
                     print(
@@ -7917,7 +7945,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             kelly_dampen=sp.simple_ev_kelly_dampen,
                             max_bankroll_fraction=sp.simple_ev_max_bankroll_fraction,
                         )
-                        if is_ultra_short_horizon(evt, yf_ticker, sp):
+                        if is_ultra_short_horizon(evt, yf_ticker, sp.ultra_short_dte_hours):
                             _sf_g *= float(sp.simple_ev_ultra_short_size_mult)
                         _sf_g *= _simple_ev_calibration_size_mult(calibration, sp)
                         if vol_p_gem is not None and abs(float(emp) - float(vol_p_gem)) > float(
@@ -8257,7 +8285,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         break
                         pos_yf = yf_mapping.get(series.upper()) if series else None
                         # Unsupported intraday (e.g. 7pm) → sell to exit
-                        if pos_yf and should_skip_by_resolution(m, pos_yf):
+                        skip_res, _ = should_skip_by_resolution(m, pos_yf)
+                        if pos_yf and skip_res:
                             yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                             no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                             sell_price = yes_bid if side == "yes" else no_bid
@@ -8367,7 +8396,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                     eff_pos += proxy_basis_extra_min_edge(cfg, series or "")
                                     if sp.dte_edge_scaling_enabled and dte_pos is not None:
                                         eff_pos *= _dte_edge_scale_factor(float(dte_pos), sp)
-                                    if is_ultra_short_horizon(m, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                                    if is_ultra_short_horizon(m, pos_yf, sp.ultra_short_dte_hours) and sp.ultra_short_min_edge_mult > 1.0:
                                         eff_pos *= float(sp.ultra_short_min_edge_mult)
                                     if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                                         eff_pos += adaptive_edge_bump
@@ -8378,7 +8407,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         if (use_vol and vol_p is not None)
                                         else sp.intraday_other_min_p_win
                                     )
-                                    if is_ultra_short_horizon(m, pos_yf, sp):
+                                    if is_ultra_short_horizon(m, pos_yf, sp.ultra_short_dte_hours):
                                         _upp = (
                                             sp.ultra_short_min_p_win_with_vol
                                             if (use_vol and vol_p is not None)
@@ -8677,7 +8706,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 eff_cached = _get_effective_min_edge(min_edge, direction, calibration, sp)
                 if sp.dte_edge_scaling_enabled and dte_cached is not None:
                     eff_cached *= _dte_edge_scale_factor(float(dte_cached), sp)
-                if is_ultra_short_horizon(m, _yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                if is_ultra_short_horizon(m, _yf, sp.ultra_short_dte_hours) and sp.ultra_short_min_edge_mult > 1.0:
                     eff_cached *= float(sp.ultra_short_min_edge_mult)
                 if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                     eff_cached += adaptive_edge_bump
@@ -8688,7 +8717,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if (use_vol and vol_p is not None)
                     else sp.intraday_other_min_p_win
                 )
-                if is_ultra_short_horizon(m, _yf, sp):
+                if is_ultra_short_horizon(m, _yf, sp.ultra_short_dte_hours):
                     _uc = (
                         sp.ultra_short_min_p_win_with_vol
                         if (use_vol and vol_p is not None)
@@ -8958,7 +8987,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         title = (info.get("title") or evt.get("title") or "")[:55]
                         ticker_g = info.get("ticker") or evt.get("ticker", "?")
                         side = outcome
-                        if should_skip_by_resolution(evt, pos_yf or ""):
+                        skip_res, _ = should_skip_by_resolution(evt, pos_yf or "")
+                        if skip_res:
                             impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
                             no_price_g = 1.0 - impl if 0 < impl < 1 else impl
                             sell_price = impl if side == "yes" else no_price_g
@@ -9041,7 +9071,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             else:
                                 hist_p_g = max(emp_g, vol_p_g)
                         min_p_win_g = sp.intraday_other_min_p_win_with_vol if (use_vol and vol_p_g is not None) else sp.intraday_other_min_p_win
-                        if is_ultra_short_horizon(evt, pos_yf, sp):
+                        if is_ultra_short_horizon(evt, pos_yf, sp.ultra_short_dte_hours):
                             _ugp = (
                                 sp.ultra_short_min_p_win_with_vol
                                 if (use_vol and vol_p_g is not None)
@@ -9052,7 +9082,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         pos_min_edge_g = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
                         if sp.dte_edge_scaling_enabled and dte_g is not None:
                             pos_min_edge_g *= _dte_edge_scale_factor(float(dte_g), sp)
-                        if is_ultra_short_horizon(evt, pos_yf, sp) and sp.ultra_short_min_edge_mult > 1.0:
+                        if is_ultra_short_horizon(evt, pos_yf, sp.ultra_short_dte_hours) and sp.ultra_short_min_edge_mult > 1.0:
                             pos_min_edge_g *= float(sp.ultra_short_min_edge_mult)
                         if sp.adaptive_learning_enabled and adaptive_edge_bump > 0:
                             pos_min_edge_g += adaptive_edge_bump

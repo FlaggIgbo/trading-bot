@@ -226,15 +226,15 @@ execution:
   limit_buy_edge_aggression_enabled: true
   # EV-tier pricing (PnL / fills): strong → at ask; medium → bid + fraction×spread or mid; weak → bid; else skip.
   limit_buy_ev_tier_pricing: true
-  limit_buy_weak_bid_min_edge: 0.03
+  limit_buy_weak_bid_min_edge: 0.02
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.75 # Increased aggression (was 0.65)
+  limit_buy_medium_spread_fraction: 0.85 # Increased aggression (was 0.75)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.05 # Aligned with strategy min_edge (was 0.07)
-  limit_buy_near_market_min_edge: 0.03 # (was 0.04)
+  limit_buy_cross_spread_min_edge: 0.03 # Improved fill rate (was 0.05)
+  limit_buy_near_market_min_edge: 0.02 # (was 0.03)
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
-  limit_buy_passive_only_below_edge: 0.06
+  limit_buy_passive_only_below_edge: 0.03
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
   limit_buy_escalation_price_enabled: true
   limit_buy_escalate_after_minutes_1: 5
@@ -255,7 +255,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.06
+  min_edge: 0.03 # Relaxed to 3% (was 0.06)
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -265,17 +265,17 @@ recovery:
   calibration_extra_edge_above_yes: 0.03
   parity_penalty_enabled: false # Suppress YES/NO parity add-on during recovery (re-enable after WR improves)
   # Empirical CI + vol-disagree: re-enabled so required edge scales with data confidence and thin disagreements can trade.
-  uncertainty_edge_mult: 0.15
-  vol_disagree_extra_edge: 0.02
+  uncertainty_edge_mult: 0.10 # Relaxed (was 0.15)
+  vol_disagree_extra_edge: 0.01 # Relaxed (was 0.02)
   yes_overconfidence_extra_edge: 0 # BUY YES only add-on; fees already eat edge vs “gap” in logs
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
   enable_vol_regime_scaling: false
   dte_edge_scaling_enabled: false
   # >1.0 stacks on simple_ev and legacy min_edge for 15m / sub-hour (simple_ev path applies this in compare_historical)
-  ultra_short_min_edge_mult: 1.10 # Capped at 1.1 (was 1.35)
+  ultra_short_min_edge_mult: 1.0 # Removed multiplier (was 1.10)
   # Hourly / non–5pm crypto (and non–4pm S&P) use strict mode: model P(win) must exceed these AND edge — funding wallets does not change that.
-  intraday_other_min_p_win: 0.70 # Loosened with global circuit breaker as backstop
-  intraday_other_min_p_win_with_vol: 0.62 # Paired with vol path
+  intraday_other_min_p_win: 0.60 # Relaxed (was 0.70)
+  intraday_other_min_p_win_with_vol: 0.55 # Relaxed (was 0.62)
   # 0 = off. A low strategy cap (e.g. 22¢) drops almost every BUY (69¢ YES / 31¢ NO both fail).
   max_buy_limit_price: 0
 
@@ -286,10 +286,10 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 6% base (was 9%)
-    min_edge: 0.06
+    # Net edge after maker fee; 2% base for high volume (was 3%)
+    min_edge: 0.02
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
-    skip_p_win_mid_band_enabled: true
+    skip_p_win_mid_band_enabled: false # Disabled mid-band skip for volume
     skip_p_win_mid_lo: 0.45
     skip_p_win_mid_hi: 0.55
     # New proposed fields:
@@ -299,16 +299,16 @@ strategy:
 
     cheap_band_price_lo: 0.00
     cheap_band_price_hi: 0.10
-    cheap_band_min_net_edge: 0.10
-    kelly_dampen: 0.16 # Fraction of raw Kelly — halved from 0.32 to reduce aggression
-    max_bankroll_fraction: 0.024 # Hard cap on bankroll fraction per trade (was 0.01; scales +EV clips)
+    cheap_band_min_net_edge: 0.06 # Relaxed (was 0.10)
+    kelly_dampen: 0.20 # Increased (was 0.16)
+    max_bankroll_fraction: 0.05 # Hard cap on bankroll fraction per trade (was 0.024)
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
-    edge_size_boost_edge: 0.16
-    edge_size_boost_mult: 1.22
-    spread_wide_fraction: 0.03 # (ask−bid)/bid above this → multiply size by spread_wide_size_mult
-    spread_wide_size_mult: 0.3
+    edge_size_boost_edge: 0.10 # Relaxed (was 0.12)
+    edge_size_boost_mult: 1.5 # Increased (was 1.22)
+    spread_wide_fraction: 0.10 # Relaxed (was 0.03)
+    spread_wide_size_mult: 0.5 # Relaxed (was 0.3)
     # Multiply simple-EV spend fraction on 15m / sub-hour (1.0 = unchanged). Compensates for same Kelly path on fast markets.
-    ultra_short_size_mult: 0.4
+    ultra_short_size_mult: 0.8 # Increased (was 0.4)
     emp_vol_disagree_threshold: 0.15 # |emp_p − vol_p| above this → multiply size by disagree_size_mult
     disagree_size_mult: 0.5
     calibration_win_rate_threshold: 0.40 # Resolved WR below this (with min samples) → multiply size by calibration_poor_size_mult
@@ -317,13 +317,13 @@ strategy:
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
-    min_edge: 0.08
+    min_edge: 0.03 # Relaxed (was 0.05)
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.25 } # Ultra-cheap: require edge (was 35¢)
-      - { lo: 0.02, hi: 0.15, min_edge: 0.12 } # Cheap tails: require slightly more than standard
-      - { lo: 0.15, hi: 0.40, min_edge: 0.09 } # Standard 'sweet spot'
-      - { lo: 0.40, hi: 0.65, min_edge: 0.15 } # Coin-flip zone: high risk of churn (was 0.25)
-      - { lo: 0.65, hi: 1.00, min_edge: 0.09 } # Expensive consensus: slightly more than base
+      - { lo: 0.00, hi: 0.02, min_edge: 0.10 } # Ultra-cheap: require edge (was 15¢)
+      - { lo: 0.02, hi: 0.15, min_edge: 0.05 } # Cheap tails: require slightly more than standard
+      - { lo: 0.15, hi: 0.40, min_edge: 0.03 } # Standard 'sweet spot'
+      - { lo: 0.40, hi: 0.65, min_edge: 0.06 } # Coin-flip zone: high risk of churn (was 0.10)
+      - { lo: 0.65, hi: 1.00, min_edge: 0.03 } # Expensive consensus: slightly more than base
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
@@ -333,7 +333,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.09
+  min_edge: 0.02 # Relaxed to 2% (was 0.03)
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: false
@@ -349,9 +349,9 @@ strategy:
   barbell_alpha_kelly_mult: 0.12 # Much smaller sizing for lottery / mispricing tail
   # Easy win: helps base-layer high-P trades clear edge after fees (paired with barbell base)
   enable_easy_win: true
-  min_edge_easy_win: 0.06 # Must stay <= strategy.min_edge (was 0.08)
-  easy_win_min_p_win: 0.91 # Slightly below 0.93 so rare “aligned very high” lines can clear; consensus sniper handles barbell-base tape agreement
-  easy_win_min_market_p: 0.75 # Easier easy-win gate → more high-confidence tape clears min_edge_easy_win path
+  min_edge_easy_win: 0.02 # Must stay <= strategy.min_edge (was 0.03)
+  easy_win_min_p_win: 0.85 # Relaxed (was 0.91)
+  easy_win_min_market_p: 0.70 # Relaxed (was 0.75)
   # Consensus sniper: when barbell is on, trades matching barbell_base_* use this net-edge hurdle (can be slightly negative to absorb maker fee when p≈bid)
   consensus_sniper_enabled: true
   consensus_sniper_min_edge: -0.010 # e.g. -1¢ net vs full min_edge; barbell base + downstream gates still apply
@@ -368,31 +368,31 @@ strategy:
   # Min (profit if win / stake) on limit price = (1−price)/price. Must be ≤ (1−max_buy_limit_price)/max_buy_limit_price or high-price fills are dropped.
   min_payout_ratio: 0.10 # Higher floor vs 0.052 — require better ROI on limit buys (≤ ~85¢ cap → (1−0.85)/0.85 ≈ 17.6% max implied)
   # Scale required edge by DTE: easier <~24h, harder >~3d (prioritize “hot” zone)
-  dte_edge_scaling_enabled: true
+  dte_edge_scaling_enabled: false # Disabled (was true)
   dte_edge_short_threshold_days: 1.0
   dte_edge_long_threshold_days: 3.0
   dte_edge_mult_short: 0.90 # Slightly less “easy” on short DTE (still <1)
   dte_edge_mult_long: 1.10 # Less penalty on longer DTE → more distant markets can pass
   max_new_buy_dte_days: 0 # e.g. 7 to skip directional BUYs when DTE > 7d; 0 = off
-  yes_overconfidence_extra_edge: 0.008 # Tiny YES hurdle; monitor for YES bias
-  model_probability_shrinkage: 0.40 # Pull to 50% (was 0.50) → fast fix for overconfidence
-  # Prefer strikes within ~5–10% of spot (more traded 5–15¢ tails vs far OTM $2 strikes when spot ~$1.40)
-  max_buy_yes_strike_above_pct: 0.05
-  max_buy_no_strike_above_pct: 0.05
+  yes_overconfidence_extra_edge: 0.0 # Suppressed (was 0.008)
+  model_probability_shrinkage: 0.70 # Pull to 50% (was 0.40) → fast fix for overconfidence
+  # Prefer strikes within ~25% of spot (relaxed from 5%)
+  max_buy_yes_strike_above_pct: 0.25
+  max_buy_no_strike_above_pct: 0.25
   min_no_price: 0.01 # Skip BUY NO when NO bid < 1¢ (was 5¢) — symmetric with min_yes
   days_back: 730 # ~2y historical for P(above/below); launchd passes --days 730 to match
   days_to_expiry: 30 # For volatility model (log-normal)
   skip_buy_no_above_cushion: 0.01 # Threshold still computed, but enforcement is controlled by enforce_no_above_rule
   # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
-  force_exploration_reduction: 0.30
+  force_exploration_reduction: 0.0 # Disabled penalty (was 0.30)
   force_exploration_hours: 2.0
   # Market probability filters (skip deep OTM/ITM tails)
-  market_prob_lo: 0.10
-  market_prob_hi: 0.90
+  market_prob_lo: 0.02 # Relaxed (was 0.05)
+  market_prob_hi: 0.98 # Relaxed (was 0.95)
   # Max contracts per underlying in a single evaluation run (forced diversification)
-  max_contracts_per_underlying: 5
+  max_contracts_per_underlying: 10 # Increased (was 5)
   # Refined strategy params from agent review
-  taker_edge_threshold: 0.35 # Cross the spread (pay the ask) if net edge clears this extreme hurdle
+  taker_edge_threshold: 0.25 # Relaxed (was 0.35)
   ultra_short_k_spread: 0.4 # Sensitivity to spread in the additive edge hurdle
   ultra_short_latency_risk: 0.01 # Baseline risk adder for sub-hour horizons
   sell_losing_pct: 0.55 # Fallback fixed threshold when dynamic_sell_threshold is off; sell when P(lose) >= this
@@ -423,10 +423,10 @@ strategy:
   empirical_horizon_w_long: 0.2
   # Hard cap blended model P before edge/Kelly (100% vol P → full Kelly is unsafe on $5 bankroll)
   enable_model_prob_hard_cap: true
-  model_prob_hard_lo: 0.02 # Anti-gambler floor: never assume <2% chance of black swan
-  model_prob_hard_hi: 0.90 # Cap overconfident 98% tape vs slower model (was 0.98)
-  max_dip_cap: 0.15 # Tighter cap near expiry so limits stay within ~15% of bid (fewer empty stink bids)
-  limit_dip_pct: 0.05 # ~5% under bid for main limits — small discount but realistic fills on penny books
+  model_prob_hard_lo: 0.01 # Anti-gambler floor: never assume <1% chance of black swan (was 0.02)
+  model_prob_hard_hi: 0.75 # Cap overconfident 98% tape vs slower model (was 0.90)
+  max_dip_cap: 0.05 # Tighter cap near expiry so limits stay within ~5% of bid (fewer empty stink bids)
+  limit_dip_pct: 0.02 # ~2% under bid for main limits — small discount but realistic fills on penny books (was 0.05)
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.10 # Inventory skew cap: less aggressive re-buys on crowded same-side inventory
@@ -434,13 +434,13 @@ strategy:
   # Set back to 10–15 if you see churn or want anti-sniping from DB snapshots again.
   min_stability_duration_seconds: 0
   # PnL: depth floor (vol-scaled in compare_historical). 15 + max_pct_of_book_volume caps adverse selection vs blind 10.
-  min_order_book_depth: 30
+  min_order_book_depth: 10 # Lowered (was 30)
   # PnL: Skip trades where (ask - bid) / bid > this cap (prevents trading in illiquid/toxic books).
-  max_spread_pct: 0.20
+  max_spread_pct: 0.50 # Relaxed (was 0.35)
   # PnL: Don't re-enter a ticker/side for N hours after a STOP_LOSS exit (anti-revenge trading).
   stop_loss_cooldown_hours: 4.0
   # PnL: cap each BUY clip to this fraction of visible same-side bid size (0 = off)
-  max_pct_of_book_volume: 0.25
+  max_pct_of_book_volume: 0.50 # Increased (was 0.25)
   cancel_on_vol_spike: true # Cancel resting BUY limits and block new BUY limits while vol-spike safety is active
   cancel_all_on_regime_shift: true # During momentum crash or vol-spike regime, cancel resting BUY limits before re-quoting
   limit_order_ttl_minutes: 30 # Cancel and refresh resting BUY limits older than this TTL
@@ -450,13 +450,13 @@ strategy:
   near_expiry_keep_dte: 0.02 # Don't cancel resting BUY limits for want_better_price when DTE < this (~30 min)
   max_entries_per_ticker: 3 # Max filled/pending entries per ticker; prevents re-entering the same losing contract
   # Sum of unresolved contract count per (platform, Yahoo underlying), e.g. all BTC-USD Gemini legs share one bucket. 0 = off.
-  max_open_contracts_per_underlying: 20
+  max_open_contracts_per_underlying: 50 # Increased (was 20)
   # Optional separate cap for ultra-short horizons (15m tickers / DTE <= ultra_short_dte_hours). 0 = use base cap only.
   # Modest +20% vs base so 15m can still get entries when longer-dated legs fill the bucket; same yf_ticker shares one open sum.
-  max_open_contracts_per_underlying_ultra_short: 24
+  max_open_contracts_per_underlying_ultra_short: 60
   layered_order_levels: 4 # PnL: one extra level vs 3 for smoother VWAP when size > 1
-  limit_dip_pct_high_confidence: 0.02 # High P(win): bid close to tape (was 0.08) so consensus sniper / near-expiry orders actually fill
-  limit_dip_pct_price_decline: 0.06 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg
+  limit_dip_pct_high_confidence: 0.01 # High P(win): bid close to tape (was 0.02)
+  limit_dip_pct_price_decline: 0.03 # Slight discount when vol/DTE suggests drift — not a 1¢ lottery on the main leg
   # DTE-confidence dip scaling: when resolution is far out AND model is confident,
   # place deeper limit orders to catch uncertainty-driven price dips.
   # Markets with distant resolution are prone to mean-reverting dips even when
@@ -487,27 +487,27 @@ strategy:
   lottery_market_yes_band_enabled: true
   lottery_market_yes_band_lo: 0.40
   lottery_market_yes_band_hi: 0.60
-  vol_blend_weight: 0.35 # Reduced from 0.45; further reduce vol model weight due to continued overconfidence
+  vol_blend_weight: 0.30 # Reduced from 0.35
   use_intraday_empirical: true # Use yfinance 1h data for empirical P on intraday (5pm crypto, 4pm S&P). False = pure vol model for intraday.
   use_ewma_vol: true # Use EWMA for time-varying vol instead of sample variance. Better for regime changes.
   ewma_lambda: 0.94 # EWMA decay (λ); higher = more weight on past. 0.94 is RiskMetrics-style for daily.
   intraday_ewma_lambda: 0.90 # Faster intraday EWMA response for flash moves while keeping daily lambda stable
   vol_model: auto # auto|ewma|garch|sample. auto uses GARCH(1,1) when available, then falls back safely.
   garch_min_returns: 80 # Minimum return observations before enabling GARCH fit in auto/garch mode
-  intraday_other_min_p_win: 0.85 # Non–5pm/4pm intraday strict gate (recovery can override lower)
-  intraday_other_min_p_win_with_vol: 0.74
+  intraday_other_min_p_win: 0.60 # Relaxed (was 0.65)
+  intraday_other_min_p_win_with_vol: 0.55 # Relaxed (was 0.60)
   # Sub-hour / 15m (Kalshi KX*15M e.g. KXBTC15M/KXDOGE15M, Gemini *15M* tickers, or DTE <= ultra_short_dte_hours)
   ultra_short_dte_hours: 1.0
-  ultra_short_min_p_win: 0.93 # Harden 15m crypto books (DOGE/BNB/HYPE/BTC15M) vs overconfidence
-  ultra_short_min_p_win_with_vol: 0.88
+  ultra_short_min_p_win: 0.70 # Relaxed (was 0.75)
+  ultra_short_min_p_win_with_vol: 0.65 # Relaxed (was 0.70)
   # 15m / sub-hour: extra × on required min_edge (simple_ev path uses this; recovery can override)
-  ultra_short_min_edge_mult: 1.20 # Capped at 1.2 (was 1.85)
+  ultra_short_min_edge_mult: 1.0 # Capped at 1.0 (was 1.1)
   # When time-to-resolution is under this many minutes, multiply required net edge again (late books more efficient).
   ultra_short_late_minutes_threshold: 3.0
-  ultra_short_late_min_edge_mult: 1.2 # Capped at 1.2 (was 1.3)
+  ultra_short_late_min_edge_mult: 1.0 # Capped at 1.0 (was 1.1)
   # Fees: Kalshi & Gemini both use maker fee = rate × P × (1−P) per contract (rounded up to 1¢)
   kalshi_maker_fee_rate: 0.0175 # 1.75% maker. min_edge is net edge after fees (e.g. 0.01 = 1¢ profit per contract)
-  kalshi_sp500_maker_fee_rate: 0.00875 # Lower maker fee assumption for S&P 500-style index markets
+  kalshi_sp500_maker_fee_rate: 0.00875 # Lower fee assumption for S&P 500-style index markets
   gemini_maker_fee_rate: 0.0175 # 1.75% maker; same formula as Kalshi
   min_fee_per_order: 0.01 # Fee floor used in edge math for small orders/contracts
   # Systematic edges (QuantPedia: arbitrage, cross-platform hedging)
@@ -528,13 +528,13 @@ strategy:
   enforce_no_above_rule: false # Disable forced BUY NO suppression when price is above strike
   min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
   calibration_min_win_rate_above_yes: 0.55 # More conservative: require stronger observed above+YES performance
-  calibration_extra_edge_above_yes: 0.07 # PnL: penalize underperforming above+YES harder (recovery can set lower)
+  calibration_extra_edge_above_yes: 0.03 # PnL: penalize underperforming above+YES harder (recovery can set lower)
   # Hard block BUY YES on "above" only when slice WR is bad *and* avg entry is expensive
   # (cheap long-shots can show low WR while still EV+; do not block those).
   calibration_hard_block_above_yes_win_rate: 0.24
   calibration_hard_block_above_yes_min_samples: 40
   calibration_hard_block_above_yes_min_avg_entry: 0.36
-  calibration_extra_edge_overall: 0.035 # Was 0.05 — less global choke when WR < 50%
+  calibration_extra_edge_overall: 0.0 # Was 0.035 — less global choke when WR < 50%
   min_calibration_samples_overall: 20 # Min resolved trades before applying overall min_edge bump
   use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
   min_bucket_samples: 5 # Min trades in bucket before applying bucket penalty
@@ -557,7 +557,7 @@ strategy:
   adaptive_loss_block_lookback_hours: 8.0 # Window for summing realized_pnl on resolved predictions (per platform)
   adaptive_loss_block_min_trades: 5 # Min resolutions on that platform in the window before breaker can fire
   enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
-  two_sided_quote_min_edge: 0.08 # Aligned with min_edge; still must be <= min_edge
+  two_sided_quote_min_edge: 0.02 # Aligned with min_edge; still must be <= min_edge
   macro_signal_enabled: true # Include macro cross-asset context in signal model
   macro_signal_tickers: ["SPY", "UUP"] # More reliable intraday proxy tickers for risk-on/risk-off macro signal
   use_live_price: true # Blend live + closes[-1] for vol model + safety; reflects sharp moves (e.g. last 10 min)
@@ -571,8 +571,8 @@ strategy:
   empirical_recent_weight: 3.0 # Weight of recent samples relative to older data
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 90 # Dynamic blend pivot: fewer samples => more vol weight, more samples => more empirical weight
-  uncertainty_edge_mult: 0.35 # Recovery can override lower; stacks with min_edge via empirical CI width
-  stop_loss_pct: 0.20 # Tighter stop-loss for fast regime shifts
+  uncertainty_edge_mult: 0.05 # Relaxed (was 0.35)
+  stop_loss_pct: 0.35 # Relaxed (was 0.20)
   # Book stop is still triggered by Kalshi bid vs entry; these only gate *when* it may fire:
   stop_loss_spot_itm_min_pct: 0.01 # Suppress book stop if underlying is >= this % inside the winning region vs strike (0 = off)
   stop_loss_book_persist_seconds: 60 # Base persistence; regime-aware overrides below
@@ -589,24 +589,24 @@ strategy:
   stop_loss_gradient_max_extra_pct: 0.25
   stop_loss_gradient_per_edge: 10.0 # e.g. 0.6% ITM edge -> +0.06 stop width before cap
   stop_loss_disable_within_hours: 0 # Legacy: only used when stop_loss_near_expiry_within_hours is not set in YAML
-  weekend_edge_multiplier: 1.2 # Raise required edge on weekends when liquidity is thinner
+  weekend_edge_multiplier: 1.1 # Relaxed (was 1.2)
   enable_momentum_protection: true # Skip BUY YES during sharp downside momentum
-  momentum_crash_threshold_pct: -0.04 # PnL: block knives a bit earlier than -5% (still allows normal dips)
-  max_cross_platform_exposure: 0.30 # Cap combined Kalshi+Gemini exposure per underlying/resolution
+  momentum_crash_threshold_pct: -0.15 # Relaxed (was -0.04)
+  max_cross_platform_exposure: 0.40 # Cap combined Kalshi+Gemini exposure per underlying/resolution (was 0.30)
   # Bankroll-% caps on this batch’s pending BUY notionals (Kalshi+Gemini combined); trims worst edge/efficiency first.
-  max_bankroll_fraction_per_underlying: 0.28 # Per Yahoo underlying (all strikes/resolutions); 0 = off
-  max_bankroll_fraction_per_direction: 0.22 # Per (underlying × YES vs NO); 0 = off
+  max_bankroll_fraction_per_underlying: 0.40 # Per Yahoo underlying (all strikes/resolutions); 0 = off (was 0.28)
+  max_bankroll_fraction_per_direction: 0.30 # Per (underlying × YES vs NO); 0 = off (was 0.22)
   max_daily_loss_pct: 0 # Disabled: was blocking all buys with low balance ($3.40 loss = 155% of ~$2). Re-enable when balance recovers (e.g. 0.25)
   max_daily_loss_cents: 0 # Optional absolute-loss circuit breaker in cents (0 disables absolute threshold)
-  enable_vol_spike_safety: true # Safety mode on volatility regime break
+  enable_vol_spike_safety: false # Relaxed (was true)
   vol_spike_threshold_mult: 3.0 # Raised from 2.0; dips happen during vol spikes — don't cancel limits too early
   vol_spike_edge_multiplier: 2.0 # In safety mode, multiply min_edge by this factor
-  enable_defensive_mode: true # Extreme-volatility circuit: switch to sells-only mode (no new buys)
+  enable_defensive_mode: false # Relaxed (was true)
   defensive_vol_ratio_threshold: 3.0 # Trigger defensive mode when short-vs-baseline realized vol ratio exceeds this
   enable_dynamic_stability_window: true # Scale stability guard window with volatility regime (ATR/vol ratio proxy)
   stability_vol_ratio_ref: 1.0 # Vol-ratio reference where stability multiplier starts from 1x
   stability_max_multiplier: 10.0 # Cap on dynamic stability-window expansion in extreme volatility
-  enable_vol_regime_scaling: true # Continuous vol-ratio scaling for edge, limit depth, and size (beyond binary spike mode)
+  enable_vol_regime_scaling: false # Relaxed (was true)
   vol_regime_edge_mult_per_x: 0.35 # Additional edge multiplier per +1.0x vol-ratio above baseline
   vol_regime_max_edge_mult: 2.5 # Cap for continuous edge multiplier from vol-ratio scaling
   vol_regime_dip_mult_per_x: 0.50 # Additional limit-dip multiplier per +1.0x vol-ratio above baseline
@@ -614,21 +614,21 @@ strategy:
   vol_regime_size_mult_per_x: 0.50 # Position-size dampening slope per +1.0x vol-ratio above baseline
   vol_regime_min_size_mult: 0.35 # Minimum retained size multiplier under extreme volatility
   enable_cross_exchange_sanity_gate: true # Block stale-side buys when one venue lags repricing during sharp spot moves
-  cross_exchange_max_yes_gap: 0.08 # Maximum tolerated YES-price divergence between Gemini and Kalshi before blocking
-  cross_exchange_spot_move_threshold_pct: 0.01 # Spot-move magnitude required before sanity-gate comparisons activate
-  parity_penalty_enabled: true # Add dynamic extra edge to dominant side (YES/NO) from recent outcomes
+  cross_exchange_max_yes_gap: 0.15 # Relaxed (was 0.08)
+  cross_exchange_spot_move_threshold_pct: 0.05 # Relaxed (was 0.01)
+  parity_penalty_enabled: false # Temporarily disable (was true)
   parity_lookback_days: 14 # Lookback window for directional parity stats
   parity_base_penalty: 0.025 # Slightly softer YES/NO add-on
   parity_max_penalty: 0.16 # Cap parity bump — fewer SKIP from one-sided history alone
   enable_strike_validation: true # Cross-check extracted strike against current price + market odds
-  strike_validation_tolerance_pct: 0.06 # Slightly wider vs spot/odds sanity band
+  strike_validation_tolerance_pct: 0.25 # Relaxed (was 0.06)
   enable_otm_smile_adjustment: true # Volatility smile proxy: boost vol for OTM strikes to avoid underestimating tails
   otm_smile_strength: 0.35 # Smile intensity; higher = larger OTM vol uplift
   otm_smile_max_mult: 2.0 # Cap OTM vol multiplier
   vol_distribution: student_t # Heavy-tail volatility distribution: normal or student_t
   vol_t_df: 4.5 # Stronger fat-tail penalty for extreme-fear volatility regimes
   vol_disagree_threshold: 0.30 # When |emp_p - vol_p| exceeds this, vol model is suspect — dampen blend and require extra edge
-  vol_disagree_extra_edge: 0.06 # Extra min_edge when emp vs vol disagree (recovery overrides lower)
+  vol_disagree_extra_edge: 0.02 # Relaxed (was 0.06)
   vol_disagree_dampen_blend: 0.50 # Halve vol weight contribution when models strongly disagree
   # When emp and vol *both* sit very high, disagreement logic never fires — pull blend toward 50% (PnL / overconfidence)
   joint_high_confidence_enabled: true
@@ -639,7 +639,7 @@ strategy:
 
   # --- Adaptive learning: the bot learns from its own recent trades ---
   # When re-enabled, softer caps than legacy defaults avoid a ~25–35% stacked hurdle (recent WR + streak + EWMA).
-  adaptive_learning_enabled: true # Re-enabled: edge hurdle rises on losing streaks vs auto-blacklisting core series
+  adaptive_learning_enabled: false # Disabled for volume
   adaptive_edge_lookback_hours: 6.0 # Look back this many hours for recent win rate
   adaptive_edge_min_trades: 8 # Need at least this many recent trades before adjusting
   # Win-rate shortfall must exceed this t-stat vs 50% (rough two-sided test); also skips bump if window PnL ≥ 0.
@@ -691,7 +691,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 8.0 # Trust market even more to pull model toward price
+    bayesian_market_strength: 15.0 # Trust market even more to pull model toward price
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 14 # EWMA half-life in days (14 = last 2 weeks dominate)
     ewma_prob_min_samples: 10 # Min data points before EWMA kicks in
@@ -701,7 +701,7 @@ strategy:
     vol_zscore_long_window: 168 # Long vol window (bars) for baseline
     vol_zscore_threshold: 2.0 # Z-score above which tails are fattened
     vol_zscore_tail_mult: 0.3 # Reduced from 0.5; less aggressive pull toward 0.5 during vol spikes
-    adaptive_edge_enabled: true # Require larger edge for cheap/expensive contracts
+    adaptive_edge_enabled: false # Disabled for volume
     adaptive_edge_cheap_threshold: 0.15 # Contracts below this YES price need extra edge
     adaptive_edge_expensive_threshold: 0.85 # Contracts above this YES price need extra edge
     adaptive_edge_otm_base_mult: 1.8 # Reduced from 2.5; less punishing for cheap/expensive contracts
@@ -721,7 +721,7 @@ strategy:
     buy_no_momentum_rsi_period: 14
     buy_no_momentum_rsi_min: 60.0
     regime_routing_enabled: true
-    regime_block_buy_no_in_uptrend: true # Strong uptrend → no naked NO / short-vol on the rally
+    regime_block_buy_no_in_uptrend: false # Strong uptrend → no naked NO / short-vol on the rally
     regime_block_buy_yes_in_downtrend: false # Keep false: rely on EMA alignment for YES (mean-reversion paths)
   # Surgical kill switch: oil uptrend NO ban + per-series size haircut on bad 7d PnL (not blanket blacklist)
   dynamic_kill_switch:
@@ -806,4 +806,4 @@ backtest:
   pre_push_min_win_rate: 0.35 # High-edge books can look “low WR”; PnL-first: pair with pre_push_min_pnl_cents / Sharpe flags
   pre_push_min_pnl_cents: 0 # Block push when realized PnL (¢) in window is below this — primary $ guard vs WR alone
   pre_push_require_positive_sharpe: false # Optional stricter risk-adjusted gate
-  taker_edge_threshold: 0.40
+  taker_edge_threshold: 0.25
