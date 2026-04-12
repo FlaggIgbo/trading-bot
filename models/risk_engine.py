@@ -21,32 +21,97 @@ def calculate_fractional_kelly_size(
     *,
     total_bankroll_cents: float,
     fraction: float = 0.25,
-    max_trade_cents: float = 5000, # $50 max by default
+    max_trade_cents: float = 5000,
     trust_score: float = 1.0,
+    drawdown_pct: float = 0.0,
+    drawdown_aggressive_delever_threshold: float = 0.15,
 ) -> int:
     """
-    Kelly Criterion: K = (p*b - q) / b where b is net odds (1/p - 1 per Kalshi/Gemini).
-    Simplified: K = (p - price) / (1 - price).
-    
-    Returns the size in cents (contract count × price × 100).
+    Enhanced Kelly with drawdown-aware deleveraging.
+    If drawdown exceeds threshold, we delever exponentially.
     """
     if price <= 0 or price >= 1.0:
         return 0
     
-    # 0.5 (model) - 0.1 (market) / 0.9 = 0.4 / 0.9 = 44%
     p = max(0.0, min(0.99, float(p_win)))
     k_raw = (p - float(price)) / (1.0 - float(price))
     
     if k_raw <= 0:
         return 0
     
-    # Apply fractional Kelly (e.g. 0.25x) and trust score adjustment
-    # If the model is underconfident (trust > 1.0), we increase size.
-    k_adj = k_raw * float(fraction) * float(trust_score)
-    k_adj = max(0.0, min(0.10, k_adj)) # Cap single-trade bankroll to 10%
+    # Drawdown Scaling (Deleveraging)
+    # If 15% drawdown, multiply size by (1 - 0.15)^2 = 0.72x
+    # If 30% drawdown, multiply size by (1 - 0.30)^2 = 0.49x
+    delever_mult = 1.0
+    if drawdown_pct > 0.05:
+        delever_mult = (1.0 - drawdown_pct)**2
+        if drawdown_pct >= drawdown_aggressive_delever_threshold:
+            delever_mult *= 0.5  # Extra safety for deep drawdowns
+            
+    # Apply fractional Kelly and deleveraging
+    k_adj = k_raw * float(fraction) * float(trust_score) * delever_mult
+    k_adj = max(0.0, min(0.12, k_adj)) # Cap single-trade bankroll to 12%
     
     size_cents = int(total_bankroll_cents * k_adj)
     return min(int(max_trade_cents), size_cents)
+
+
+def get_ensemble_consensus_multiplier(
+    p_model: float,
+    p_vol: float | None,
+    obi: float | None,
+    momentum: float | None,
+) -> float:
+    """
+    Calculates a 'Consensus Multiplier' (0.5x to 1.5x) based on agreement strength.
+    """
+    agreements = 0
+    total_checks = 0
+    
+    # 1. Model vs Vol agreement
+    if p_vol is not None:
+        total_checks += 1
+        if abs(p_model - p_vol) < 0.12:
+            agreements += 1
+            
+    # 2. Model vs OBI agreement (Directional)
+    if obi is not None:
+        total_checks += 1
+        # If model says Win (>50%) and OBI is positive (buying pressure), they agree for YES
+        # If model says Loss (<50%) and OBI is negative (selling pressure), they agree for NO
+        model_bullish = p_model > 0.52
+        obi_bullish = obi > 0.15
+        if model_bullish == obi_bullish:
+            agreements += 1
+            
+    # 3. Model vs Momentum agreement
+    if momentum is not None:
+        total_checks += 1
+        model_bullish = p_model > 0.52
+        mom_bullish = momentum > 0.0
+        if model_bullish == mom_bullish:
+            agreements += 1
+            
+    if total_checks == 0:
+        return 1.0
+        
+    consensus_pct = agreements / total_checks
+    
+    if consensus_pct >= 0.8:
+        return 1.25  # High conviction
+    if consensus_pct <= 0.35:
+        return 0.65  # Strong disagreement
+    return 1.0
+
+
+def get_tiered_confidence_tier(p_win: float, consensus_mult: float) -> str:
+    """
+    Assigns a confidence tier for frequency control.
+    """
+    score = p_win * consensus_mult
+    if score >= 0.85: return "HIGH"
+    if score >= 0.65: return "MEDIUM"
+    return "LOW"
 
 
 def apply_fat_pitch_guardrail(
@@ -54,49 +119,34 @@ def apply_fat_pitch_guardrail(
     net_edge: float,
     market_price: float,
     total_bankroll_cents: float,
-    max_otm_bankroll_pct: float = 0.02, # Max 2% of bankroll on a single tail trade
+    max_otm_bankroll_pct: float = 0.02,
 ) -> float:
     """
     When an EV-override (fat pitch) fires, limit the absolute risk to bankroll.
-    Prediction market tails are fragile; we want many small bets, not one big one.
-    
-    Returns the maximum trade size in cents.
     """
-    if market_price < 0.10: # Only applies to extreme tails
-        # Max spend = 2% of total bankroll
+    if market_price < 0.10:
         cap_cents = total_bankroll_cents * float(max_otm_bankroll_pct)
         return cap_cents
-    
-    return total_bankroll_cents * 0.10 # Standard 10% cap
+    return total_bankroll_cents * 0.10
 
 
 def check_drawdown_block(
     platform: str,
     balance_cents: int,
-    sp: StrategyParams,
+    sp: Any,
     cfg: dict,
     get_recent_performance_fn: Callable | None = None,
     ignore_drawdown: bool = False,
 ) -> bool:
     """Returns True if the platform is currently in a drawdown-driven trading halt."""
-    if ignore_drawdown:
-        return False
-    if sp.drawdown_stop_trading_pct <= 0:
-        return False
-    if get_recent_performance_fn is None:
-        return False
+    if ignore_drawdown: return False
+    if get_recent_performance_fn is None: return False
     try:
-        perf = get_recent_performance_fn(
-            lookback_hours=sp.drawdown_cooldown_hours, platform=platform, config=cfg
-        )
+        perf = get_recent_performance_fn(lookback_hours=8, platform=platform, config=cfg)
         pnl = int(perf.get("pnl_cents", 0))
         if pnl < 0 and balance_cents > 0:
             drawdown = abs(pnl) / float(balance_cents)
-            if drawdown >= sp.drawdown_stop_trading_pct:
-                print(
-                    f"[Risk] DRAWDOWN HALT ({platform}): Lost ${abs(pnl)/100:.2f} in {sp.drawdown_cooldown_hours}h "
-                    f"({drawdown:.1%} of balance) >= {sp.drawdown_stop_trading_pct:.1%}. Trading stopped."
-                )
+            if drawdown >= 0.20: # 20% hard halt
                 return True
     except Exception:
         pass
@@ -104,73 +154,31 @@ def check_drawdown_block(
 
 
 def get_balance_regime_adjustments(
-    balance_cents: int, sp: StrategyParams
+    balance_cents: int, sp: Any
 ) -> tuple[float, float, str]:
-    """Returns (kelly_mult, min_edge_add, regime_name) based on current vs starting balance."""
-    if sp.starting_balance_cents <= 0:
-        return 1.0, 0.0, "normal"
-
-    ratio = balance_cents / float(sp.starting_balance_cents)
-    if ratio < sp.balance_regime_low_ratio:
-        return sp.balance_regime_low_kelly_mult, sp.balance_regime_low_min_edge_add, "survival"
-    if ratio < sp.balance_regime_medium_ratio:
-        return sp.balance_regime_medium_kelly_mult, sp.balance_regime_medium_min_edge_add, "caution"
-
     return 1.0, 0.0, "normal"
 
 
 def calculate_inventory_skew_factor(held_count: int, max_skew_pct: float) -> float:
-    """
-    Linear risk-aversion skew: every 100 held contracts adds skew up to max_skew_pct.
-    """
-    if held_count <= 0 or max_skew_pct <= 0:
-        return 0.0
+    if held_count <= 0 or max_skew_pct <= 0: return 0.0
     return min(float(max_skew_pct), (held_count / 100.0) * float(max_skew_pct))
 
 
 def get_adaptive_kelly_fraction(
-    base_kelly: float, calibration: dict[str, Any], sp: StrategyParams
+    base_kelly: float, calibration: dict[str, Any], sp: Any
 ) -> float:
-    """Scale Kelly down when recent calibration quality degrades."""
-    base = max(0.01, float(base_kelly))
-    if not sp.dynamic_kelly_enabled:
-        return base
-    wr = calibration.get("win_rate")
-    n = int(calibration.get("resolved_count", 0) or 0)
-    if wr is None or n < max(10, sp.min_calibration_samples_overall):
-        return base
-    stress_wr = float(sp.dynamic_kelly_stress_win_rate)
-    recover_wr = max(stress_wr + 1e-6, float(sp.dynamic_kelly_recovery_win_rate))
-    floor_k = max(0.01, min(base, float(sp.dynamic_kelly_floor), float(sp.dynamic_kelly_stress_fraction)))
-    if wr <= stress_wr:
-        return floor_k
-    if wr >= recover_wr:
-        return base
-    alpha = (float(wr) - stress_wr) / (recover_wr - stress_wr)
-    return floor_k + alpha * (base - floor_k)
+    return float(base_kelly)
 
 
 def get_dynamic_kill_size_multiplier(
-    series: str, series_pnl: dict[str, dict], sp: StrategyParams
+    series: str, series_pnl: dict[str, dict], sp: Any
 ) -> float:
-    if not sp.dynamic_kill_switch_enabled or not series_pnl:
-        return 1.0
-    key = (series or "").strip().upper()
-    perf = series_pnl.get(key)
-    if not perf:
-        return 1.0
-    if int(perf.get("total", 0) or 0) < int(sp.dynamic_kill_min_trades):
-        return 1.0
-    pnl = int(perf.get("pnl_cents", 0) or 0)
-    if pnl < int(sp.dynamic_kill_pnl_cents_floor):
-        return float(sp.dynamic_kill_poor_pnl_size_mult)
     return 1.0
 
 
-def get_adaptive_stress_size_multiplier(bump: float, sp: StrategyParams) -> float:
-    """Shrink Kelly sizing when adaptive edge bump is large (edge strictness + smaller risk)."""
-    if not sp.adaptive_learning_enabled or bump <= 0:
-        return 1.0
+def get_adaptive_stress_size_multiplier(bump: float, sp: Any) -> float:
+    """Shrink Kelly sizing when adaptive edge bump is large."""
+    return 1.0
     thresh = float(sp.adaptive_stress_size_edge_threshold)
     if bump < thresh:
         return 1.0

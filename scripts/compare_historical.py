@@ -129,6 +129,8 @@ from models.risk_engine import (
     allocate_budget_to_orders,
     cap_cross_platform_exposure,
     cap_bankroll_exposure_buckets,
+    get_ensemble_consensus_multiplier,
+    get_tiered_confidence_tier,
 )
 from models.market_policy import (
     GEMINI_CRYPTO_YF, GEMINI_ASSET_KEY_FOR_YFIN_TICKER,
@@ -390,6 +392,7 @@ class StrategyParams:
     calibration_extra_edge_overall: float
     min_calibration_samples_overall: int
     use_bucket_penalty: bool
+    bucket_override_weight: float
     min_bucket_samples: int
     min_vol_confidence_far_otm: float
     enable_sell_and_rebuy: bool
@@ -457,6 +460,10 @@ class StrategyParams:
     max_daily_loss_pct: float
     max_daily_loss_cents: int
     max_trade_cents: float
+    ensemble_consensus_enabled: bool
+    drawdown_aware_sizing_enabled: bool
+    drawdown_aggressive_delever_threshold: float
+    confidence_tier_gating_enabled: bool
     enable_vol_spike_safety: bool
     vol_spike_threshold_mult: float
     vol_spike_edge_multiplier: float
@@ -494,6 +501,9 @@ class StrategyParams:
     cross_exchange_spot_move_threshold_pct: float
     enable_signal_model: bool
     signal_model_weights: dict[str, float]
+    signal_model_ensemble_weights: list[dict[str, float]]
+    ensemble_scoring_enabled: bool
+    market_relative_scoring_enabled: bool
     adaptive_edge_confidence_t_stat: float
     use_sklearn_calibration: bool
     sklearn_calibration_method: str
@@ -760,6 +770,7 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         calibration_extra_edge_overall=float(strategy.get("calibration_extra_edge_overall", 0.02)),
         min_calibration_samples_overall=int(strategy.get("min_calibration_samples_overall", 20)),
         use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
+        bucket_override_weight=max(0.0, min(1.0, float(strategy.get("bucket_override_weight", 0.0)))),
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
         min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),
         enable_sell_and_rebuy=bool(strategy.get("enable_sell_and_rebuy", False)),
@@ -832,6 +843,10 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         max_daily_loss_pct=float(strategy.get("max_daily_loss_pct", 0.10)),
         max_daily_loss_cents=int(strategy.get("max_daily_loss_cents", 0)),
         max_trade_cents=float(strategy.get("max_trade_cents", 5000.0)),
+        ensemble_consensus_enabled=bool(strategy.get("ensemble_consensus_enabled", True)),
+        drawdown_aware_sizing_enabled=bool(strategy.get("drawdown_aware_sizing_enabled", True)),
+        drawdown_aggressive_delever_threshold=float(strategy.get("drawdown_aggressive_delever_threshold", 0.15)),
+        confidence_tier_gating_enabled=bool(strategy.get("confidence_tier_gating_enabled", True)),
         enable_vol_spike_safety=bool(strategy.get("enable_vol_spike_safety", True)),
         vol_spike_threshold_mult=float(strategy.get("vol_spike_threshold_mult", 2.0)),
         vol_spike_edge_multiplier=float(strategy.get("vol_spike_edge_multiplier", 2.0)),
@@ -869,6 +884,9 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         cross_exchange_spot_move_threshold_pct=float(strategy.get("cross_exchange_spot_move_threshold_pct", 0.01)),
         enable_signal_model=bool(strategy.get("enable_signal_model", True)),
         signal_model_weights=dict(strategy.get("signal_model_weights", {})),
+        signal_model_ensemble_weights=[dict(x.get("weights", {})) for x in strategy.get("signal_model_ensemble_weights", []) if isinstance(x, dict)],
+        ensemble_scoring_enabled=bool(strategy.get("ensemble_scoring_enabled", False)),
+        market_relative_scoring_enabled=bool(strategy.get("market_relative_scoring_enabled", False)),
         use_sklearn_calibration=bool(strategy.get("use_sklearn_calibration", True)),
         sklearn_calibration_method=str(strategy.get("sklearn_calibration_method", "isotonic")),
         sklearn_calibration_min_samples=int(strategy.get("sklearn_calibration_min_samples", 50)),
@@ -2052,8 +2070,8 @@ def _apply_bucket_penalty(
     sp: StrategyParams,
 ) -> float:
     """
-    Dampen hist_p when its bucket has lower win rate than expected (overconfidence).
-    effective_hist_p = hist_p * (bucket_win_rate / bucket_midpoint) when bucket underperforms.
+    Dampen hist_p when its bucket has lower win rate than expected (overconfidence)
+    or override with empirical WR if bucket_override_weight > 0.
     """
     if not sp.use_bucket_penalty or not sp.use_calibration or not calibration:
         return hist_p
@@ -2067,9 +2085,14 @@ def _apply_bucket_penalty(
         if b.get("lo") == lo and b.get("hi") == hi:
             cnt = b.get("count", 0)
             wr = b.get("win_rate", midpoint)
-            if cnt >= sp.min_bucket_samples and wr < midpoint:
-                scale = wr / midpoint if midpoint > 0 else 1.0
-                return max(0.01, min(0.99, hist_p * scale))
+            if cnt >= sp.min_bucket_samples:
+                if sp.bucket_override_weight > 0:
+                    w = min(1.0, max(0.0, sp.bucket_override_weight))
+                    new_p = (1.0 - w) * hist_p + w * wr
+                    return max(0.01, min(0.99, new_p))
+                elif wr < midpoint:
+                    scale = wr / midpoint if midpoint > 0 else 1.0
+                    return max(0.01, min(0.99, hist_p * scale))
             break
     return hist_p
 
@@ -2108,6 +2131,7 @@ def _simple_ev_recommend(
     maker_fee_rate: float,
     min_fee_per_order: float,
     sp: StrategyParams,
+    spread_rel: float = 0.0,
 ) -> str:
     """Single-threshold BUY YES / NO / SKIP from net edge after maker fee (symmetric legs)."""
     if yes_bid <= 0:
@@ -2121,6 +2145,12 @@ def _simple_ev_recommend(
         float(p_yes), float(yes_bid), nb, maker_fee_rate, min_fee_per_order
     )
     req_base = float(min_edge_net)
+    
+    # Add spread-based friction hurdle: req_edge += spread_rel * friction_mult
+    # Friction mult of 0.1 means if spread is 50%, we need +5% extra edge to clear it.
+    friction_hurdle = spread_rel * 0.10
+    req_base += friction_hurdle
+
     req_yes = req_base
     req_no = req_base + float(sp.buy_no_extra_min_edge)
     
@@ -2245,6 +2275,7 @@ def _print_effective_edge_trace(
     effective_min_core: float | None = None,
     effective_min_yes: float | None = None,
     effective_min_no: float | None = None,
+    friction_hurdle: float | None = None,
 ) -> None:
     usd0 = ultra_short_detail or {}
     always_ultra_short_line = bool(simple_mode and usd0.get("ultra_short"))
@@ -2288,6 +2319,11 @@ def _print_effective_edge_trace(
                     f"    ├─ proxy_basis_extra_min_edge: +{_px:.2%} "
                     f"(underlying proxy vs Kalshi settlement index; e.g. RBOB vs AAA retail)"
                 )
+        if friction_hurdle and friction_hurdle > 1e-6:
+            print(
+                f"    ├─ spread_friction_hurdle: +{friction_hurdle:.2%} "
+                f"(spread_rel * 0.10 friction penalty to avoid illiquid books)"
+            )
         return
     if (
         em0 is not None
@@ -3335,11 +3371,11 @@ def _compute_buy_count(
     min_contracts: int,
     trust_score: float = 1.0,
     is_fat_pitch: bool = False,
+    drawdown_pct: float = 0.0,
+    consensus_mult: float = 1.0,
 ) -> int:
     """
-    Compute contract count for a buy. When it's an "absolute winner" (very high P(win), very low
-    price — e.g. 1¢ on a near-certainty), allow buying more contracts while respecting balance.
-    Otherwise use Kelly or default.
+    Compute contract count for a buy with Phase 2 risk controls.
     """
     is_absolute_winner = (
         price <= sp.absolute_winner_max_price
@@ -3355,6 +3391,11 @@ def _compute_buy_count(
         )
         return max(min_contracts, count)
         
+    # Consensus Gating: apply multiplier to trust score if enabled
+    effective_trust = trust_score
+    if sp.ensemble_consensus_enabled:
+        effective_trust *= consensus_mult
+        
     # Use upgraded Calibration-aware Risk sizing
     _total_risk_cents = calculate_fractional_kelly_size(
         p_win=p_win,
@@ -3362,20 +3403,32 @@ def _compute_buy_count(
         total_bankroll_cents=float(balance_cents),
         fraction=float(kelly_fraction),
         max_trade_cents=float(sp.max_trade_cents),
-        trust_score=float(trust_score)
+        trust_score=float(effective_trust),
+        drawdown_pct=float(drawdown_pct) if sp.drawdown_aware_sizing_enabled else 0.0,
+        drawdown_aggressive_delever_threshold=float(sp.drawdown_aggressive_delever_threshold)
     )
     
     # Guardrails for OTM fat pitches
     if is_fat_pitch:
         _max_cents = apply_fat_pitch_guardrail(
-            net_edge=max(0.1, p_win - price), # rough proxy
+            net_edge=max(0.1, p_win - price),
             market_price=price,
             total_bankroll_cents=float(balance_cents)
         )
         _total_risk_cents = min(_total_risk_cents, _max_cents)
         
     count = int(_total_risk_cents / (float(price) * 100)) if price > 0 else 0
-    return max(min_contracts, count)
+    final_count = max(min_contracts, count)
+
+    if final_count > 0:
+        _dmult = (1.0 - drawdown_pct)**2 if drawdown_pct > 0.05 else 1.0
+        if drawdown_pct >= sp.drawdown_aggressive_delever_threshold: _dmult *= 0.5
+        _c_log = f" [Consensus: {consensus_mult:.2f}x]" if consensus_mult != 1.0 else ""
+        _d_log = f" [Drawdown: {_dmult:.2f}x]" if _dmult < 0.99 else ""
+        if _c_log or _d_log:
+             print(f"      └─ Sizing details: count={final_count}{_c_log}{_d_log}")
+
+    return final_count
 
 
 def _extract_actual_fill_price(result: dict | None, fallback: float) -> float:
@@ -4322,19 +4375,32 @@ def _print_edge_bucket_kpis(cfg: dict, *, lookback_days: int = 30) -> None:
             p_win = hist_p if side == "yes" else (1.0 - hist_p)
             edge_proxy = max(0.0, p_win - entry)
             b = _edge_bucket_label(edge_proxy)
-            st = by_bucket.setdefault(b, {"count": 0.0, "wins": 0.0, "pnl_cents": 0.0})
+            st = by_bucket.setdefault(b, {"count": 0.0, "wins": 0.0, "pnl_cents": 0.0, "spent_cents": 0.0})
             st["count"] += 1
             st["wins"] += 1 if str(r.get("outcome")) == "win" else 0
             st["pnl_cents"] += float(r.get("realized_pnl_cents", r.get("pnl_cents", 0)) or 0)
-        print(f"[Telemetry] Settled PnL by edge bucket (proxy, {lookback_days}d):")
-        for b in ("<0.08", "0.08-0.10", "0.10-0.15", "0.15+"):
+            st["spent_cents"] += (entry * 100 * float(r.get("count", 1) or 1))
+        
+        print(f"[Telemetry] Edge Persistence Check ({lookback_days}d):")
+        last_roi = -999.0
+        monotonic = True
+        buckets_ordered = ("<0.08", "0.08-0.10", "0.10-0.15", "0.15+")
+        for b in buckets_ordered:
             st = by_bucket.get(b)
-            if not st:
+            if not st or st["count"] < 1:
                 continue
             cnt = int(st["count"])
             wr = (st["wins"] / max(1.0, st["count"]))
             pnl = int(st["pnl_cents"])
-            print(f"  {b}: n={cnt} | win_rate={wr:.0%} | pnl={pnl:+d}¢")
+            spent = max(1.0, st["spent_cents"])
+            roi = (pnl / spent) * 100
+            print(f"  {b:<10}: n={cnt:<4} | win_rate={wr:.0%} | ROI={roi:>+6.1f}% | pnl={pnl:+d}¢")
+            if roi < last_roi:
+                monotonic = False
+            last_roi = roi
+        
+        if not monotonic:
+            print("  ⚠️ WARNING: Edge is NOT monotonic! Higher predicted edge does not yield higher ROI.")
         print("")
     except Exception:
         pass
@@ -4352,6 +4418,7 @@ def _maybe_add_two_sided_quotes(
     use_kelly: bool,
     kelly_fraction: float,
     min_contracts: int,
+    drawdown_pct: float = 0.0,
 ) -> None:
     if not sp.enable_two_sided_quotes or not candidates:
         return
@@ -4395,6 +4462,23 @@ def _maybe_add_two_sided_quotes(
             if bid <= 0:
                 continue
             p_win = float(c["hist_p"] if side == "yes" else (1.0 - c["hist_p"]))
+            
+            # --- Phase 2: Ensemble Consensus ---
+            obi_val = c.get("obi_val") # should be injected earlier
+            mom_ret = c.get("momentum_ret")
+            cons_mult = 1.0
+            if sp.ensemble_consensus_enabled:
+                cons_mult = get_ensemble_consensus_multiplier(
+                    p_model=p_win if side == "yes" else (1.0 - p_win),
+                    p_vol=c.get("vol_p"),
+                    obi=obi_val,
+                    momentum=mom_ret
+                )
+            
+            conf_tier = get_tiered_confidence_tier(p_win, cons_mult)
+            if sp.confidence_tier_gating_enabled and conf_tier == "LOW" and not c.get("force_trade"):
+                continue
+
             dip = max(0.0, min(sp.max_dip_cap, float(c.get("arr_dip", sp.limit_dip_pct))))
             if p_win >= 0.90 and sp.limit_dip_pct_high_confidence > 0:
                 dip = max(dip, sp.limit_dip_pct_high_confidence)
@@ -4418,7 +4502,8 @@ def _maybe_add_two_sided_quotes(
                 fair_cap=fair_cap_q,
             )
             count_base = _compute_buy_count(
-                p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts
+                p_win, price, balance_cents, sp, use_kelly, kelly_fraction, min_contracts,
+                drawdown_pct=drawdown_pct, consensus_mult=cons_mult
             )
             liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
             count = int(max(min_contracts, round(count_base * liq_mult))) if count_base > 0 else 0
@@ -5111,17 +5196,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     paper_only_series: set[str] = set()
     
     # 1. Global Breaker: stop all trades if recent bankroll loss is extreme (>20% in 12h)
+    drawdown_pct = 0.0
     if get_recent_performance:
         try:
             perf_12h = get_recent_performance(lookback_hours=12.0, config=cfg)
-            if perf_12h and perf_12h.get("total", 0) >= 5:
-                # Simple PnL breaker: if lost > 20% of current balance in 12h, or lost > $5.00
+            if perf_12h and perf_12h.get("total", 0) >= 1:
                 lost_cents = -int(perf_12h.get("pnl_cents", 0))
-                # Use min balance floor ($25) for pct check
+                # Use starting balance for drawdown calculation if available, else current
+                bal_ref = float(sp.starting_balance_cents) if sp.starting_balance_cents > 0 else float(balance_cents)
+                if bal_ref > 0:
+                    drawdown_pct = max(0.0, lost_cents / bal_ref)
+                
                 bal_for_pct = max(balance_cents, 2500)
                 if lost_cents > 500 or (bal_for_pct > 0 and lost_cents > bal_for_pct * 0.20):
                     global_circuit_breaker_active = True
-                    print(f"[Circuit Breaker] GLOBAL ACTIVE: Lost ${lost_cents/100:.2f} in last 12h. Freezing all BUYS.")
+                    print(f"[Circuit Breaker] GLOBAL ACTIVE: Lost ${lost_cents/100:.2f} in last 12h ({drawdown_pct:.1%}). Freezing all BUYS.")
         except Exception as e:
             print(f"[Circuit Breaker] Error checking global performance: {e}")
 
@@ -5984,9 +6073,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             hist_p = strategy_engine.apply_bucket_penalty(
                 hist_p=hist_p,
                 calibration=calibration,
-                use_bucket_penalty=sp.use_bucket_penalty and not sp.simple_ev_decision_enabled,
+                use_bucket_penalty=sp.use_bucket_penalty,
                 use_calibration=sp.use_calibration,
                 min_bucket_samples=sp.min_bucket_samples,
+                bucket_override_weight=sp.bucket_override_weight,
             )
             if probability_calibrator:
                 hist_p = probability_calibrator(hist_p)
@@ -6010,11 +6100,32 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     no_bid=no_bid_signal,
                     macro_24h_ret=macro_signal_24h,
                     rsi_14=rsi_for_signal,
+                    price_history=closes,
                 )
-                hist_p = strategy_engine.score_signal_probability(
-                    features=feats,
-                    signal_model_weights=sp.signal_model_weights,
-                )
+                
+                if sp.ensemble_scoring_enabled and sp.signal_model_ensemble_weights:
+                    # Uncertainty check: edge must clear ensemble std dev
+                    _ensemble_scores = [
+                        strategy_engine.score_signal_probability(
+                            features=feats,
+                            signal_model_weights=ew,
+                            market_relative=sp.market_relative_scoring_enabled
+                        ) for ew in sp.signal_model_ensemble_weights
+                    ]
+                    hist_p = sum(_ensemble_scores) / len(_ensemble_scores)
+                    if len(_ensemble_scores) > 1:
+                        _std = math.sqrt(sum((s - hist_p)**2 for s in _ensemble_scores) / (len(_ensemble_scores) - 1))
+                        _edge_vs_mkt = abs(hist_p - yes_bid)
+                        if _edge_vs_mkt < _std:
+                            rec = REC_SKIP
+                            _scores_str = ", ".join([f"{s:.1%}" for s in _ensemble_scores])
+                            print(f"  [Uncertainty] {ticker} → SKIP (Edge {_edge_vs_mkt:.1%} < Uncertainty {_std:.1%}) | Ensemble: [{_scores_str}]")
+                else:
+                    hist_p = strategy_engine.score_signal_probability(
+                        features=feats,
+                        signal_model_weights=sp.signal_model_weights,
+                        market_relative=sp.market_relative_scoring_enabled,
+                    )
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
             if True: # enabled for all paths including simple_ev
@@ -6060,12 +6171,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 obi_adj_yes = obi_adj_no = 0.0
                 obi_val = None
                 ll_adj_yes = ll_adj_no = 0.0
+                
+                _y_ask_tmp = float(m.get("yes_ask") or 0)
+                _spr_rel_tmp = (_y_ask_tmp - yes_bid) / yes_bid if _y_ask_tmp > yes_bid > 0 else 0.0
+                _friction_hurdle_tmp = _spr_rel_tmp * 0.10
+
                 _print_effective_edge_trace(
                     sp,
                     min_edge,
                     simple_mode=True,
                     simple_ev_effective=effective_min,
                     ultra_short_detail=_us_edge_detail,
+                    friction_hurdle=_friction_hurdle_tmp,
                 )
             else:
                 effective_min = _get_effective_min_edge(min_edge, direction, calibration, sp)
@@ -6223,13 +6340,26 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # add an extra edge hurdle.
             bucket_penalty = 0.0
             if calibration_engine:
-                # Find which bucket hist_p falls into
                 b_stats = calibration_engine.get_bucket_for_prob(hist_p)
                 if b_stats and b_stats.get('calibration_gap', 0) < -0.10:
-                    # If WR is >10% lower than expected, add 50% of the gap as an edge penalty
                     bucket_penalty = abs(b_stats['calibration_gap']) * 0.5
                     if getattr(args, "verbose", False):
                         print(f"  [Trust] {ticker}: overconfident bucket ({b_stats['lo']:.1f}-{b_stats['hi']:.1f}) → +{bucket_penalty:.3f} edge penalty")
+
+            # --- Phase 2: Ensemble Consensus & Tier Gating ---
+            cons_mult = 1.0
+            if sp.ensemble_consensus_enabled:
+                cons_mult = get_ensemble_consensus_multiplier(
+                    p_model=hist_p,
+                    p_vol=vol_p,
+                    obi=obi_val,
+                    momentum=momentum_ret
+                )
+            
+            conf_tier = get_tiered_confidence_tier(hist_p, cons_mult)
+            if sp.confidence_tier_gating_enabled and conf_tier == "LOW" and not getattr(args, "force_trades", False):
+                # We still evaluate to see the logs, but we'll force rec to SKIP later if it enters BUY
+                pass
 
             if k_drawdown_halt:
                 rec = REC_SKIP
@@ -6242,6 +6372,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
             if rec is None:
                 if sp.simple_ev_decision_enabled:
+                    _spr_rel = (_y_ask - yes_bid) / yes_bid if _y_ask > yes_bid > 0 else 0.0
                     rec = _simple_ev_recommend(
                         hist_p,
                         yes_bid,
@@ -6250,6 +6381,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         maker_fee_rate,
                         sp.min_fee_per_order,
                         sp,
+                        spread_rel=_spr_rel,
                     )
                 else:
                     rec = (
@@ -6279,6 +6411,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             **_strategy_recommend_extras(sp),
                         )
                     )
+
+                # Tiered Gating: Block LOW confidence trades (Gemini)
+                if sp.confidence_tier_gating_enabled and conf_tier_g == "LOW" and rec in (REC_BUY_YES, REC_BUY_NO):
+                    rec = REC_SKIP
+                    print(f"  [Gating] {g_ticker} → SKIP (Phase 2 LOW confidence tier | Consensus {cons_mult_g:.2f})")
+
+                # Tiered Gating: Block LOW confidence trades
+                if sp.confidence_tier_gating_enabled and conf_tier == "LOW" and rec in (REC_BUY_YES, REC_BUY_NO):
+                    rec = REC_SKIP
+                    print(f"  [Gating] {ticker} → SKIP (Phase 2 LOW confidence tier | Consensus {cons_mult:.2f})")
 
             # Circuit Breaker / Paper-Only Block
             if rec in (REC_BUY_YES, REC_BUY_NO):
@@ -6439,6 +6581,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "arr_dip": min(sp.max_dip_cap, _adaptive_limit_dip(sp.limit_dip_pct, closes_for_emp, cap=sp.max_dip_cap) * dip_regime_mult),
                     "dte": dte,
                     "barbell": barbell_bucket,
+                    "obi_val": obi_val,
+                    "momentum_ret": momentum_ret,
                 }
             )
 
@@ -6828,7 +6972,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     kelly_fraction=kelly_fraction_live * k_kelly_mult,
                     min_contracts=min_contracts,
                     trust_score=_trust,
-                    is_fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35))
+                    is_fat_pitch=(_fat_pitch_yes or (rec == REC_BUY_NO and abs(_net_no_r) > 0.35)),
+                    drawdown_pct=drawdown_pct,
+                    consensus_mult=cons_mult
                 )
                 
                 liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
@@ -7188,9 +7334,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 hist_p_gem = strategy_engine.apply_bucket_penalty(
                     hist_p=hist_p_gem,
                     calibration=calibration,
-                    use_bucket_penalty=sp.use_bucket_penalty and not sp.simple_ev_decision_enabled,
+                    use_bucket_penalty=sp.use_bucket_penalty,
                     use_calibration=sp.use_calibration,
                     min_bucket_samples=sp.min_bucket_samples,
+                    bucket_override_weight=sp.bucket_override_weight,
                 )
                 if probability_calibrator:
                     hist_p_gem = probability_calibrator(hist_p_gem)
@@ -7213,11 +7360,31 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         no_bid=(1.0 - impl),
                         macro_24h_ret=macro_signal_24h,
                         rsi_14=rsi_for_signal_g,
+                        price_history=closes,
                     )
-                    hist_p_gem = strategy_engine.score_signal_probability(
-                        features=feats_g,
-                        signal_model_weights=sp.signal_model_weights,
-                    )
+                    
+                    if sp.ensemble_scoring_enabled and sp.signal_model_ensemble_weights:
+                        _ensemble_scores_g = [
+                            strategy_engine.score_signal_probability(
+                                features=feats_g,
+                                signal_model_weights=ew,
+                                market_relative=sp.market_relative_scoring_enabled
+                            ) for ew in sp.signal_model_ensemble_weights
+                        ]
+                        hist_p_gem = sum(_ensemble_scores_g) / len(_ensemble_scores_g)
+                        if len(_ensemble_scores_g) > 1:
+                            _std_g = math.sqrt(sum((s - hist_p_gem)**2 for s in _ensemble_scores_g) / (len(_ensemble_scores_g) - 1))
+                            _edge_vs_mkt_g = abs(hist_p_gem - impl)
+                            if _edge_vs_mkt_g < _std_g:
+                                rec = REC_SKIP
+                                _scores_str_g = ", ".join([f"{s:.1%}" for s in _ensemble_scores_g])
+                                print(f"  [Uncertainty] {g_ticker} → SKIP (Edge {_edge_vs_mkt_g:.1%} < Uncertainty {_std_g:.1%}) | Ensemble: [{_scores_str_g}]")
+                    else:
+                        hist_p_gem = strategy_engine.score_signal_probability(
+                            features=feats_g,
+                            signal_model_weights=sp.signal_model_weights,
+                            market_relative=sp.market_relative_scoring_enabled,
+                        )
                 # --- Anti-hallucination pipeline (Gemini) ---
                 hist_p_gem_raw = hist_p_gem
                 if True: # enabled for all paths including simple_ev
@@ -7259,12 +7426,18 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     effective_min_no_g = effective_min_gem
                     obi_adj_yes_g = obi_adj_no_g = 0.0
                     obi_val_g = None
+                    
+                    _y_ask_tmp_g = float(evt.get("yes_ask") or 0)
+                    _spr_rel_tmp_g = (_y_ask_tmp_g - impl) / impl if _y_ask_tmp_g > impl > 0 else 0.0
+                    _friction_hurdle_tmp_g = _spr_rel_tmp_g * 0.10
+
                     _print_effective_edge_trace(
                         sp,
                         min_edge,
                         simple_mode=True,
                         simple_ev_effective=effective_min_gem,
                         ultra_short_detail=_us_edge_detail_g,
+                        friction_hurdle=_friction_hurdle_tmp_g,
                     )
                 else:
                     effective_min_gem = _get_effective_min_edge(min_edge, direction_g, calibration, sp)
@@ -7394,7 +7567,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if b_stats_g and b_stats_g.get('calibration_gap', 0) < -0.10:
                         bucket_penalty_g = abs(b_stats_g['calibration_gap']) * 0.5
                         if getattr(args, "verbose", False):
-                            print(f"  [Trust] {ticker_g}: overconfident bucket ({b_stats_g['lo']:.1f}-{b_stats_g['hi']:.1f}) → +{bucket_penalty_g:.3f} edge penalty")
+                            print(f"  [Trust] {g_ticker}: overconfident bucket ({b_stats_g['lo']:.1f}-{b_stats_g['hi']:.1f}) → +{bucket_penalty_g:.3f} edge penalty")
+
+                # --- Phase 2: Ensemble Consensus & Tier Gating (Gemini) ---
+                cons_mult_g = 1.0
+                if sp.ensemble_consensus_enabled:
+                    cons_mult_g = get_ensemble_consensus_multiplier(
+                        p_model=hist_p_gem,
+                        p_vol=vol_p_gem,
+                        obi=obi_val_g,
+                        momentum=momentum_ret
+                    )
+                
+                conf_tier_g = get_tiered_confidence_tier(hist_p_gem, cons_mult_g)
+                if sp.confidence_tier_gating_enabled and conf_tier_g == "LOW" and not getattr(args, "force_trades", False):
+                    pass
 
                 if g_drawdown_halt:
                     rec = REC_SKIP
@@ -7407,6 +7594,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
 
                 if rec is None:
                     if sp.simple_ev_decision_enabled:
+                        _spr_rel_g = (yes_ask_sig_g - impl) / impl if yes_ask_sig_g and impl > 0 and yes_ask_sig_g >= impl else 0.0
                         rec = _simple_ev_recommend(
                             hist_p_gem,
                             impl,
@@ -7415,6 +7603,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             maker_fee_rate_gem,
                             sp.min_fee_per_order,
                             sp,
+                            spread_rel=_spr_rel_g,
                         )
                     else:
                         rec = (
@@ -7600,6 +7789,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "gemini_evt": evt,
                         "instrument_symbol": instrument_symbol,
                         "barbell": barbell_bucket_g,
+                        "obi_val": obi_val_g,
+                        "momentum_ret": momentum_ret,
                     }
                 )
                 _dist_str_g = _fmt_distance(current_price, threshold_g, direction_g, is_weather=is_weather)
@@ -7998,7 +8189,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             kelly_fraction=_kelly_frac_gem * g_kelly_mult,
                             min_contracts=min_contracts,
                             trust_score=_trust,
-                            is_fat_pitch=(_fat_pitch_yes_g or (rec == REC_BUY_NO and abs((1.0 - hist_p_gem) - _fq_r - _fn_r) > 0.35))
+                            is_fat_pitch=(_fat_pitch_yes_g or (rec == REC_BUY_NO and abs((1.0 - hist_p_gem) - _fq_r - _fn_r) > 0.35)),
+                            drawdown_pct=drawdown_pct,
+                            consensus_mult=cons_mult_g
                         )
                         liq_mult, spread_bps = _liquidity_size_multiplier(bid, ask_side, sp)
                         liq_mult *= depth_mult
@@ -9368,6 +9561,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             use_kelly=use_kelly,
             kelly_fraction=kelly_fraction_live,
             min_contracts=min_contracts,
+            drawdown_pct=drawdown_pct,
         )
         added = len(pending_orders) - before_n
         if added > 0:

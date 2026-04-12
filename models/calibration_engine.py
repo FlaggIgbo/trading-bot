@@ -170,3 +170,15 @@ class CalibrationEngine:
             prefix: CalibrationEngine(preds).compute_trust_score(min_samples=5)
             for prefix, preds in by_series.items()
         }
+
+    def get_reliability_curve(self, n_bins: int = 10) -> dict[str, list[float]]:
+        """
+        Calculates coordinates for a reliability diagram (calibration curve).
+        Returns {'expected': [avg_p_in_bin], 'actual': [realized_win_rate_in_bin]}.
+        """
+        buckets = self.get_bucketed_calibration(n_bins)
+        return {
+            "expected": [b["expected_win_rate"] for b in buckets],
+            "actual": [b["win_rate"] for b in buckets],
+            "counts": [b["count"] for b in buckets]
+        }

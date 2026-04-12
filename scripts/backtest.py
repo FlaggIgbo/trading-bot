@@ -303,28 +303,61 @@ def _run_synthetic(
         return yes_bid if side == "yes" else no_bid
 
     def _fills_with_dwell(ticker: str, side: str, limit_price: float, placed_ts: float, resolution_ts: float | None) -> bool:
+        """
+        Simulates queue-based fill logic.
+        - Requires a minimum 'dwell time' at or below the limit price.
+        - Probability of fill increases with duration and depth of price move.
+        """
         needed = max(0.0, min_dwell_minutes) * 60.0
         if needed <= 0:
             return True
         snaps = by_ticker.get(ticker) or []
         if not snaps:
             return False
+            
         horizon = float(resolution_ts) if resolution_ts else float("inf")
         window = [s for s in snaps if float(s.get("ts") or 0.0) >= placed_ts and float(s.get("ts") or 0.0) <= horizon]
         if not window:
             return False
+            
+        # Queue / Probability parameters
+        queue_delay_factor = float(bt_cfg.get("synthetic_fill_queue_delay_factor", 0.5))
+        prob_per_minute = float(bt_cfg.get("synthetic_fill_prob_per_minute", 0.15))
+        
         dwell = 0.0
+        cumulative_prob = 0.0
         default_step = 15.0 * 60.0
+        
         for i, snap in enumerate(window):
             ts_i = float(snap.get("ts") or 0.0)
             ts_next = float(window[i + 1].get("ts") or ts_i) if i + 1 < len(window) else (ts_i + default_step)
             dt = max(0.0, ts_next - ts_i)
-            if _side_price(snap, side) <= limit_price:
-                dwell += dt
-                if dwell >= needed:
-                    return True
+            
+            p_mkt = _side_price(snap, side)
+            if p_mkt < limit_price:
+                # Price is better than our limit (we are 'deep' in the book)
+                # Fast fill logic
+                dwell += dt * 2.0  # Penetration accelerates fill
+            elif p_mkt == limit_price:
+                # Price is exactly at our limit (we are at the back of the queue)
+                dwell += dt * queue_delay_factor
             else:
+                # Price moved away
                 dwell = 0.0
+                
+            if dwell >= needed:
+                # Once we've dwelled enough to clear the 'queue', 
+                # we start accumulating fill probability
+                mins = dt / 60.0
+                cumulative_prob += mins * prob_per_minute
+                
+                # Check for fill (probabilistic)
+                # Seed with ticker/ts/price for deterministic backtest results per run
+                import random
+                rng = random.Random(f"{ticker}_{ts_i}_{limit_price}")
+                if rng.random() < cumulative_prob:
+                    return True
+                    
         return False
 
     def _depth_available_contracts(snap: dict, side: str) -> float | None:

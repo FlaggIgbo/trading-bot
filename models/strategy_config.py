@@ -147,6 +147,10 @@ class StrategyParams:
     max_daily_loss_pct: float
     max_daily_loss_cents: int
     max_trade_cents: float
+    ensemble_consensus_enabled: bool
+    drawdown_aware_sizing_enabled: bool
+    drawdown_aggressive_delever_threshold: float
+    confidence_tier_gating_enabled: bool
     enable_vol_spike_safety: bool
     vol_spike_threshold_mult: float
     vol_spike_edge_multiplier: float
@@ -746,6 +750,10 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         max_daily_loss_pct=float(strategy.get("max_daily_loss_pct", 0.10)),
         max_daily_loss_cents=int(strategy.get("max_daily_loss_cents", 0)),
         max_trade_cents=float(strategy.get("max_trade_cents", 5000.0)),
+        ensemble_consensus_enabled=bool(strategy.get("ensemble_consensus_enabled", True)),
+        drawdown_aware_sizing_enabled=bool(strategy.get("drawdown_aware_sizing_enabled", True)),
+        drawdown_aggressive_delever_threshold=float(strategy.get("drawdown_aggressive_delever_threshold", 0.15)),
+        confidence_tier_gating_enabled=bool(strategy.get("confidence_tier_gating_enabled", True)),
         enable_vol_spike_safety=bool(strategy.get("enable_vol_spike_safety", True)),
         vol_spike_threshold_mult=float(strategy.get("vol_spike_threshold_mult", 2.0)),
         vol_spike_edge_multiplier=float(strategy.get("vol_spike_edge_multiplier", 2.0)),

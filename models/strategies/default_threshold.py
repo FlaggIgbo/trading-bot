@@ -208,6 +208,7 @@ class DefaultThresholdStrategy(BaseStrategy):
         no_bid: float | None,
         macro_24h_ret: float = 0.0,
         rsi_14: float | None = None,
+        price_history: list[float] | None = None,
     ) -> dict[str, float]:
         vol = self._clip01(vol_p if vol_p is not None else emp_p)
         mkt = self._clip01(market_yes)
@@ -223,6 +224,20 @@ class DefaultThresholdStrategy(BaseStrategy):
         if no_bid is not None:
             consistency = 1.0 - abs((mkt + self._clip01(float(no_bid))) - 1.0)
         rsi_norm = self._clip01((float(rsi_14) / 100.0) if rsi_14 is not None else 0.5)
+
+        # Market-relative features (Alpha)
+        vwap_dist = 0.0
+        price_trend = 0.0
+        if price_history and len(price_history) > 0:
+            # Pseudo-VWAP (SMA of last 20)
+            lookback = min(20, len(price_history))
+            sma_20 = sum(price_history[-lookback:]) / lookback
+            vwap_dist = (current_price - sma_20) / sma_20 if sma_20 > 0 else 0.0
+            # Trend (current vs SMA of last 10)
+            lookback_trend = min(10, len(price_history))
+            sma_10 = sum(price_history[-lookback_trend:]) / lookback_trend
+            price_trend = (current_price - sma_10) / sma_10 if sma_10 > 0 else 0.0
+
         return {
             "emp_p": self._clip01(emp_p),
             "vol_p": vol,
@@ -235,6 +250,8 @@ class DefaultThresholdStrategy(BaseStrategy):
             "liquidity_consistency": self._clip01(consistency),
             "macro_24h_ret": max(-0.1, min(0.1, float(macro_24h_ret))),
             "rsi_norm": rsi_norm,
+            "vwap_dist": max(-0.2, min(0.2, vwap_dist)),
+            "price_trend": max(-0.1, min(0.1, price_trend)),
         }
 
     def score_signal_probability(
@@ -242,26 +259,56 @@ class DefaultThresholdStrategy(BaseStrategy):
         *,
         features: dict[str, float],
         signal_model_weights: dict[str, float] | None,
+        ensemble_weights: list[dict[str, float]] | None = None,
+        market_relative: bool = False,
     ) -> float:
-        w = {
-            "bias": 0.0,
-            "emp_p": 1.8,
-            "vol_p": 1.3,
-            "market_yes": 0.3,
-            "edge_yes": 1.2,
-            "edge_no": -0.8,
-            "moneyness": 0.2,
-            "dte_norm": 0.1,
-            "spread_norm": -0.5,
-            "liquidity_consistency": 0.3,
-            "macro_24h_ret": 0.2,
-            "rsi_norm": -0.3,
-        }
-        if signal_model_weights:
-            w.update(signal_model_weights)
-        z = sum(float(w.get(k, 0.0)) * float(features.get(k, 0.0)) for k in w.keys() if k != "bias")
-        z += float(w.get("bias", 0.0))
-        return self._clip01(1.0 / (1.0 + math.exp(-z)))
+        """
+        Return P(YES) from signal model features.
+        If market_relative=True, we model the residual (edge) instead of absolute probability.
+        """
+        def _score_one(w_dict: dict[str, float]) -> float:
+            # Baseline weights for absolute probability
+            base_w = {
+                "bias": 0.0,
+                "emp_p": 1.5,
+                "vol_p": 1.0,
+                "market_yes": 0.5,
+                "edge_yes": 1.0,
+                "edge_no": -0.5,
+                "moneyness": 0.3,
+                "dte_norm": 0.2,
+                "spread_norm": -0.8,
+                "liquidity_consistency": 0.5,
+                "macro_24h_ret": 0.2,
+                "rsi_norm": -0.5,
+                "vwap_dist": 0.5,
+                "price_trend": 0.3,
+            }
+            base_w.update(w_dict)
+            
+            if market_relative:
+                # EDGE MODEL: target = outcome - market_prob
+                # features should ideally be signals why market is wrong
+                z = sum(float(base_w.get(k, 0.0)) * float(features.get(k, 0.0)) for k in base_w.keys() if k != "bias")
+                z += float(base_w.get("bias", 0.0))
+                # z here is the predicted 'edge residual'. 
+                # We blend it back with market_yes to get a probability.
+                mkt = float(features.get("market_yes", 0.5))
+                # Simple sigmoid-like mapping of residual to prob shift
+                edge_shift = 1.0 / (1.0 + math.exp(-z)) - 0.5
+                return self._clip01(mkt + edge_shift)
+            else:
+                # PROBABILITY MODEL: target = outcome
+                z = sum(float(base_w.get(k, 0.0)) * float(features.get(k, 0.0)) for k in base_w.keys() if k != "bias")
+                z += float(base_w.get("bias", 0.0))
+                return self._clip01(1.0 / (1.0 + math.exp(-z)))
+
+        # Ensemble scoring
+        if ensemble_weights and len(ensemble_weights) > 0:
+            scores = [_score_one(ew) for ew in ensemble_weights]
+            return sum(scores) / len(scores)
+        
+        return _score_one(signal_model_weights or {})
 
     def apply_bucket_penalty(
         self,
@@ -271,6 +318,7 @@ class DefaultThresholdStrategy(BaseStrategy):
         use_bucket_penalty: bool,
         use_calibration: bool,
         min_bucket_samples: int,
+        bucket_override_weight: float = 0.0,
     ) -> float:
         if not use_bucket_penalty or not use_calibration or not calibration:
             return float(hist_p)
@@ -284,9 +332,18 @@ class DefaultThresholdStrategy(BaseStrategy):
             if b.get("lo") == lo and b.get("hi") == hi:
                 cnt = int(b.get("count", 0) or 0)
                 wr = float(b.get("win_rate", midpoint) or midpoint)
-                if cnt >= int(min_bucket_samples) and wr < midpoint:
-                    scale = wr / midpoint if midpoint > 0 else 1.0
-                    return max(0.01, min(0.99, float(hist_p) * scale))
+                if cnt >= int(min_bucket_samples):
+                    if bucket_override_weight > 0:
+                        # EMPIRICAL OVERRIDE: model -> empirical reality -> override model
+                        # Blend model prob with historical WR. weight=1.0 means full override.
+                        w = min(1.0, max(0.0, bucket_override_weight))
+                        # Pull hist_p towards historical WR observed in this bucket
+                        new_p = (1.0 - w) * float(hist_p) + w * wr
+                        return max(0.01, min(0.99, new_p))
+                    elif wr < midpoint:
+                        # Legacy penalty path
+                        scale = wr / midpoint if midpoint > 0 else 1.0
+                        return max(0.01, min(0.99, float(hist_p) * scale))
                 break
         return float(hist_p)
 

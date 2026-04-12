@@ -77,6 +77,7 @@ class BaseStrategy(ABC):
         no_bid: float | None,
         macro_24h_ret: float = 0.0,
         rsi_14: float | None = None,
+        price_history: list[float] | None = None,
     ) -> dict[str, float]:
         """Build normalized signal features for scoring."""
         raise NotImplementedError
@@ -87,6 +88,8 @@ class BaseStrategy(ABC):
         *,
         features: dict[str, float],
         signal_model_weights: dict[str, float] | None,
+        ensemble_weights: list[dict[str, float]] | None = None,
+        market_relative: bool = False,
     ) -> float:
         """Return P(YES) from signal model features."""
         raise NotImplementedError
@@ -100,8 +103,9 @@ class BaseStrategy(ABC):
         use_bucket_penalty: bool,
         use_calibration: bool,
         min_bucket_samples: int,
+        bucket_override_weight: float = 0.0,
     ) -> float:
-        """Apply calibration bucket penalty to probability."""
+        """Apply calibration bucket penalty or override to probability."""
         raise NotImplementedError
 
     @abstractmethod

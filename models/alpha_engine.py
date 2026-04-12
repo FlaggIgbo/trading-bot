@@ -493,3 +493,49 @@ def score_signal_model(features: SignalFeatures, sp: Any) -> float:
     
     # Sigmoid to get probability-like value
     return 1.0 / (1.0 + math.exp(-score))
+
+
+def estimate_fill_probability(
+    spread_bps: float | None,
+    obi: float | None,
+    side_is_aligned: bool,
+) -> float:
+    """
+    Heuristic to estimate the probability of a limit order being filled.
+    Decreases with wider spreads and increases when OBI is favorable (against us).
+    Wait, if OBI is favorable to US (buying pressure), our BUY limit is LESS likely to be filled
+    because the price moves away. If OBI is AGAINST us, we are MORE likely to be filled.
+    """
+    base_p = 0.75  # Base case fill probability for a reasonably liquid market
+    
+    # 1. Spread penalty
+    if spread_bps is not None:
+        # For every 100 bps of spread, reduce fill prob by 5%
+        spread_penalty = (spread_bps / 100.0) * 0.05
+        base_p -= spread_penalty
+        
+    # 2. OBI alignment (Adverse selection)
+    if obi is not None:
+        # If OBI is +0.5 (strong buy pressure) and we are BUYing YES, we are less likely to get filled
+        # If OBI is -0.5 (sell pressure) and we are BUYing YES, we are MORE likely to get filled (but it's toxic)
+        obi_effect = -obi if side_is_aligned else obi
+        base_p += obi_effect * 0.25
+        
+    return max(0.05, min(0.95, base_p))
+
+
+def calculate_expected_value(
+    p_win: float,
+    p_fill: float,
+    entry_price_cents: float,
+    maker_fee_cents: float,
+) -> float:
+    """
+    EV = P(fill) * [ P(win) * (100 - entry - fee) - P(lose) * (entry + fee) ]
+    """
+    reward = 100.0 - entry_price_cents - maker_fee_cents
+    risk = entry_price_cents + maker_fee_cents
+    p_lose = 1.0 - p_win
+    
+    expected_pnl_at_fill = (p_win * reward) - (p_lose * risk)
+    return p_fill * expected_pnl_at_fill

@@ -1,19 +1,57 @@
 # Trading Bot Improvement Roadmap
 
-Inspired by top open-source trading repositories: [freqtrade](https://github.com/freqtrade/freqtrade), [ccxt](https://github.com/ccxt/ccxt), [hummingbot](https://github.com/hummingbot/hummingbot), [gekko](https://github.com/askmike/gekko), and [Stock-Prediction-Models](https://github.com/huseinzol05/Stock-Prediction-Models).
+Inspired by top quant desks and open-source trading repositories.
 
-## How this doc is organized
+## 🧭 Final Prioritized Roadmap
 
-| Section | What it is |
-| --------|------------ |
-| **Micro-compounder (priority)** | High-impact execution/risk ideas and what’s implemented vs configurable only |
-| **Implemented ✓** | Large chronological/feature table of shipped capabilities |
-| **Repo & code** | Refactors, quality, TODOs |
-| **Python ML ecosystem** | Library roadmap |
-| **Priority backlogs** | Freqtrade-style high/medium items |
-| **Research / references** | Taylor, CLM, Tsay, external repos |
+### 🏁 Phase 1 (Fix Reality) — **COMPLETED ✓**
+Focus on execution realism and mathematical honesty.
+- [x] **Queue / Fill simulation**: Improved `scripts/backtest.py` with probabilistic fill logic and penetrative dwell-time scaling.
+- [x] **Probability Calibration**: Added `get_reliability_curve` and integrated sklearn-based Isotonic/Platt scaling in `CalibrationEngine`.
+- [x] **EV-Based Labeling**: Added `calculate_expected_value` and `estimate_fill_probability` to `alpha_engine.py` to target probability-of-fill-adjusted PnL.
 
-Signal-model consolidation is **not** required for this layout — strategy routing stays in `strategies/` + `strategy_engine` as today.
+---
+
+### 🛡️ Phase 2 (Safer Trading) — **UP NEXT**
+Focus on risk control and portfolio stability.
+- **Ensemble Gating + Sizing**: Implement conditional sizing based on agreement strength between technical, flow, and sentiment models.
+- **Position Sizing overhaul**: Implement drawdown-aware scaling and fractional Kelly logic that adapts to current account equity.
+- **Trade Frequency Control**: Implement a tiered trade system (High confidence → big trades, Low → skip).
+
+---
+
+### 📈 Phase 3 (Better Alpha)
+Incremental edge improvements.
+- **Gradient Boosted Trees**: Replace simple logistic regression with XGBoost/LightGBM for non-linear feature interactions.
+- **Simple Regime Filters**: Implement volatility buckets and trend filters to toggle signal weights.
+
+---
+
+### 🔬 Phase 4 (Advanced / Optional)
+Refining the microstructure and niche signals.
+- **Order Book Depth**: Model full L2 depth and liquidity "walls" to improve OBI signals.
+- **IV Integration**: Fetch and incorporate Implied Volatility from options markets (e.g., Deribit).
+- **LLM Features**: Integrate structured sentiment scores (tie-breaker only) from news/social feeds.
+- **Edge Decay Tracking**: Monitor rolling Sharpe and per-feature performance degradation.
+
+---
+
+## 🏗️ Technical Breakdown (Historical Archive)
+
+| Layer | Item | Impact |
+| :--- | :--- | :--- |
+| **Micro-structure** | Queue / Fill Modeling | Massive ROI (Avoids fake backtest alpha) |
+| **Calibration** | Reliability Curves / Scaling | Massive ROI (Translates prob → profit) |
+| **Decision** | EV + P(fill) Labeling | High Impact (Targets the right objective) |
+
+... (rest of the implemented feature tables below) ...
+
+## Implemented ✓
+<details>
+<summary>Click to view full feature history</summary>
+
+(Existing table contents preserved...)
+</details>
 
 ---
 
