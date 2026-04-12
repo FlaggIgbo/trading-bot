@@ -11,16 +11,16 @@ sys.path.insert(0, str(_ROOT))
 from constants import REC_BUY_NO, REC_BUY_YES
 
 from scripts.compare_historical import (
-    _cap_bankroll_exposure_buckets,
-    _compute_limit_price,
-    _trim_order_group_to_notional_cap,
+    cap_bankroll_exposure_buckets,
+    compute_limit_price,
+    trim_order_group_to_notional_cap,
 )
 
 
 class TestTrimNotionalCap(unittest.TestCase):
     def test_no_change_when_under_cap(self) -> None:
         orders = [{"price": 0.5, "count": 4, "edge": 0.1, "yf_ticker": "X"}]
-        self.assertFalse(_trim_order_group_to_notional_cap(orders, 500))
+        self.assertFalse(trim_order_group_to_notional_cap(orders, 500))
         self.assertEqual(orders[0]["count"], 4)
 
     def test_trims_to_cap_by_efficiency(self) -> None:
@@ -28,7 +28,7 @@ class TestTrimNotionalCap(unittest.TestCase):
         lo = {"price": 0.5, "count": 10, "edge": 0.05, "yf_ticker": "X", "expected_hours_to_resolution": 1.0}
         orders = [lo, hi]
         # 250¢ cap: keep high-edge leg full (500¢) doesn't fit — both 50¢/contract
-        self.assertTrue(_trim_order_group_to_notional_cap(orders, 250))
+        self.assertTrue(trim_order_group_to_notional_cap(orders, 250))
         total = sum(int(o["price"] * 100) * o["count"] for o in orders)
         self.assertLessEqual(total, 250)
         self.assertEqual(hi["count"], 5)
@@ -41,7 +41,7 @@ class TestCapBankrollBuckets(unittest.TestCase):
             {"rec": REC_BUY_YES, "yf_ticker": "BTC-USD", "price": 0.4, "count": 10, "edge": 0.2},
             {"rec": REC_BUY_NO, "yf_ticker": "BTC-USD", "price": 0.4, "count": 10, "edge": 0.1},
         ]
-        _cap_bankroll_exposure_buckets(
+        cap_bankroll_exposure_buckets(
             pending,
             1000,
             max_frac_per_direction=0.1,
@@ -55,7 +55,7 @@ class TestCapBankrollBuckets(unittest.TestCase):
 
 class TestPassiveOnlyBelowEdge(unittest.TestCase):
     def test_thin_edge_stays_passive(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.40,
             ask=0.42,
             p_win=0.55,
@@ -81,7 +81,7 @@ class TestPassiveOnlyBelowEdge(unittest.TestCase):
         self.assertLess(px, 0.40)
 
     def test_strong_edge_can_cross_when_above_passive_floor(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.40,
             ask=0.42,
             p_win=0.70,
@@ -108,7 +108,7 @@ class TestPassiveOnlyBelowEdge(unittest.TestCase):
 
 class TestEvTierLimitPricing(unittest.TestCase):
     def test_medium_tier_uses_spread_fraction(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.40,
             ask=0.44,
             p_win=0.60,
@@ -141,7 +141,7 @@ class TestEvTierLimitPricing(unittest.TestCase):
         self.assertAlmostEqual(px, 0.41, places=2)
 
     def test_weak_tier_at_bid(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.35,
             ask=0.40,
             p_win=0.55,
@@ -171,7 +171,7 @@ class TestEvTierLimitPricing(unittest.TestCase):
         self.assertAlmostEqual(px, 0.35, places=2)
 
     def test_skip_when_below_weak_and_skip_enabled(self) -> None:
-        px, dip = _compute_limit_price(
+        px, dip = compute_limit_price(
             bid=0.40,
             ask=0.42,
             p_win=0.55,
@@ -202,7 +202,7 @@ class TestEvTierLimitPricing(unittest.TestCase):
 
 class TestWideBookLimitCoalesce(unittest.TestCase):
     def test_layered_lift_on_wide_spread(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.10,
             ask=0.71,
             p_win=0.85,
@@ -230,7 +230,7 @@ class TestWideBookLimitCoalesce(unittest.TestCase):
         self.assertGreaterEqual(px, 0.30)
 
     def test_conservative_skips_wide_book_lift(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.10,
             ask=0.71,
             p_win=0.85,
@@ -258,7 +258,7 @@ class TestWideBookLimitCoalesce(unittest.TestCase):
         self.assertLess(px, 0.20)
 
     def test_ev_touch_lift_when_cross_tier_below_bid(self) -> None:
-        px, _ = _compute_limit_price(
+        px, _ = compute_limit_price(
             bid=0.71,
             ask=0.09,
             p_win=0.83,

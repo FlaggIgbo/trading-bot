@@ -78,6 +78,8 @@ class BaseStrategy(ABC):
         macro_24h_ret: float = 0.0,
         rsi_14: float | None = None,
         price_history: list[float] | None = None,
+        vol_regime: float = 0.0,
+        trend_score: float = 0.0,
     ) -> dict[str, float]:
         """Build normalized signal features for scoring."""
         raise NotImplementedError

@@ -25,32 +25,47 @@ def calculate_fractional_kelly_size(
     trust_score: float = 1.0,
     drawdown_pct: float = 0.0,
     drawdown_aggressive_delever_threshold: float = 0.15,
+    regime_size_mult: float = 1.0,
 ) -> int:
     """
-    Enhanced Kelly with drawdown-aware deleveraging.
+    Enhanced Kelly with drawdown-aware deleveraging and regime-based scaling.
     If drawdown exceeds threshold, we delever exponentially.
     """
     if price <= 0 or price >= 1.0:
         return 0
     
     p = max(0.0, min(0.99, float(p_win)))
-    k_raw = (p - float(price)) / (1.0 - float(price))
+    q = 1.0 - p
+    b = (1.0 - float(price)) / float(price) # Odds
+    
+    # Kelly % = (bp - q) / b
+    k_raw = (b * p - q) / b if b > 0 else 0
     
     if k_raw <= 0:
         return 0
     
     # Drawdown Scaling (Deleveraging)
-    # If 15% drawdown, multiply size by (1 - 0.15)^2 = 0.72x
-    # If 30% drawdown, multiply size by (1 - 0.30)^2 = 0.49x
+    # 1. Linear scaling for small drawdowns
+    # 2. Exponential deleveraging for significant ones
     delever_mult = 1.0
-    if drawdown_pct > 0.05:
-        delever_mult = (1.0 - drawdown_pct)**2
-        if drawdown_pct >= drawdown_aggressive_delever_threshold:
-            delever_mult *= 0.5  # Extra safety for deep drawdowns
+    if drawdown_pct > 0.02:
+        if drawdown_pct < 0.10:
+            # Linear fade: 100% at 2% DD -> 80% at 10% DD
+            delever_mult = 1.0 - (drawdown_pct - 0.02) * 2.5
+        else:
+            # Quadratic fade: 80% at 10% DD -> 0% at ~40% DD
+            delever_mult = 0.8 * (1.0 - (drawdown_pct - 0.10) / 0.30)**2
             
-    # Apply fractional Kelly and deleveraging
-    k_adj = k_raw * float(fraction) * float(trust_score) * delever_mult
-    k_adj = max(0.0, min(0.12, k_adj)) # Cap single-trade bankroll to 12%
+        if drawdown_pct >= drawdown_aggressive_delever_threshold:
+            delever_mult *= 0.4  # Hard emergency haircut
+            
+    delever_mult = max(0.0, delever_mult)
+            
+    # Apply fractional Kelly, trust, regime, and deleveraging
+    k_adj = k_raw * float(fraction) * float(trust_score) * float(regime_size_mult) * delever_mult
+    
+    # Cap single-trade bankroll risk to 10% (more conservative than 12%)
+    k_adj = min(0.10, k_adj)
     
     size_cents = int(total_bankroll_cents * k_adj)
     return min(int(max_trade_cents), size_cents)
@@ -61,47 +76,47 @@ def get_ensemble_consensus_multiplier(
     p_vol: float | None,
     obi: float | None,
     momentum: float | None,
+    sentiment: float | None = None,
 ) -> float:
     """
     Calculates a 'Consensus Multiplier' (0.5x to 1.5x) based on agreement strength.
+    Covers technical (momentum, vol), flow (obi), and sentiment models.
     """
-    agreements = 0
-    total_checks = 0
+    checks = []
     
-    # 1. Model vs Vol agreement
+    # 1. Model vs Vol agreement (Technical/Model)
     if p_vol is not None:
-        total_checks += 1
-        if abs(p_model - p_vol) < 0.12:
-            agreements += 1
+        checks.append(abs(p_model - p_vol) < 0.10)
             
-    # 2. Model vs OBI agreement (Directional)
+    # 2. Model vs OBI agreement (Flow)
     if obi is not None:
-        total_checks += 1
-        # If model says Win (>50%) and OBI is positive (buying pressure), they agree for YES
-        # If model says Loss (<50%) and OBI is negative (selling pressure), they agree for NO
-        model_bullish = p_model > 0.52
-        obi_bullish = obi > 0.15
-        if model_bullish == obi_bullish:
-            agreements += 1
+        model_bullish = p_model > 0.50
+        obi_bullish = obi > 0.10
+        # Check alignment: both bullish or both bearish
+        checks.append(model_bullish == (obi > 0.05 if model_bullish else obi < -0.05))
             
-    # 3. Model vs Momentum agreement
+    # 3. Model vs Momentum agreement (Technical)
     if momentum is not None:
-        total_checks += 1
-        model_bullish = p_model > 0.52
-        mom_bullish = momentum > 0.0
-        if model_bullish == mom_bullish:
-            agreements += 1
+        model_bullish = p_model > 0.50
+        checks.append(model_bullish == (momentum > 0.0))
+        
+    # 4. Model vs Sentiment agreement (Sentiment)
+    if sentiment is not None:
+        model_bullish = p_model > 0.50
+        sentiment_bullish = sentiment > 0.0
+        checks.append(model_bullish == sentiment_bullish)
             
-    if total_checks == 0:
+    if not checks:
         return 1.0
         
-    consensus_pct = agreements / total_checks
+    agreement_rate = sum(1 for c in checks if c) / len(checks)
     
-    if consensus_pct >= 0.8:
-        return 1.25  # High conviction
-    if consensus_pct <= 0.35:
-        return 0.65  # Strong disagreement
-    return 1.0
+    # Sizing multiplier based on consensus
+    if agreement_rate >= 0.9: return 1.50   # Full consensus -> big trades
+    if agreement_rate >= 0.7: return 1.20   # Strong agreement
+    if agreement_rate >= 0.4: return 1.00   # Partial agreement
+    if agreement_rate >= 0.2: return 0.60   # Disagreement -> small size
+    return 0.30                            # Strong conflict -> minimal size
 
 
 def get_tiered_confidence_tier(p_win: float, consensus_mult: float) -> str:
@@ -274,113 +289,97 @@ def compute_limit_price(
     wide_book_conservative: bool = False,
     wide_book_spread_rel: float = 0.22,
     wide_book_anchor_fraction: float = 0.38,
+    fill_prob: float | None = None,
 ) -> tuple[float | None, float]:
     """
     Returns (limit_price, dip_used_proxy).
+
+    Implements three execution regimes:
+    1. Aggressive: Take liquidity (cross spread) for very high edge.
+    2. Competitive: Join top of book or improve slightly for moderate edge.
+    3. Passive: Deeper limit orders (dip-style) for low edge or wide spreads.
     """
     mode_norm = (mode or "fixed_pct").strip().lower()
     if mode_norm not in {"fixed_pct", "dynamic_tick", "layered"}:
         mode_norm = "fixed_pct"
 
+    # Hard cap at fair value (P_win - fees)
     fair_cap = clip_price(float(p_win) - _fee_per_contract(float(p_win), maker_fee_rate, min_fee_per_order))
+    if fair_cap <= 0.01:
+        return 0.01, 0.0 # Stink bid floor
 
     _po = max(0.0, float(passive_only_below_edge or 0.0))
-    _ne_ok = net_edge is not None and float(net_edge) > 0
-    if _po > 0 and _ne_ok and float(net_edge) < _po:
+    ne = float(net_edge) if net_edge is not None else 0.0
+    _ne_ok = ne > 0
+    if _po > 0 and _ne_ok and ne < _po:
         _ne_ok = False
-    if edge_aggression_enabled and _ne_ok and fair_cap > 0:
-        ne = float(net_edge)
-        tick = max(1, int(tick_offset)) * 0.01
+
+    # Dynamic Offset Logic
+    tick = max(1, int(tick_offset)) * 0.01
+    spread = (float(ask) - float(bid)) if (ask is not None and ask > bid) else 0.0
+    
+    # Execution Regime Selection
+    if edge_aggression_enabled and _ne_ok:
         cross_th = max(0.0, float(cross_spread_min_edge))
         near_th = max(0.0, float(near_market_min_edge))
         weak_th = max(0.0, float(weak_bid_min_edge))
-        if near_th > cross_th:
-            near_th = cross_th
-        if weak_th > near_th:
-            weak_th = near_th
+        if near_th > cross_th: near_th = cross_th
+        if weak_th > near_th: weak_th = near_th
 
-        if ev_tier_pricing:
-            base_px_ev: float | None = None
-            if ne >= cross_th:
-                if ask is not None and float(ask) > 0:
-                    base_px_ev = min(float(ask), fair_cap)
-                else:
-                    base_px_ev = min(float(bid) + tick, fair_cap)
-            elif ne >= near_th:
-                spread_v = 0.0
-                if ask is not None and float(ask) > float(bid):
-                    spread_v = float(ask) - float(bid)
-                mode_m = (medium_quote_mode or "spread_fraction").strip().lower()
-                if mode_m == "mid" and ask is not None and float(ask) > float(bid):
-                    mid_px = (float(bid) + float(ask)) / 2.0
-                    base_px_ev = min(mid_px, fair_cap)
-                else:
-                    frac = max(0.0, min(1.0, float(medium_spread_fraction)))
-                    base_px_ev = float(bid) + frac * spread_v
-                    base_px_ev = min(max(0.01, base_px_ev), fair_cap)
-                if ask is not None and float(ask) > 0:
-                    base_px_ev = min(float(base_px_ev), float(ask))
-            elif ne >= weak_th:
-                base_px_ev = min(float(bid), fair_cap)
-            elif skip_below_weak_edge:
-                return None, 0.0
+        # A. AGGRESSIVE (Take Liquidity / Cross Spread)
+        if ne >= cross_th:
+            if ask is not None and float(ask) > 0:
+                # If very large edge, we take the ask; otherwise we join it
+                target = min(float(ask), fair_cap)
+            else:
+                # No ask? Penny jump the bid
+                target = min(float(bid) + tick, fair_cap)
+            
+            # Wide-book coalescing: if our target is below bid but we can afford bid, lift to bid
+            if (wide_book_coalesce_enabled and not wide_book_conservative 
+                and target + 1e-9 < float(bid) and fair_cap + 1e-9 >= float(bid)):
+                target = min(float(bid), fair_cap)
+                
+            return clip_price(target), 0.0
 
-            if base_px_ev is not None:
-                px_esc = float(base_px_ev)
-                if escalation_price_enabled and resting_order_age_minutes is not None:
-                    age = float(resting_order_age_minutes)
-                    extra_ticks = 0
-                    if age >= float(escalate_after_minutes_1):
-                        extra_ticks += 1
-                    if age >= float(escalate_after_minutes_2):
-                        extra_ticks += 1
-                    px_esc += extra_ticks * 0.01
-                    px_esc = min(px_esc, fair_cap)
-                    if ask is not None and float(ask) > 0:
-                        px_esc = min(px_esc, float(ask))
-                if (
-                    wide_book_coalesce_enabled
-                    and not wide_book_conservative
-                    and float(bid) > 0
-                    and px_esc + 1e-9 < float(bid)
-                    and float(fair_cap) + 1e-9 >= float(bid)
-                ):
-                    px_esc = min(float(fair_cap), float(bid))
-                return clip_price(px_esc), 0.0
-        else:
-            if ask is not None and ask > 0 and ne >= float(cross_spread_min_edge):
-                aggressive = min(max(0.01, float(ask) - 0.01), fair_cap, float(ask))
-                px_leg = float(aggressive)
-                if (
-                    wide_book_coalesce_enabled
-                    and not wide_book_conservative
-                    and float(bid) > 0
-                    and px_leg + 1e-9 < float(bid)
-                    and float(fair_cap) + 1e-9 >= float(bid)
-                ):
-                    px_leg = min(float(fair_cap), float(bid))
-                return clip_price(px_leg), 0.0
-            if ne >= float(near_market_min_edge):
-                jump = float(bid) + tick
-                if ask is not None and ask > 0:
-                    jump = min(jump, max(0.01, float(ask) - 0.01))
-                near_px = min(jump, fair_cap, float(bid) + max(tick, 0.02))
-                px_near = float(near_px)
-                if (
-                    wide_book_coalesce_enabled
-                    and not wide_book_conservative
-                    and float(bid) > 0
-                    and px_near + 1e-9 < float(bid)
-                    and float(fair_cap) + 1e-9 >= float(bid)
-                ):
-                    px_near = min(float(fair_cap), float(bid))
-                return clip_price(px_near), 0.0
+        # B. COMPETITIVE (Join/Improve Top of Book)
+        elif ne >= near_th:
+            # We want to be at bid + small_offset
+            # small_offset = min(tick, spread * 0.3, edge * 0.5)
+            dynamic_offset = min(tick, spread * 0.3, ne * 0.5)
+            target = float(bid) + dynamic_offset
+            
+            # If medium_quote_mode is spread_fraction, use that as a floor for aggression
+            if medium_quote_mode == "spread_fraction" and spread > 0:
+                frac_target = float(bid) + (spread * float(medium_spread_fraction))
+                target = max(target, frac_target)
+            
+            target = min(target, fair_cap)
+            if ask is not None and ask > 0:
+                target = min(target, float(ask)) # Don't cross in competitive mode
+            
+            # Wide-book coalescing: if our target is below bid but we can afford bid, lift to bid
+            if (wide_book_coalesce_enabled and not wide_book_conservative 
+                and target + 1e-9 < float(bid) and fair_cap + 1e-9 >= float(bid)):
+                target = min(float(bid), fair_cap)
 
+            return clip_price(target), 0.0
+
+        # NEW: WEAK TIER (Quote at Bid)
+        elif ne >= weak_th:
+            target = min(float(bid), fair_cap)
+            return clip_price(target), 0.0
+
+        # C. WEAK / PASSIVE GATE
+        elif skip_below_weak_edge:
+            return None, 0.0
+
+    # C. PASSIVE (Dip / Provide Liquidity)
     if mode_norm == "fixed_pct":
         dip = max(0.0, min(max_dip_cap, float(base_dip)))
         raw_price = bid * (1.0 - dip) if dip > 0 else bid
     elif mode_norm == "dynamic_tick":
-        tick = max(1, int(tick_offset)) * 0.01
+        # competitive-ish passive
         jump_price = bid + tick
         if ask is not None and ask > 0:
             jump_price = min(jump_price, max(0.01, float(ask) - 0.01))
@@ -390,15 +389,14 @@ def compute_limit_price(
         # Layered: place passive limits BELOW bid
         dip = max(0.0, min(max_dip_cap, float(base_dip)))
         base_price = bid * (1.0 - dip) if dip > 0 else bid
-
         levels = max(1, int(layered_order_levels))
         if levels > 1 and order_count > 1:
             level_idx = min(order_count - 1, levels - 1)
             depth_per_level = max(0.01, bid * dip * 0.5) if dip > 0 else 0.01
             base_price -= level_idx * depth_per_level
-
         raw_price = min(base_price, fair_cap)
 
+    # Wide Book Coalescing (Avoid dead zones)
     if mode_norm in ("fixed_pct", "layered"):
         raw_price = wide_book_lift_passive_raw_price(
             bid=bid,
@@ -411,9 +409,12 @@ def compute_limit_price(
             anchor_fraction=wide_book_anchor_fraction,
         )
 
+    # Inventory Skew Adjustment
     same_skew = calculate_inventory_skew_factor(int(held_same_side), max_inventory_skew_pct)
     opp_skew = calculate_inventory_skew_factor(int(held_opp_side), max_inventory_skew_pct) * 0.5
     skewed = raw_price * (1.0 - same_skew + opp_skew)
+
+    # Final resolution based on passive_quote mode
     merged = resolve_passive_quote_price(
         passive_quote=passive_quote,
         bid=bid,
@@ -421,6 +422,29 @@ def compute_limit_price(
         dip_based_price=skewed,
         fair_cap=fair_cap,
     )
+
+    # D. ESCALATION (Aging Order Patience Exhausted)
+    if escalation_price_enabled and resting_order_age_minutes is not None:
+        age = float(resting_order_age_minutes)
+        if age >= float(escalate_after_minutes_1):
+            # Increase aggression: move towards competitive or mid
+            # If we were passive, we might move to bid or bid+tick
+            current_px = float(merged or 0)
+            target_px = current_px
+            if age >= float(escalate_after_minutes_2):
+                # Second stage: move even closer to market
+                if ask is not None and ask > bid:
+                    target_px = (bid + ask) / 2.0
+                else:
+                    target_px = bid + (2 * tick)
+            else:
+                # First stage: move to bid or bid+tick
+                target_px = max(current_px, bid + tick)
+            
+            merged = min(target_px, fair_cap)
+            if ask is not None and ask > 0:
+                merged = min(float(merged), float(ask))
+
     return merged, float(dip)
 
 
@@ -510,7 +534,7 @@ def cap_cross_platform_exposure(
         grouped.setdefault((str(yf), str(res_key)), []).append(o)
 
     for _, orders in grouped.items():
-        _trim_order_group_to_notional_cap(orders, cap_cents)
+        trim_order_group_to_notional_cap(orders, cap_cents)
 
 
 def cap_bankroll_exposure_buckets(
@@ -553,7 +577,7 @@ def cap_bankroll_exposure_buckets(
                 side = "yes" if o.get("rec") == REC_BUY_YES else "no"
                 by_dir.setdefault((yf, side), []).append(o)
             for grp in by_dir.values():
-                if _trim_order_group_to_notional_cap(grp, cap_d):
+                if trim_order_group_to_notional_cap(grp, cap_d):
                     touched = True
     if fu > 0:
         cap_u = int(total_balance_cents * fu)
@@ -563,7 +587,7 @@ def cap_bankroll_exposure_buckets(
                 yf = str(o.get("yf_ticker")).strip()
                 by_yf.setdefault(yf, []).append(o)
             for grp in by_yf.values():
-                if _trim_order_group_to_notional_cap(grp, cap_u):
+                if trim_order_group_to_notional_cap(grp, cap_u):
                     touched = True
     if touched:
         logger(
@@ -571,8 +595,19 @@ def cap_bankroll_exposure_buckets(
             f"(per-direction cap={fd:.0%}, per-underlying cap={fu:.0%} of combined balance)."
         )
 
+def _capital_efficiency_score_order(o: dict) -> float:
+    """Edge-first order score with soft liquidity/time modifiers."""
+    edge = max(0.0, float(o.get("edge", 0.0)))
+    spread_bps = float(o.get("spread_bps_at_place", 100.0) or 100.0)
+    liquidity_score = max(0.25, min(1.0, 1.0 - (max(0.0, spread_bps) / 10000.0)))
+    ttl_h = o.get("expected_hours_to_resolution")
+    # Fallback to 24h if missing to avoid heavy dependencies
+    ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
+    time_decay = 1.0 / (1.0 + (ttl_h / 24.0))
+    return edge * liquidity_score * time_decay
 
-def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> bool:
+
+def trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> bool:
     """Shrink counts so sum(price*count) <= cap_cents. Returns True if any count changed."""
     if cap_cents <= 0 or not orders:
         return False
@@ -582,10 +617,13 @@ def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> boo
     )
     if total_cost <= cap_cents:
         return False
-    # Sort by edge for ranking
+    # Sort by efficiency then edge for ranking
     ranked = sorted(
         orders,
-        key=lambda x: -float(x.get("edge", 0.0)),
+        key=lambda x: (
+            -_capital_efficiency_score_order(x),
+            -float(x.get("edge", 0.0)),
+        ),
     )
     used = 0
     changed = False

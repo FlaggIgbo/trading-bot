@@ -597,6 +597,25 @@ def set_yf_closes(ticker: str, days_back: int, closes: list[float], config: dict
         conn.close()
 
 
+def clear_yf_cache(ticker: str, days_back: int | None = None, config: dict | None = None) -> None:
+    """Clear cached yfinance data for a ticker."""
+    conn = _get_conn(config)
+    if not conn:
+        return
+    try:
+        if days_back is not None:
+            conn.execute("DELETE FROM yf_cache WHERE ticker=? AND days_back=?", (ticker, days_back))
+            conn.execute("DELETE FROM yf_intraday_cache WHERE ticker=? AND days_back=?", (ticker, days_back))
+        else:
+            conn.execute("DELETE FROM yf_cache WHERE ticker=?", (ticker,))
+            conn.execute("DELETE FROM yf_intraday_cache WHERE ticker=?", (ticker,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    finally:
+        conn.close()
+
+
 def get_yf_intraday_at_hour(
     ticker: str,
     days_back: int,

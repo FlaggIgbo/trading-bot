@@ -100,6 +100,8 @@ from models.strategy_registry import build_strategy_engine
 from models.alpha_engine import (
     AlphaEngineConfig,
     compute_obi,
+    estimate_fill_probability,
+    calculate_expected_value,
     lead_lag_edge_adjustment,
     lead_lag_signal,
     load_alpha_engine_config,
@@ -110,6 +112,8 @@ from models.alpha_engine import (
     fit_signal_model_weights,
     build_signal_features,
     score_signal_model,
+    compute_regime_state,
+    RegimeState,
 )
 from models.decision_diagnostics import build_required_edge_breakdown, print_decision_diagnostics_line
 from models.calibration_engine import CalibrationEngine, fit_probability_calibrator
@@ -129,6 +133,7 @@ from models.risk_engine import (
     allocate_budget_to_orders,
     cap_cross_platform_exposure,
     cap_bankroll_exposure_buckets,
+    trim_order_group_to_notional_cap,
     get_ensemble_consensus_multiplier,
     get_tiered_confidence_tier,
 )
@@ -208,6 +213,7 @@ try:
         get_unresolved_predictions,
         get_ticker_entry_counts,
         get_unresolved_contract_sums_by_platform_yf,
+        clear_yf_cache,
         mark_prediction_cancelled,
         record_position_evaluation,
         record_prediction_from_fill,
@@ -459,6 +465,7 @@ class StrategyParams:
     max_bankroll_fraction_per_direction: float
     max_daily_loss_pct: float
     max_daily_loss_cents: int
+    emergency_stop_reset_time: float
     max_trade_cents: float
     ensemble_consensus_enabled: bool
     drawdown_aware_sizing_enabled: bool
@@ -501,6 +508,8 @@ class StrategyParams:
     cross_exchange_spot_move_threshold_pct: float
     enable_signal_model: bool
     signal_model_weights: dict[str, float]
+    # Phase 2/3
+    regime_size_mult: float
     signal_model_ensemble_weights: list[dict[str, float]]
     ensemble_scoring_enabled: bool
     market_relative_scoring_enabled: bool
@@ -842,6 +851,7 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         ),
         max_daily_loss_pct=float(strategy.get("max_daily_loss_pct", 0.10)),
         max_daily_loss_cents=int(strategy.get("max_daily_loss_cents", 0)),
+        emergency_stop_reset_time=float(strategy.get("emergency_stop_reset_time", 0.0)),
         max_trade_cents=float(strategy.get("max_trade_cents", 5000.0)),
         ensemble_consensus_enabled=bool(strategy.get("ensemble_consensus_enabled", True)),
         drawdown_aware_sizing_enabled=bool(strategy.get("drawdown_aware_sizing_enabled", True)),
@@ -884,6 +894,7 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         cross_exchange_spot_move_threshold_pct=float(strategy.get("cross_exchange_spot_move_threshold_pct", 0.01)),
         enable_signal_model=bool(strategy.get("enable_signal_model", True)),
         signal_model_weights=dict(strategy.get("signal_model_weights", {})),
+        regime_size_mult=1.0,
         signal_model_ensemble_weights=[dict(x.get("weights", {})) for x in strategy.get("signal_model_ensemble_weights", []) if isinstance(x, dict)],
         ensemble_scoring_enabled=bool(strategy.get("ensemble_scoring_enabled", False)),
         market_relative_scoring_enabled=bool(strategy.get("market_relative_scoring_enabled", False)),
@@ -1748,6 +1759,15 @@ def _clip01(v: float) -> float:
 
 
 
+def _format_verdict(rec: str) -> str:
+    """Add emojis for better visibility: BUY=✅, SELL/EXIT=❌/⚠️."""
+    if "BUY" in rec:
+        return f"{rec} ✅"
+    if any(x in rec for x in ("SELL", "EXIT", "LOSE", "RULE")):
+        return f"{rec} ❌"
+    return rec
+
+
 def _build_signal_features(
     *,
     emp_p: float,
@@ -1758,6 +1778,9 @@ def _build_signal_features(
     dte_days: float | None,
     spread_bps: float | None,
     no_bid: float | None,
+    vol_regime: float = 0.0,
+    trend_score: float = 0.0,
+    rsi: float = 0.5,
 ) -> SignalFeatures:
     vol = _clip01(vol_p if vol_p is not None else emp_p)
     mkt = _clip01(market_yes)
@@ -1782,6 +1805,9 @@ def _build_signal_features(
         dte_norm=dte_norm,
         spread_norm=spread_norm,
         liquidity_consistency=_clip01(consistency),
+        vol_regime=float(vol_regime),
+        trend_score=float(trend_score),
+        rsi=float(rsi),
     )
 
 
@@ -3405,7 +3431,8 @@ def _compute_buy_count(
         max_trade_cents=float(sp.max_trade_cents),
         trust_score=float(effective_trust),
         drawdown_pct=float(drawdown_pct) if sp.drawdown_aware_sizing_enabled else 0.0,
-        drawdown_aggressive_delever_threshold=float(sp.drawdown_aggressive_delever_threshold)
+        drawdown_aggressive_delever_threshold=float(sp.drawdown_aggressive_delever_threshold),
+        regime_size_mult=float(getattr(sp, "regime_size_mult", 1.0)),
     )
     
     # Guardrails for OTM fat pitches
@@ -4212,62 +4239,6 @@ def _apply_max_open_contracts_per_underlying(
         logger("")
 
 
-def _capital_efficiency_score_order(o: dict) -> float:
-    """Edge-first order score with soft liquidity/time modifiers."""
-    edge = max(0.0, float(o.get("edge", 0.0)))
-    spread_bps = float(o.get("spread_bps_at_place", 100.0) or 100.0)
-    liquidity_score = max(0.25, min(1.0, 1.0 - (max(0.0, spread_bps) / 10000.0)))
-    ttl_h = o.get("expected_hours_to_resolution")
-    if ttl_h is None:
-        title = str(o.get("title") or "")
-        yf = str(o.get("yf_ticker") or "")
-        parsed = hours_until_resolution(title, yf) if title else None
-        ttl_h = parsed
-    ttl_h = max(1.0, float(ttl_h) if ttl_h is not None else 24.0)
-    time_decay = 1.0 / (1.0 + (ttl_h / 24.0))
-    return edge * liquidity_score * time_decay
-
-
-def _trim_order_group_to_notional_cap(orders: list[dict], cap_cents: int) -> bool:
-    """Shrink counts so sum(price*count) <= cap_cents. Returns True if any count changed."""
-    if cap_cents <= 0 or not orders:
-        return False
-    total_cost = sum(
-        int(float(o.get("price", 0)) * 100) * max(0, int(o.get("count", 0)))
-        for o in orders
-    )
-    if total_cost <= cap_cents:
-        return False
-    ranked = sorted(
-        orders,
-        key=lambda x: (
-            -_capital_efficiency_score_order(x),
-            -float(x.get("edge", 0)),
-        ),
-    )
-    used = 0
-    changed = False
-    for o in ranked:
-        price_c = max(1, int(float(o.get("price", 0)) * 100))
-        curr = max(0, int(o.get("count", 0)))
-        if curr <= 0:
-            continue
-        room = max(0, cap_cents - used)
-        max_count = room // price_c
-        if curr > max_count:
-            o["count"] = max_count
-            changed = True
-            traces = o.setdefault("_sizing_trace", [])
-            traces.append({
-                "stage": "notional_cap_trim",
-                "before": int(curr),
-                "after": int(max_count),
-                "note": f"group cap ${cap_cents/100:.2f}",
-            })
-        used += price_c * max(0, int(o.get("count", 0)))
-    return changed
-
-
 def _print_sizing_trace(pending_orders: list[dict], *, logger=print, max_rows: int = 20) -> None:
     rows: list[dict] = []
     for o in pending_orders:
@@ -4469,10 +4440,11 @@ def _maybe_add_two_sided_quotes(
             cons_mult = 1.0
             if sp.ensemble_consensus_enabled:
                 cons_mult = get_ensemble_consensus_multiplier(
-                    p_model=p_win if side == "yes" else (1.0 - p_win),
+                    p_model=p_win,
                     p_vol=c.get("vol_p"),
                     obi=obi_val,
-                    momentum=mom_ret
+                    momentum=mom_ret,
+                    sentiment=0.0
                 )
             
             conf_tier = get_tiered_confidence_tier(p_win, cons_mult)
@@ -5470,6 +5442,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     if get_realized_pnl_stats and (sp.max_daily_loss_pct > 0 or sp.max_daily_loss_cents > 0):
         try:
             since_ts = time.time() - 86400
+            if sp.emergency_stop_reset_time > 0:
+                since_ts = max(since_ts, sp.emergency_stop_reset_time)
             pnl_stats = get_realized_pnl_stats(since_ts=since_ts, config=cfg) or {}
             pnl_24h = int(pnl_stats.get("total_pnl_cents", 0) or 0)
             loss_24h = max(0, -pnl_24h)
@@ -5755,6 +5729,10 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     discrepancy = live_f / last_close
                     if discrepancy > 5.0 or discrepancy < 0.2:
                         print(f"  !!! DATA WARNING: {yf_ticker} live ({live_f:,.2f}) vs history ({last_close:,.2f}) ratio {discrepancy:.2f}x. Likely unit mismatch or stale cache. !!!")
+                        if clear_yf_cache:
+                            print(f"  [Risk] Clearing stale yfinance cache for {yf_ticker}...")
+                            clear_yf_cache(yf_ticker, args.days, cfg)
+                        print()
                 
                 w = sp.live_price_weight
                 current_price = w * live_f + (1 - w) * last_close
@@ -6089,6 +6067,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 spread_bps_signal = ((yes_ask_signal - yes_bid) / max(0.01, yes_bid)) * 10_000.0
             if sp.enable_signal_model:
                 rsi_for_signal = _compute_rsi(closes)
+                # Phase 3: Regime State
+                rs = compute_regime_state(closes, vol_buckets=getattr(sp.ae_cfg, "regime_vol_buckets", None))
+                
                 feats = strategy_engine.build_signal_features(
                     emp_p=emp,
                     vol_p=vol_p,
@@ -6101,7 +6082,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     macro_24h_ret=macro_signal_24h,
                     rsi_14=rsi_for_signal,
                     price_history=closes,
+                    vol_regime=rs.vol_zscore,
+                    trend_score=rs.trend_score,
                 )
+                # Inject regime features
+                if hasattr(feats, "vol_regime"):
+                    feats.vol_regime = rs.vol_zscore
+                    feats.trend_score = rs.trend_score
                 
                 if sp.ensemble_scoring_enabled and sp.signal_model_ensemble_weights:
                     # Uncertainty check: edge must clear ensemble std dev
@@ -6353,7 +6340,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     p_model=hist_p,
                     p_vol=vol_p,
                     obi=obi_val,
-                    momentum=momentum_ret
+                    momentum=momentum_ret,
+                    sentiment=0.0
                 )
             
             conf_tier = get_tiered_confidence_tier(hist_p, cons_mult)
@@ -6411,11 +6399,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             **_strategy_recommend_extras(sp),
                         )
                     )
-
-                # Tiered Gating: Block LOW confidence trades (Gemini)
-                if sp.confidence_tier_gating_enabled and conf_tier_g == "LOW" and rec in (REC_BUY_YES, REC_BUY_NO):
-                    rec = REC_SKIP
-                    print(f"  [Gating] {g_ticker} → SKIP (Phase 2 LOW confidence tier | Consensus {cons_mult_g:.2f})")
 
                 # Tiered Gating: Block LOW confidence trades
                 if sp.confidence_tier_gating_enabled and conf_tier == "LOW" and rec in (REC_BUY_YES, REC_BUY_NO):
@@ -6645,7 +6628,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _alpha_tags.append(f"LL={_ll_sig:+.3%}")
             if _alpha_tags:
                 print(f"    ├─ Alpha:        {' | '.join(_alpha_tags)}")
-            print(f"    ├─ Verdict:      {rec}")
+            print(f"    ├─ Verdict:      {_format_verdict(rec)}")
             if sp.log_effective_min_edge:
                 _eys, _ens = _net_edges_buy_legs(
                     hist_p, yes_bid, no_bid_early, maker_fee_rate, sp.min_fee_per_order
@@ -6866,6 +6849,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     sp.limit_buy_wide_book_conservative_substrings,
                     sp.limit_buy_wide_book_conservative_yf_tickers,
                 )
+                
+                # Execution Alpha: Fill Probability & EV
+                _obi_k = compute_obi(book.get("yes_bid_size"), book.get("yes_ask_size")) if side == "yes" else compute_obi(book.get("no_bid_size"), book.get("no_ask_size"))
+                _spr_bps_k = (float(ask_side) - bid) / bid * 10_000 if (ask_side and bid > 0) else None
+                _fill_p_k = estimate_fill_probability(_spr_bps_k, _obi_k, side_is_aligned=True)
+                _ev_k = calculate_expected_value(p_win, _fill_p_k, bid * 100, _fee_le * 100)
+
                 price, dip_used = compute_limit_price(
                     bid=bid,
                     ask=ask_side,
@@ -6900,11 +6890,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     wide_book_conservative=_wbc_k,
                     wide_book_spread_rel=sp.limit_buy_wide_book_spread_rel,
                     wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
+                    fill_prob=_fill_p_k,
                 )
                 if sp.taker_edge_threshold > 0 and _net_edge_le >= sp.taker_edge_threshold and ask_side is not None and ask_side > 0:
                     print(f"    [Taker Mode] Edge {_net_edge_le:.1%} >= {sp.taker_edge_threshold:.1%} → paying ask {ask_side:.2f}")
                     price = ask_side
                     dip_used = 0.0
+                
+                # Log execution alpha
+                if price:
+                    print(f"       Exec: fill_prob={_fill_p_k:.1%}  |  EV=${_ev_k/100:.3f}/contract  |  Price=${price:.2f}")
+
                 if price is None:
                     print(
                         f"    Why: limit quote skipped — net edge {_net_edge_le:.1%} below weak tier "
@@ -7349,6 +7345,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     spread_bps_sig_g = ((yes_ask_sig_g - impl) / max(0.01, impl)) * 10_000.0
                 if sp.enable_signal_model:
                     rsi_for_signal_g = _compute_rsi(closes)
+                    # Phase 3: Regime State
+                    rs_g = compute_regime_state(closes, vol_buckets=getattr(sp.ae_cfg, "regime_vol_buckets", None))
+
                     feats_g = strategy_engine.build_signal_features(
                         emp_p=emp,
                         vol_p=vol_p_gem,
@@ -7361,6 +7360,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         macro_24h_ret=macro_signal_24h,
                         rsi_14=rsi_for_signal_g,
                         price_history=closes,
+                        vol_regime=rs_g.vol_zscore,
+                        trend_score=rs_g.trend_score,
                     )
                     
                     if sp.ensemble_scoring_enabled and sp.signal_model_ensemble_weights:
@@ -7576,7 +7577,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         p_model=hist_p_gem,
                         p_vol=vol_p_gem,
                         obi=obi_val_g,
-                        momentum=momentum_ret
+                        momentum=momentum_ret,
+                        sentiment=0.0
                     )
                 
                 conf_tier_g = get_tiered_confidence_tier(hist_p_gem, cons_mult_g)
@@ -7634,14 +7636,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             )
                         )
 
+                # Tiered Gating: Block LOW confidence trades (Gemini)
+                if sp.confidence_tier_gating_enabled and conf_tier_g == "LOW" and rec in (REC_BUY_YES, REC_BUY_NO):
+                    rec = REC_SKIP
+                    print(f"  [Gating] {g_ticker} → SKIP (Phase 2 LOW confidence tier | Consensus {cons_mult_g:.2f})")
+
                 # Circuit Breaker / Paper-Only Block
                 if rec in (REC_BUY_YES, REC_BUY_NO):
                     if global_circuit_breaker_active:
                         rec = REC_SKIP
-                        print(f"  [Circuit Breaker] {ticker_g} → SKIP (Global drawdown block)")
+                        print(f"  [Circuit Breaker] {g_ticker} → SKIP (Global drawdown block)")
                     elif is_paper_only_g:
                         rec = REC_SKIP
-                        print(f"  [Series Guard] {ticker_g} → SKIP (Series {series_prefix_g} in paper-only mode)")
+                        print(f"  [Series Guard] {g_ticker} → SKIP (Series {series_prefix_g} in paper-only mode)")
 
                 if rec in (REC_BUY_YES, REC_BUY_NO) and sp.max_new_buy_dte_days > 0 and dte_g is not None and float(dte_g) > sp.max_new_buy_dte_days:
                     rec = REC_SKIP
@@ -7832,7 +7839,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         f"    ├─ Ultra-short:  min_edge ×{_usm_g:.2f} "
                         f"(ultra_short_min_edge_mult){_us_note_g}"
                     )
-                print(f"    ├─ Verdict:      {rec}")
+                print(f"    ├─ Verdict:      {_format_verdict(rec)}")
                 if sp.log_effective_min_edge:
                     _eys_g, _ens_g = _net_edges_buy_legs(
                         hist_p_gem, impl, no_bid_gem_early, maker_fee_rate_gem, sp.min_fee_per_order
@@ -8067,6 +8074,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         sp.limit_buy_wide_book_conservative_substrings,
                         sp.limit_buy_wide_book_conservative_yf_tickers,
                     )
+
+                    # Execution Alpha: Fill Probability & EV (Gemini)
+                    _obi_g = compute_obi(book.get("yes_bid_size"), book.get("yes_ask_size")) if side == "yes" else compute_obi(book.get("no_bid_size"), book.get("no_ask_size"))
+                    _spr_bps_g = (float(ask_side) - bid) / bid * 10_000 if (ask_side and bid > 0) else None
+                    _fill_p_g = estimate_fill_probability(_spr_bps_g, _obi_g, side_is_aligned=True)
+                    _ev_g = calculate_expected_value(p_win, _fill_p_g, bid * 100, _fee_leg * 100)
+
                     price, dip_used = compute_limit_price(
                         bid=bid,
                         ask=ask_side,
@@ -8101,11 +8115,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         wide_book_conservative=_wbc_g,
                         wide_book_spread_rel=sp.limit_buy_wide_book_spread_rel,
                         wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
+                        fill_prob=_fill_p_g,
                     )
                     if sp.taker_edge_threshold > 0 and _net_edge_leg >= sp.taker_edge_threshold and ask_side is not None and ask_side > 0:
                         print(f"    [Taker Mode] Edge {_net_edge_leg:.1%} >= {sp.taker_edge_threshold:.1%} → paying ask {ask_side:.2f}")
                         price = ask_side
                         dip_used = 0.0
+                    
+                    # Log execution alpha
+                    if price:
+                        print(f"       Exec: fill_prob={_fill_p_g:.1%}  |  EV=${_ev_g/100:.3f}/contract  |  Price=${price:.2f}")
+
                     if price is None:
                         print(
                             f"    Why: limit quote skipped — net edge {_net_edge_leg:.1%} below weak tier "

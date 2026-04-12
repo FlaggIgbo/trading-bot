@@ -146,6 +146,7 @@ class StrategyParams:
     max_bankroll_fraction_per_direction: float
     max_daily_loss_pct: float
     max_daily_loss_cents: int
+    emergency_stop_reset_time: float
     max_trade_cents: float
     ensemble_consensus_enabled: bool
     drawdown_aware_sizing_enabled: bool
@@ -188,6 +189,8 @@ class StrategyParams:
     cross_exchange_spot_move_threshold_pct: float
     enable_signal_model: bool
     signal_model_weights: dict[str, float]
+    # Phase 2/3
+    regime_size_mult: float
     use_sklearn_calibration: bool
     sklearn_calibration_method: str
     sklearn_calibration_min_samples: int
@@ -749,6 +752,7 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         ),
         max_daily_loss_pct=float(strategy.get("max_daily_loss_pct", 0.10)),
         max_daily_loss_cents=int(strategy.get("max_daily_loss_cents", 0)),
+        emergency_stop_reset_time=float(strategy.get("emergency_stop_reset_time", 0.0)),
         max_trade_cents=float(strategy.get("max_trade_cents", 5000.0)),
         ensemble_consensus_enabled=bool(strategy.get("ensemble_consensus_enabled", True)),
         drawdown_aware_sizing_enabled=bool(strategy.get("drawdown_aware_sizing_enabled", True)),
@@ -791,6 +795,7 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         cross_exchange_spot_move_threshold_pct=float(strategy.get("cross_exchange_spot_move_threshold_pct", 0.01)),
         enable_signal_model=bool(strategy.get("enable_signal_model", True)),
         signal_model_weights=dict(strategy.get("signal_model_weights", {})),
+        regime_size_mult=float(strategy.get("regime_size_mult", 1.0)),
         use_sklearn_calibration=bool(strategy.get("use_sklearn_calibration", True)),
         sklearn_calibration_method=str(strategy.get("sklearn_calibration_method", "isotonic")),
         sklearn_calibration_min_samples=int(strategy.get("sklearn_calibration_min_samples", 50)),

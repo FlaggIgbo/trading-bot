@@ -209,6 +209,8 @@ class DefaultThresholdStrategy(BaseStrategy):
         macro_24h_ret: float = 0.0,
         rsi_14: float | None = None,
         price_history: list[float] | None = None,
+        vol_regime: float = 0.0,
+        trend_score: float = 0.0,
     ) -> dict[str, float]:
         vol = self._clip01(vol_p if vol_p is not None else emp_p)
         mkt = self._clip01(market_yes)
@@ -252,6 +254,8 @@ class DefaultThresholdStrategy(BaseStrategy):
             "rsi_norm": rsi_norm,
             "vwap_dist": max(-0.2, min(0.2, vwap_dist)),
             "price_trend": max(-0.1, min(0.1, price_trend)),
+            "vol_regime": float(vol_regime),
+            "trend_score": float(trend_score),
         }
 
     def score_signal_probability(

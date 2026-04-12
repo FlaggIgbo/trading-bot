@@ -239,6 +239,7 @@ recovery:
 
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
+  emergency_stop_reset_time: 1776032100
   # vol_regime | vol_regime_threshold (aliases): VolRegimeStrategy = DefaultThreshold recommend + vol mults in compare_historical
   strategy_engine: vol_regime
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.

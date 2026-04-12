@@ -49,6 +49,24 @@ class AlphaEngineConfig:
     lead_lag_edge_bonus: float = 0.02
     lead_lag_lookback_bars: int = 5
 
+    # --- GBDT Signal Model (Phase 3) ---
+    gbdt_enabled: bool = True
+    gbdt_min_samples: int = 250
+    gbdt_params: dict = field(default_factory=lambda: {
+        "n_estimators": 100,
+        "max_depth": 4,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+    })
+    gbdt_retrain_interval_trades: int = 250
+    regime_vol_buckets: list[float] = field(default_factory=lambda: [0.3, 0.7, 1.2, 1.8])
+
+    # --- Regime Filters (Phase 3) ---
+    regime_enabled: bool = True
+    regime_vol_buckets: list[float] = field(default_factory=lambda: [0.01, 0.02, 0.04])
+    regime_trend_ema_span: int = 24
+
 
 _DEFAULT_LEAD_LAG_PAIRS = {"^GSPC": "KXINXU", "^IXIC": "KXINXU", "^NDX": "KXNASDAQ100U"}
 _DEFAULT_MARKOUT_WINDOWS = [1, 5, 15]
@@ -80,6 +98,12 @@ def load_alpha_engine_config(strategy: dict) -> AlphaEngineConfig:
         lead_lag_min_move_pct=float(ae.get("lead_lag_min_move_pct", 0.003)),
         lead_lag_edge_bonus=float(ae.get("lead_lag_edge_bonus", 0.02)),
         lead_lag_lookback_bars=int(ae.get("lead_lag_lookback_bars", 5)),
+        gbdt_enabled=bool(ae.get("gbdt_enabled", True)),
+        gbdt_min_samples=int(ae.get("gbdt_min_samples", 250)),
+        gbdt_params=dict(ae.get("gbdt_params", {})),
+        regime_enabled=bool(ae.get("regime_enabled", True)),
+        regime_vol_buckets=list(ae.get("regime_vol_buckets", [0.01, 0.02, 0.04])),
+        regime_trend_ema_span=int(ae.get("regime_trend_ema_span", 24)),
     )
 
 
@@ -220,7 +244,7 @@ def toxic_flow_edge_penalty(
 
 
 # ---------------------------------------------------------------------------
-# Layer 3: Volatility-Adjusted Kelly
+# Layer 3: Volatility-Adjusted Kelly Sizing
 # ---------------------------------------------------------------------------
 
 def vol_adjusted_kelly(
@@ -231,36 +255,103 @@ def vol_adjusted_kelly(
     max_shrink: float = 0.25,
 ) -> float:
     """
-    Scale Kelly fraction inversely with realized volatility.
-
-    f_adjusted = base_kelly * (baseline_vol / current_vol)
-
-    In high-volatility regimes (current_vol >> baseline_vol), the Kelly
-    fraction shrinks automatically, preserving capital for cleaner signals.
-    Capped so that in extreme vol the fraction never goes below max_shrink * base_kelly.
-
-    In low vol, the Kelly fraction is NOT inflated beyond 1x to avoid overconfidence.
+    Scale Kelly fraction inversely with recent realized volatility.
+    
+    If current vol > baseline, shrink position size.
+    Size = base_kelly * (baseline / current_vol)
+    
+    Capped at max_shrink * base_kelly.
     """
-    if not closes or len(closes) < max(2, lookback):
+    if not closes or len(closes) < 2:
         return base_kelly
 
-    recent = closes[-lookback:]
     rets = []
-    for i in range(1, len(recent)):
-        if recent[i - 1] > 0 and recent[i] > 0:
-            rets.append(math.log(recent[i] / recent[i - 1]))
+    # Use log returns for volatility
+    for i in range(max(1, len(closes) - lookback), len(closes)):
+        if closes[i-1] > 0:
+            rets.append(math.log(closes[i] / closes[i-1]))
+    
     if not rets:
         return base_kelly
-
-    current_vol = math.sqrt(sum(r * r for r in rets) / len(rets))
-    if current_vol <= 0:
+        
+    current_vol = math.sqrt(sum(r*r for r in rets) / len(rets))
+    if current_vol <= baseline_vol:
         return base_kelly
-
+        
     ratio = baseline_vol / current_vol
-    ratio = min(1.0, ratio)
     ratio = max(max_shrink, ratio)
-
     return base_kelly * ratio
+
+
+# ---------------------------------------------------------------------------
+# Layer 4: Regime State & Filters (Phase 3)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RegimeState:
+    vol_bucket: str      # 'Low', 'Medium', 'High', 'Extreme'
+    trend: str           # 'Uptrend', 'Downtrend', 'Sideways'
+    vol_zscore: float    # Z-score of realized volatility
+    is_volatile: bool    # True if vol > high threshold
+    trend_score: float   # Momentum score normalized to [-1, 1]
+
+
+def compute_regime_state(
+    closes: list[float],
+    lookback_vol: int = 24,
+    lookback_trend: int = 24,
+    vol_buckets: list[float] = None,
+) -> RegimeState:
+    """
+    Identifies the current market regime based on volatility and trend.
+    """
+    if vol_buckets is None:
+        vol_buckets = [0.01, 0.02, 0.04]
+        
+    if not closes or len(closes) < 2:
+        return RegimeState("Medium", "Sideways", 0.0, False, 0.0)
+
+    # 1. Volatility
+    rets = []
+    for i in range(1, len(closes)):
+        if closes[i-1] > 0:
+            rets.append(math.log(closes[i] / closes[i-1]))
+    
+    if not rets:
+        return RegimeState("Medium", "Sideways", 0.0, False, 0.0)
+        
+    current_vol = math.sqrt(sum(r*r for r in rets[-lookback_vol:]) / len(rets[-lookback_vol:]))
+    
+    # Simple Z-score (vs full history)
+    mean_vol = math.sqrt(sum(r*r for r in rets) / len(rets))
+    vol_z = (current_vol - mean_vol) / (mean_vol + 1e-9)
+    
+    bucket = "Low"
+    if current_vol > vol_buckets[2]: bucket = "Extreme"
+    elif current_vol > vol_buckets[1]: bucket = "High"
+    elif current_vol > vol_buckets[0]: bucket = "Medium"
+    
+    # 2. Trend
+    recent = closes[-lookback_trend:]
+    if len(recent) < lookback_trend:
+        trend = "Sideways"
+        trend_score = 0.0
+    else:
+        # Simple slope / return
+        total_ret = (recent[-1] - recent[0]) / recent[0]
+        trend_score = max(-1.0, min(1.0, total_ret / 0.02)) # Normalized by ~2% move
+        
+        if trend_score > 0.35: trend = "Uptrend"
+        elif trend_score < -0.35: trend = "Downtrend"
+        else: trend = "Sideways"
+        
+    return RegimeState(
+        vol_bucket=bucket,
+        trend=trend,
+        vol_zscore=vol_z,
+        is_volatile=current_vol > vol_buckets[1],
+        trend_score=trend_score
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -341,20 +432,30 @@ class SignalFeatures:
     dte_norm: float
     spread_norm: float
     liquidity_consistency: float
+    # New Regime Features
+    vol_regime: float  # Z-scored vol
+    trend_score: float # Momentum score
+    rsi: float        # Relative Strength Index
 
 
 def fit_signal_model_weights(
     sp: Any,  # StrategyParams
     rows: list[dict],
-) -> dict[str, float] | None:
+) -> dict[str, Any] | None:
     """
-    Learn signal-model feature weights from resolved predictions.
-
-    Uses logistic regression on available prediction columns. Features that are not
-    historically stored (e.g. moneyness, dte_norm) remain at default runtime weights.
+    Learn signal-model feature weights (Logistic or GBDT) from resolved predictions.
     """
     try:
+        import numpy as np
         from sklearn.linear_model import LogisticRegression
+        
+        # Phase 3: GBDT support
+        use_gbdt = getattr(sp.ae_cfg, "gbdt_enabled", False)
+        if use_gbdt:
+            try:
+                from xgboost import XGBClassifier
+            except ImportError:
+                from sklearn.ensemble import HistGradientBoostingClassifier as XGBClassifier
     except ImportError:
         return None
 
@@ -363,19 +464,19 @@ def fit_signal_model_weights(
             r for r in rows
             if r.get("hist_p") is not None and r.get("outcome") in ("win", "lose")
         ]
-        if len(train) < max(30, sp.signal_weight_fit_min_samples):
+        
+        min_samples = sp.signal_weight_fit_min_samples
+        if use_gbdt:
+            min_samples = max(min_samples, getattr(sp.ae_cfg, "gbdt_min_samples", 250))
+            
+        if len(train) < max(30, min_samples):
             return None
 
         # Feature schema mirrors the runtime scorer where possible.
         feat_names = [
-            "emp_p",
-            "vol_p",
-            "market_yes",
-            "edge_yes",
-            "edge_no",
-            "spread_norm",
-            "liquidity_consistency",
-            "macro_24h_ret",
+            "emp_p", "vol_p", "market_yes", "edge_yes", "edge_no", 
+            "spread_norm", "liquidity_consistency", "macro_24h_ret",
+            "vol_regime", "trend_score", "rsi"
         ]
         x_rows: list[list[float]] = []
         y_rows: list[int] = []
@@ -383,38 +484,48 @@ def fit_signal_model_weights(
         for r in train:
             emp_p = max(0.0, min(1.0, float(r.get("hist_p") or 0.5)))
             vol_p = max(0.0, min(1.0, float(r.get("vol_p") if r.get("vol_p") is not None else emp_p)))
-            market_yes = r.get("bid_at_place")
-            if market_yes is None:
-                market_yes = r.get("theoretical_price")
-            if market_yes is None:
-                market_yes = r.get("entry_price")
-            m = max(0.0, min(1.0, float(market_yes or 0.5)))
+            market_yes = float(r.get("bid_at_place") or r.get("theoretical_price") or r.get("entry_price") or 0.5)
             spread_bps = float(r.get("spread_bps_at_place") or 0.0)
-            spread_norm = max(0.0, min(1.0, spread_bps / 10_000.0))
-
-            edge_yes = max(-1.0, min(1.0, emp_p - m))
-            edge_no = max(-1.0, min(1.0, (1.0 - emp_p) - (1.0 - m)))
-            liq_consistency = 1.0  # Not persisted historically; neutral default.
-
-            # Historical rows currently do not persist macro features, so keep neutral 0.0.
-            x_rows.append([emp_p, vol_p, m, edge_yes, edge_no, spread_norm, liq_consistency, 0.0])
+            
+            # Basic features
+            feats = [
+                emp_p,
+                vol_p,
+                max(0.0, min(1.0, market_yes)),
+                max(-1.0, min(1.0, emp_p - market_yes)),
+                max(-1.0, min(1.0, (1.0 - emp_p) - (1.0 - market_yes))),
+                max(0.0, min(1.0, spread_bps / 10_000.0)),
+                1.0, # consistency placeholder
+                float(r.get("macro_24h_ret") or 0.0),
+                # Regime placeholders (historical data may not have these yet)
+                float(r.get("vol_zscore") or 0.0),
+                float(r.get("trend_score") or 0.0),
+                float(r.get("rsi") or 0.5),
+            ]
+            x_rows.append(feats)
             y_rows.append(1 if r.get("outcome") == "win" else 0)
 
-        if len(x_rows) < max(30, sp.signal_weight_fit_min_samples):
-            return None
+        X = np.array(x_rows)
+        y = np.array(y_rows)
 
-        lr = LogisticRegression(
-            solver="lbfgs",
-            max_iter=1000,
-            C=max(1e-4, float(sp.signal_weight_fit_l2_c)),
-            class_weight="balanced",
-        )
-        lr.fit(x_rows, y_rows)
-        coefs = lr.coef_[0]
-        learned = {"bias": float(lr.intercept_[0])}
-        for i, name in enumerate(feat_names):
-            learned[name] = float(coefs[i])
-        return learned
+        if use_gbdt:
+            params = getattr(sp.ae_cfg, "gbdt_params", {})
+            model = XGBClassifier(**params)
+            model.fit(X, y)
+            return {"type": "gbdt", "model": model, "features": feat_names}
+        else:
+            lr = LogisticRegression(
+                solver="lbfgs",
+                max_iter=1000,
+                C=max(1e-4, float(sp.signal_weight_fit_l2_c)),
+                class_weight="balanced",
+            )
+            lr.fit(X, y)
+            coefs = lr.coef_[0]
+            learned = {"type": "logistic", "bias": float(lr.intercept_[0])}
+            for i, name in enumerate(feat_names):
+                learned[name] = float(coefs[i])
+            return learned
     except Exception:
         return None
 
@@ -429,6 +540,9 @@ def build_signal_features(
     dte_days: float | None,
     spread_bps: float | None,
     no_bid: float | None,
+    vol_regime: float = 0.0,
+    trend_score: float = 0.0,
+    rsi: float = 0.5,
 ) -> SignalFeatures:
     def _clip01(v: float) -> float:
         return max(0.0, min(1.0, float(v)))
@@ -456,14 +570,33 @@ def build_signal_features(
         dte_norm=dte_norm,
         spread_norm=spread_norm,
         liquidity_consistency=_clip01(consistency),
+        vol_regime=float(vol_regime),
+        trend_score=float(trend_score),
+        rsi=float(rsi),
     )
 
 
 def score_signal_model(features: SignalFeatures, sp: Any) -> float:
     """
-    Simple interpretable signal model: weighted logistic over normalized features.
-    Weights are fully configurable in strategy.signal_model_weights.
+    Interpretable signal model (Logistic) or GBDT.
     """
+    w_fit = sp.signal_model_weights or {}
+    model_type = w_fit.get("type", "logistic")
+
+    if model_type == "gbdt":
+        model = w_fit.get("model")
+        if model:
+            import numpy as np
+            X = np.array([[
+                features.emp_p, features.vol_p, features.market_yes,
+                features.edge_yes, features.edge_no, features.spread_norm,
+                features.liquidity_consistency, 0.0, # macro placeholder
+                features.vol_regime, features.trend_score, features.rsi
+            ]])
+            # Return probability of class 1
+            return float(model.predict_proba(X)[0][1])
+
+    # Fallback to Logistic
     w = {
         "bias": 0.0,
         "emp_p": 1.8,
@@ -476,23 +609,32 @@ def score_signal_model(features: SignalFeatures, sp: Any) -> float:
         "spread_norm": -0.5,
         "liquidity_consistency": 0.6,
         "macro_24h_ret": 0.3,
+        "vol_regime": 0.5,
+        "trend_score": 0.5,
+        "rsi": -0.3,
     }
-    # Update with strategy overrides
-    w.update(sp.signal_model_weights or {})
+    # Update with strategy overrides or learned weights
+    w.update({k: v for k, v in w_fit.items() if k != "type"})
 
-    score = w["bias"]
-    score += features.emp_p * w["emp_p"]
-    score += features.vol_p * w["vol_p"]
-    score += features.market_yes * w["market_yes"]
-    score += features.edge_yes * w["edge_yes"]
-    score += features.edge_no * w["edge_no"]
-    score += features.moneyness * w["moneyness"]
-    score += features.dte_norm * w["dte_norm"]
-    score += features.spread_norm * w["spread_norm"]
-    score += features.liquidity_consistency * w["liquidity_consistency"]
+    score = w.get("bias", 0.0)
+    score += features.emp_p * w.get("emp_p", 0.0)
+    score += features.vol_p * w.get("vol_p", 0.0)
+    score += features.market_yes * w.get("market_yes", 0.0)
+    score += features.edge_yes * w.get("edge_yes", 0.0)
+    score += features.edge_no * w.get("edge_no", 0.0)
+    score += features.moneyness * w.get("moneyness", 0.0)
+    score += features.dte_norm * w.get("dte_norm", 0.0)
+    score += features.spread_norm * w.get("spread_norm", 0.0)
+    score += features.liquidity_consistency * w.get("liquidity_consistency", 0.0)
+    score += features.vol_regime * w.get("vol_regime", 0.0)
+    score += features.trend_score * w.get("trend_score", 0.0)
+    score += features.rsi * w.get("rsi", 0.0)
     
     # Sigmoid to get probability-like value
-    return 1.0 / (1.0 + math.exp(-score))
+    try:
+        return 1.0 / (1.0 + math.exp(-score))
+    except OverflowError:
+        return 1.0 if score > 0 else 0.0
 
 
 def estimate_fill_probability(

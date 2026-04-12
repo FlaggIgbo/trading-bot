@@ -396,10 +396,13 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
             print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0)")
             return False
     if t == "HG=F":
-        # Copper usually ~450 cents. If it hits 4500 (milli-dollars), it is close to S&P.
-        # However, 10x move is more likely data corruption than a real commodity price.
-        if mx > 2000.0:
-            print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 2000.0) — likely index cross-pollination")
+        # Copper usually ~4.50 USD or ~450 cents. If it hits 4500 (milli-dollars), it is close to ^GSPC/S&P index scale.
+        # This occurs during storage cross-pollination bugs.
+        if mx > 2000.0 or mn > 2000.0:
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (range [{mn:.1f}, {mx:.1f}] > 2000.0) — likely index cross-pollination")
+            return False
+        # Also check for stale 0.0 values
+        if mn < 0.01:
             return False
     if t == "GC=F":
         if mx > 50_000.0: # Gold is ~$2500, shouldn't be 50k
@@ -458,10 +461,14 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
 
     # Check cache first (storage.storage_enabled and cache TTL)
     try:
-        from storage import get_yf_closes
+        from storage import get_yf_closes, clear_yf_cache
         cached = get_yf_closes(ticker, days_back, cfg)
-        if cached and _yf_daily_closes_plausible(ticker, cached):
-            return cached
+        if cached:
+            if _yf_daily_closes_plausible(ticker, cached):
+                return cached
+            else:
+                # Corrupted data in cache (likely index cross-pollination); purge it.
+                clear_yf_cache(ticker, days_back, cfg)
     except ImportError:
         pass
 
@@ -534,10 +541,13 @@ def get_intraday_aggs_at_hour(
 
     # Check storage cache (keyed by ticker, days_back, resolution_hour)
     try:
-        from storage import get_yf_intraday_at_hour
+        from storage import get_yf_intraday_at_hour, clear_yf_cache
         cached = get_yf_intraday_at_hour(ticker, days_back, resolution_hour_et, cfg)
         if cached:
-            return cached
+            if _yf_daily_closes_plausible(ticker, cached):
+                return cached
+            else:
+                clear_yf_cache(ticker, days_back, cfg)
     except ImportError:
         pass
 

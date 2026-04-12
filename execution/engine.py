@@ -299,9 +299,10 @@ def sync_and_cancel_resting_orders(
                                 "old_price": old_price,
                             }
                         )
-                    elif _safe_float(pend.get("price"), 0.0) > old_price:
+                    elif abs(_safe_float(pend.get("price"), 0.0) - old_price) > 0.005:
                         pend_dte = _safe_float(pend.get("dte"), 999.0)
-                        if pend_dte < near_expiry_dte:
+                        if pend_dte < near_expiry_dte and _safe_float(pend.get("price"), 0.0) > old_price:
+                            # Near expiry: if recommended price is higher, stay at current limit to avoid crossing spread.
                             result.kalshi_keep_buys.add((ticker, side))
                         else:
                             to_cancel.append(
@@ -309,10 +310,11 @@ def sync_and_cancel_resting_orders(
                                     "platform": platform_kalshi,
                                     "order_id": oid,
                                     "label": label,
-                                    "reason": "want_better_price",
+                                    "reason": "repricing_needed",
                                     "ticker": ticker,
                                     "side": side,
                                     "old_price": old_price,
+                                    "new_price": _safe_float(pend.get("price"), 0.0),
                                 }
                             )
                     else:
@@ -453,9 +455,9 @@ def sync_and_cancel_resting_orders(
                                 "old_price": old_price,
                             }
                         )
-                    elif _safe_float(pend.get("price"), 0.0) > old_price:
+                    elif abs(_safe_float(pend.get("price"), 0.0) - old_price) > 0.005:
                         pend_dte = _safe_float(pend.get("dte"), 999.0)
-                        if pend_dte < near_expiry_dte:
+                        if pend_dte < near_expiry_dte and _safe_float(pend.get("price"), 0.0) > old_price:
                             result.gemini_keep_buys.add(key)
                         else:
                             to_cancel.append(
@@ -463,10 +465,11 @@ def sync_and_cancel_resting_orders(
                                     "platform": platform_gemini,
                                     "order_id": str(oid),
                                     "label": label,
-                                    "reason": "want_better_price",
+                                    "reason": "repricing_needed",
                                     "ticker": str(symbol),
                                     "side": outcome,
                                     "old_price": old_price,
+                                    "new_price": _safe_float(pend.get("price"), 0.0),
                                 }
                             )
                     else:

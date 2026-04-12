@@ -6,12 +6,18 @@
 
 execution:
   price_strategy: aggressive
-  limit_offset_cents: 1
-  resting_cancel_if_market_bid_above_limit_by: 0.02
-  limit_buy_cross_spread_min_edge: 0.03 # Improved fill rate (was 0.10)
-  limit_buy_near_market_min_edge: 0.02  # (was 0.06)
-  limit_buy_passive_only_below_edge: 0.03 # (was 0.05)
-  limit_buy_medium_spread_fraction: 0.85 # Increased aggression (was 0.30)
+  limit_offset_cents: 2 # More aggressive penny jump
+  resting_cancel_if_market_bid_above_limit_by: 0.01 # Tightened to re-quote faster
+  limit_buy_edge_aggression_enabled: true
+  limit_buy_cross_spread_min_edge: 0.08 # Take liquidity for >8% edge
+  limit_buy_near_market_min_edge: 0.04  # Join/improve for >4% edge
+  limit_buy_passive_only_below_edge: 0.02 # Stay very passive for <2% edge
+  limit_buy_medium_spread_fraction: 0.40 # Competitive offset
+  limit_buy_escalation_price_enabled: true
+  limit_buy_escalate_after_minutes_1: 3.0
+  limit_buy_escalate_after_minutes_2: 7.0
+  limit_buy_wide_book_coalesce_enabled: true
+  passive_limit_quote: mid # Quote mid instead of dip when passive
 
 recovery:
   min_edge: 0.03 # Relaxed to 3%
