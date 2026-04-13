@@ -366,9 +366,15 @@ class StrategyParams:
     max_new_buy_dte_days: float  # 0 = off; skip directional BUY when DTE exceeds
     passive_bid_chase_enabled: bool
     taker_edge_threshold: float
+    edge_aggression_scaling: float
     ultra_short_k_spread: float
     ultra_short_latency_risk: float
     passive_bid_chase_refresh_minutes: int
+    series_hurdle_enabled: bool
+    series_hurdle_paper_penalty: float
+    series_hurdle_trusted_bonus: float
+    series_trusted_min_win_rate: float
+    series_trusted_min_samples: int
     market_prob_lo: float
     market_prob_hi: float
     max_contracts_per_underlying: int
@@ -743,9 +749,16 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         max_new_buy_dte_days=max(0.0, float(strategy.get("max_new_buy_dte_days", 0) or 0)),
         passive_bid_chase_enabled=bool(strategy.get("passive_bid_chase_enabled", False)),
         taker_edge_threshold=float(strategy.get("taker_edge_threshold", 0.35)),
+        edge_aggression_scaling=float(strategy.get("edge_aggression_scaling", 0.0)),
         ultra_short_k_spread=float(strategy.get("ultra_short_k_spread", 0.4)),
+
         ultra_short_latency_risk=float(strategy.get("ultra_short_latency_risk", 0.01)),
         passive_bid_chase_refresh_minutes=max(0, int(strategy.get("passive_bid_chase_refresh_minutes", 0) or 0)),
+        series_hurdle_enabled=bool(strategy.get("series_hurdle_enabled", False)),
+        series_hurdle_paper_penalty=float(strategy.get("series_hurdle_paper_penalty", 0.10)),
+        series_hurdle_trusted_bonus=float(strategy.get("series_hurdle_trusted_bonus", 0.05)),
+        series_trusted_min_win_rate=float(strategy.get("series_trusted_min_win_rate", 0.65)),
+        series_trusted_min_samples=int(strategy.get("series_trusted_min_samples", 5)),
         market_prob_lo=float(strategy.get("market_prob_lo", 0.10)),
         market_prob_hi=float(strategy.get("market_prob_hi", 0.90)),
         max_contracts_per_underlying=int(strategy.get("max_contracts_per_underlying", 5)),
@@ -5226,17 +5239,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
         except Exception as e:
             print(f"[Circuit Breaker] Error checking global performance: {e}")
 
-    # 2. Series Filter: disable BUYS for series with win rate < 25% or 5+ consecutive losses in 24h
+    # 2. Series Filter: disable BUYS or adjust hurdles based on recent performance
+    trusted_series = set()
     if get_recent_performance_by_series:
         try:
             series_perf = get_recent_performance_by_series(lookback_hours=24.0, config=cfg)
             for s_prefix, p in series_perf.items():
-                if p.get("total", 0) >= 5:
+                if p.get("total", 0) >= sp.series_trusted_min_samples:
                     wr = p.get("win_rate")
                     cl = p.get("consecutive_losses", 0)
                     if (wr is not None and wr < 0.25) or cl >= 5:
                         paper_only_series.add(s_prefix)
                         print(f"[Series Guard] {s_prefix} → PAPER ONLY (WR {wr:.1%}, {cl} consecutive losses)")
+                    elif (wr is not None and wr >= sp.series_trusted_min_win_rate):
+                        trusted_series.add(s_prefix)
+                        print(f"[Series Guard] {s_prefix} → TRUSTED (WR {wr:.1%}, {p.get('total')} samples)")
         except Exception as e:
             print(f"[Series Guard] Error checking series performance: {e}")
             
@@ -6393,7 +6410,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # --- Safeguard Gating ---
             series_prefix = (ticker.split("-")[0] if "-" in ticker else ticker[:6])
             is_paper_only = (series_prefix in paper_only_series)
+            is_trusted = (series_prefix in trusted_series)
             
+            series_penalty = 0.0
+            if sp.series_hurdle_enabled:
+                if is_paper_only:
+                    series_penalty = sp.series_hurdle_paper_penalty
+                elif is_trusted:
+                    series_penalty = -sp.series_hurdle_trusted_bonus
+            
+            if series_penalty != 0:
+                effective_min += series_penalty
+                effective_min_yes += series_penalty
+                effective_min_no += series_penalty
+                if sp.debug:
+                    print(f"  [Series Hurdle] {ticker} penalty: {series_penalty:+.1%} (Paper={is_paper_only}, Trusted={is_trusted})")
+
             # Trust-aware calibration penalty: if this confidence bucket is historically overconfident,
             # add an extra edge hurdle.
             bucket_penalty = 0.0
@@ -6481,7 +6513,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if global_circuit_breaker_active:
                     rec = REC_SKIP
                     print(f"  [Circuit Breaker] {ticker} → SKIP (Global drawdown block)")
-                elif is_paper_only:
+                elif is_paper_only and not sp.series_hurdle_enabled:
                     rec = REC_SKIP
                     print(f"  [Series Guard] {ticker} → SKIP (Series {series_prefix} in paper-only mode)")
 
@@ -6987,8 +7019,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
                     fill_prob=_fill_p_k,
                 )
-                if sp.taker_edge_threshold > 0 and _net_edge_le >= sp.taker_edge_threshold and ask_side is not None and ask_side > 0:
-                    print(f"    [Taker Mode] Edge {_net_edge_le:.1%} >= {sp.taker_edge_threshold:.1%} → paying ask {ask_side:.2f}")
+                # Dynamic Taker Threshold: be more aggressive if we have massive edge
+                eff_taker_threshold = sp.taker_edge_threshold
+                if sp.edge_aggression_scaling > 0 and _net_edge_le > effective_min:
+                    bonus = (_net_edge_le - effective_min) * sp.edge_aggression_scaling
+                    eff_taker_threshold = max(0.01, sp.taker_edge_threshold - bonus)
+
+                if eff_taker_threshold > 0 and _net_edge_le >= eff_taker_threshold and ask_side is not None and ask_side > 0:
+                    print(f"    [Taker Mode] Edge {_net_edge_le:.1%} >= {eff_taker_threshold:.1%} (dynamic threshold) → paying ask {ask_side:.2f}")
                     price = ask_side
                     dip_used = 0.0
                 
@@ -7694,7 +7732,22 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 # --- Safeguard Gating (Gemini) ---
                 series_prefix_g = (yf_ticker or "GEMINI")
                 is_paper_only_g = (series_prefix_g in paper_only_series)
+                is_trusted_g = (series_prefix_g in trusted_series)
                 
+                series_penalty_g = 0.0
+                if sp.series_hurdle_enabled:
+                    if is_paper_only_g:
+                        series_penalty_g = sp.series_hurdle_paper_penalty
+                    elif is_trusted_g:
+                        series_penalty_g = -sp.series_hurdle_trusted_bonus
+                
+                if series_penalty_g != 0:
+                    effective_min_gem += series_penalty_g
+                    effective_min_yes_g += series_penalty_g
+                    effective_min_no_g += series_penalty_g
+                    if sp.debug:
+                        print(f"  [Series Hurdle] {g_ticker} penalty: {series_penalty_g:+.1%} (Paper={is_paper_only_g}, Trusted={is_trusted_g})")
+
                 bucket_penalty_g = 0.0
                 if calibration_engine:
                     b_stats_g = calibration_engine.get_bucket_for_prob(hist_p_gem)
@@ -7779,7 +7832,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if global_circuit_breaker_active:
                         rec = REC_SKIP
                         print(f"  [Circuit Breaker] {g_ticker} → SKIP (Global drawdown block)")
-                    elif is_paper_only_g:
+                    elif is_paper_only_g and not sp.series_hurdle_enabled:
                         rec = REC_SKIP
                         print(f"  [Series Guard] {g_ticker} → SKIP (Series {series_prefix_g} in paper-only mode)")
 
@@ -8269,8 +8322,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         wide_book_anchor_fraction=sp.limit_buy_wide_book_anchor_fraction,
                         fill_prob=_fill_p_g,
                     )
-                    if sp.taker_edge_threshold > 0 and _net_edge_leg >= sp.taker_edge_threshold and ask_side is not None and ask_side > 0:
-                        print(f"    [Taker Mode] Edge {_net_edge_leg:.1%} >= {sp.taker_edge_threshold:.1%} → paying ask {ask_side:.2f}")
+                    # Dynamic Taker Threshold: be more aggressive if we have massive edge
+                    eff_taker_threshold_g = sp.taker_edge_threshold
+                    if sp.edge_aggression_scaling > 0 and _net_edge_leg > effective_min_gem:
+                        bonus_g = (_net_edge_leg - effective_min_gem) * sp.edge_aggression_scaling
+                        eff_taker_threshold_g = max(0.01, sp.taker_edge_threshold - bonus_g)
+
+                    if eff_taker_threshold_g > 0 and _net_edge_leg >= eff_taker_threshold_g and ask_side is not None and ask_side > 0:
+                        print(f"    [Taker Mode] Edge {_net_edge_leg:.1%} >= {eff_taker_threshold_g:.1%} (dynamic threshold) → paying ask {ask_side:.2f}")
                         price = ask_side
                         dip_used = 0.0
                     

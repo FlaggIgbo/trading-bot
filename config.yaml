@@ -365,13 +365,22 @@ strategy:
   # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
   force_exploration_reduction: 0.0 # Disabled penalty (was 0.30)
   force_exploration_hours: 2.0
+  # Dynamic series hurdles (replaces hard Paper-Only block)
+  series_hurdle_enabled: true
+  series_hurdle_paper_penalty: 0.10 # Add 10% edge req for poor performers
+  series_hurdle_trusted_bonus: 0.05 # Reduce 5% edge req for proven performers
+  series_trusted_min_win_rate: 0.65
+  series_trusted_min_samples: 5
   # Market probability filters (skip deep OTM/ITM tails)
-  market_prob_lo: 0.05 # Tightened (was 0.02)
-  market_prob_hi: 0.95 # Tightened (was 0.98)
+  market_prob_lo: 0.01 # RELAXED (was 0.05) to capture high-edge tail signals
+  market_prob_hi: 0.99 # RELAXED (was 0.95)
   # Max contracts per underlying in a single evaluation run (forced diversification)
   max_contracts_per_underlying: 5 # Tightened (was 10)
   # Refined strategy params from agent review
   taker_edge_threshold: 0.20 # MOVED AGGRESSIVELY (was 0.35): take liquidity more often to improve fill rate and avoid adverse selection
+  # Aggression scaling: reduce taker threshold by this mult * (edge - min_edge)
+  # e.g. 0.5 mult means if we have 25% edge vs 15% hurdle, threshold drops by 0.5 * 0.10 = 5% (to 0.15)
+  edge_aggression_scaling: 0.5
   ultra_short_k_spread: 0.6 # Increased sensitivity to spread
   ultra_short_latency_risk: 0.02 # Increased baseline risk
   sell_losing_pct: 0.65 # Tightened exit (was 0.55)
