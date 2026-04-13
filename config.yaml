@@ -184,15 +184,15 @@ execution:
   limit_buy_edge_aggression_enabled: true
   # EV-tier pricing (PnL / fills): strong → at ask; medium → bid + fraction×spread or mid; weak → bid; else skip.
   limit_buy_ev_tier_pricing: true
-  limit_buy_weak_bid_min_edge: 0.05 # Increased (was 0.02)
+  limit_buy_weak_bid_min_edge: 0.04 # Slightly lower (was 0.05)
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.90 # Increased (was 0.85)
+  limit_buy_medium_spread_fraction: 0.95 # More aggressive (was 0.90)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.12 # SELECTIVE TAKER: cross spread only when edge is very high (was 0.10)
-  limit_buy_near_market_min_edge: 0.07 # (was 0.02)
+  limit_buy_cross_spread_min_edge: 0.10 # Lower threshold to take ask (was 0.12)
+  limit_buy_near_market_min_edge: 0.05 # (was 0.07)
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
-  limit_buy_passive_only_below_edge: 0.05 # (was 0.03)
+  limit_buy_passive_only_below_edge: 0.03 # (was 0.05)
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
   limit_buy_escalation_price_enabled: true
   limit_buy_escalate_after_minutes_1: 2 # Faster (was 5)
@@ -334,7 +334,7 @@ strategy:
   dte_edge_mult_long: 1.25 # More penalty for distant zones
   max_new_buy_dte_days: 14 # Added 14d cap (was 0)
   yes_overconfidence_extra_edge: 0.01 # Re-enabled (was 0)
-  model_probability_shrinkage: 0.40 # Much stronger pull to 0.5 (was 0.70)
+  model_probability_shrinkage: 0.60 # Slightly less aggressive shrinkage (was 0.40)
   # Prefer strikes within ~25% of spot (relaxed from 5%)
   max_buy_yes_strike_above_pct: 0.15 # Tightened (was 0.25)
   max_buy_no_strike_above_pct: 0.15 # Tightened (was 0.25)
@@ -671,7 +671,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 30.0 # Trust market even more (was 15.0)
+    bayesian_market_strength: 10.0 # Trusts market less (was 30.0)
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 7 # Faster response (was 14)
     ewma_prob_min_samples: 5 # (was 10)

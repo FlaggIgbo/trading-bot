@@ -156,6 +156,56 @@ class CalibrationEngine:
             errors.append((p_win - outcome) ** 2)
         return sum(errors) / len(errors)
 
+    def get_calibrated_probability(self, p_win: float, n_bins: int = 10, min_bin_samples: int = 10) -> float:
+        """
+        Maps a predicted win probability to its realized win rate using bucketed history.
+        If a bucket has enough samples, returns the realized win rate.
+        Otherwise, performs linear interpolation between adjacent buckets.
+        """
+        p = max(0.0, min(1.0, float(p_win)))
+        buckets = self.get_bucketed_calibration(n_bins)
+        if not buckets:
+            return p
+
+        # Find the bucket containing p
+        target_b = None
+        for b in buckets:
+            if b["lo"] <= p <= b["hi"]:
+                if b["count"] >= min_bin_samples:
+                    target_b = b
+                break
+        
+        if target_b:
+            # Direct mapping from bucket realized win rate
+            return target_b["win_rate"]
+
+        # Interpolation fallback
+        valid_buckets = [b for b in buckets if b["count"] >= min_bin_samples]
+        if not valid_buckets:
+            return p # No enough data in any bucket
+
+        # Find nearest buckets for interpolation
+        left = None
+        right = None
+        for b in valid_buckets:
+            mid = (b["lo"] + b["hi"]) / 2.0
+            if mid <= p:
+                left = b
+            elif mid > p and right is None:
+                right = b
+        
+        if left and right:
+            l_mid = (left["lo"] + left["hi"]) / 2.0
+            r_mid = (right["lo"] + right["hi"]) / 2.0
+            t = (p - l_mid) / (r_mid - l_mid)
+            return left["win_rate"] + t * (right["win_rate"] - left["win_rate"])
+        elif left:
+            return left["win_rate"]
+        elif right:
+            return right["win_rate"]
+        
+        return p
+
     def get_series_trust_matrix(self) -> dict[str, float]:
         """Returns {series_prefix: trust_score}."""
         by_series: dict[str, list[dict]] = {}

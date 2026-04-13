@@ -9,13 +9,13 @@ execution:
   limit_offset_cents: 2 # More aggressive penny jump
   resting_cancel_if_market_bid_above_limit_by: 0.01 # Tightened to re-quote faster
   limit_buy_edge_aggression_enabled: true
-  limit_buy_cross_spread_min_edge: 0.08 # Take liquidity for >8% edge
-  limit_buy_near_market_min_edge: 0.04  # Join/improve for >4% edge
-  limit_buy_passive_only_below_edge: 0.02 # Stay very passive for <2% edge
-  limit_buy_medium_spread_fraction: 0.40 # Competitive offset
+  limit_buy_cross_spread_min_edge: 0.10 # Take liquidity (was 0.08)
+  limit_buy_near_market_min_edge: 0.05  # (was 0.04)
+  limit_buy_passive_only_below_edge: 0.03 # (was 0.02)
+  limit_buy_medium_spread_fraction: 0.95 # COMPETITIVE: 95% of spread (was 0.40)
   limit_buy_escalation_price_enabled: true
-  limit_buy_escalate_after_minutes_1: 3.0
-  limit_buy_escalate_after_minutes_2: 7.0
+  limit_buy_escalate_after_minutes_1: 2.0 # Faster
+  limit_buy_escalate_after_minutes_2: 5.0 # Faster
   limit_buy_wide_book_coalesce_enabled: true
   passive_limit_quote: mid # Quote mid instead of dip when passive
 
@@ -46,12 +46,12 @@ strategy:
   no_trade_penalty: 0.01 # Lowered
   yes_bias_bonus: 0.0
   
-  # Probability shrinkage: 0.70 pulls strongly to 0.5 (p = 0.5 + (p-0.5)*0.7)
-  model_probability_shrinkage: 0.70
+  # Probability shrinkage: 0.60 pulls to 0.5 (p = 0.5 + (p-0.5)*0.6)
+  model_probability_shrinkage: 0.60 # Relaxed (was 0.70)
   enable_model_prob_hard_cap: true
-  model_prob_hard_lo: 0.01
-  model_prob_hard_hi: 0.75 # Cap overconfident tape (was 0.90)
-  tail_cutoff_min_p: 0.01
+  model_prob_hard_lo: 0.05 # Increased floor
+  model_prob_hard_hi: 0.70 # Cap overconfident tape (was 0.75)
+  tail_cutoff_min_p: 0.02
   vol_model_zero_drift: true
   
   starting_balance_cents: 10000
@@ -67,6 +67,7 @@ strategy:
   drawdown_cooldown_hours: 4.0 # (was 8.0)
   
   use_bucket_penalty: true
+  bucket_override_weight: 1.0 # FULL OVERRIDE: model -> empirical reality (was default 0.5)
   use_calibration: true
   use_sklearn_calibration: true
   enable_signal_model: true
@@ -78,12 +79,12 @@ strategy:
 
   anti_hallucination:
     bayesian_enabled: true
-    bayesian_market_strength: 15.0 # Pull model even harder toward market price
+    bayesian_market_strength: 8.0 # Trusts market less (was 15.0)
     ewma_prob_enabled: true
     vol_zscore_enabled: true
     adaptive_edge_enabled: false # Disabled to increase volume
     regime_filter_enabled: true
-    momentum_crash_threshold_pct: -0.15 # Relaxed (was -0.04)
+    momentum_crash_threshold_pct: -0.10 # Relaxed (was -0.15)
     regime_block_buy_no_in_uptrend: false # Relaxed
     regime_block_buy_yes_in_downtrend: false
 

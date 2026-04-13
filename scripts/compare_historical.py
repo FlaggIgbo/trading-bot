@@ -5133,6 +5133,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     except Exception as exc:
         print(f"[Reconcile] Fill reconciliation failed (continuing run): {exc}")
 
+    # Adaptive Execution Aggressiveness: shrink dip if fill rate is low
+    fill_rate_aggression_mult = 1.0
+    if get_limit_order_fill_rate_stats:
+        try:
+            stats_30d = get_limit_order_fill_rate_stats(config=cfg, days=30.0)
+            fr = stats_30d.get("fill_rate")
+            if fr is not None and fr < 0.10: # 10% target
+                # Shrink dip proportionally. If fr=0.018 (1.8%), mult = max(0.2, 0.018 / 0.10) = 0.2
+                fill_rate_aggression_mult = max(0.2, fr / 0.10)
+                print(f"[Adaptive Execution] Fill rate {fr:.1%} < 10% → dip multiplier {fill_rate_aggression_mult:.2f} (more aggressive)")
+        except Exception:
+            pass
+
     pending_orders: list[dict] = []
     quote_candidates: list[dict] = []
     pending_sells: list[dict] = []
@@ -6048,14 +6061,23 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if sp.enable_model_prob_hard_cap:
                 hist_p = max(sp.model_prob_hard_lo, min(sp.model_prob_hard_hi, float(hist_p)))
             # Bucket penalty + optional sklearn probability calibration.
-            hist_p = strategy_engine.apply_bucket_penalty(
-                hist_p=hist_p,
-                calibration=calibration,
-                use_bucket_penalty=sp.use_bucket_penalty,
-                use_calibration=sp.use_calibration,
-                min_bucket_samples=sp.min_bucket_samples,
-                bucket_override_weight=sp.bucket_override_weight,
-            )
+            if calibration_engine and sp.use_bucket_penalty:
+                # Forceful Calibration: map predicted P to realized WR using CalibrationEngine buckets
+                _cal_p = calibration_engine.get_calibrated_probability(
+                    hist_p, n_bins=10, min_bin_samples=sp.min_bucket_samples
+                )
+                if abs(_cal_p - hist_p) > 0.005:
+                    print(f"    [Calibration] Forceful mapping: {hist_p:.1%} → {_cal_p:.1%} (based on historical WR)")
+                hist_p = _cal_p
+            else:
+                hist_p = strategy_engine.apply_bucket_penalty(
+                    hist_p=hist_p,
+                    calibration=calibration,
+                    use_bucket_penalty=sp.use_bucket_penalty,
+                    use_calibration=sp.use_calibration,
+                    min_bucket_samples=sp.min_bucket_samples,
+                    bucket_override_weight=sp.bucket_override_weight,
+                )
             if probability_calibrator:
                 hist_p = probability_calibrator(hist_p)
             if sp.model_probability_shrinkage < 1.0:
@@ -6863,7 +6885,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     maker_fee_rate=maker_fee_rate,
                     min_fee_per_order=sp.min_fee_per_order,
                     mode=sp.limit_order_mode,
-                    base_dip=dip,
+                    base_dip=dip * fill_rate_aggression_mult,
                     tick_offset=sp.tick_offset,
                     held_same_side=held_same,
                     held_opp_side=held_opp,
@@ -7327,14 +7349,24 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hist_p_gem = emp
                 if sp.enable_model_prob_hard_cap:
                     hist_p_gem = max(sp.model_prob_hard_lo, min(sp.model_prob_hard_hi, float(hist_p_gem)))
-                hist_p_gem = strategy_engine.apply_bucket_penalty(
-                    hist_p=hist_p_gem,
-                    calibration=calibration,
-                    use_bucket_penalty=sp.use_bucket_penalty,
-                    use_calibration=sp.use_calibration,
-                    min_bucket_samples=sp.min_bucket_samples,
-                    bucket_override_weight=sp.bucket_override_weight,
-                )
+                # Bucket penalty + optional sklearn probability calibration (Gemini)
+                if calibration_engine and sp.use_bucket_penalty:
+                    # Forceful Calibration: map predicted P to realized WR
+                    _cal_g = calibration_engine.get_calibrated_probability(
+                        hist_p_gem, n_bins=10, min_bin_samples=sp.min_bucket_samples
+                    )
+                    if abs(_cal_g - hist_p_gem) > 0.005:
+                        print(f"    [Calibration] Forceful mapping (Gemini): {hist_p_gem:.1%} → {_cal_g:.1%}")
+                    hist_p_gem = _cal_g
+                else:
+                    hist_p_gem = strategy_engine.apply_bucket_penalty(
+                        hist_p=hist_p_gem,
+                        calibration=calibration,
+                        use_bucket_penalty=sp.use_bucket_penalty,
+                        use_calibration=sp.use_calibration,
+                        min_bucket_samples=sp.min_bucket_samples,
+                        bucket_override_weight=sp.bucket_override_weight,
+                    )
                 if probability_calibrator:
                     hist_p_gem = probability_calibrator(hist_p_gem)
                 if sp.model_probability_shrinkage < 1.0:
@@ -8088,7 +8120,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         maker_fee_rate=maker_fee_rate_gem,
                         min_fee_per_order=sp.min_fee_per_order,
                         mode=sp.limit_order_mode,
-                        base_dip=dip,
+                        base_dip=dip * fill_rate_aggression_mult,
                         tick_offset=sp.tick_offset,
                         held_same_side=held_same,
                         held_opp_side=held_opp,

@@ -391,6 +391,14 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
         if mx > 1000.0:
             print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0) — index scale overlap?")
             return False
+    if t in ("^NDX", "NDX"):
+        if mn < 1000.0:
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 1000.0) — likely commodity scale leakage")
+            return False
+    if t in ("^GSPC", "GSPC"):
+        if mn < 500.0:
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 500.0) — likely commodity scale leakage")
+            return False
     if t == "SI=F":
         if mx > 1000.0:
             print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0)")
