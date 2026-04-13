@@ -18,17 +18,27 @@ markets:
   - KXDOGE15M
   - KXDOGED
   - KXBNB15M
+  - KXBNBD
   - KXHYPE15M
+  - KXHYPED
+  - KXSHIBAD
+  - KXETH15M
+  - KXSOL15M
+  - KXXRP15M
   # Commodities & Nasdaq-100 (Kalshi series → Yahoo underlyings below)
   - KXWTI # WTI crude — https://kalshi.com/markets/kxwti/wti-oil-election-day
   - KXBRENTD # Brent oil daily — https://kalshi.com/markets/kxbrentd/brent-oil
   - KXBRENTW # Brent oil weekly — https://kalshi.com/markets/kxbrentw/brent-oil
+  - KXBRENTMON # Brent monthly — https://kalshi.com/markets/kxbrentmon/brent-monthly
   - KXNASDAQ100U # Nasdaq-100 above/below — https://kalshi.com/markets/kxnasdaq100u/nasdaq-abovebelow
   - KXSILVERD # Silver daily — https://kalshi.com/markets/kxsilverd/silver-daily
   - KXSILVERW # Silver weekly — https://kalshi.com/markets/kxsilverw/silver-weekly-price
   - KXGOLDD # Gold daily — https://kalshi.com/markets/kxgoldd/gold-daily
   - KXGOLDW # Gold weekly — https://kalshi.com/markets/kxgoldw/gold-weekly-price-
   - KXCOPPERD # Daily copper — https://kalshi.com/markets/kxcopperd/daily-copper
+  - KXWTIW # WTI weekly — https://kalshi.com/markets/kxwtiw/wti-oil-weekly-range
+  - KXNATGASMON # Nat gas monthly — https://kalshi.com/markets/kxnatgasmon/natural-gas-monthly
+  - KXHOILMON # Heating oil monthly — https://kalshi.com/markets/kxhoilmon/heating-oil-monthly
   - KXAAAGASW # AAA Gas weekly (RBOB proxy)
 
 # How often to poll markets (seconds)
@@ -46,17 +56,27 @@ yfinance_tickers:
   KXDOGE15M: "DOGE-USD"
   KXDOGED: "DOGE-USD"
   KXBNB15M: "BNB-USD"
+  KXBNBD: "BNB-USD"
+  KXSHIBAD: "SHIB-USD"
+  KXETH15M: "ETH-USD"
+  KXSOL15M: "SOL-USD"
+  KXXRP15M: "XRP-USD"
   # Hyperliquid — Yahoo listing (see https://finance.yahoo.com/quote/HYPE32196-USD/)
   KXHYPE15M: "HYPE32196-USD"
+  KXHYPED: "HYPE32196-USD"
   KXWTI: "CL=F" # WTI crude (NYMEX continuous) — https://finance.yahoo.com/quote/CL=F/
+  KXWTIW: "CL=F"
   KXBRENTD: "BZ=F" # Brent daily — Yahoo ICE continuous
   KXBRENTW: "BZ=F" # Brent weekly — Yahoo ICE continuous
+  KXBRENTMON: "BZ=F"
   KXNASDAQ100U: "^NDX" # NASDAQ-100 — https://finance.yahoo.com/quote/%5ENDX/
   KXSILVERD: "SI=F" # Silver daily — same COMEX continuous as weekly; https://finance.yahoo.com/quote/SI=F/
   KXSILVERW: "SI=F" # Silver futures — https://finance.yahoo.com/quote/SI=F/
   KXGOLDD: "GC=F" # Gold daily — same COMEX continuous as weekly; https://finance.yahoo.com/quote/GC=F/
   KXGOLDW: "GC=F" # Gold futures — https://finance.yahoo.com/quote/GC=F/
   KXCOPPERD: "HG=F" # COMEX copper continuous — https://finance.yahoo.com/quote/HG=F/
+  KXNATGASMON: "NG=F"
+  KXHOILMON: "HO=F"
   KXAAAGASW: "RB=F" # RBOB gasoline futures (proxy for retail gas) — https://finance.yahoo.com/quote/RB=F/
   # Weather mapping: Series -> Weather City
   KXHIGHCHI: "WEATHER:CHI"

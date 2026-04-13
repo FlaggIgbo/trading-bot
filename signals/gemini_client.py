@@ -121,6 +121,7 @@ _CRYPTO_ASSET_KEYS = {
     "binance": "BNB-USD",
     "zec": "ZEC-USD",
     "zcash": "ZEC-USD",
+    "shib": "SHIB-USD",
     "hype": "HYPE-USD",
     "hyperliquid": "HYPE-USD",
     # Oil / WTI — Yahoo CL=F (Kalshi KXWTI); Gemini terms cite KK_RFR_WTIUSDC / WTIOIL-USDC
@@ -130,6 +131,14 @@ _CRYPTO_ASSET_KEYS = {
     "brent crude": "BZ=F",
     "oil (brent)": "BZ=F",
     "brent": "BZ=F",
+    # Commodities
+    "xau": "GC=F",
+    "gold": "GC=F",
+    "xag": "SI=F",
+    "silver": "SI=F",
+    "copper": "HG=F",
+    "ngas": "NG=F",
+    "natural gas": "NG=F",
     # Weather
     "high temp": "WEATHER:HIGH",
     "low temp": "WEATHER:LOW",
@@ -273,11 +282,15 @@ class GeminiPredictionClient:
 
         _fetch_category("crypto")  # daily, weekly
         try:
+            _fetch_category("commodities")  # oil, gold, silver etc.
+        except Exception as e:
+            log.debug("Gemini commodities category fetch failed: %s", e)
+        try:
             _fetch_category("hourly")  # hourly (BTC, ETH, SOL, XRP at 1am EDT etc.)
         except Exception as e:
             log.debug("Gemini hourly category fetch failed (API may have deprecated it): %s", e)
         # 15-minute interval events (*15M*); may be buried in long crypto pagination
-        for term in ("BTC15M", "DOGE15M", "BNB15M", "HYPE15M"):
+        for term in ("BTC15M", "ETH15M", "SOL15M", "XRP15M", "DOGE15M", "BNB15M", "HYPE15M", "SHIB15M"):
             try:
                 r = self.get_events(category="crypto", status="active", search=term, limit=100, offset=0)
                 for evt in r.get("data") or []:

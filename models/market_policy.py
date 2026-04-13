@@ -26,9 +26,11 @@ GEMINI_CRYPTO_YF = {
     "BNB-USD",
     "ZEC-USD",
     "HYPE-USD",
+    "SHIB-USD",
     "HYPE32196-USD",  # Yahoo symbol for Hyperliquid; Gemini buckets still use HYPE-USD from _event_to_asset
     "CL=F",  # WTI — Gemini KK_RFR_WTIUSDC / WTIOIL-USDC; Kalshi KXWTI uses same Yahoo continuous future
     "BZ=F",  # Brent — Gemini KK_RFR_BRENTOILUSDC; Yahoo ICE continuous — https://finance.yahoo.com/quote/BZ=F/
+    "GC=F", "SI=F", "HG=F", "NG=F", "HO=F",
     "WEATHER:NYC", "WEATHER:CHI", "WEATHER:BOS", "WEATHER:MIA", "WEATHER:LAX",
     "WEATHER:AUS", "WEATHER:DAL", "WEATHER:PHL", "WEATHER:PHX", "WEATHER:DEN",
     "WEATHER:LAS", "WEATHER:SEA", "WEATHER:SFO", "WEATHER:HOU", "WEATHER:DC",
@@ -114,7 +116,7 @@ def should_skip_by_resolution(
     market_or_title: dict | str,
     yf_ticker: str,
     min_hours: float = 0.05,
-    max_hours: float = 500.0,
+    max_hours: float = 1000.0,
 ) -> tuple[bool, str]:
     """Check if market should be skipped due to near/far resolution."""
     is_idx = yf_is_us_equity_index(yf_ticker)
