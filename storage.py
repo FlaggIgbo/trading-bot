@@ -518,6 +518,27 @@ def get_markout_history(
         conn.close()
 
 
+def get_all_recent_markouts(
+    lookback_hours: float = 24.0,
+    config: dict | None = None,
+) -> list[float]:
+    """Return all markout_bps observations in the last N hours."""
+    conn = _get_conn(config)
+    if not conn:
+        return []
+    try:
+        cutoff = time.time() - (lookback_hours * 3600)
+        rows = conn.execute(
+            "SELECT markout_bps FROM markout_snapshots WHERE snapshot_ts > ? ORDER BY snapshot_ts DESC",
+            (cutoff,)
+        ).fetchall()
+        return [float(r[0]) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
 def get_price_after_buy_from_snapshots(
     ticker: str,
     buy_ts: float,

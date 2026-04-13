@@ -208,6 +208,7 @@ try:
         get_recent_performance,
         get_recent_performance_by_series,
         get_recent_stop_loss_cooldowns,
+        get_all_recent_markouts,
         get_seconds_since_last_resolved_trade,
         get_price_after_buy_from_snapshots,
         get_unresolved_predictions,
@@ -5142,8 +5143,32 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if fr is not None and fr < 0.10: # 10% target
                 # Shrink dip proportionally. If fr=0.018 (1.8%), mult = max(0.2, 0.018 / 0.10) = 0.2
                 fill_rate_aggression_mult = max(0.2, fr / 0.10)
+                
+                # Execution Quality Feedback Loop: if markouts are toxic, reduce aggression
+                if get_all_recent_markouts:
+                    all_markouts = get_all_recent_markouts(lookback_hours=24.0, config=cfg)
+                    
+                    if all_markouts:
+                        toxic_penalty = toxic_flow_edge_penalty(
+                            all_markouts, 
+                            threshold_bps=-50.0, 
+                            min_samples=10,
+                            base_penalty=0.05 # 5% extra edge penalty implies high toxicity
+                        )
+                        if toxic_penalty > 0:
+                            # toxic_penalty is in range [0.05, ~0.25]
+                            # If toxicity is high, move multiplier back toward 1.0 (less aggressive)
+                            # e.g. 0.2 * (1.0 + 0.10*10) = 0.2 * 2.0 = 0.4
+                            aggression_reduction = 1.0 + (toxic_penalty * 8.0)
+                            fill_rate_aggression_mult = min(1.0, fill_rate_aggression_mult * aggression_reduction)
+                            print(
+                                f"[Adaptive Execution] Toxic markouts detected (penalty {toxic_penalty:.1%}) "
+                                f"→ reducing aggression to {fill_rate_aggression_mult:.2f} (prev {fr / 0.10:.2f})"
+                            )
+
                 print(f"[Adaptive Execution] Fill rate {fr:.1%} < 10% → dip multiplier {fill_rate_aggression_mult:.2f} (more aggressive)")
-        except Exception:
+        except Exception as e:
+            print(f"[Adaptive Execution] Error calculating adaptive aggression: {e}")
             pass
 
     pending_orders: list[dict] = []
@@ -6137,6 +6162,28 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     )
             # --- Anti-hallucination pipeline: correct model P before recommendation ---
             hist_p_raw = hist_p
+            
+            # Phase 3: Underlying Momentum Alpha (Short-term Drift)
+            # We use the trend_score from RegimeState to provide a directional bias.
+            try:
+                # Re-calculate regime if signal model was disabled
+                if not sp.enable_signal_model:
+                    rs = compute_regime_state(closes, vol_buckets=getattr(sp.ae_cfg, "regime_vol_buckets", None))
+                
+                # If trend is strong in our strike direction, add a small bonus to P(YES).
+                # trend_score is in [-1, 1]. direction is 'above' or 'below'.
+                drift_bonus = 0.0
+                if direction == "above":
+                    drift_bonus = rs.trend_score * 0.02 # Max +/- 2%
+                elif direction == "below":
+                    drift_bonus = -rs.trend_score * 0.02
+                
+                if abs(drift_bonus) > 0.005:
+                    hist_p = max(0.01, min(0.99, hist_p + drift_bonus))
+                    print(f"    [Alpha] Drift adjustment: {hist_p_raw:.1%} → {hist_p:.1%} (trend_score {rs.trend_score:.2f})")
+            except Exception:
+                pass
+
             if True: # enabled for all paths including simple_ev
                 # Calculate market consistency (sum of bids near 1.0)
                 m_yes_tmp = float(m.get("yes_bid") or 0)
@@ -6590,6 +6637,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     "momentum_ret": momentum_ret,
                 }
             )
+
+            if rec in (REC_BUY_YES, REC_BUY_NO):
+                # Spread Penalty: reduce effective edge in illiquid (wide spread) markets.
+                # spread_bps already computed if yes_ask_signal exists.
+                # If not, we estimate it from bids if possible or use a safe floor.
+                _m_ask = float(m.get("yes_ask") or 0)
+                _m_bid = float(m.get("yes_bid") or 0)
+                _m_spread = 0.0
+                if _m_ask > _m_bid and _m_bid > 0:
+                    _m_spread = (_m_ask - _m_bid) / _m_bid
+                
+                # effective_edge = net_edge - (spread * 0.5)
+                # This ensures we don't cross wide spreads for marginal edges.
+                _leg_edge = _net_yes_r if rec == REC_BUY_YES else _net_no_r
+                _eff_edge_final = _leg_edge - (_m_spread * 0.5)
+                
+                # Check if effective_edge still clears the required hurdle
+                _req_h = effective_min_yes if rec == REC_BUY_YES else effective_min_no
+                if _eff_edge_final < _req_h:
+                    print(
+                        f"  {ticker}: SKIP (spread penalty: effective edge {_eff_edge_final:.1%} < "
+                        f"required {_req_h:.1%} | spread {_m_spread:.1%})"
+                    )
+                    rec = REC_SKIP
 
             _dist_str = _fmt_distance(current_price, threshold, direction, is_weather=is_weather)
             _dte_str = _fmt_dte(dte)
@@ -7420,8 +7491,30 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         )
                 # --- Anti-hallucination pipeline (Gemini) ---
                 hist_p_gem_raw = hist_p_gem
-                if True: # enabled for all paths including simple_ev
-                    hist_p_gem = apply_anti_hallucination_pipeline(
+
+                # Phase 3: Underlying Momentum Alpha (Short-term Drift)
+                try:
+                    # trend_score already available from rs_g if signal model enabled
+                    # or from rs below if we need it
+                    if not sp.enable_signal_model:
+                        _rs_g = compute_regime_state(closes, vol_buckets=getattr(sp.ae_cfg, "regime_vol_buckets", None))
+                    else:
+                        # rs_g is calculated later in the code, let's move it up or re-calc
+                        _rs_g = compute_regime_state(closes, vol_buckets=getattr(sp.ae_cfg, "regime_vol_buckets", None))
+
+                    drift_bonus_g = 0.0
+                    if direction_g == "above":
+                        drift_bonus_g = _rs_g.trend_score * 0.02
+                    elif direction_g == "below":
+                        drift_bonus_g = -_rs_g.trend_score * 0.02
+
+                    if abs(drift_bonus_g) > 0.005:
+                        hist_p_gem = max(0.01, min(0.99, hist_p_gem + drift_bonus_g))
+                        print(f"    [Alpha] Drift adjustment (Gemini): {hist_p_gem_raw:.1%} → {hist_p_gem:.1%} (trend_score {_rs_g.trend_score:.2f})")
+                except Exception:
+                    pass
+
+                hist_p_gem = apply_anti_hallucination_pipeline(
                         model_p=hist_p_gem,
                         market_p=impl,
                         closes=closes,
@@ -7832,6 +7925,25 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         "momentum_ret": momentum_ret,
                     }
                 )
+                if rec in (REC_BUY_YES, REC_BUY_NO):
+                    # Spread Penalty (Gemini): reduce effective edge in wide-spread markets
+                    _m_ask_g = float(book_gq.get("yes_ask") or 0)
+                    _m_bid_g = float(impl or 0)
+                    _m_spread_g = 0.0
+                    if _m_ask_g > _m_bid_g and _m_bid_g > 0:
+                        _m_spread_g = (_m_ask_g - _m_bid_g) / _m_bid_g
+                    
+                    _leg_edge_g = (hist_p_gem - impl - fee_yes_gq) if rec == REC_BUY_YES else ((1.0 - hist_p_gem) - no_price_gem_q - fee_no_gq)
+                    _eff_edge_final_g = _leg_edge_g - (_m_spread_g * 0.5)
+                    
+                    _req_h_g = effective_min_yes_g if rec == REC_BUY_YES else effective_min_no_g
+                    if _eff_edge_final_g < _req_h_g:
+                        print(
+                            f"  [Gemini] {g_ticker}: SKIP (spread penalty: effective edge {_eff_edge_final_g:.1%} < "
+                            f"required {_req_h_g:.1%} | spread {_m_spread_g:.1%})"
+                        )
+                        rec = REC_SKIP
+
                 _dist_str_g = _fmt_distance(current_price, threshold_g, direction_g, is_weather=is_weather)
                 _dte_str_g = _fmt_dte(dte_g)
                 _rec_plain_g = _fmt_rec_plain(rec, "yes" if rec == REC_BUY_YES else "no", direction_g, threshold_g, current_price, dte_g, is_weather=is_weather)

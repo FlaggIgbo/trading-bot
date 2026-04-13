@@ -156,53 +156,77 @@ class CalibrationEngine:
             errors.append((p_win - outcome) ** 2)
         return sum(errors) / len(errors)
 
-    def get_calibrated_probability(self, p_win: float, n_bins: int = 10, min_bin_samples: int = 10) -> float:
+    def get_calibrated_probability(
+        self, 
+        p_win: float, 
+        n_bins: int = 10, 
+        min_bin_samples: int = 5,
+        prior_weight: float = 10.0  # Bayesian prior strength (virtual samples)
+    ) -> float:
         """
-        Maps a predicted win probability to its realized win rate using bucketed history.
-        If a bucket has enough samples, returns the realized win rate.
-        Otherwise, performs linear interpolation between adjacent buckets.
+        Maps a predicted win probability to its realized win rate using a 
+        Bayesian-weighted smoothed blend.
+        
+        Formula: (sum_wins + prior_wins) / (count + prior_samples)
+        where prior_wins = p_win * prior_weight.
+        
+        Ensures monotonicity by enforcing p_cal(i) >= p_cal(i-1).
         """
         p = max(0.0, min(1.0, float(p_win)))
         buckets = self.get_bucketed_calibration(n_bins)
         if not buckets:
             return p
 
-        # Find the bucket containing p
-        target_b = None
+        # 1. Calculate Bayesian-weighted WR for each bucket
+        # We treat the model's p_win as the prior.
+        cal_points = []
         for b in buckets:
-            if b["lo"] <= p <= b["hi"]:
-                if b["count"] >= min_bin_samples:
-                    target_b = b
+            mid = (b["lo"] + b["hi"]) / 2.0
+            # Bayesian blend: (actual_wins + prior_wins) / (actual_n + prior_n)
+            # prior_wins = mid * prior_weight
+            actual_n = float(b["count"])
+            actual_wins = float(b["win_rate"]) * actual_n
+            
+            # Credibility-weighted win rate
+            # As actual_n -> inf, blend -> actual_win_rate
+            # As actual_n -> 0, blend -> mid (model's bucket prior)
+            blend_wr = (actual_wins + (mid * prior_weight)) / (actual_n + prior_weight)
+            cal_points.append({"p": mid, "wr": blend_wr})
+            
+        # 2. Enforce Monotonicity (Isotonic Smoothing)
+        # If a higher bucket has lower WR than a lower bucket, we average them.
+        # Simple Pool Adjacent Violators Algorithm (PAVA) lite
+        for _ in range(len(cal_points)):
+            changed = False
+            for i in range(len(cal_points) - 1):
+                if cal_points[i]["wr"] > cal_points[i+1]["wr"]:
+                    # Violation of monotonicity: average the win rates
+                    avg_wr = (cal_points[i]["wr"] + cal_points[i+1]["wr"]) / 2.0
+                    cal_points[i]["wr"] = avg_wr
+                    cal_points[i+1]["wr"] = avg_wr
+                    changed = True
+            if not changed:
                 break
-        
-        if target_b:
-            # Direct mapping from bucket realized win rate
-            return target_b["win_rate"]
 
-        # Interpolation fallback
-        valid_buckets = [b for b in buckets if b["count"] >= min_bin_samples]
-        if not valid_buckets:
-            return p # No enough data in any bucket
-
-        # Find nearest buckets for interpolation
+        # 3. Interpolate p in the smoothed monotonic curve
+        # Find nearest points
         left = None
         right = None
-        for b in valid_buckets:
-            mid = (b["lo"] + b["hi"]) / 2.0
-            if mid <= p:
-                left = b
-            elif mid > p and right is None:
-                right = b
+        for i, pt in enumerate(cal_points):
+            if pt["p"] <= p:
+                left = pt
+            if pt["p"] > p and right is None:
+                right = pt
+                break
         
         if left and right:
-            l_mid = (left["lo"] + left["hi"]) / 2.0
-            r_mid = (right["lo"] + right["hi"]) / 2.0
-            t = (p - l_mid) / (r_mid - l_mid)
-            return left["win_rate"] + t * (right["win_rate"] - left["win_rate"])
+            t = (p - left["p"]) / (right["p"] - left["p"])
+            return left["wr"] + t * (right["wr"] - left["wr"])
         elif left:
-            return left["win_rate"]
+            # Extrapolate slightly or cap
+            return left["wr"]
         elif right:
-            return right["win_rate"]
+            return right["wr"]
         
         return p
 
