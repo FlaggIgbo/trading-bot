@@ -3232,7 +3232,9 @@ def _fmt_price(v: float, is_weather: bool = False) -> str:
         return f"${v:,.0f}"
     if v >= 1:
         return f"${v:,.2f}"
-    return f"${v:,.4f}"
+    if v >= 0.001:
+        return f"${v:,.4f}"
+    return f"${v:,.8f}"
 
 
 def _fmt_distance(current_price: float, threshold: float, direction: str, is_weather: bool = False) -> str:
@@ -3240,8 +3242,8 @@ def _fmt_distance(current_price: float, threshold: float, direction: str, is_wea
     if current_price <= 0 or threshold <= 0:
         return ""
     diff = threshold - current_price
-    pct = abs(diff / current_price) * 100
-    d = _fmt_price(abs(diff), is_weather=is_weather) if abs(diff) >= 0.005 else ("0.0°" if is_weather else "$0.00")
+    pct = abs(diff / current_price) * 100 if current_price > 0 else 0
+    d = _fmt_price(abs(diff), is_weather=is_weather)
     if direction == "above":
         if diff > 0:
             return f"{d} below strike ({pct:.2f}% gap to cover)"
@@ -7096,6 +7098,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     price=float(price),
                     min_contracts=min_contracts,
                 )
+                # Safety Cap: 100 cents ($1.00) absolute max per trade during live calibration phase
+                if count > 0:
+                    _cost_per_c = int(max(1, round(float(price) * 100)))
+                    if count * _cost_per_c > 100:
+                        count = max(min_contracts, 100 // _cost_per_c)
+                
                 # Opportunity-level accounting
                 sig_id = record_signal(PLATFORM_KALSHI, ticker, side, hist_p, bid, _chosen_net_k, cfg)
 
@@ -8384,6 +8392,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         price=float(price),
                         min_contracts=min_contracts,
                     )
+                    # Safety Cap: 100 cents ($1.00) absolute max per trade during live calibration phase
+                    if count > 0:
+                        _cost_per_c = int(max(1, round(float(price) * 100)))
+                        if count * _cost_per_c > 100:
+                            count = max(min_contracts, 100 // _cost_per_c)
+                    
                     order_entry = {
                         "platform": PLATFORM_GEMINI,
                         "ticker": evt.get("ticker", "?"),

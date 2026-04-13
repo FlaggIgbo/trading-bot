@@ -161,7 +161,7 @@ class CalibrationEngine:
         p_win: float, 
         n_bins: int = 10, 
         min_bin_samples: int = 5,
-        prior_weight: float = 10.0  # Bayesian prior strength (virtual samples)
+        prior_weight: float = 5.0  # SUBSTANTIAL TUNING (was 10.0): trust actual data more
     ) -> float:
         """
         Maps a predicted win probability to its realized win rate using a 

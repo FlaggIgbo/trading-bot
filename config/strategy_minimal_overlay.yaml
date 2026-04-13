@@ -46,8 +46,8 @@ strategy:
   no_trade_penalty: 0.01 # Lowered
   yes_bias_bonus: 0.0
   
-  # Probability shrinkage: 0.60 pulls to 0.5 (p = 0.5 + (p-0.5)*0.6)
-  model_probability_shrinkage: 0.60 # Relaxed (was 0.70)
+  # Probability shrinkage: 0.20 pulls to 0.5
+  model_probability_shrinkage: 0.20 # EXTREME TUNING (was 0.35)
   enable_model_prob_hard_cap: true
   model_prob_hard_lo: 0.05 # Increased floor
   model_prob_hard_hi: 0.70 # Cap overconfident tape (was 0.75)
@@ -90,8 +90,8 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.02 # Base gate at 2% for volume
-    min_edge_full: 0.05 # Lowered (was 0.08)
+    min_edge: 0.15 # Tightened from 0.02 to focus on high-signal trades
+    min_edge_full: 0.15 # Lowered (was 0.08)
     skip_p_win_mid_band_enabled: false # Disabled
     kelly_dampen: 0.20 # (was 0.16)
     max_bankroll_fraction: 0.05 # (was 0.024)
@@ -102,7 +102,7 @@ strategy:
     ultra_short_size_mult: 0.8 # (was 0.4)
 
   log_effective_min_edge: true
-  log_decision_diagnostics: false
+  log_decision_diagnostics: true
   filter_disjoint_underlying_buys: false
   max_bankroll_fraction_per_underlying: 0.40
   max_bankroll_fraction_per_direction: 0.30
@@ -119,16 +119,16 @@ strategy:
   parity_penalty_enabled: false # Temporarily disable to increase volume
   adaptive_learning_enabled: false # Disabled to increase volume
 
-  # Tiered min edge: Balanced but lowered
+  # Tiered min edge: Tightened to focus on signal
   tiered_min_edge:
     enabled: true
-    min_edge: 0.03
+    min_edge: 0.15
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.10 }
-      - { lo: 0.02, hi: 0.15, min_edge: 0.05 }
-      - { lo: 0.15, hi: 0.40, min_edge: 0.03 }
-      - { lo: 0.40, hi: 0.65, min_edge: 0.06 }
-      - { lo: 0.65, hi: 1.00, min_edge: 0.03 }
+      - { lo: 0.00, hi: 0.02, min_edge: 0.25 }
+      - { lo: 0.02, hi: 0.15, min_edge: 0.20 }
+      - { lo: 0.15, hi: 0.40, min_edge: 0.15 }
+      - { lo: 0.40, hi: 0.65, min_edge: 0.20 }
+      - { lo: 0.65, hi: 1.00, min_edge: 0.15 }
 
   enable_vol_regime_scaling: false # Disable to prevent threshold bloat
   enable_vol_spike_safety: false # Relaxed

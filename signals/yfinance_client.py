@@ -235,8 +235,23 @@ def _merge_sp500_closes(spy: list[float], gspc: list[float], days_back: int) -> 
             prefix = spy[: len(spy) - min_len]
         elif len(gspc) > min_len:
             prefix = gspc[: len(gspc) - min_len]
-        tail = [(spy[-i] + gspc[-i]) / 2.0 for i in range(1, min_len + 1)]
+        
+        tail: list[float] = []
+        for i in range(1, min_len + 1):
+            s_val = spy[-i]
+            g_val = gspc[-i]
+            # If they disagree by more than 2%, use the one that is more consistent with previous points
+            # or just skip if both are suspicious.
+            if abs(s_val - g_val) / max(s_val, g_val) > 0.02:
+                # Disagreement! This often precedes a phantom crash in one feed.
+                # Use the one closer to the other feed's average if available, or just average and hope _plausible catches it.
+                # For now, let's just pick the max to be conservative against "phantom crashes" (min would be the crash).
+                tail.append(max(s_val, g_val))
+            else:
+                tail.append((s_val + g_val) / 2.0)
+                
         merged = prefix + list(reversed(tail))
+    
     need = min(days_back, len(merged))
     min_required = min(14, days_back)
     if len(merged) < min_required:
@@ -377,45 +392,63 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     if not closes:
         return False
     t = (ticker or "").strip().upper()
+    
+    # Check for stale 0.0 values or negative prices
+    if any(x <= 0 for x in closes):
+        return False
+
     tail = closes[-min(120, len(closes)) :]
     mx = max(tail)
     mn = min(tail)
     
-    if mn <= 0:
-        return False
-        
-    # Validation thresholds:
+    # 1. SCALE VALIDATION:
     # Commodities should not be at S&P 500 scale (4000-6000) unless there's hyperinflation.
-    # Note: Copper (HG=F) is usually ~4.50 (dollars) or ~450 (cents).
-    # If it's 4500 (milli-dollars), it still shouldn't be confused with ^GSPC.
+    # S&P 500 should not be at commodity scale.
+    
     if t in ("RB=F", "CL=F", "BZ=F"):
-        if mx > 1000.0:
-            print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0) — index scale overlap?")
+        if mx > 500.0: # Oil/Gas futures usually < $200
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 500.0) — index scale leakage?")
             return False
+    
     if t in ("^NDX", "NDX"):
-        if mn < 1000.0:
+        if mn < 2000.0: # Nasdaq-100 hasn't been below 2000 in a long time
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 2000.0) — likely commodity scale leakage")
+            return False
+            
+    if t in ("^GSPC", "GSPC"):
+        if mn < 1000.0: # S&P 500 hasn't been below 1000 in decades
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 1000.0) — likely commodity scale leakage")
             return False
-    if t in ("^GSPC", "GSPC"):
-        if mn < 500.0:
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 500.0) — likely commodity scale leakage")
-            return False
+            
     if t == "SI=F":
-        if mx > 1000.0:
-            print(f"  [yfinance_client] WARNING: Rejecting cached {t} data (mx={mx:.1f} > 1000.0)")
+        if mx > 200.0: # Silver usually < $50
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 200.0)")
             return False
+            
     if t == "HG=F":
-        # Copper usually ~4.50 USD or ~450 cents. If it hits 4500 (milli-dollars), it is close to ^GSPC/S&P index scale.
-        # This occurs during storage cross-pollination bugs.
-        if mx > 2000.0 or mn > 2000.0:
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (range [{mn:.1f}, {mx:.1f}] > 2000.0) — likely index cross-pollination")
+        # Copper usually ~4.50 USD. Reject if it hits 10.0+ (likely index scale)
+        if mx > 10.0:
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 10.0) — likely index cross-pollination")
             return False
-        # Also check for stale 0.0 values
-        if mn < 0.01:
-            return False
+            
     if t == "GC=F":
-        if mx > 50_000.0: # Gold is ~$2500, shouldn't be 50k
+        if mx > 10000.0: # Gold is ~$2500, shouldn't be 10k+
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 10000.0)")
             return False
+
+    # 2. PHANTOM CRASH VALIDATION:
+    # Large single-day jumps (>50% or < -50%) are almost always data errors for these assets.
+    for i in range(1, len(closes)):
+        prev = closes[i-1]
+        curr = closes[i]
+        if prev > 0:
+            ratio = curr / prev
+            if ratio > 2.0 or ratio < 0.5:
+                # Exception for ultra-volatile crypto if needed, but for indices and commodities it's definitely an error.
+                if t not in ("DOGE-USD", "SHIB-USD", "PEPE-USD"):
+                    print(f"  [yfinance_client] WARNING: Rejecting {t} data due to phantom move: {prev:.2f} -> {curr:.2f} ({ratio-1:.1%})")
+                    return False
+
     return True
 
 

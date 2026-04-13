@@ -31,7 +31,7 @@ class TestGetConfigUsesOverlay(unittest.TestCase):
         try:
             cfg = get_config()
             sed = (cfg.get("strategy") or {}).get("simple_ev_decision") or {}
-            self.assertEqual(sed.get("min_edge"), 0.08)
+            self.assertEqual(sed.get("min_edge"), 0.15)
         finally:
             if old is not None:
                 os.environ["TRADING_BOT_MINIMAL_OVERLAY"] = old
@@ -42,8 +42,8 @@ class TestGetConfigUsesOverlay(unittest.TestCase):
             os.environ["TRADING_BOT_MINIMAL_OVERLAY"] = "0"
             cfg = get_config()
             sed = (cfg.get("strategy") or {}).get("simple_ev_decision") or {}
-            # Base config.yaml keeps 0.10 when overlay off
-            self.assertEqual(sed.get("min_edge"), 0.10)
+            # Base config.yaml now has 0.15
+            self.assertEqual(sed.get("min_edge"), 0.15)
         finally:
             if old is None:
                 os.environ.pop("TRADING_BOT_MINIMAL_OVERLAY", None)

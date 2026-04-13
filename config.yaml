@@ -265,8 +265,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 5% base for higher hurdle (was 2%)
-    min_edge: 0.05
+    # Net edge after maker fee; 15% base for higher hurdle (was 5%)
+    min_edge: 0.15
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: true # Re-enabled to avoid coin flips
     skip_p_win_mid_lo: 0.42
@@ -280,7 +280,7 @@ strategy:
     cheap_band_price_hi: 0.10
     cheap_band_min_net_edge: 0.12 # Tightened (was 0.06)
     kelly_dampen: 0.10 # Reduced to decrease size (was 0.20)
-    max_bankroll_fraction: 0.01 # Many small trades for learning (was 0.02)
+    max_bankroll_fraction: 0.05 # Increased from 0.01 to allow larger trades
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
     edge_size_boost_edge: 0.15 # Tightened (was 0.10)
     edge_size_boost_mult: 1.2 # Reduced (was 1.5)
@@ -296,23 +296,23 @@ strategy:
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
-    min_edge: 0.05 # Tightened (was 0.03)
+    min_edge: 0.15 # Tightened from 0.05 to focus on high-signal trades
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.20 } # Ultra-cheap: require edge (was 10¢)
-      - { lo: 0.02, hi: 0.15, min_edge: 0.10 } # Cheap tails: require slightly more than standard
-      - { lo: 0.15, hi: 0.40, min_edge: 0.05 } # Standard 'sweet spot'
-      - { lo: 0.40, hi: 0.65, min_edge: 0.12 } # Coin-flip zone: high risk of churn (was 0.06)
-      - { lo: 0.65, hi: 1.00, min_edge: 0.06 } # Expensive consensus: slightly more than base
+      - { lo: 0.00, hi: 0.02, min_edge: 0.25 } # Ultra-cheap: require edge (was 20¢)
+      - { lo: 0.02, hi: 0.15, min_edge: 0.20 } # Cheap tails
+      - { lo: 0.15, hi: 0.40, min_edge: 0.15 } # Standard 'sweet spot'
+      - { lo: 0.40, hi: 0.65, min_edge: 0.20 } # Coin-flip zone
+      - { lo: 0.65, hi: 1.00, min_edge: 0.15 } # Expensive consensus
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
-  log_decision_diagnostics: false
+  log_decision_diagnostics: true # ENABLED for live calibration test: captures P-shifts for analysis
   # When true: drop pending BUYs whose win range does not overlap an already-kept bet (same yf+resolution+platform).
   # Default false — true blocked many valid multi-strike edges (e.g. INXU hourly ladder) for disjoint ranges.
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.04 # Slightly relaxed from 0.05 to increase volume while keeping friction penalty
+  min_edge: 0.15 # Tightened from 0.04
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: true # Re-enabled for conservative consensus (was false)
@@ -354,7 +354,7 @@ strategy:
   dte_edge_mult_long: 1.25 # More penalty for distant zones
   max_new_buy_dte_days: 14 # Added 14d cap (was 0)
   yes_overconfidence_extra_edge: 0.01 # Re-enabled (was 0)
-  model_probability_shrinkage: 0.60 # Slightly less aggressive shrinkage (was 0.40)
+  model_probability_shrinkage: 0.20 # EXTREME TUNING (was 0.35): model is highly overconfident; pull harder to 50%
   # Prefer strikes within ~25% of spot (relaxed from 5%)
   max_buy_yes_strike_above_pct: 0.15 # Tightened (was 0.25)
   max_buy_no_strike_above_pct: 0.15 # Tightened (was 0.25)
@@ -371,7 +371,7 @@ strategy:
   # Max contracts per underlying in a single evaluation run (forced diversification)
   max_contracts_per_underlying: 5 # Tightened (was 10)
   # Refined strategy params from agent review
-  taker_edge_threshold: 0.35 # Tightened (was 0.25)
+  taker_edge_threshold: 0.20 # MOVED AGGRESSIVELY (was 0.35): take liquidity more often to improve fill rate and avoid adverse selection
   ultra_short_k_spread: 0.6 # Increased sensitivity to spread
   ultra_short_latency_risk: 0.02 # Increased baseline risk
   sell_losing_pct: 0.65 # Tightened exit (was 0.55)
@@ -515,8 +515,8 @@ strategy:
   calibration_hard_block_above_yes_min_avg_entry: 0.25 # (was 0.36)
   calibration_extra_edge_overall: 0.05 # (was 0.0)
   min_calibration_samples_overall: 10 # (was 20)
-  use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected (overconfidence dampening)
-  bucket_override_weight: 0.5 # EMPIRICAL OVERRIDE: 50% weight to historical WR mapping
+  use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected
+  bucket_override_weight: 0.8 # INCREASED (was 0.5): 80% weight to empirical reality
   min_bucket_samples: 3 # (was 5)
   min_vol_confidence_far_otm: 0.92 # (was 0.88)
   calibration_loss_weight: 2.0 # (was 1.5)
@@ -525,7 +525,8 @@ strategy:
   p_lose_blend_market_max_weight: 0.7 # (was 0.5)
   p_lose_blend_market_half_life_days: 0.25 # (was 0.5)
   use_kelly: true # Kelly criterion for position sizing — reduces size for farther-OTM contracts (lower P(win))
-  kelly_fraction: 0.01 # Small size, more trades for learning (was 0.02)
+  kelly_fraction: 0.05 # Increased from 0.01 to allow meaningful bet sizes
+
   dynamic_kelly_enabled: true # Adapt Kelly down when calibration quality degrades
   dynamic_kelly_floor: 0.01 # (was 0.02)
   dynamic_kelly_stress_fraction: 0.01 # (was 0.03)
@@ -660,47 +661,47 @@ strategy:
   signal_weight_fit_l2_c: 0.5 # (was 1.0)
   signal_model_weights:
     bias: 0.0
-    emp_p: 1.5 # Reduced weight (was 1.8)
-    vol_p: 1.0 # Reduced weight (was 1.3)
-    market_yes: 0.5 # Increased weight (was 0.3)
-    edge_yes: 1.0 # (was 1.2)
-    edge_no: -0.5 # (was -0.8)
+    emp_p: 1.2 # FURTHER REDUCED (was 1.5): focus on higher-confidence signals
+    vol_p: 0.8 # FURTHER REDUCED (was 1.0)
+    market_yes: 0.7 # INCREASED (was 0.5): trust market price more to dampen overconfidence
+    edge_yes: 0.8 # REDUCED (was 1.0)
+    edge_no: -0.4 # REDUCED (was -0.5)
     moneyness: 0.3 # (was 0.2)
     dte_norm: 0.2 # (was 0.1)
-    spread_norm: -0.8 # Increased penalty for spread (was -0.5)
-    liquidity_consistency: 0.5 # (was 0.3)
+    spread_norm: -1.2 # INCREASED PENALTY (was -0.8): avoid wide spreads
+    liquidity_consistency: 0.7 # INCREASED (was 0.5)
     rsi_norm: -0.5 # (was -0.3)
     vwap_dist: 0.5
     price_trend: 0.3
   signal_model_ensemble_weights:
     - name: "Conservative Consensus"
       weights:
-        emp_p: 2.0
-        vol_p: 1.5
-        market_yes: 0.8
-        liquidity_consistency: 1.0
-        spread_norm: -1.2
+        emp_p: 1.5
+        vol_p: 1.0
+        market_yes: 1.0
+        liquidity_consistency: 1.2
+        spread_norm: -1.5
     - name: "Alpha Residual"
       weights:
-        edge_yes: 2.0
-        edge_no: -1.5
+        edge_yes: 1.5
+        edge_no: -1.0
         vwap_dist: 1.2
         price_trend: 0.8
-        spread_norm: -0.5
-        rsi_norm: -0.8
+        spread_norm: -1.0
+        rsi_norm: -1.0
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 10.0 # Trusts market less (was 30.0)
+    bayesian_market_strength: 20.0 # INCREASED (was 10.0): trust market more as prior
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 7 # Faster response (was 14)
     ewma_prob_min_samples: 5 # (was 10)
-    ewma_prob_blend_weight: 0.50 # (was 0.30)
+    ewma_prob_blend_weight: 0.60 # INCREASED (was 0.50)
     vol_zscore_enabled: true # Vol Z-score gate: dampen confidence during vol spikes
     vol_zscore_short_window: 12 # (was 24)
     vol_zscore_long_window: 168 # Long vol window (bars) for baseline
-    vol_zscore_threshold: 1.5 # (was 2.0)
-    vol_zscore_tail_mult: 0.5 # (was 0.3)
+    vol_zscore_threshold: 1.2 # TIGHTENED (was 1.5)
+    vol_zscore_tail_mult: 0.4 # TIGHTENED (was 0.5)
     adaptive_edge_enabled: true # Re-enabled
     adaptive_edge_cheap_threshold: 0.20 # (was 0.15)
     adaptive_edge_expensive_threshold: 0.80 # (was 0.85)
@@ -773,8 +774,8 @@ storage:
 # Underlying: yfinance + live snapshot — not exchange websocket latency; favor limit/maker fills (taker fees are higher).
 trading:
   dry_run: false # Set true for paper runs until forward performance recovers (preview: --preview --no-llm)
-  max_pct_of_balance: 0.10 # Reduced from 0.22
-  max_total_buy_pct: 0.30 # Reduced from 0.55
+  max_pct_of_balance: 0.20 # INCREASED (was 0.10) to allow meaningful trades on small balance
+  max_total_buy_pct: 0.50 # INCREASED (was 0.30)
   min_contracts: 1 # skip if capped count < this
   # Dust-to-trade: when venue balance ≤ threshold, promote best zero-count BUY to x1 after budget pass (data + compounding on micro bankrolls)
   dust_trade_enabled: true
