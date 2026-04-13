@@ -5781,19 +5781,31 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 _snap = apply_underlying_price(cfg, series, yf_get_snapshot(yf_ticker))
             if _snap is not None and _snap > 0:
                 live_f = float(_snap)
-                # Detection: if live price deviates by >5x or <0.2x from last close, it's almost certainly a unit mismatch (e.g. cents vs dollars)
+                # Detection: if live price deviates by >25% (or >5x for crypto) from last close, it's suspicious
+                is_suspicious = False
                 if last_close > 0:
                     discrepancy = live_f / last_close
-                    if discrepancy > 5.0 or discrepancy < 0.2:
-                        print(f"  !!! DATA WARNING: {yf_ticker} live ({live_f:,.2f}) vs history ({last_close:,.2f}) ratio {discrepancy:.2f}x. Likely unit mismatch or stale cache. !!!")
-                        if clear_yf_cache:
-                            print(f"  [Risk] Clearing stale yfinance cache for {yf_ticker}...")
+                    # Indices/commodities: 25% threshold
+                    limit_lo, limit_hi = 0.75, 1.25
+                    # Crypto: allow more range (5x)
+                    if yf_ticker in GEMINI_CRYPTO_YF or "USD" in yf_ticker:
+                        limit_lo, limit_hi = 0.2, 5.0
+                    
+                    if discrepancy > limit_hi or discrepancy < limit_lo:
+                        is_suspicious = True
+                        print(f"  !!! DATA WARNING: Rejecting suspicious {yf_ticker} live price ({live_f:,.2f}) vs history ({last_close:,.2f}) ratio {discrepancy:.2f}x. !!!")
+                        if clear_yf_cache and (discrepancy > 5.0 or discrepancy < 0.2):
+                            print(f"  [Risk] Extreme discrepancy: clearing stale yfinance cache for {yf_ticker}...")
                             clear_yf_cache(yf_ticker, args.days, cfg)
                         print()
                 
-                w = sp.live_price_weight
-                current_price = w * live_f + (1 - w) * last_close
-                live_note = " (blend live+close)"
+                if not is_suspicious:
+                    w = sp.live_price_weight
+                    current_price = w * live_f + (1 - w) * last_close
+                    live_note = " (blend live+close)"
+                else:
+                    current_price = last_close
+                    live_note = " (history only, live rejected)"
             else:
                 current_price = last_close
                 live_note = ""
@@ -6348,13 +6360,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         # Model is underconfident; discount required edge to take more trades
                         discount = min(0.06, (_trust - 1.0) * 0.15)
                         effective_min = max(0.015, effective_min - discount)
-                        if sp.debug:
+                        if getattr(args, "verbose", False):
                             print(f"[Learning] Discounting edge by {discount:.1%} for {_series_prefix} (Trust {_trust:.2f})")
                     elif _trust < 0.8:
                         # Model is overconfident (hallucinating); bump required edge
                         penalty = min(0.10, (1.0 - _trust) * 0.2)
                         effective_min += penalty
-                        if sp.debug:
+                        if getattr(args, "verbose", False):
                             print(f"[Learning] Penalizing edge by {penalty:.1%} for {_series_prefix} (Trust {_trust:.2f})")
                 if sp.dte_edge_scaling_enabled and dte is not None:
                     effective_min *= _dte_edge_scale_factor(float(dte), sp)
@@ -6423,7 +6435,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 effective_min += series_penalty
                 effective_min_yes += series_penalty
                 effective_min_no += series_penalty
-                if sp.debug:
+                if getattr(args, "verbose", False):
                     print(f"  [Series Hurdle] {ticker} penalty: {series_penalty:+.1%} (Paper={is_paper_only}, Trusted={is_trusted})")
 
             # Trust-aware calibration penalty: if this confidence bucket is historically overconfident,
@@ -7745,7 +7757,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     effective_min_gem += series_penalty_g
                     effective_min_yes_g += series_penalty_g
                     effective_min_no_g += series_penalty_g
-                    if sp.debug:
+                    if getattr(args, "verbose", False):
                         print(f"  [Series Hurdle] {g_ticker} penalty: {series_penalty_g:+.1%} (Paper={is_paper_only_g}, Trusted={is_trusted_g})")
 
                 bucket_penalty_g = 0.0

@@ -285,14 +285,19 @@ def _yfinance_snapshot(ticker: str) -> float | None:
 
 
 def _combine_sp500_snapshot(spy_price: float | None, gspc_price: float | None) -> float | None:
-    values: list[float] = []
-    if spy_price is not None:
-        values.append(spy_price * 10.0)
-    if gspc_price is not None:
-        values.append(gspc_price)
-    if not values:
+    spy_adj = spy_price * 10.0 if spy_price is not None else None
+    if spy_adj is None and gspc_price is None:
         return None
-    return sum(values) / len(values)
+    if spy_adj is None:
+        return gspc_price
+    if gspc_price is None:
+        return spy_adj
+    
+    # If they disagree by > 2%, pick the one that is likely NOT a phantom crash (max)
+    if abs(spy_adj - gspc_price) / max(spy_adj, gspc_price) > 0.02:
+        return max(spy_adj, gspc_price)
+        
+    return (spy_adj + gspc_price) / 2.0
 
 
 def _coingecko_snapshot(ticker: str) -> float | None:
@@ -322,59 +327,79 @@ def _coingecko_snapshot(ticker: str) -> float | None:
 
 def get_snapshot(ticker: str) -> float | None:
     """
-    Get current/latest price. Returns None on failure.
+    Get current/latest price. Returns None on failure or if price is suspicious.
     Crypto: Gemini v2/ticker (exchange spot) when enabled, else yfinance, else CoinGecko.
     S&P 500 (^GSPC): yfinance, fallback to SPY × 10.
     """
     pair = _gemini_pair_for_ticker(ticker)
+    price = None
     if pair and _USE_GEMINI_SPOT:
-        g = _gemini_v2_ticker_close(pair)
-        if g is not None and g > 0:
-            return g
+        price = _gemini_v2_ticker_close(pair)
 
-    if ticker in ("^GSPC", "GSPC") and _USE_SPY_FOR_SP500:
-        combined_snapshot = _combine_sp500_snapshot(
+    if price is None and ticker in ("^GSPC", "GSPC") and _USE_SPY_FOR_SP500:
+        price = _combine_sp500_snapshot(
             _yfinance_snapshot("SPY"), _yfinance_snapshot(ticker)
         )
-        if combined_snapshot is not None:
-            return combined_snapshot
 
-    # ^GSPC: try yfinance, then SPY. Crypto without Gemini: yfinance then CoinGecko.
-    to_try: list[tuple[str, bool]] = []
-    if ticker in _COINGECKO_IDS.values() or ticker in _YF_TO_GEMINI_PAIR:
-        to_try = [(ticker, False), (ticker, True)]
-    elif ticker in ("^GSPC", "GSPC"):
-        to_try = [(ticker, False), ("SPY", False)]
-    else:
-        to_try = [(ticker, False)]
+    if price is None:
+        # ^GSPC: try yfinance, then SPY. Crypto without Gemini: yfinance then CoinGecko.
+        to_try: list[tuple[str, bool]] = []
+        if ticker in _COINGECKO_IDS.values() or ticker in _YF_TO_GEMINI_PAIR:
+            to_try = [(ticker, False), (ticker, True)]
+        elif ticker in ("^GSPC", "GSPC"):
+            to_try = [(ticker, False), ("SPY", False)]
+        else:
+            to_try = [(ticker, False)]
 
-    for t, use_coingecko in to_try:
-        if use_coingecko:
-            p = _coingecko_snapshot(t)
-            if p is not None:
-                return p
-            continue
+        for t, use_coingecko in to_try:
+            if use_coingecko:
+                p = _coingecko_snapshot(t)
+                if p is not None:
+                    price = p
+                    break
+                continue
+            try:
+                yf_t = yf.Ticker(t)
+                hist = yf_t.history(period="5d", interval="1d")
+                if hist is not None and not hist.empty and "Close" in hist.columns:
+                    p = float(hist["Close"].iloc[-1])
+                    if t == "SPY" and ticker in ("^GSPC", "GSPC"):
+                        p *= 10.0
+                    price = p
+                    break
+                info = yf_t.info
+                if isinstance(info, dict):
+                    for key in ("regularMarketPrice", "previousClose", "open"):
+                        if info.get(key) is not None:
+                            p = float(info[key])
+                            if t == "SPY" and ticker in ("^GSPC", "GSPC"):
+                                p *= 10.0
+                            price = p
+                            break
+                    if price is not None:
+                        break
+            except Exception as e:
+                if _DEBUG:
+                    print(f"  [yfinance_client] yfinance failed for {t}: {e}")
+                continue
+
+    # VALIDATION: Check against cached last close if available
+    if price is not None:
         try:
-            yf_t = yf.Ticker(t)
-            hist = yf_t.history(period="5d", interval="1d")
-            if hist is not None and not hist.empty and "Close" in hist.columns:
-                price = float(hist["Close"].iloc[-1])
-                if t == "SPY" and ticker in ("^GSPC", "GSPC"):
-                    price *= 10.0
-                return price
-            info = yf_t.info
-            if isinstance(info, dict):
-                for key in ("regularMarketPrice", "previousClose", "open"):
-                    if info.get(key) is not None:
-                        price = float(info[key])
-                        if t == "SPY" and ticker in ("^GSPC", "GSPC"):
-                            price *= 10.0
-                        return price
-        except Exception as e:
-            if _DEBUG:
-                print(f"  [yfinance_client] yfinance failed for {t}: {e}")
-            continue
-    return None
+            from storage import get_yf_closes
+            cached = get_yf_closes(ticker, days_back=5)
+            if cached:
+                last_close = cached[-1]
+                # Reject if price moved > 25% from last close (unless known volatile crypto)
+                if last_close > 0:
+                    ratio = price / last_close
+                    if (ratio > 1.25 or ratio < 0.75) and ticker not in ("DOGE-USD", "PEPE-USD", "SHIB-USD"):
+                        print(f"  [yfinance_client] REJECTING suspicious snapshot for {ticker}: {price:.2f} (vs cached close {last_close:.2f}, ratio {ratio:.2f})")
+                        return None
+        except Exception:
+            pass
+
+    return price
 
 
 # Fallback tickers when primary fails (e.g. ^GSPC blocked by proxy, SPY often works)
@@ -553,6 +578,11 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
                     continue
 
     if result:
+        # Final validation before caching
+        if not _yf_daily_closes_plausible(ticker, result):
+            print(f"  [yfinance_client] CRITICAL: Downloaded data for {ticker} failed plausibility check — not caching.")
+            return []
+            
         try:
             from storage import set_yf_closes
             set_yf_closes(ticker, days_back, result, cfg)
