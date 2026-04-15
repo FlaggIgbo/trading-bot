@@ -576,6 +576,8 @@ class StrategyParams:
     adaptive_loss_block_max_balance_loss_pct: float
     adaptive_loss_block_lookback_hours: float
     adaptive_loss_block_min_trades: int
+    adaptive_execution_fill_rate_target: float
+    adaptive_execution_min_dip_multiplier: float
     adaptive_edge_idle_decay_start_hours: float
     adaptive_edge_idle_decay_halflife_hours: float
     adaptive_stress_size_edge_threshold: float
@@ -629,6 +631,7 @@ class StrategyParams:
     low_balance_min_price: float
     drawdown_stop_trading_pct: float
     drawdown_cooldown_hours: float
+    risk_balance_floor_cents: int
     limit_buy_edge_aggression_enabled: bool
     limit_buy_cross_spread_min_edge: float
     limit_buy_near_market_min_edge: float
@@ -969,6 +972,12 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         ),
         adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 8.0)),
         adaptive_loss_block_min_trades=int(strategy.get("adaptive_loss_block_min_trades", 5)),
+        adaptive_execution_fill_rate_target=max(
+            0.01, min(1.0, float(strategy.get("adaptive_execution_fill_rate_target", 0.10)))
+        ),
+        adaptive_execution_min_dip_multiplier=max(
+            0.05, min(1.0, float(strategy.get("adaptive_execution_min_dip_multiplier", 0.20)))
+        ),
         adaptive_edge_idle_decay_start_hours=max(0.0, float(strategy.get("adaptive_edge_idle_decay_start_hours", 2.5))),
         adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
         adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
@@ -1021,6 +1030,7 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         low_balance_min_price=float(strategy.get("low_balance_min_price", 0.05)),
         drawdown_stop_trading_pct=float(strategy.get("drawdown_stop_trading_pct", 0.10)),
         drawdown_cooldown_hours=float(strategy.get("drawdown_cooldown_hours", 24.0)),
+        risk_balance_floor_cents=max(100, int(strategy.get("risk_balance_floor_cents", 2500))),
         limit_buy_edge_aggression_enabled=bool(
 strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
@@ -1576,15 +1586,25 @@ def _check_drawdown_block(platform: str, balance_cents: int, sp: StrategyParams,
     if not get_recent_performance:
         return False
     try:
+        lookback = sp.drawdown_cooldown_hours
+        cutoff = time.time() - lookback * 3600
+        # Respect manual reset time
+        if sp.emergency_stop_reset_time > 0:
+            cutoff = max(cutoff, sp.emergency_stop_reset_time)
+            
         perf = get_recent_performance(
-            lookback_hours=sp.drawdown_cooldown_hours, platform=platform, config=cfg
+            lookback_hours=(time.time() - cutoff) / 3600.0 if cutoff < time.time() else 0,
+            platform=platform,
+            config=cfg
         )
         pnl = int(perf.get("pnl_cents", 0))
         if pnl < 0 and balance_cents > 0:
-            drawdown = abs(pnl) / float(balance_cents)
+            # Use configurable balance floor to avoid permanent lockouts on micro-wallets.
+            balance_for_pct = max(balance_cents, int(sp.risk_balance_floor_cents))
+            drawdown = abs(pnl) / float(balance_for_pct)
             if drawdown >= sp.drawdown_stop_trading_pct:
                 print(
-                    f"[Risk] DRAWDOWN HALT ({platform}): Lost ${abs(pnl)/100:.2f} in {sp.drawdown_cooldown_hours}h "
+                    f"[Risk] DRAWDOWN HALT ({platform}): Lost ${abs(pnl)/100:.2f} in recent window "
                     f"({drawdown:.1%} of balance) >= {sp.drawdown_stop_trading_pct:.1%}. Trading stopped."
                 )
                 return True
@@ -5149,15 +5169,19 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     except Exception as exc:
         print(f"[Reconcile] Fill reconciliation failed (continuing run): {exc}")
 
+    sp = _load_strategy_params(strategy)
+
     # Adaptive Execution Aggressiveness: shrink dip if fill rate is low
     fill_rate_aggression_mult = 1.0
     if get_limit_order_fill_rate_stats:
         try:
             stats_30d = get_limit_order_fill_rate_stats(config=cfg, days=30.0)
             fr = stats_30d.get("fill_rate")
-            if fr is not None and fr < 0.10: # 10% target
-                # Shrink dip proportionally. If fr=0.018 (1.8%), mult = max(0.2, 0.018 / 0.10) = 0.2
-                fill_rate_aggression_mult = max(0.2, fr / 0.10)
+            fill_target = max(0.01, float(sp.adaptive_execution_fill_rate_target))
+            min_dip_mult = max(0.05, min(1.0, float(sp.adaptive_execution_min_dip_multiplier)))
+            if fr is not None and fr < fill_target:
+                # Shrink dip proportionally; when fill-rate is poor, quote closer to the tape.
+                fill_rate_aggression_mult = max(min_dip_mult, fr / fill_target)
                 
                 # Execution Quality Feedback Loop: if markouts are toxic, reduce aggression
                 if get_all_recent_markouts:
@@ -5178,10 +5202,13 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             fill_rate_aggression_mult = min(1.0, fill_rate_aggression_mult * aggression_reduction)
                             print(
                                 f"[Adaptive Execution] Toxic markouts detected (penalty {toxic_penalty:.1%}) "
-                                f"→ reducing aggression to {fill_rate_aggression_mult:.2f} (prev {fr / 0.10:.2f})"
+                                f"→ reducing aggression to {fill_rate_aggression_mult:.2f} (prev {fr / fill_target:.2f})"
                             )
 
-                print(f"[Adaptive Execution] Fill rate {fr:.1%} < 10% → dip multiplier {fill_rate_aggression_mult:.2f} (more aggressive)")
+                print(
+                    f"[Adaptive Execution] Fill rate {fr:.1%} < target {fill_target:.1%} "
+                    f"→ dip multiplier {fill_rate_aggression_mult:.2f} (more aggressive)"
+                )
         except Exception as e:
             print(f"[Adaptive Execution] Error calculating adaptive aggression: {e}")
             pass
@@ -5203,8 +5230,6 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     inventory_by_key[key] = inventory_by_key.get(key, 0) + cnt
         except Exception:
             pass
-    sp = _load_strategy_params(strategy)
-    
     # --- Balance-Aware Regime & Drawdown Checks ---
     k_kelly_mult, k_edge_add, k_regime = _get_balance_regime_adjustments(balance_cents, sp)
     g_kelly_mult, g_edge_add, g_regime = _get_balance_regime_adjustments(gemini_balance_for_arb, sp)
@@ -5504,8 +5529,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             pnl_stats = get_realized_pnl_stats(since_ts=since_ts, config=cfg) or {}
             pnl_24h = int(pnl_stats.get("total_pnl_cents", 0) or 0)
             loss_24h = max(0, -pnl_24h)
-            # Use min balance floor ($25) so low-balance accounts don't get permanently locked out
-            balance_for_pct = max(balance_cents, 2500)
+            # Use configurable balance floor so low-balance accounts don't get permanently locked out.
+            balance_for_pct = max(balance_cents, int(sp.risk_balance_floor_cents))
             loss_pct = (loss_24h / max(1, balance_for_pct))
             breach_pct = sp.max_daily_loss_pct > 0 and loss_pct >= sp.max_daily_loss_pct
             breach_abs = sp.max_daily_loss_cents > 0 and loss_24h >= sp.max_daily_loss_cents

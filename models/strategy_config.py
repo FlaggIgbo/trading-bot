@@ -246,6 +246,8 @@ class StrategyParams:
     adaptive_loss_block_max_balance_loss_pct: float
     adaptive_loss_block_lookback_hours: float
     adaptive_loss_block_min_trades: int
+    adaptive_execution_fill_rate_target: float
+    adaptive_execution_min_dip_multiplier: float
     adaptive_edge_idle_decay_start_hours: float
     adaptive_edge_idle_decay_halflife_hours: float
     adaptive_stress_size_edge_threshold: float
@@ -295,6 +297,7 @@ class StrategyParams:
     low_balance_min_price: float
     drawdown_stop_trading_pct: float
     drawdown_cooldown_hours: float
+    risk_balance_floor_cents: int
     limit_buy_edge_aggression_enabled: bool
     limit_buy_cross_spread_min_edge: float
     limit_buy_near_market_min_edge: float
@@ -853,6 +856,12 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         ),
         adaptive_loss_block_lookback_hours=float(strategy.get("adaptive_loss_block_lookback_hours", 8.0)),
         adaptive_loss_block_min_trades=int(strategy.get("adaptive_loss_block_min_trades", 5)),
+        adaptive_execution_fill_rate_target=max(
+            0.01, min(1.0, float(strategy.get("adaptive_execution_fill_rate_target", 0.10)))
+        ),
+        adaptive_execution_min_dip_multiplier=max(
+            0.05, min(1.0, float(strategy.get("adaptive_execution_min_dip_multiplier", 0.20)))
+        ),
         adaptive_edge_idle_decay_start_hours=max(0.0, float(strategy.get("adaptive_edge_idle_decay_start_hours", 2.5))),
         adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
         adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
@@ -904,6 +913,7 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         low_balance_min_price=float(strategy.get("low_balance_min_price", 0.05)),
         drawdown_stop_trading_pct=float(strategy.get("drawdown_stop_trading_pct", 0.10)),
         drawdown_cooldown_hours=float(strategy.get("drawdown_cooldown_hours", 24.0)),
+        risk_balance_floor_cents=max(100, int(strategy.get("risk_balance_floor_cents", 2500))),
         limit_buy_edge_aggression_enabled=bool(strategy.get("limit_buy_edge_aggression_enabled", False)),
         limit_buy_cross_spread_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_cross_spread_min_edge", 0.10)))),
         limit_buy_near_market_min_edge=max(0.0, min(0.95, float(strategy.get("limit_buy_near_market_min_edge", 0.05)))),

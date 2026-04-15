@@ -409,6 +409,27 @@ _TICKER_FALLBACKS: dict[str, list[str]] = {
 }
 
 
+def _filter_cross_pollinated_prices(ticker: str, prices: list[float]) -> list[float]:
+    """Remove values that are clearly from a different asset scale."""
+    t = (ticker or "").strip().upper()
+    cleaned: list[float] = []
+    for x in prices or []:
+        if x <= 0:
+            continue
+        if t in ("^GSPC", "GSPC") and x < 1000.0:
+            continue
+        if t in ("^NDX", "NDX") and x < 2000.0:
+            continue
+        if t == "SI=F" and x > 200.0:
+            continue
+        if t == "HG=F" and x > 10.0:
+            continue
+        if t == "GC=F" and x > 10000.0:
+            continue
+        cleaned.append(float(x))
+    return cleaned
+
+
 def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     """
     Drop corrupted SQLite rows (e.g. index prices stored under a futures ticker).
@@ -578,6 +599,9 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
                     continue
 
     if result:
+        # Clean obvious cross-pollination pollution before plausibility checks.
+        result = _filter_cross_pollinated_prices(ticker, result)
+
         # Final validation before caching
         if not _yf_daily_closes_plausible(ticker, result):
             print(f"  [yfinance_client] CRITICAL: Downloaded data for {ticker} failed plausibility check — not caching.")
@@ -689,6 +713,12 @@ def get_intraday_aggs_at_hour(
 
     if not result:
         # Fallback to daily closes (CoinGecko doesn't have intraday)
+        return get_aggs(ticker, days_back, cfg)
+
+    # Clean and validate before caching intraday snapshots.
+    result = _filter_cross_pollinated_prices(ticker, result)
+    if not _yf_daily_closes_plausible(ticker, result):
+        print(f"  [yfinance_client] WARNING: Intraday data for {ticker} failed plausibility; falling back to daily closes.")
         return get_aggs(ticker, days_back, cfg)
 
     try:

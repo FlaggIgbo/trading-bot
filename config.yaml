@@ -181,51 +181,51 @@ yfinance_underlying_adjust:
 execution:
   price_strategy: aggressive # passive | aggressive | market — cross spread when edge clears (PnL / fills on fast crypto books)
   # Penny-jump: bid+1¢ (or min with ask−1¢) for queue priority vs stink bids
-  limit_offset_cents: 2 # Increased from 1 to jump more aggressively
+  limit_offset_cents: 3 # Increased from 2 for better queue priority
   # PnL: if passive/mid, force dip-style limits when time-to-resolution ≤ this many hours (inclusive at boundary)
-  near_expiry_aggressive_hours: 2.0 # Increased from 1.0
+  near_expiry_aggressive_hours: 4.0 # Increased from 2.0 to capture more short-dated wicks
   # Cancel resting BUY when live bid has risen this far above our limit (frees capital; reprices next cycle).
-  resting_cancel_if_market_bid_above_limit_by: 0.01 # Tightened from 0.02 to re-quote faster
+  resting_cancel_if_market_bid_above_limit_by: 0.01 # Tightened from 0.01 (already tight)
   # Sell held side when net edge (model − bid − maker fee) falls below this floor; 0 = off.
   # Negative value = require clear reversal before exiting (hysteresis buffer).
-  position_exit_min_net_edge: 0.01 # Exit as soon as edge is gone (was -0.02)
+  position_exit_min_net_edge: 0.02 # Exit as soon as edge is gone (was 0.01)
   # Minimum minutes to hold a position before discretionary exits (edge-exit, likely-loser, flip).
   # Stop-loss and rule-violation still fire immediately. 0 = off.
-  position_min_hold_minutes: 5 # Reduced from 10
+  position_min_hold_minutes: 3 # Reduced from 5 to allow faster exits on bad trades
   # Conviction-based hold: if entry edge was >= this, use the stronger (more negative) exit floor below.
-  position_exit_strong_entry_edge: 0.20 # Increased from 0.15
-  position_exit_strong_entry_floor: -0.02 # Tightened (was -0.04)
+  position_exit_strong_entry_edge: 0.25 # Increased from 0.20
+  position_exit_strong_entry_floor: -0.01 # Tightened (was -0.02)
   # After this many minutes, if held net edge is still below position_exit_stale_edge_floor, exit (slow bleed / bag-hold).
   # Not blocked by min-hold. 0 = off.
-  position_exit_stale_minutes: 30 # Reduced from 60
+  position_exit_stale_minutes: 15 # Reduced from 30
   # Stale exit when held_edge < this (default 0 = any negative edge after stale_minutes).
-  position_exit_stale_edge_floor: 0.02 # Tightened (was 0.0)
+  position_exit_stale_edge_floor: 0.04 # Tightened (was 0.02)
   # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
   limit_buy_edge_aggression_enabled: true
   # EV-tier pricing (PnL / fills): strong → at ask; medium → bid + fraction×spread or mid; weak → bid; else skip.
   limit_buy_ev_tier_pricing: true
-  limit_buy_weak_bid_min_edge: 0.04 # Slightly lower (was 0.05)
+  limit_buy_weak_bid_min_edge: 0.03 # Lowered (was 0.04)
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.95 # More aggressive (was 0.90)
+  limit_buy_medium_spread_fraction: 1.0 # Extremely aggressive (was 0.98)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.10 # Lower threshold to take ask (was 0.12)
-  limit_buy_near_market_min_edge: 0.05 # (was 0.07)
+  limit_buy_cross_spread_min_edge: 0.04 # MOVED AGGRESSIVELY to improve fill rate (was 0.07)
+  limit_buy_near_market_min_edge: 0.02 # (was 0.03)
   # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
-  limit_buy_passive_only_below_edge: 0.03 # (was 0.05)
+  limit_buy_passive_only_below_edge: 0.01 # (was 0.03)
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
   limit_buy_escalation_price_enabled: true
-  limit_buy_escalate_after_minutes_1: 2 # Faster (was 5)
-  limit_buy_escalate_after_minutes_2: 5 # Faster (was 10)
+  limit_buy_escalate_after_minutes_1: 1 # Faster (was 2)
+  limit_buy_escalate_after_minutes_2: 3 # Faster (was 5)
   # Optional: cancel stale resting BUYs earlier than limit_order_ttl (0 = off). 15 = patience exhausted.
-  limit_buy_escalation_cancel_minutes: 10 # Added 10min cap (was 0)
+  limit_buy_escalation_cancel_minutes: 5 # Tighter (was 10)
   # Avoid stacking another same-side BUY while an unresolved position exists for that market (platform+ticker+side).
   skip_new_buy_when_unresolved_same_side: true
   # Wide/gapped order books: lift dip-based limits toward bid + anchor×(ask−bid), capped by model fair value;
   # EV-tier quotes also get a touch-lift to at least the bid when fair_cap allows.
   limit_buy_wide_book_coalesce_enabled: true
-  limit_buy_wide_book_spread_rel: 0.15 # Tightened (was 0.22)
-  limit_buy_wide_book_anchor_fraction: 0.80 # Increased (was 0.70)
+  limit_buy_wide_book_spread_rel: 0.12 # Tightened (was 0.15)
+  limit_buy_wide_book_anchor_fraction: 0.90 # Increased (was 0.80)
   limit_buy_wide_book_conservative_substrings: []
   limit_buy_wide_book_conservative_yf_tickers: []
 
@@ -259,50 +259,50 @@ recovery:
 
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
-  emergency_stop_reset_time: 1776032100
+  emergency_stop_reset_time: 1773550140 # RESET: April 15, 2026
   # vol_regime | vol_regime_threshold (aliases): VolRegimeStrategy = DefaultThreshold recommend + vol mults in compare_historical
   strategy_engine: vol_regime
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 15% base for higher hurdle (was 5%)
-    min_edge: 0.15
+    # Net edge after maker fee; 3% base for higher hurdle (was 15%)
+    min_edge: 0.03
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
-    skip_p_win_mid_band_enabled: true # Re-enabled to avoid coin flips
+    skip_p_win_mid_band_enabled: false # Disabled to allow more trades
     skip_p_win_mid_lo: 0.42
     skip_p_win_mid_hi: 0.58
     # New proposed fields:
-    no_trade_zone_width: 0.10
-    buy_no_extra_min_edge: 0.07
+    no_trade_zone_width: 0.05
+    buy_no_extra_min_edge: 0.03
     # 0–10¢ legs must clear this net edge (blocks weak edge at penny prices; 0 = off).
 
     cheap_band_price_lo: 0.00
     cheap_band_price_hi: 0.10
-    cheap_band_min_net_edge: 0.12 # Tightened (was 0.06)
-    kelly_dampen: 0.10 # Reduced to decrease size (was 0.20)
-    max_bankroll_fraction: 0.05 # Increased from 0.01 to allow larger trades
+    cheap_band_min_net_edge: 0.06 # Relaxed (was 0.12)
+    kelly_dampen: 0.15 # Reduced (was 0.10)
+    max_bankroll_fraction: 0.08 # Increased (was 0.05)
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).
-    edge_size_boost_edge: 0.15 # Tightened (was 0.10)
-    edge_size_boost_mult: 1.2 # Reduced (was 1.5)
-    spread_wide_fraction: 0.05 # Tightened (was 0.10)
-    spread_wide_size_mult: 0.3 # Tightened (was 0.5)
+    edge_size_boost_edge: 0.10 # (was 0.15)
+    edge_size_boost_mult: 1.5 # (was 1.2)
+    spread_wide_fraction: 0.15 # Relaxed
+    spread_wide_size_mult: 0.5
     # Multiply simple-EV spend fraction on 15m / sub-hour (1.0 = unchanged). Compensates for same Kelly path on fast markets.
-    ultra_short_size_mult: 0.5 # Reduced (was 0.8)
-    emp_vol_disagree_threshold: 0.10 # Tightened (was 0.15)
-    disagree_size_mult: 0.3 # Tightened (was 0.5)
-    calibration_win_rate_threshold: 0.45 # Tightened (was 0.40)
-    calibration_poor_size_mult: 0.5 # Tightened (was 0.7)
+    ultra_short_size_mult: 0.8 # (was 0.5)
+    emp_vol_disagree_threshold: 0.15 # Relaxed
+    disagree_size_mult: 0.5
+    calibration_win_rate_threshold: 0.40 # Relaxed
+    calibration_poor_size_mult: 0.7
     min_bid_size: 0 # Hard skip when visible bid size below this; 0 = use min_order_book_depth only
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
-    min_edge: 0.15 # Tightened from 0.05 to focus on high-signal trades
+    min_edge: 0.03 # Relaxed to match simple_ev
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.25 } # Ultra-cheap: require edge (was 20¢)
-      - { lo: 0.02, hi: 0.15, min_edge: 0.20 } # Cheap tails
-      - { lo: 0.15, hi: 0.40, min_edge: 0.15 } # Standard 'sweet spot'
-      - { lo: 0.40, hi: 0.65, min_edge: 0.20 } # Coin-flip zone
-      - { lo: 0.65, hi: 1.00, min_edge: 0.15 } # Expensive consensus
+      - { lo: 0.00, hi: 0.02, min_edge: 0.15 } # (was 0.25)
+      - { lo: 0.02, hi: 0.15, min_edge: 0.10 } # (was 0.20)
+      - { lo: 0.15, hi: 0.40, min_edge: 0.05 } # (was 0.15)
+      - { lo: 0.40, hi: 0.65, min_edge: 0.08 } # (was 0.20)
+      - { lo: 0.65, hi: 1.00, min_edge: 0.05 } # (was 0.15)
   # Log final required edges: simple mode prints the single gate; legacy prints stacked core + req_yes/req_no.
   log_effective_min_edge: true
   # One JSON line per market with p pipeline, net edges, required hurdles, regime mults (grep decision_diag:).
@@ -413,8 +413,8 @@ strategy:
   enable_model_prob_hard_cap: true
   model_prob_hard_lo: 0.05 # Increased floor (was 0.01)
   model_prob_hard_hi: 0.70 # Decreased cap (was 0.75)
-  max_dip_cap: 0.03 # Tightened (was 0.05)
-  limit_dip_pct: 0.03 # Slightly more aggressive limit to improve fill rate (was 0.02)
+  max_dip_cap: 0.01 # Tightened (was 0.03)
+  limit_dip_pct: 0.005 # Extremely aggressive limit to improve 1.8% fill rate (was 0.03)
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.05 # Tightened (was 0.10)
@@ -443,8 +443,8 @@ strategy:
   # Modest +20% vs base so 15m can still get entries when longer-dated legs fill the bucket; same yf_ticker shares one open sum.
   max_open_contracts_per_underlying_ultra_short: 25
   layered_order_levels: 3 # Reduced (was 4)
-  limit_dip_pct_high_confidence: 0.01 # High P(win): bid close to tape (was 0.02)
-  limit_dip_pct_price_decline: 0.02 # (was 0.03)
+  limit_dip_pct_high_confidence: 0.00 # High P(win): bid the tape (was 0.01)
+  limit_dip_pct_price_decline: 0.01 # (was 0.02)
   # DTE-confidence dip scaling: when resolution is far out AND model is confident,
   # place deeper limit orders to catch uncertainty-driven price dips.
   # Markets with distant resolution are prone to mean-reverting dips even when
@@ -543,9 +543,14 @@ strategy:
   dynamic_kelly_recovery_win_rate: 0.60 # (was 0.55)
   # Per-venue circuit breaker: Kalshi realized PnL vs Kalshi balance; Gemini vs Gemini — independent.
   # Not win-rate based — trips when losses eat too much of that venue's balance (e.g. 20% in 8h).
-  adaptive_loss_block_max_balance_loss_pct: 0.10 # (was 0.20)
-  adaptive_loss_block_lookback_hours: 12.0 # (was 8.0)
+  adaptive_loss_block_max_balance_loss_pct: 0.50 # INCREASED SIGNIFICANTLY (was 0.10) to avoid drawdown halts on micro-balances
+  adaptive_loss_block_lookback_hours: 4.0 # (was 12.0)
   adaptive_loss_block_min_trades: 3 # (was 5)
+  adaptive_execution_fill_rate_target: 0.12 # Raise fill-rate target; below this bot tightens limits toward tape
+  adaptive_execution_min_dip_multiplier: 0.10 # Allow much more aggression than old hard floor 0.20
+  drawdown_stop_trading_pct: 0.50 # Avoid constant halts on tiny wallets; still hard-stops at 50% drawdown in window
+  drawdown_cooldown_hours: 6.0 # Shorten drawdown lookback so old losses decay faster after reset
+  risk_balance_floor_cents: 2500 # Treat balances below $25 as $25 for loss % calculations to prevent micro-balance lockout
   enable_two_sided_quotes: false # Temporarily disable symmetric YES/NO quotes while performance stabilizes
   two_sided_quote_min_edge: 0.05 # (was 0.02)
   macro_signal_enabled: true # Include macro cross-asset context in signal model
