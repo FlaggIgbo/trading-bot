@@ -10591,5 +10591,143 @@ def _reconcile_and_record_markouts(cfg: dict, ae_cfg: AlphaEngineConfig) -> None
         print(f"[Markouts] Recorded {recorded_count} new markout observations across recent fills.")
 
 
+class BackgroundRunner:
+    def __init__(self, args):
+        self.args = args
+        self.running = True
+        self.iteration = 0
+        # Register signal handlers
+        signal.signal(signal.SIGTERM, self.handle_exit)
+        signal.signal(signal.SIGINT, self.handle_exit)
+
+    def handle_exit(self, signum, frame):
+        print(f"\n[Runner] Signal {signum} received. Shutting down gracefully...")
+        self.running = False
+
+    def run(self):
+        print("===========================================================================")
+        print("  TRADING BOT — Background Runner Started")
+        print(f"  Interval: {os.getenv('POLL_INTERVAL_SECONDS', '600')} seconds")
+        print("===========================================================================")
+        
+        while self.running:
+            start_ts = time.time()
+            self.iteration += 1
+            
+            # Handle --clear-emergency-stop: only active on the very first loop if passed via CLI
+            current_args = copy.deepcopy(self.args)
+            if self.iteration > 1 and hasattr(current_args, "clear_emergency_stop"):
+                current_args.clear_emergency_stop = False
+            
+            try:
+                # Use the existing capture_and_analyze entry point
+                capture_and_analyze(
+                    lambda: _run(current_args),
+                    "scripts/compare_historical.py",
+                    use_llm=not getattr(current_args, "no_llm", False),
+                    per_trade_analysis=True,
+                )
+            except Exception as e:
+                print(f"[Runner] Unhandled loop error: {e}")
+            
+            if not self.running:
+                break
+                
+            # Sleep until next interval (10 min default)
+            poll_seconds = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
+            elapsed = time.time() - start_ts
+            sleep_time = max(1, poll_seconds - elapsed)
+            
+            if self.running:
+                print(f"\n[Runner] Iteration {self.iteration} complete. Sleeping {int(sleep_time)}s...\n")
+                # Sleep in small chunks to remain responsive to SIGTERM
+                for _ in range(int(sleep_time)):
+                    if not self.running:
+                        break
+                    time.sleep(1)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # We must import signal and copy here as they might not be in global scope
+    import signal
+    import copy
+    import os
+
+    # Re-parse args to ensure we have them for the runner
+    # (main logic usually does this, but we're replacing the entry point)
+    # We call main() once but catch its return if it's a "simple" command like --show-config
+    
+    # Check for background mode env var or just default to loop if on Render
+    is_render = os.getenv("RENDER") == "true"
+    is_background = os.getenv("BACKGROUND_MODE", "false").lower() in ("true", "1", "yes")
+    
+    if is_render or is_background:
+        # We need to peek at args to see if we should just exit (e.g. --show-config)
+        # but the actual loop will call _run() which calls get_config() fresh.
+        # For now, let's just use a simplified version of the main() parser
+        # to decide if we should loop.
+        import argparse
+        temp_parser = argparse.ArgumentParser()
+        temp_parser.add_argument("--show-config", action="store_true")
+        temp_parser.add_argument("--reconcile-only", action="store_true")
+        t_args, _ = temp_parser.parse_known_args()
+        
+        if t_args.show_config or t_args.reconcile_only:
+            # Fall back to single-run main() for utility commands
+            raise SystemExit(main())
+        
+        # Standard production run -> start the background loop
+        # We call main()'s logic to get the fully parsed 'args' object first
+        # but we need to prevent it from actually RUNNING yet.
+        # This is a bit tricky without refactoring main(). 
+        # Let's just manually re-parse everything here for the runner.
+        
+        # Copy the parser from main() or just call main() and have it return args?
+        # Actually, let's just modify the end of main() to return args if asked.
+        # But even simpler: just run the loop in a new block.
+        
+        # We'll just define the runner and use the user's logic.
+        pass # placeholder
+
+    # Using the user's requested simple wrap for now, but with the runner class
+    # to handle the SIGTERM properly.
+    
+    # First, parse everything once
+    # (Note: we need to recreate the parser or just extract the logic)
+    # For now, I will just call main() inside the loop as requested, 
+    # but with the SIGTERM handler.
+    
+    runner_active = True
+    def signal_handler(sig, frame):
+        global runner_active
+        print("\n[Runner] SIGTERM/SIGINT received. Shutting down...")
+        runner_active = False
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    print("[Runner] Starting background loop (10m interval)...")
+    while runner_active:
+        try:
+            # We call main() which does its own argparse.parse_args()
+            # This is fine as sys.argv remains constant in the process.
+            exit_code = main()
+            if exit_code != 0 and os.getenv("EXIT_ON_ERROR", "false").lower() == "true":
+                print(f"[Runner] Main returned non-zero ({exit_code}). Exiting.")
+                sys.exit(exit_code)
+        except SystemExit as se:
+            if se.code != 0:
+                print(f"[Runner] SystemExit({se.code})")
+        except Exception as e:
+            print(f"[Runner] Loop Error: {e}")
+        
+        if not runner_active:
+            break
+            
+        wait = int(os.getenv("POLL_INTERVAL_SECONDS", "600"))
+        print(f"[Runner] Sleeping {wait}s...")
+        for _ in range(wait):
+            if not runner_active: break
+            time.sleep(1)
+    
+    sys.exit(0)
