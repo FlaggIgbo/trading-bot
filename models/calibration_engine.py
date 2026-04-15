@@ -78,7 +78,12 @@ class CalibrationEngine:
         for p in self.predictions:
             # Model P(Win)
             # If side is 'no', P(Win) = 1 - p_yes
-            p_val = float(p.get("hist_p") or 0.5)
+            p_raw = float(p.get("hist_p") or 0.5)
+            # EXCLUDE fallback noise (0.5 on Gemini usually means lost limit_orders context)
+            if p_raw == 0.5:
+                continue
+                
+            p_val = p_raw
             if p.get("side", "").lower() == "no":
                 p_val = 1.0 - p_val
             
@@ -129,7 +134,11 @@ class CalibrationEngine:
         n = 0
         
         for p in self.predictions:
-            p_win = float(p.get("hist_p") or 0.5)
+            p_raw = float(p.get("hist_p") or 0.5)
+            if p_raw == 0.5:
+                continue
+            
+            p_win = p_raw
             if p.get("side", "").lower() == "no":
                 p_win = 1.0 - p_win
             
@@ -149,7 +158,11 @@ class CalibrationEngine:
             return None
         errors = []
         for p in self.predictions:
-            p_win = float(p.get("hist_p") or 0.5)
+            p_raw = float(p.get("hist_p") or 0.5)
+            if p_raw == 0.5:
+                continue
+                
+            p_win = p_raw
             if p.get("side", "").lower() == "no":
                 p_win = 1.0 - p_win
             outcome = 1.0 if p.get("outcome") == "win" else 0.0

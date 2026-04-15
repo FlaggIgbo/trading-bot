@@ -5031,6 +5031,7 @@ def _run(args) -> int:
 
 
 def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fraction, min_contracts) -> int:
+    sp = _load_strategy_params(strategy)
     min_edge = float(strategy.get("min_edge", args.edge))
     kalshi = KalshiClient()
     trading_cfg = cfg.get("trading", {})
@@ -5049,6 +5050,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     except Exception:
         gemini_balance_for_arb = 0
 
+    sp = _load_strategy_params(strategy)
+
+    # Prefetch lookback: we need enough history for empirical (180-730d) 
+    # even if evaluation simulation (args.days) is only 1 day.
+    hist_lookback = max(int(args.days), int(getattr(sp, "empirical_horizon_long_days", 365)) + 30)
+
     to_date = datetime.utcnow()
     from_date = to_date - timedelta(days=args.days)
     from_ts, to_ts = from_date.strftime("%Y-%m-%d"), to_date.strftime("%Y-%m-%d")
@@ -5058,7 +5065,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     print("  TRADING BOT — Contract Evaluation Run")
     print("=" * 75)
     print(f"  Time:        {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
-    print(f"  History:     {from_ts} → {to_ts} ({args.days} days)")
+    print(f"  Eval window: {from_ts} → {to_ts} ({args.days} days)")
+    print(f"  History:     {hist_lookback} days lookback (for empirical/vol models)")
     print(f"  Min edge:    {min_edge:.0%}")
     print(f"  Volatility:  {'enabled' if bool(getattr(args, 'use_volatility', False) or strategy.get('use_volatility_by_default')) else 'disabled'}")
     _dry_banner = bool(trading_cfg.get("dry_run", True))
@@ -5217,7 +5225,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     except Exception as exc:
         print(f"[Reconcile] Fill reconciliation failed (continuing run): {exc}")
 
-    sp = _load_strategy_params(strategy)
+
 
     # Adaptive Execution Aggressiveness: shrink dip if fill rate is low
     fill_rate_aggression_mult = 1.0
@@ -5780,7 +5788,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             if yt.startswith("WEATHER:"):
                 # Warm weather cache if needed, but the model handles it fine
                 return s, yt, [], None, "ok"
-            cl = yf_get_aggs(yt, days_back=args.days, config=cfg)
+            cl = yf_get_aggs(yt, days_back=hist_lookback, config=cfg)
             if not cl:
                 return s, yt, None, None, "no_closes"
             cl = apply_underlying_closes(cfg, s, cl)
@@ -6108,7 +6116,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 use_vol = False # Weather model handles its own distribution
                 closes_for_emp = []
             else:
-                closes_for_emp = _get_closes_for_empirical(yf_ticker, args.days, closes, m, sp, cfg, kalshi_series=series)
+                closes_for_emp = _get_closes_for_empirical(yf_ticker, hist_lookback, closes, m, sp, cfg, kalshi_series=series)
                 recent_w = _regime_adjusted_recent_weight(closes_for_emp, sp.empirical_recent_weight)
                 if sp.empirical_multi_horizon_enabled:
                     emp = empirical_probability_multi_horizon(
@@ -7478,7 +7486,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     emp = hist_p_gem
                     use_vol = False
                 else:
-                    closes_for_emp_g = _get_closes_for_empirical(yf_ticker, args.days, closes, evt, sp, cfg)
+                    closes_for_emp_g = _get_closes_for_empirical(yf_ticker, hist_lookback, closes, evt, sp, cfg)
                 recent_w_g = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
                 if sp.empirical_multi_horizon_enabled:
                     emp = empirical_probability_multi_horizon(
@@ -8819,7 +8827,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             continue
                         # Supported market (5pm crypto, 4pm S&P, daily close) — fetch closes and evaluate
                         if pos_yf:
-                            closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
+                            closes = yf_get_aggs(pos_yf, days_back=hist_lookback, config=cfg)
                             if closes:
                                     closes = apply_underlying_closes(cfg, series or "", closes)
                                     threshold, direction, threshold_hi = extract_strike(m)
@@ -8827,7 +8835,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                                         yes_bid = float(m.get("yes_bid_dollars") or 0) or float(m.get("last_price_dollars") or m.get("yes_ask_dollars") or 0)
                                         no_bid = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
                                         closes_for_emp_pos = _get_closes_for_empirical(
-                                            pos_yf, args.days, closes, m, sp, cfg, kalshi_series=series or ""
+                                            pos_yf, hist_lookback, closes, m, sp, cfg, kalshi_series=series or ""
                                         )
                                         recent_w_pos = _regime_adjusted_recent_weight(closes_for_emp_pos, sp.empirical_recent_weight)
                                         emp_pos = empirical_probability(
@@ -9523,7 +9531,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             continue
                         if not pos_yf or pos_yf not in GEMINI_CRYPTO_YF:
                             continue
-                        closes = yf_get_aggs(pos_yf, days_back=args.days, config=cfg)
+                        closes = yf_get_aggs(pos_yf, days_back=hist_lookback, config=cfg)
                         if not closes:
                             if getattr(args, "verbose", False):
                                 print(f"    (no hist data for Gemini {ticker_g}, skip sell eval)")
@@ -9536,7 +9544,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                             current_price_g = last_close_g
                         impl = get_yes_price(info.get("contract") or _get_yes_contract(evt) or {})
                         no_price_g = 1.0 - impl if 0 < impl < 1 else impl
-                        closes_for_emp_g = _get_closes_for_empirical(pos_yf, args.days, closes, evt, sp, cfg)
+                        closes_for_emp_g = _get_closes_for_empirical(pos_yf, hist_lookback, closes, evt, sp, cfg)
                         recent_w_gp = _regime_adjusted_recent_weight(closes_for_emp_g, sp.empirical_recent_weight)
                         emp_g = empirical_probability(
                             closes_for_emp_g,
