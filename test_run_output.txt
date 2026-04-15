@@ -1,0 +1,1914 @@
+
+===========================================================================
+  TRADING BOT — Contract Evaluation Run
+===========================================================================
+  Time:        2026-04-13 04:16 UTC
+  History:     2024-04-13 → 2026-04-13 (730 days)
+  Min edge:    3%
+  Volatility:  enabled
+  Mode:        PREVIEW — shows proposed orders only (no API order placement)
+  CLI flags:   --execute=False  --preview=True  config trading.dry_run=False
+===========================================================================
+
+[Gemini] Fetched 26 events (BTC-USD:4, BZ=F:3, CL=F:3, ETH-USD:3, SOL-USD:3, WEATHER:1, WEATHER:BOS:1, WEATHER:CHI:1, WEATHER:LAX:1, WEATHER:MIA:1, XRP-USD:3, ZEC-USD:2)
+[Reconcile] Kalshi seen=71 inserted=0 dup=69 skipped=2 | Gemini seen=83 inserted=0 dup=83 skipped=0
+[Adaptive Execution] Fill rate 1.8% < 10% → dip multiplier 0.20 (more aggressive)
+[Balance] Kalshi Regime: SURVIVAL (Kelly x0.50, Edge +0.01)
+[Balance] Gemini Regime: SURVIVAL (Kelly x0.50, Edge +0.01)
+[Series Guard] KXWTI → PAPER ONLY (WR 0.0%, 10 consecutive losses)
+[Series Guard] KXDOGE15M → PAPER ONLY (WR 18.2%, 0 consecutive losses)
+[Series Guard] KXTEMPNYCH → PAPER ONLY (WR 4.3%, 22 consecutive losses)
+[Markouts] Recorded 12 new markout observations across recent fills.
+[Strategy] Engine: vol_regime
+[Exploration] No fills in last 2.0h. Active: -0% edge.
+[Trust Engine] Overall Trust Score: 0.35 (Realized/Predicted EV) | Brier: 0.355
+[Trust Engine] Bucketed Reliability (Win Rate vs Prediction):
+  0.0-0.1: WR 0.0% vs Expected 9.1% (OVER confident, N=2)
+  0.1-0.2: WR 0.0% vs Expected 14.5% (OVER confident, N=15)
+  0.2-0.3: WR 6.7% vs Expected 25.7% (OVER confident, N=90)
+  0.3-0.4: WR 16.0% vs Expected 35.1% (OVER confident, N=106)
+  0.4-0.5: WR 15.9% vs Expected 45.7% (OVER confident, N=138)
+  0.5-0.6: WR 8.8% vs Expected 52.1% (OVER confident, N=1479)
+  0.6-0.7: WR 24.5% vs Expected 63.8% (OVER confident, N=555)
+  0.7-0.8: WR 49.2% vs Expected 75.7% (OVER confident, N=317)
+  0.8-0.9: WR 35.5% vs Expected 85.0% (OVER confident, N=473)
+  0.9-1.0: WR 36.7% vs Expected 95.1% (OVER confident, N=788)
+
+[Empirical] Stressed calibration (overall WR 23.3%) → rolling recent_days 90 → 30
+
+[Risk] Kelly fraction: base=0.01 adaptive=0.01
+
+[Macro] 24h macro signal=-0.13% from SPY, UUP, GLD
+
+[Fill Attribution] 4798 fills (1252 with theoretical) | avg slippage 2986.2 bps | avg spread 21340.8 bps
+
+[Limit order fills] last 30d: fill_rate=1.8% (153 filled / 8438 closed) | open_resting=1744
+  Hint: fill_rate <10% often means limits too passive for current books.
+
+[Parity] Dynamic side penalty active | YES +0.0%, NO +21.0% (lookback 7d)
+
+[YES Bias Correction] overconfidence_edge +0.0% | probability_shrinkage 70%
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXINXU (^GSPC)
+  Current Price:  $8,061 (blend live+close)  (-38.38% vs last close)
+  20-Day Range:   $11,984 – $13,083
+  History:        502 daily closes loaded
+  KXINXU-26APR13H1600-T7524.9999: SKIP (market prob 1.0% < 2.0%) | Will the S&P 500 be above 7524.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7499.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7499.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7474.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7474.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7449.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7449.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7424.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7424.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7399.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7399.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7374.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7374.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7349.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7349.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7324.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7324.9999 on Apr 13, 2026 at 
+  KXINXU-26APR13H1600-T7299.9999: SKIP (market prob 0.0% < 2.0%) | Will the S&P 500 be above 7299.9999 on Apr 13, 2026 at 
+
+───────────────────────────────────────────────────────────────────────────
+  KXNASDAQ100U (^NDX)
+  Current Price:  $25,116 (blend live+close)  (+0.00% vs last close)
+  20-Day Range:   $22,953 – $25,116
+  History:        499 daily closes loaded
+  KXNASDAQ100U-26APR13H1600-T27899.99: SKIP (market prob 1.0% < 2.0%) | Will the Nasdaq-100 be above 27899.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27799.99: SKIP (market prob 1.0% < 2.0%) | Will the Nasdaq-100 be above 27799.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27699.99: SKIP (market prob 1.0% < 2.0%) | Will the Nasdaq-100 be above 27699.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27599.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 27599.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27499.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 27499.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27399.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 27399.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27299.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 27299.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27199.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 27199.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T27099.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 27099.99 at the end of Apr
+  KXNASDAQ100U-26APR13H1600-T26999.99: SKIP (market prob 0.0% < 2.0%) | Will the Nasdaq-100 be above 26999.99 at the end of Apr
+
+───────────────────────────────────────────────────────────────────────────
+  KXWTI (CL=F)
+  Current Price:  $105 (blend live+close)  (-0.01% vs last close)
+  20-Day Range:   $88.13 – $113
+  History:        502 daily closes loaded
+  [Regime] vol ratio=1.24x | edge x1.12 | dip x1.17 | size x0.86
+  [Execution] stability window scaled to 6s (base 5s)
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR13-T109.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >109.99 on Apr 13, 2026?
+    ├─ Strike:       $110 (pays if above)
+    ├─ Current:      $105  →  $5.11 below strike (4.87% gap to cover)
+    ├─ Resolves in:  14.2 hr
+    ├─ Empirical P:  20.4%  (historical frequency)
+    ├─ Volatility P: 14.1%  (model based on current price + DTE)
+    ├─ Blended P:    18.7%  (final model probability)  (AH: 39.5%→18.7%)
+    ├─ Barbell@blend: P(YES) 16.2%→24.6% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 18.7% (used for rec)
+    ├─ Market YES:   17.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net +0.3%  (bids 17.0% / 80.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 14.2 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 3.0%; NO 0.3% vs req 3.0% (raw gaps 1.7% / -1.7%)  [Trust 0.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR13-T108.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >108.99 on Apr 13, 2026?
+    ├─ Strike:       $109 (pays if above)
+    ├─ Current:      $105  →  $4.11 below strike (3.92% gap to cover)
+    ├─ Resolves in:  14.2 hr
+    ├─ Empirical P:  20.4%  (historical frequency)
+    ├─ Volatility P: 18.3%  (model based on current price + DTE)
+    ├─ Blended P:    25.2%  (final model probability)  (AH: 44.8%→25.2%)
+    ├─ Barbell@blend: P(YES) 19.2%→26.9% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 25.2% (used for rec)
+    ├─ Market YES:   23.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.2%  |  NO net -0.2%  (bids 23.0% / 74.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 14.2 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.2% vs req 3.0%; NO -0.2% vs req 3.0% (raw gaps 2.2% / -2.2%)  [Trust 0.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR13-T107.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >107.99 on Apr 13, 2026?
+    ├─ Strike:       $108 (pays if above)
+    ├─ Current:      $105  →  $3.11 below strike (2.96% gap to cover)
+    ├─ Resolves in:  14.2 hr
+    ├─ Empirical P:  20.4%  (historical frequency)
+    ├─ Volatility P: 23.4%  (model based on current price + DTE)
+    ├─ Blended P:    31.7%  (final model probability)  (AH: 50.7%→31.7%)
+    ├─ Barbell@blend: P(YES) 22.9%→29.7% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 31.7% (used for rec)
+    ├─ Market YES:   30.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net +0.3%  (bids 30.0% / 67.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 14.2 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 3.0%; NO 0.3% vs req 3.0% (raw gaps 1.7% / -1.7%)  [Trust 0.00]
+
+  [Uncertainty] KXWTI-26APR13-T106.99 → SKIP (Edge 17.8% < Uncertainty 19.5%) | Ensemble: [72.6%, 45.0%]
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR13-T106.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >106.99 on Apr 13, 2026?
+    ├─ Strike:       $107 (pays if above)
+    ├─ Current:      $105  →  $2.11 below strike (2.01% gap to cover)
+    ├─ Resolves in:  14.2 hr
+    ├─ Empirical P:  20.4%  (historical frequency)
+    ├─ Volatility P: 31.0%  (model based on current price + DTE)
+    ├─ Blended P:    41.9%  (final model probability)  (AH: 58.8%→41.9%)
+    ├─ Barbell@blend: P(YES) 28.4%→33.8% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 41.9% (used for rec)
+    ├─ Market YES:   41.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.1%  |  NO net +2.1%  (bids 41.0% / 55.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 14.2 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -0.1% vs req 6.0%; NO 2.1% vs req 6.0% (raw gaps 0.9% / -0.9%)  [Trust 0.00]
+
+  [Uncertainty] KXWTI-26APR13-T105.99 → SKIP (Edge 15.5% < Uncertainty 24.9%) | Ensemble: [86.1%, 50.8%]
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR13-T105.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >105.99 on Apr 13, 2026?
+    ├─ Strike:       $106 (pays if above)
+    ├─ Current:      $105  →  $1.11 below strike (1.06% gap to cover)
+    ├─ Resolves in:  14.2 hr
+    ├─ Empirical P:  20.4%  (historical frequency)
+    ├─ Volatility P: 39.4%  (model based on current price + DTE)
+    ├─ Blended P:    52.6%  (final model probability)  (AH: 68.5%→52.6%)
+    ├─ Barbell@blend: P(YES) 34.4%→38.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 52.6% (used for rec)
+    ├─ Market YES:   53.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -1.4%  |  NO net +2.4%  (bids 53.0% / 44.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 14.2 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -1.4% vs req 6.0%; NO 2.4% vs req 6.0% (raw gaps -0.4% / 0.4%)  [Trust 0.00]
+
+  [Uncertainty] KXWTI-26APR14-T113.99 → SKIP (Edge 4.4% < Uncertainty 13.0%) | Ensemble: [22.6%, 4.2%]
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR14-T113.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >113.99 on Apr 14, 2026?
+    ├─ Strike:       $114 (pays if above)
+    ├─ Current:      $105  →  $9.11 below strike (8.68% gap to cover)
+    ├─ Resolves in:  38 hr
+    ├─ Empirical P:  0.0%  (historical frequency)
+    ├─ Volatility P: 13.4%  (model based on current price + DTE)
+    ├─ Blended P:    10.8%  (final model probability)  (AH: 13.4%→10.8%)
+    ├─ Barbell@blend: P(YES) 7.1%→17.8% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: base→—; final P(YES) 10.8% (used for rec)  [WARN] joint-high pulled NO leg out of base bucket @ blend
+    ├─ Market YES:   9.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.8%  |  NO net -0.8%  (bids 9.0% / 89.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 38 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.8% vs req 5.0%; NO -0.8% vs req 5.0% (raw gaps 1.8% / -1.8%)  [Trust 0.00]
+
+  KXWTI-26APR14-T112.99: SKIP (spread 100.0% > 50.0% cap) | Will the WTI front-month settle oil price  be >112.99 o
+  KXWTI-26APR14-T111.99: SKIP (spread 300.0% > 50.0% cap) | Will the WTI front-month settle oil price  be >111.99 o
+  KXWTI-26APR14-T110.99: SKIP (spread 64.7% > 50.0% cap) | Will the WTI front-month settle oil price  be >110.99 o
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    KXWTI-26APR14-T109.99  [Kalshi]
+    Will the WTI front-month settle oil price  be >109.99 on Apr 14, 2026?
+    ├─ Strike:       $110 (pays if above)
+    ├─ Current:      $105  →  $5.11 below strike (4.87% gap to cover)
+    ├─ Resolves in:  38 hr
+    ├─ Empirical P:  20.4%  (historical frequency)
+    ├─ Volatility P: 24.9%  (model based on current price + DTE)
+    ├─ Blended P:    28.9%  (final model probability)  (AH: 50.4%→28.9%)
+    ├─ Barbell@blend: P(YES) 23.2%→29.9% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 28.9% (used for rec)
+    ├─ Market YES:   27.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.9%  |  NO net -1.9%  (bids 27.0% / 72.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 38 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.9% vs req 3.0%; NO -1.9% vs req 3.0% (raw gaps 1.9% / -1.9%)  [Trust 0.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    WTI2604132100  [Gemini]
+    Oil (WTI) price on April 13? ($98 or above)
+    ├─ Strike:       $98.00 (pays if above)
+    ├─ Current:      $105  →  $6.88 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  54.7%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    64.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 74.6%→68.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 64.1% (used for rec)
+    ├─ Market YES:   65.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -1.9%  |  NO net -0.1%  (bids 65.0% / 35.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 64.1% vs market 65.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    WTI2604132100  [Gemini]
+    Oil (WTI) price on April 13? ($101 or above)
+    ├─ Strike:       $101 (pays if above)
+    ├─ Current:      $105  →  $3.88 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  46.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    9.8%  (final model probability)
+    ├─ Barbell@blend: P(YES) 64.9%→61.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: alpha→alpha; NO-base: —→—; final P(YES) 9.8% (used for rec)
+    ├─ Market YES:   8.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.8%  |  NO net -2.8%  (bids 8.0% / 92.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 9.8% vs market 8.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    WTI2604132100  [Gemini]
+    Oil (WTI) price on April 13? ($102 or above)
+    ├─ Strike:       $102 (pays if above)
+    ├─ Current:      $105  →  $2.88 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  41.8%  (historical frequency)
+    ├─ Volatility P: 74.2%  (model based on current price + DTE)
+    ├─ Blended P:    27.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 59.8%→57.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 27.5% (used for rec)
+    ├─ Market YES:   26.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 26.0% / 74.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 27.5% vs market 26.0%  [Trust 1.00]
+
+  [Gemini] WTI2604132100: SKIP (market prob 0.0% < 2.0%) | Oil (WTI) price on April 13? ($95 or above)
+  [Gemini] WTI2604132100: SKIP (market prob 0.0% < 2.0%) | Oil (WTI) price on April 13? ($96 or above)
+  [Gemini] WTI2604132100: SKIP (market prob 0.0% < 2.0%) | Oil (WTI) price on April 13? ($97 or above)
+  [Gemini] WTI2604132100: SKIP (market prob 0.0% < 2.0%) | Oil (WTI) price on April 13? ($99 or above)
+  [Gemini] WTI2604132100: SKIP (market prob 0.0% < 2.0%) | Oil (WTI) price on April 13? ($100 or above)
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    WTI2604172100  [Gemini]
+    Oil (WTI) price on April 17? ($84 or above)
+    ├─ Strike:       $84.00 (pays if above)
+    ├─ Current:      $105  →  $20.88 above strike (already in-the-money)
+    ├─ Resolves in:  4.7 days
+    ├─ Empirical P:  99.4%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 97.3%→85.5% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→base; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   89.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -15.0%  |  NO net +13.0%  (bids 89.0% / 11.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 4.7 days)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 89.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    WTI2604172100  [Gemini]
+    Oil (WTI) price on April 17? ($87 or above)
+    ├─ Strike:       $87.00 (pays if above)
+    ├─ Current:      $105  →  $17.88 above strike (already in-the-money)
+    ├─ Resolves in:  4.7 days
+    ├─ Empirical P:  99.4%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 96.3%→84.7% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   83.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -9.0%  |  NO net +7.0%  (bids 83.0% / 17.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 4.7 days)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 83.0%  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXAAAGASW (RB=F)
+  Underlying adjust: Yahoo × 1.0000 + 0.90 $/gal (align wholesale proxy to retail-style Kalshi thresholds); Kalshi settles on AAA national retail (gasprices.aaa.com), not RBOB
+  Proxy basis: +2.50% extra min edge (model vs settlement source)
+  Current Price:  $3.98 (blend live+close)  (+0.01% vs last close)
+  20-Day Range:   $3.87 – $4.25
+  History:        502 daily closes loaded
+
+───────────────────────────────────────────────────────────────────────────
+  KXBTCD (BTC-USD)
+  Current Price:  $70,944 (blend live+close)  (+0.29% vs last close)
+  20-Day Range:   $65,958 – $73,075
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.14x | edge x1.07 | dip x1.10 | size x0.91
+  [Execution] stability window scaled to 6s (base 5s)
+  KXBTCD-26APR1301-T80799.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80699.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80599.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80499.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80399.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80299.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80199.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T80099.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T79999.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+  KXBTCD-26APR1301-T79899.99: SKIP (market prob 1.0% < 2.0%) | Bitcoin price  on Apr 13, 2026?
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($70,700 or above)
+    ├─ Strike:       $70,700 (pays if above)
+    ├─ Current:      $70,944  →  $244 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  62.2%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 79.6%→72.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   91.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -17.0%  |  NO net +15.0%  (bids 91.0% / 9.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -17.0% vs req 3.6%; NO 15.0% vs req 3.6% (raw gaps -16.0% / 16.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($70,800 or above)
+    ├─ Strike:       $70,800 (pays if above)
+    ├─ Current:      $70,944  →  $144 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  62.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 72.4%→66.8% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   85.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -11.0%  |  NO net +9.0%  (bids 85.0% / 15.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -11.0% vs req 3.6%; NO 9.0% vs req 3.6% (raw gaps -10.0% / 10.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($70,900 or above)
+    ├─ Strike:       $70,900 (pays if above)
+    ├─ Current:      $70,944  →  $43.81 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  62.0%  (historical frequency)
+    ├─ Volatility P: 59.3%  (model based on current price + DTE)
+    ├─ Blended P:    66.8%  (final model probability)
+    ├─ Barbell@blend: P(YES) 60.1%→57.6% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.8% (used for rec)
+    ├─ Market YES:   66.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.2%  |  NO net -1.8%  (bids 66.0% / 34.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -0.2% vs req 3.6%; NO -1.8% vs req 3.6% (raw gaps 0.8% / -0.8%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.10 min_left=43.3m size_mult=0.80 → net_min=6.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,000 or above)
+    ├─ Strike:       $71,000 (pays if above)
+    ├─ Current:      $70,944  →  $56.19 below strike (0.08% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.9%  (historical frequency)
+    ├─ Volatility P: 37.9%  (model based on current price + DTE)
+    ├─ Blended P:    42.7%  (final model probability)
+    ├─ Barbell@blend: P(YES) 42.1%→44.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 42.7% (used for rec)
+    ├─ Market YES:   41.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net -2.7%  (bids 41.0% / 59.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 6.6%; NO -2.7% vs req 6.6% (raw gaps 1.7% / -1.7%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,100 or above)
+    ├─ Strike:       $71,100 (pays if above)
+    ├─ Current:      $70,944  →  $156 below strike (0.22% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.6%  (historical frequency)
+    ├─ Volatility P: 21.3%  (model based on current price + DTE)
+    ├─ Blended P:    18.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 31.0%→35.8% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 18.5% (used for rec)
+    ├─ Market YES:   17.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 17.0% / 83.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.5% vs req 3.6%; NO -2.5% vs req 3.6% (raw gaps 1.5% / -1.5%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.3m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,200 or above)
+    ├─ Strike:       $71,200 (pays if above)
+    ├─ Current:      $70,944  →  $256 below strike (0.36% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.6%  (historical frequency)
+    ├─ Volatility P: 11.6%  (model based on current price + DTE)
+    ├─ Blended P:    6.7%  (final model probability)
+    ├─ Barbell@blend: P(YES) 25.3%→31.5% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 6.7% (used for rec)
+    ├─ Market YES:   5.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net -2.7%  (bids 5.0% / 95.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 5.6%; NO -2.7% vs req 5.6% (raw gaps 1.7% / -1.7%)  [Trust 1.00]
+
+  [Gemini] BTC2604130500: SKIP (market prob 1.0% < 2.0%) | BTC price today at 1am EDT ($71,300 or above)
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.3m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,400 or above)
+    ├─ Strike:       $71,400 (pays if above)
+    ├─ Current:      $70,944  →  $456 below strike (0.64% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.6%  (historical frequency)
+    ├─ Volatility P: 3.7%  (model based on current price + DTE)
+    ├─ Blended P:    4.9%  (final model probability)
+    ├─ Barbell@blend: P(YES) 21.1%→28.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 4.9% (used for rec)
+    ├─ Market YES:   3.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.9%  |  NO net -2.9%  (bids 3.0% / 97.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.9% vs req 5.6%; NO -2.9% vs req 5.6% (raw gaps 1.9% / -1.9%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BTC2604132100  [Gemini]
+    BTC price on April 13 ($70,250 or above)
+    ├─ Strike:       $70,250 (pays if above)
+    ├─ Current:      $70,944  →  $694 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  69.6%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    74.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 74.2%→68.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 74.1% (used for rec)
+    ├─ Market YES:   73.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.1%  |  NO net -2.1%  (bids 73.0% / 27.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.1% vs req 3.0%; NO -2.1% vs req 3.0% (raw gaps 1.1% / -1.1%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BTC2604132100  [Gemini]
+    BTC price on April 13 ($70,500 or above)
+    ├─ Strike:       $70,500 (pays if above)
+    ├─ Current:      $70,944  →  $444 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  69.6%  (historical frequency)
+    ├─ Volatility P: 68.5%  (model based on current price + DTE)
+    ├─ Blended P:    66.6%  (final model probability)
+    ├─ Barbell@blend: P(YES) 68.9%→64.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.6% (used for rec)
+    ├─ Market YES:   65.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.6%  |  NO net -2.6%  (bids 65.0% / 35.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.6% vs req 3.0%; NO -2.6% vs req 3.0% (raw gaps 1.6% / -1.6%)  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXBTC15M (BTC-USD)
+  Current Price:  $70,944 (blend live+close)  (+0.29% vs last close)
+  20-Day Range:   $65,958 – $73,075
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.14x | edge x1.07 | dip x1.10 | size x0.91
+  [Execution] stability window scaled to 6s (base 5s)
+    ├─ ultra_short: horizon_edge_mult=1.27 min_left=13.3m size_mult=0.80 → net_min=7.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    KXBTC15M-26APR130030-30  [Kalshi]
+    BTC price up in next 15 mins?
+    ├─ Strike:       $70,964 (pays if above)
+    ├─ Current:      $70,944  →  $20.65 below strike (0.03% gap to cover)
+    ├─ Resolves in:  13 min
+    ├─ Empirical P:  50.5%  (historical frequency)
+    ├─ Volatility P: 41.9%  (model based on current price + DTE)
+    ├─ Blended P:    55.6%  (final model probability)  (AH: 90.2%→55.6%)
+    ├─ Barbell@blend: P(YES) 45.0%→46.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 55.6% (used for rec)
+    ├─ Market YES:   53.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.6%  |  NO net -2.6%  (bids 53.0% / 46.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 13 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.6% vs req 7.6%; NO -2.6% vs req 7.6% (raw gaps 2.6% / -2.6%)  [Trust 0.55]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($70,700 or above)
+    ├─ Strike:       $70,700 (pays if above)
+    ├─ Current:      $70,944  →  $244 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  62.2%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 79.8%→72.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   91.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -17.0%  |  NO net +15.0%  (bids 91.0% / 9.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -17.0% vs req 3.6%; NO 15.0% vs req 3.6% (raw gaps -16.0% / 16.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($70,800 or above)
+    ├─ Strike:       $70,800 (pays if above)
+    ├─ Current:      $70,944  →  $144 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  62.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 72.7%→67.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   85.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -11.0%  |  NO net +9.0%  (bids 85.0% / 15.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -11.0% vs req 3.6%; NO 9.0% vs req 3.6% (raw gaps -10.0% / 10.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($70,900 or above)
+    ├─ Strike:       $70,900 (pays if above)
+    ├─ Current:      $70,944  →  $43.81 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  62.0%  (historical frequency)
+    ├─ Volatility P: 59.4%  (model based on current price + DTE)
+    ├─ Blended P:    66.8%  (final model probability)
+    ├─ Barbell@blend: P(YES) 60.2%→57.6% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.8% (used for rec)
+    ├─ Market YES:   66.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.2%  |  NO net -1.8%  (bids 66.0% / 34.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -0.2% vs req 3.6%; NO -1.8% vs req 3.6% (raw gaps 0.8% / -0.8%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.10 min_left=43.3m size_mult=0.80 → net_min=6.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,000 or above)
+    ├─ Strike:       $71,000 (pays if above)
+    ├─ Current:      $70,944  →  $56.19 below strike (0.08% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.9%  (historical frequency)
+    ├─ Volatility P: 38.3%  (model based on current price + DTE)
+    ├─ Blended P:    42.7%  (final model probability)
+    ├─ Barbell@blend: P(YES) 42.4%→44.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 42.7% (used for rec)
+    ├─ Market YES:   41.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net -2.7%  (bids 41.0% / 59.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 6.6%; NO -2.7% vs req 6.6% (raw gaps 1.7% / -1.7%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.3m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,100 or above)
+    ├─ Strike:       $71,100 (pays if above)
+    ├─ Current:      $70,944  →  $156 below strike (0.22% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.6%  (historical frequency)
+    ├─ Volatility P: 21.1%  (model based on current price + DTE)
+    ├─ Blended P:    18.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 30.9%→35.7% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 18.5% (used for rec)
+    ├─ Market YES:   17.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 17.0% / 83.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.5% vs req 3.6%; NO -2.5% vs req 3.6% (raw gaps 1.5% / -1.5%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,200 or above)
+    ├─ Strike:       $71,200 (pays if above)
+    ├─ Current:      $70,944  →  $256 below strike (0.36% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.6%  (historical frequency)
+    ├─ Volatility P: 11.5%  (model based on current price + DTE)
+    ├─ Blended P:    6.7%  (final model probability)
+    ├─ Barbell@blend: P(YES) 25.3%→31.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 6.7% (used for rec)
+    ├─ Market YES:   5.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net -2.7%  (bids 5.0% / 95.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 5.6%; NO -2.7% vs req 5.6% (raw gaps 1.7% / -1.7%)  [Trust 1.00]
+
+  [Gemini] BTC2604130500: SKIP (market prob 1.0% < 2.0%) | BTC price today at 1am EDT ($71,300 or above)
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    BTC2604130500  [Gemini]
+    BTC price today at 1am EDT ($71,400 or above)
+    ├─ Strike:       $71,400 (pays if above)
+    ├─ Current:      $70,944  →  $456 below strike (0.64% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  51.6%  (historical frequency)
+    ├─ Volatility P: 3.8%  (model based on current price + DTE)
+    ├─ Blended P:    4.9%  (final model probability)
+    ├─ Barbell@blend: P(YES) 21.1%→28.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 4.9% (used for rec)
+    ├─ Market YES:   3.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.9%  |  NO net -2.9%  (bids 3.0% / 97.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.9% vs req 5.6%; NO -2.9% vs req 5.6% (raw gaps 1.9% / -1.9%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BTC2604132100  [Gemini]
+    BTC price on April 13 ($70,250 or above)
+    ├─ Strike:       $70,250 (pays if above)
+    ├─ Current:      $70,944  →  $694 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  69.6%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    74.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 74.0%→68.0% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 74.1% (used for rec)
+    ├─ Market YES:   73.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.1%  |  NO net -2.1%  (bids 73.0% / 27.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.1% vs req 3.0%; NO -2.1% vs req 3.0% (raw gaps 1.1% / -1.1%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BTC2604132100  [Gemini]
+    BTC price on April 13 ($70,500 or above)
+    ├─ Strike:       $70,500 (pays if above)
+    ├─ Current:      $70,944  →  $444 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  69.6%  (historical frequency)
+    ├─ Volatility P: 68.7%  (model based on current price + DTE)
+    ├─ Blended P:    66.6%  (final model probability)
+    ├─ Barbell@blend: P(YES) 69.1%→64.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.6% (used for rec)
+    ├─ Market YES:   65.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.6%  |  NO net -2.6%  (bids 65.0% / 35.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.6% vs req 3.0%; NO -2.6% vs req 3.0% (raw gaps 1.6% / -1.6%)  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXETHD (ETH-USD)
+  Current Price:  $2,194 (blend live+close)  (+0.11% vs last close)
+  20-Day Range:   $1,984 – $2,285
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.23x | edge x1.11 | dip x1.16 | size x0.86
+  [Execution] stability window scaled to 6s (base 5s)
+  KXETHD-26APR1301-T2939.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2919.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2899.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2879.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2859.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2839.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2819.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2799.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2779.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+  KXETHD-26APR1301-T2759.99: SKIP (market prob 0.0% < 2.0%) | Ethereum price at Apr 13, 2026 at 1am EDT?
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+  [Gating] ETH2604130500 → SKIP (Phase 2 LOW confidence tier | Consensus 0.60)
+
+    ····························································
+    ETH2604130500  [Gemini]
+    ETH price today at 1am EDT ($2,180 or above)
+    ├─ Strike:       $2,180 (pays if above)
+    ├─ Current:      $2,194  →  $14.19 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  61.6%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 81.0%→73.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   95.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -21.0%  |  NO net +19.0%  (bids 95.0% / 5.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -21.0% vs req 3.6%; NO 19.0% vs req 3.6% (raw gaps -20.0% / 20.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    ETH2604130500  [Gemini]
+    ETH price today at 1am EDT ($2,200 or above)
+    ├─ Strike:       $2,200 (pays if above)
+    ├─ Current:      $2,194  →  $5.81 below strike (0.26% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  39.6%  (historical frequency)
+    ├─ Volatility P: 24.4%  (model based on current price + DTE)
+    ├─ Blended P:    12.3%  (final model probability)
+    ├─ Barbell@blend: P(YES) 29.0%→34.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 12.3% (used for rec)
+    ├─ Market YES:   11.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.3%  |  NO net -2.3%  (bids 11.0% / 89.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.3% vs req 5.6%; NO -2.3% vs req 5.6% (raw gaps 1.3% / -1.3%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    ETH2604130500  [Gemini]
+    ETH price today at 1am EDT ($2,220 or above)
+    ├─ Strike:       $2,220 (pays if above)
+    ├─ Current:      $2,194  →  $25.81 below strike (1.18% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  22.8%  (historical frequency)
+    ├─ Volatility P: 1.9%  (model based on current price + DTE)
+    ├─ Blended P:    4.4%  (final model probability)
+    ├─ Barbell@blend: P(YES) 8.2%→18.6% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 4.4% (used for rec)
+    ├─ Market YES:   3.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.4%  |  NO net -2.4%  (bids 3.0% / 97.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.4% vs req 5.6%; NO -2.4% vs req 5.6% (raw gaps 1.4% / -1.4%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+  [Gating] ETH2604130500 → SKIP (Phase 2 LOW confidence tier | Consensus 0.60)
+
+    ····························································
+    ETH2604130500  [Gemini]
+    ETH price today at 1am EDT ($2,160 or above)
+    ├─ Strike:       $2,160 (pays if above)
+    ├─ Current:      $2,194  →  $34.19 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  61.9%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 81.1%→73.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   97.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -23.0%  |  NO net +21.0%  (bids 97.0% / 3.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 97.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+  [Gating] ETH2604132100 → SKIP (Phase 2 LOW confidence tier | Consensus 0.60)
+
+    ····························································
+    ETH2604132100  [Gemini]
+    ETH price on April 13 ($2,080 or above)
+    ├─ Strike:       $2,080 (pays if above)
+    ├─ Current:      $2,194  →  $114 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  85.3%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 92.7%→82.1% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   95.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -21.0%  |  NO net +19.0%  (bids 95.0% / 5.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 95.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    ETH2604132100  [Gemini]
+    ETH price on April 13 ($2,120 or above)
+    ├─ Strike:       $2,120 (pays if above)
+    ├─ Current:      $2,194  →  $74.19 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  72.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 85.0%→76.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   89.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -15.0%  |  NO net +13.0%  (bids 89.0% / 11.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 89.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    ETH2604132100  [Gemini]
+    ETH price on April 13 ($2,160 or above)
+    ├─ Strike:       $2,160 (pays if above)
+    ├─ Current:      $2,194  →  $34.19 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  69.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    72.3%  (final model probability)
+    ├─ Barbell@blend: P(YES) 75.5%→69.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 72.3% (used for rec)
+    ├─ Market YES:   71.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.3%  |  NO net -2.3%  (bids 71.0% / 29.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 72.3% vs market 71.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    ETH2604132100  [Gemini]
+    ETH price on April 13 ($2,200 or above)
+    ├─ Strike:       $2,200 (pays if above)
+    ├─ Current:      $2,194  →  $5.81 below strike (0.26% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  33.4%  (historical frequency)
+    ├─ Volatility P: 44.2%  (model based on current price + DTE)
+    ├─ Blended P:    41.9%  (final model probability)
+    ├─ Barbell@blend: P(YES) 39.8%→42.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 41.9% (used for rec)
+    ├─ Market YES:   41.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.1%  |  NO net -1.9%  (bids 41.0% / 59.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -0.1% vs req 6.0%; NO -1.9% vs req 6.0% (raw gaps 0.9% / -0.9%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    ETH2604132100  [Gemini]
+    ETH price on April 13 ($2,240 or above)
+    ├─ Strike:       $2,240 (pays if above)
+    ├─ Current:      $2,194  →  $45.81 below strike (2.09% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  33.3%  (historical frequency)
+    ├─ Volatility P: 14.7%  (model based on current price + DTE)
+    ├─ Blended P:    11.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 22.2%→29.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 11.1% (used for rec)
+    ├─ Market YES:   10.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.1%  |  NO net -2.1%  (bids 10.0% / 90.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.1% vs req 5.0%; NO -2.1% vs req 5.0% (raw gaps 1.1% / -1.1%)  [Trust 1.00]
+
+  [Gemini] ETH2604132100: SKIP (market prob 1.0% < 2.0%) | ETH price on April 13 ($2,280 or above)
+
+───────────────────────────────────────────────────────────────────────────
+  KXSOLD (SOL-USD)
+  Current Price:  $81.84 (blend live+close)  (+0.43% vs last close)
+  20-Day Range:   $78.92 – $91.74
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.24x | edge x1.12 | dip x1.16 | size x0.86
+  [Execution] stability window scaled to 6s (base 5s)
+  KXSOLD-26APR1301-T99.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T98.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T97.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T96.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T95.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T94.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T93.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T92.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T91.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+  KXSOLD-26APR1301-T90.9999: SKIP (market prob 0.0% < 2.0%) | SOL price  on Apr 13, 2026?
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    SOL2604130500  [Gemini]
+    SOL price today at 1am EDT ($82 or above)
+    ├─ Strike:       $82.00 (pays if above)
+    ├─ Current:      $81.84  →  $0.1588 below strike (0.19% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  71.2%  (historical frequency)
+    ├─ Volatility P: 30.2%  (model based on current price + DTE)
+    ├─ Blended P:    40.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 44.3%→45.7% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 40.1% (used for rec)
+    ├─ Market YES:   38.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.1%  |  NO net -3.1%  (bids 38.0% / 62.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.1% vs req 3.6%; NO -3.1% vs req 3.6% (raw gaps 2.1% / -2.1%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    SOL2604130500  [Gemini]
+    SOL price today at 1am EDT ($83 or above)
+    ├─ Strike:       $83.00 (pays if above)
+    ├─ Current:      $81.84  →  $1.16 below strike (1.42% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  43.3%  (historical frequency)
+    ├─ Volatility P: 1.2%  (model based on current price + DTE)
+    ├─ Blended P:    4.9%  (final model probability)
+    ├─ Barbell@blend: P(YES) 15.8%→24.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 4.9% (used for rec)
+    ├─ Market YES:   3.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.9%  |  NO net -2.9%  (bids 3.0% / 97.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.9% vs req 5.6%; NO -2.9% vs req 5.6% (raw gaps 1.9% / -1.9%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+  [Gating] SOL2604130500 → SKIP (Phase 2 LOW confidence tier | Consensus 0.60)
+
+    ····························································
+    SOL2604130500  [Gemini]
+    SOL price today at 1am EDT ($80 or above)
+    ├─ Strike:       $80.00 (pays if above)
+    ├─ Current:      $81.84  →  $1.84 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  86.4%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 88.9%→79.2% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   97.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -23.0%  |  NO net +21.0%  (bids 97.0% / 3.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 97.0%  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+  [Gating] SOL2604130500 → SKIP (Phase 2 LOW confidence tier | Consensus 0.60)
+
+    ····························································
+    SOL2604130500  [Gemini]
+    SOL price today at 1am EDT ($81 or above)
+    ├─ Strike:       $81.00 (pays if above)
+    ├─ Current:      $81.84  →  $0.8412 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  77.2%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 86.2%→77.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   97.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -23.0%  |  NO net +21.0%  (bids 97.0% / 3.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 97.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    SOL2604132100  [Gemini]
+    SOL price on April 13 ($79 or above)
+    ├─ Strike:       $79.00 (pays if above)
+    ├─ Current:      $81.84  →  $2.84 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  97.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 95.2%→83.9% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   88.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -14.0%  |  NO net +12.0%  (bids 88.0% / 12.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 88.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    SOL2604132100  [Gemini]
+    SOL price on April 13 ($80 or above)
+    ├─ Strike:       $80.00 (pays if above)
+    ├─ Current:      $81.84  →  $1.84 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  97.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 91.0%→80.7% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   84.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -10.0%  |  NO net +8.0%  (bids 84.0% / 16.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 84.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    SOL2604132100  [Gemini]
+    SOL price on April 13 ($81 or above)
+    ├─ Strike:       $81.00 (pays if above)
+    ├─ Current:      $81.84  →  $0.8412 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  83.3%  (historical frequency)
+    ├─ Volatility P: 71.7%  (model based on current price + DTE)
+    ├─ Blended P:    71.6%  (final model probability)
+    ├─ Barbell@blend: P(YES) 76.4%→69.8% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 71.6% (used for rec)
+    ├─ Market YES:   70.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.6%  |  NO net -2.6%  (bids 70.0% / 30.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 71.6% vs market 70.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    SOL2604132100  [Gemini]
+    SOL price on April 13 ($82 or above)
+    ├─ Strike:       $82.00 (pays if above)
+    ├─ Current:      $81.84  →  $0.1588 below strike (0.19% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  57.9%  (historical frequency)
+    ├─ Volatility P: 45.3%  (model based on current price + DTE)
+    ├─ Blended P:    47.7%  (final model probability)
+    ├─ Barbell@blend: P(YES) 50.4%→50.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 47.7% (used for rec)
+    ├─ Market YES:   46.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.7%  |  NO net -2.7%  (bids 46.0% / 54.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.7% vs req 6.0%; NO -2.7% vs req 6.0% (raw gaps 1.7% / -1.7%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    SOL2604132100  [Gemini]
+    SOL price on April 13 ($83 or above)
+    ├─ Strike:       $83.00 (pays if above)
+    ├─ Current:      $81.84  →  $1.16 below strike (1.42% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  47.7%  (historical frequency)
+    ├─ Volatility P: 22.9%  (model based on current price + DTE)
+    ├─ Blended P:    24.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 33.2%→37.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 24.1% (used for rec)
+    ├─ Market YES:   22.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.1%  |  NO net -3.1%  (bids 22.0% / 78.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.1% vs req 3.0%; NO -3.1% vs req 3.0% (raw gaps 2.1% / -2.1%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    SOL2604132100  [Gemini]
+    SOL price on April 13 ($84 or above)
+    ├─ Strike:       $84.00 (pays if above)
+    ├─ Current:      $81.84  →  $2.16 below strike (2.64% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  35.2%  (historical frequency)
+    ├─ Volatility P: 10.8%  (model based on current price + DTE)
+    ├─ Blended P:    9.3%  (final model probability)
+    ├─ Barbell@blend: P(YES) 20.9%→28.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 9.3% (used for rec)
+    ├─ Market YES:   8.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.3%  |  NO net -2.3%  (bids 8.0% / 92.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.3% vs req 5.0%; NO -2.3% vs req 5.0% (raw gaps 1.3% / -1.3%)  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXXRPD (XRP-USD)
+  Current Price:  $1.33 (blend live+close)  (+0.11% vs last close)
+  20-Day Range:   $1.32 – $1.42
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.24x | edge x1.12 | dip x1.17 | size x0.86
+  [Execution] stability window scaled to 6s (base 5s)
+  KXXRPD-26APR1301-T2.0399: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T2.0199: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.9999: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.9799: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.9599: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.9399: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.9199: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.8999: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.8799: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+  KXXRPD-26APR1301-T1.8599: SKIP (market prob 0.0% < 2.0%) | Ripple price at Apr 13, 2026 at 1am EDT?
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    XRP2604130500  [Gemini]
+    XRP price today at 1am EDT ($1.32 or above)
+    ├─ Strike:       $1.32 (pays if above)
+    ├─ Current:      $1.33  →  $0.0057 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  80.7%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 87.2%→77.9% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   86.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -12.0%  |  NO net +10.0%  (bids 86.0% / 14.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -12.0% vs req 3.6%; NO 10.0% vs req 3.6% (raw gaps -11.0% / 11.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    XRP2604130500  [Gemini]
+    XRP price today at 1am EDT ($1.34 or above)
+    ├─ Strike:       $1.34 (pays if above)
+    ├─ Current:      $1.33  →  $0.0143 below strike (1.08% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  41.2%  (historical frequency)
+    ├─ Volatility P: 1.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    5.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 14.6%→23.5% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 5.0% (used for rec)
+    ├─ Market YES:   3.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.0%  |  NO net -3.0%  (bids 3.0% / 97.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.0% vs req 5.6%; NO -3.0% vs req 5.6% (raw gaps 2.0% / -2.0%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.12 min_left=43.2m size_mult=0.80 → net_min=5.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    XRP2604130500  [Gemini]
+    XRP price today at 1am EDT ($1.36 or above)
+    ├─ Strike:       $1.36 (pays if above)
+    ├─ Current:      $1.33  →  $0.0343 below strike (2.58% gap to cover)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  10.9%  (historical frequency)
+    ├─ Volatility P: 1.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    3.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 3.3%→15.0% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 3.5% (used for rec)
+    ├─ Market YES:   3.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.5%  |  NO net -1.5%  (bids 3.0% / 97.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -0.5% vs req 5.6%; NO -1.5% vs req 5.6% (raw gaps 0.5% / -0.5%)  [Trust 1.00]
+
+    ├─ ultra_short: horizon_edge_mult=1.21 min_left=43.2m size_mult=0.80 → net_min=3.62% (base=3.00%; YES/NO net edges vs bid+fee)
+  [Gating] XRP2604130500 → SKIP (Phase 2 LOW confidence tier | Consensus 0.60)
+
+    ····························································
+    XRP2604130500  [Gemini]
+    XRP price today at 1am EDT ($1.3 or above)
+    ├─ Strike:       $1.30 (pays if above)
+    ├─ Current:      $1.33  →  $0.0257 above strike (already in-the-money)
+    ├─ Resolves in:  43 min
+    ├─ Empirical P:  100.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 93.0%→82.2% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   97.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -23.0%  |  NO net +21.0%  (bids 97.0% / 3.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 43 min)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 97.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    XRP2604132100  [Gemini]
+    XRP price on April 13 ($1.3 or above)
+    ├─ Strike:       $1.30 (pays if above)
+    ├─ Current:      $1.33  →  $0.0257 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  100.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 95.1%→83.8% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   86.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -12.0%  |  NO net +10.0%  (bids 86.0% / 14.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 86.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    XRP2604132100  [Gemini]
+    XRP price on April 13 ($1.32 or above)
+    ├─ Strike:       $1.32 (pays if above)
+    ├─ Current:      $1.33  →  $0.0057 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  89.3%  (historical frequency)
+    ├─ Volatility P: 64.6%  (model based on current price + DTE)
+    ├─ Blended P:    61.4%  (final model probability)
+    ├─ Barbell@blend: P(YES) 74.8%→68.6% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 61.4% (used for rec)
+    ├─ Market YES:   59.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.4%  |  NO net -3.4%  (bids 59.0% / 41.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.4% vs req 6.0%; NO -3.4% vs req 6.0% (raw gaps 2.4% / -2.4%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    XRP2604132100  [Gemini]
+    XRP price on April 13 ($1.34 or above)
+    ├─ Strike:       $1.34 (pays if above)
+    ├─ Current:      $1.33  →  $0.0143 below strike (1.08% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  58.3%  (historical frequency)
+    ├─ Volatility P: 19.7%  (model based on current price + DTE)
+    ├─ Blended P:    17.8%  (final model probability)
+    ├─ Barbell@blend: P(YES) 36.9%→40.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 17.8% (used for rec)
+    ├─ Market YES:   16.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.8%  |  NO net -2.8%  (bids 16.0% / 84.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.8% vs req 3.0%; NO -2.8% vs req 3.0% (raw gaps 1.8% / -1.8%)  [Trust 1.00]
+
+  [Uncertainty] XRP2604132100 → SKIP (Edge 0.7% < Uncertainty 1.8%) | Ensemble: [0.0%, 2.6%]
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    XRP2604132100  [Gemini]
+    XRP price on April 13 ($1.36 or above)
+    ├─ Strike:       $1.36 (pays if above)
+    ├─ Current:      $1.33  →  $0.0343 below strike (2.58% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  9.1%  (historical frequency)
+    ├─ Volatility P: 5.1%  (model based on current price + DTE)
+    ├─ Blended P:    2.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 6.7%→17.5% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 2.1% (used for rec)
+    ├─ Market YES:   2.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.9%  |  NO net -1.1%  (bids 2.0% / 98.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES -0.9% vs req 5.0%; NO -1.1% vs req 5.0% (raw gaps 0.1% / -0.1%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    XRP2604172100  [Gemini]
+    XRP price on April 17 ($1.28 or above)
+    ├─ Strike:       $1.28 (pays if above)
+    ├─ Current:      $1.33  →  $0.0457 above strike (already in-the-money)
+    ├─ Resolves in:  4.7 days
+    ├─ Empirical P:  100.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    66.2%  (final model probability)
+    ├─ Barbell@blend: P(YES) 93.3%→82.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.2% (used for rec)
+    ├─ Market YES:   64.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.2%  |  NO net -3.2%  (bids 64.0% / 36.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 4.7 days)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 66.2% vs market 64.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    XRP2604172100  [Gemini]
+    XRP price on April 17 ($1.3 or above)
+    ├─ Strike:       $1.30 (pays if above)
+    ├─ Current:      $1.33  →  $0.0257 above strike (already in-the-money)
+    ├─ Resolves in:  4.7 days
+    ├─ Empirical P:  100.0%  (historical frequency)
+    ├─ Volatility P: 71.7%  (model based on current price + DTE)
+    ├─ Blended P:    57.8%  (final model probability)
+    ├─ Barbell@blend: P(YES) 88.6%→79.0% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 57.8% (used for rec)
+    ├─ Market YES:   55.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.8%  |  NO net -3.8%  (bids 55.0% / 45.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 4.7 days)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 57.8% vs market 55.0%  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXDOGE15M (DOGE-USD)
+  Current Price:  $0.0911 (blend live+close)  (+0.23% vs last close)
+  20-Day Range:   $0.0900 – $0.0961
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.17x | edge x1.08 | dip x1.12 | size x0.90
+  [Execution] stability window scaled to 6s (base 5s)
+    ├─ ultra_short: horizon_edge_mult=1.54 min_left=13.2m size_mult=0.80 → net_min=4.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    KXDOGE15M-26APR130030-30  [Kalshi]
+    DOGE price up in next 15 mins?
+    ├─ Strike:       $0.0912 (pays if above)
+    ├─ Current:      $0.0911  →  $0.00 below strike (0.09% gap to cover)
+    ├─ Resolves in:  13 min
+    ├─ Empirical P:  69.8%  (historical frequency)
+    ├─ Volatility P: 27.2%  (model based on current price + DTE)
+    ├─ Blended P:    41.7%  (final model probability)  (AH: 83.0%→41.7%)
+    ├─ Barbell@blend: P(YES) 42.5%→44.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 41.7% (used for rec)
+    ├─ Market YES:   38.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +2.7%  |  NO net -2.7%  (bids 38.0% / 60.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 13 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 2.7% vs req 4.6%; NO -2.7% vs req 4.6% (raw gaps 3.7% / -3.7%)  [Trust 0.26]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXDOGED (DOGE-USD)
+  Current Price:  $0.0911 (blend live+close)  (+0.23% vs last close)
+  20-Day Range:   $0.0900 – $0.0961
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.17x | edge x1.08 | dip x1.12 | size x0.90
+  [Execution] stability window scaled to 6s (base 5s)
+  KXDOGED-26APR1301-T0.2749999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2699999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2649999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2599999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2549999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2499999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2449999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2399999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2349999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+  KXDOGED-26APR1301-T0.2299999: SKIP (market prob 0.0% < 2.0%) | Dogecoin price  on Apr 13, 2026?
+
+───────────────────────────────────────────────────────────────────────────
+  KXBNB15M (BNB-USD)
+  Current Price:  $595 (blend live+close)  (+0.41% vs last close)
+  20-Day Range:   $583 – $647
+  History:        365 daily closes loaded
+  [Regime] vol ratio=1.17x | edge x1.08 | dip x1.12 | size x0.90
+  [Execution] stability window scaled to 6s (base 5s)
+    ├─ ultra_short: horizon_edge_mult=1.54 min_left=13.1m size_mult=0.80 → net_min=4.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    KXBNB15M-26APR130030-30  [Kalshi]
+    BNB price up in next 15 mins?
+    ├─ Strike:       $595 (pays if above)
+    ├─ Current:      $595  →  $0.6271 below strike (0.11% gap to cover)
+    ├─ Resolves in:  13 min
+    ├─ Empirical P:  73.8%  (historical frequency)
+    ├─ Volatility P: 23.1%  (model based on current price + DTE)
+    ├─ Blended P:    74.8%  (final model probability)  (AH: 100.0%→74.8%)
+    ├─ Barbell@blend: P(YES) 41.1%→43.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 74.8% (used for rec)
+    ├─ Market YES:   72.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +1.8%  |  NO net +1.2%  (bids 72.0% / 23.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 13 min)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 1.8% vs req 4.6%; NO 1.2% vs req 4.6% (raw gaps 2.8% / -2.8%)  [Trust 0.28]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXHYPE15M (HYPE32196-USD)
+  Current Price:  $53.73 (blend live+close)  (-47.53% vs last close)
+  20-Day Range:   $94.75 – $118
+  History:        502 daily closes loaded
+    ├─ ultra_short: horizon_edge_mult=1.27 min_left=13.1m size_mult=0.80 → net_min=7.62% (base=3.00%; YES/NO net edges vs bid+fee)
+
+    ····························································
+    KXHYPE15M-26APR130030-30  [Kalshi]
+    HYPE price up in next 15 mins?
+    ├─ Strike:       $41.62 (pays if above)
+    ├─ Current:      $53.73  →  $12.10 above strike (already in-the-money)
+    ├─ Resolves in:  13 min
+    ├─ Empirical P:  100.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    46.8%  (final model probability)  (AH: 95.0%→46.8%)
+    ├─ Barbell@blend: P(YES) 93.0%→82.2% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: —→—; NO-base: —→—; final P(YES) 46.8% (used for rec)
+    ├─ Market YES:   46.0%  (what the market is pricing)
+    ├─ Ultra-short:  min_edge ×1.00 (ultra_short_min_edge_mult) (no extra ×)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -0.2%  |  NO net +3.2%  (bids 46.0% / 49.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 13 min)
+    └─ Reason:       momentum protection: live-vs-close return -47.53% <= -8.00% threshold
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXBRENTD (BZ=F)
+  Current Price:  $102 (blend live+close)  (-0.17% vs last close)
+  20-Day Range:   $94.75 – $118
+  History:        502 daily closes loaded
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($95 or above)
+    ├─ Strike:       $95.00 (pays if above)
+    ├─ Current:      $102  →  $7.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  89.2%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 91.2%→80.9% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   79.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -5.0%  |  NO net +3.0%  (bids 79.0% / 21.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 79.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($96 or above)
+    ├─ Strike:       $96.00 (pays if above)
+    ├─ Current:      $102  →  $6.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    66.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 78.7%→71.5% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.0% (used for rec)
+    ├─ Market YES:   67.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -2.0%  |  NO net -0.0%  (bids 67.0% / 33.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 66.0% vs market 67.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($97 or above)
+    ├─ Strike:       $97.00 (pays if above)
+    ├─ Current:      $102  →  $5.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    51.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 77.0%→70.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 51.0% (used for rec)
+    ├─ Market YES:   51.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -1.0%  |  NO net -1.0%  (bids 51.0% / 49.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 51.0% vs market 51.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($98 or above)
+    ├─ Strike:       $98.00 (pays if above)
+    ├─ Current:      $102  →  $4.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    34.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 74.8%→68.6% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 34.1% (used for rec)
+    ├─ Market YES:   33.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.1%  |  NO net -2.1%  (bids 33.0% / 67.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 34.1% vs market 33.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($99 or above)
+    ├─ Strike:       $99.00 (pays if above)
+    ├─ Current:      $102  →  $3.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    19.4%  (final model probability)
+    ├─ Barbell@blend: P(YES) 71.5%→66.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 19.4% (used for rec)
+    ├─ Market YES:   18.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.4%  |  NO net -2.4%  (bids 18.0% / 82.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 19.4% vs market 18.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($100 or above)
+    ├─ Strike:       $100 (pays if above)
+    ├─ Current:      $102  →  $2.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  62.5%  (historical frequency)
+    ├─ Volatility P: 70.5%  (model based on current price + DTE)
+    ├─ Blended P:    7.9%  (final model probability)
+    ├─ Barbell@blend: P(YES) 67.2%→62.9% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: alpha→alpha; NO-base: —→—; final P(YES) 7.9% (used for rec)
+    ├─ Market YES:   6.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.9%  |  NO net -2.9%  (bids 6.0% / 94.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 7.9% vs market 6.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($101 or above)
+    ├─ Strike:       $101 (pays if above)
+    ├─ Current:      $102  →  $1.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  62.1%  (historical frequency)
+    ├─ Volatility P: 62.0%  (model based on current price + DTE)
+    ├─ Blended P:    28.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 62.0%→59.0% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 28.5% (used for rec)
+    ├─ Market YES:   27.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 27.0% / 73.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 28.5% vs market 27.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($102 or above)
+    ├─ Strike:       $102 (pays if above)
+    ├─ Current:      $102  →  $0.2240 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  57.1%  (historical frequency)
+    ├─ Volatility P: 52.1%  (model based on current price + DTE)
+    ├─ Blended P:    18.4%  (final model probability)
+    ├─ Barbell@blend: P(YES) 54.2%→53.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 18.4% (used for rec)
+    ├─ Market YES:   17.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.4%  |  NO net -2.4%  (bids 17.0% / 83.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.4% vs req 3.0%; NO -2.4% vs req 3.0% (raw gaps 1.4% / -1.4%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($103 or above)
+    ├─ Strike:       $103 (pays if above)
+    ├─ Current:      $102  →  $0.7760 below strike (0.76% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  38.1%  (historical frequency)
+    ├─ Volatility P: 42.8%  (model based on current price + DTE)
+    ├─ Blended P:    16.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 40.9%→43.1% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: alpha→alpha; NO-base: —→—; final P(YES) 16.5% (used for rec)
+    ├─ Market YES:   15.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 15.0% / 85.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.5% vs req 3.0%; NO -2.5% vs req 3.0% (raw gaps 1.5% / -1.5%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+  [Gating] BRENT2604172100 → SKIP (Phase 2 LOW confidence tier | Consensus 0.30)
+
+    ····························································
+    BRENT2604172100  [Gemini]
+    Oil (Brent) price on April 17? ($84 or above)
+    ├─ Strike:       $84.00 (pays if above)
+    ├─ Current:      $102  →  $18.22 above strike (already in-the-money)
+    ├─ Resolves in:  4.7 days
+    ├─ Empirical P:  99.6%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 96.9%→85.2% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   96.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -22.0%  |  NO net +20.0%  (bids 96.0% / 4.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 4.7 days)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 96.0%  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXBRENTW (BZ=F)
+  Current Price:  $102 (blend live+close)  (-0.17% vs last close)
+  20-Day Range:   $94.75 – $118
+  History:        502 daily closes loaded
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($95 or above)
+    ├─ Strike:       $95.00 (pays if above)
+    ├─ Current:      $102  →  $7.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  89.2%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 91.3%→81.0% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: base→—; NO-base: —→—; final P(YES) 75.0% (used for rec)  [WARN] joint-high pulled YES leg out of base bucket @ blend
+    ├─ Market YES:   79.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -5.0%  |  NO net +3.0%  (bids 79.0% / 21.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 79.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($96 or above)
+    ├─ Strike:       $96.00 (pays if above)
+    ├─ Current:      $102  →  $6.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    66.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 78.6%→71.4% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 66.0% (used for rec)
+    ├─ Market YES:   67.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -2.0%  |  NO net -0.0%  (bids 67.0% / 33.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 66.0% vs market 67.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=6.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($97 or above)
+    ├─ Strike:       $97.00 (pays if above)
+    ├─ Current:      $102  →  $5.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    51.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 77.1%→70.3% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 51.0% (used for rec)
+    ├─ Market YES:   51.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -1.0%  |  NO net -1.0%  (bids 51.0% / 49.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 51.0% vs market 51.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($98 or above)
+    ├─ Strike:       $98.00 (pays if above)
+    ├─ Current:      $102  →  $4.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.1%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    34.1%  (final model probability)
+    ├─ Barbell@blend: P(YES) 74.7%→68.5% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 34.1% (used for rec)
+    ├─ Market YES:   33.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.1%  |  NO net -2.1%  (bids 33.0% / 67.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 34.1% vs market 33.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($99 or above)
+    ├─ Strike:       $99.00 (pays if above)
+    ├─ Current:      $102  →  $3.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  63.0%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    19.4%  (final model probability)
+    ├─ Barbell@blend: P(YES) 71.5%→66.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 19.4% (used for rec)
+    ├─ Market YES:   18.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.4%  |  NO net -2.4%  (bids 18.0% / 82.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 19.4% vs market 18.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=5.00% (base=3.00% × ultra_short_min_edge_mult on this horizon; single gate; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($100 or above)
+    ├─ Strike:       $100 (pays if above)
+    ├─ Current:      $102  →  $2.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  62.5%  (historical frequency)
+    ├─ Volatility P: 70.4%  (model based on current price + DTE)
+    ├─ Blended P:    7.9%  (final model probability)
+    ├─ Barbell@blend: P(YES) 67.1%→62.8% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: alpha→alpha; NO-base: —→—; final P(YES) 7.9% (used for rec)
+    ├─ Market YES:   6.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.9%  |  NO net -2.9%  (bids 6.0% / 94.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 7.9% vs market 6.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($101 or above)
+    ├─ Strike:       $101 (pays if above)
+    ├─ Current:      $102  →  $1.22 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  62.1%  (historical frequency)
+    ├─ Volatility P: 61.8%  (model based on current price + DTE)
+    ├─ Blended P:    28.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 61.9%→58.9% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 28.5% (used for rec)
+    ├─ Market YES:   27.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 27.0% / 73.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 28.5% vs market 27.0%  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($102 or above)
+    ├─ Strike:       $102 (pays if above)
+    ├─ Current:      $102  →  $0.2240 above strike (already in-the-money)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  57.1%  (historical frequency)
+    ├─ Volatility P: 52.2%  (model based on current price + DTE)
+    ├─ Blended P:    18.4%  (final model probability)
+    ├─ Barbell@blend: P(YES) 54.2%→53.2% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: —→—; NO-base: —→—; final P(YES) 18.4% (used for rec)
+    ├─ Market YES:   17.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.4%  |  NO net -2.4%  (bids 17.0% / 83.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.4% vs req 3.0%; NO -2.4% vs req 3.0% (raw gaps 1.4% / -1.4%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+
+    ····························································
+    BRENT2604132100  [Gemini]
+    Oil (Brent) price on April 13? ($103 or above)
+    ├─ Strike:       $103 (pays if above)
+    ├─ Current:      $102  →  $0.7760 below strike (0.76% gap to cover)
+    ├─ Resolves in:  16.7 hr
+    ├─ Empirical P:  38.1%  (historical frequency)
+    ├─ Volatility P: 42.6%  (model based on current price + DTE)
+    ├─ Blended P:    16.5%  (final model probability)
+    ├─ Barbell@blend: P(YES) 40.7%→43.0% (joint_high λ=0.25, outside dual-high zone (<85%)); YES-base: alpha→alpha; NO-base: —→—; final P(YES) 16.5% (used for rec)
+    ├─ Market YES:   15.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net +0.5%  |  NO net -2.5%  (bids 15.0% / 85.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 16.7 hr)
+    └─ Reason:       net edge vs hurdle (fee-adjusted): YES 0.5% vs req 3.0%; NO -2.5% vs req 3.0% (raw gaps 1.5% / -1.5%)  [Trust 1.00]
+
+    ├─ Edge trace: simple_ev net_min=3.00% (single gate; no stacked penalties; YES/NO net edges use each leg bid + fee)
+  [Gating] BRENT2604172100 → SKIP (Phase 2 LOW confidence tier | Consensus 0.30)
+
+    ····························································
+    BRENT2604172100  [Gemini]
+    Oil (Brent) price on April 17? ($84 or above)
+    ├─ Strike:       $84.00 (pays if above)
+    ├─ Current:      $102  →  $18.22 above strike (already in-the-money)
+    ├─ Resolves in:  4.7 days
+    ├─ Empirical P:  99.6%  (historical frequency)
+    ├─ Volatility P: 75.0% (display capped)  (model based on current price + DTE)
+    ├─ Blended P:    75.0%  (final model probability)
+    ├─ Barbell@blend: P(YES) 96.9%→85.2% (joint_high λ=0.25, dual-high zone min(emp,vol)≥85%); YES-base: —→—; NO-base: —→—; final P(YES) 75.0% (used for rec)
+    ├─ Market YES:   96.0%  (what the market is pricing)
+    ├─ Verdict:      SKIP
+    ├─ Leg edges:     YES net -22.0%  |  NO net +20.0%  (bids 96.0% / 4.0%)
+    ├─ Barbell:      gating off (simple EV mode)
+    │    → No trade — insufficient edge or safety block (resolves in 4.7 days)
+    └─ Reason:       would favor YES (price above strike) but no edge: model 75.0% vs market 96.0%  [Trust 1.00]
+
+
+───────────────────────────────────────────────────────────────────────────
+  KXSILVERD (SI=F)
+  Current Price:  $79.96 (blend live+close)  (-21.91% vs last close)
+  20-Day Range:   $94.75 – $118
+  History:        502 daily closes loaded
+
+───────────────────────────────────────────────────────────────────────────
+  KXSILVERW (SI=F)
+  Current Price:  $79.96 (blend live+close)  (-21.91% vs last close)
+  20-Day Range:   $94.75 – $118
+  History:        502 daily closes loaded
+
+───────────────────────────────────────────────────────────────────────────
+  KXGOLDD (GC=F)
+  Current Price:  $4,737 (blend live+close)  (-0.07% vs last close)
+  20-Day Range:   $4,376 – $5,001
+  History:        502 daily closes loaded
+
+───────────────────────────────────────────────────────────────────────────
+  KXGOLDW (GC=F)
+  Current Price:  $4,737 (blend live+close)  (-0.08% vs last close)
+  20-Day Range:   $4,376 – $5,001
+  History:        502 daily closes loaded
+
+───────────────────────────────────────────────────────────────────────────
+  KXCOPPERD (HG=F)
+  Current Price:  $5.81 (blend live+close)  (-0.03% vs last close)
+  20-Day Range:   $5.34 – $5.87
+  History:        502 daily closes loaded
+  [Regime] vol ratio=1.14x | edge x1.07 | dip x1.10 | size x0.91
+  [Execution] stability window scaled to 6s (base 5s)
+
+Evaluating 9 position(s) for keep vs sell...
+[Risk] Regime-shift cleanup active: stale/risky resting BUY limits will be cancelled.
+
+
+===========================================================================
+  RUN SUMMARY
+===========================================================================
+  Markets evaluated:   83
+  Recommendations:     0 BUY  |  83 SKIP
+  Proposed buys:       0
+  Proposed sells:      0
+  Funnel (this run):   recommended=0 -> proposed=0 -> funded=0
+[Telemetry] Edge Persistence Check (30d):
+  <0.08     : n=95   | win_rate=63% | ROI=  -2.7% | pnl=-244¢
+  0.08-0.10 : n=12   | win_rate=8% | ROI= -57.9% | pnl=-227¢
+  0.10-0.15 : n=42   | win_rate=29% | ROI= +30.3% | pnl=+404¢
+  0.15+     : n=3814 | win_rate=22% | ROI= +88.7% | pnl=+43651¢
+  ⚠️ WARNING: Edge is NOT monotonic! Higher predicted edge does not yield higher ROI.
+
+===========================================================================

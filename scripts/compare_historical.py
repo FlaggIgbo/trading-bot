@@ -24,7 +24,7 @@ import time
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from zoneinfo import ZoneInfo
@@ -404,6 +404,7 @@ class StrategyParams:
     calibration_hard_block_above_yes_min_avg_entry: float
     calibration_extra_edge_overall: float
     min_calibration_samples_overall: int
+    calibration_min_date: str
     use_bucket_penalty: bool
     bucket_override_weight: float
     min_bucket_samples: int
@@ -795,6 +796,7 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         ),
         calibration_extra_edge_overall=float(strategy.get("calibration_extra_edge_overall", 0.02)),
         min_calibration_samples_overall=int(strategy.get("min_calibration_samples_overall", 20)),
+        calibration_min_date=str(strategy.get("calibration_min_date", "")).strip(),
         use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
         bucket_override_weight=max(0.0, min(1.0, float(strategy.get("bucket_override_weight", 0.0)))),
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
@@ -1464,6 +1466,11 @@ def _strategy_with_recovery_overrides(cfg: dict) -> dict:
         s["intraday_other_min_p_win"] = float(r["intraday_other_min_p_win"])
     if r.get("intraday_other_min_p_win_with_vol") is not None:
         s["intraday_other_min_p_win_with_vol"] = float(r["intraday_other_min_p_win_with_vol"])
+    # Ultra-short confidence floors (15m/sub-hour). Allow recovery profile to relax/tighten independently.
+    if r.get("ultra_short_min_p_win") is not None:
+        s["ultra_short_min_p_win"] = float(r["ultra_short_min_p_win"])
+    if r.get("ultra_short_min_p_win_with_vol") is not None:
+        s["ultra_short_min_p_win_with_vol"] = float(r["ultra_short_min_p_win_with_vol"])
     if r.get("max_buy_limit_price") is not None:
         s["max_buy_limit_price"] = max(0.0, min(1.0, float(r["max_buy_limit_price"])))
     if r.get("enable_vol_regime_scaling") is not None:
@@ -1625,6 +1632,35 @@ def _get_balance_regime_adjustments(balance_cents: int, sp: StrategyParams) -> t
         return sp.balance_regime_medium_kelly_mult, sp.balance_regime_medium_min_edge_add, "caution"
 
     return 1.0, 0.0, "normal"
+
+
+def _parse_calibration_min_date_ts(sp: StrategyParams) -> float | None:
+    """Parse strategy.calibration_min_date (YYYY-MM-DD) as UTC timestamp."""
+    raw = str(getattr(sp, "calibration_min_date", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return float(dt.timestamp())
+    except Exception:
+        print(f"[Calibration] WARNING: Invalid calibration_min_date={raw!r}; expected YYYY-MM-DD. Ignoring.")
+        return None
+
+
+def _load_resolved_history_for_calibration(sp: StrategyParams, cfg: dict) -> list[dict]:
+    """Load resolved prediction history used by trust + calibration layers."""
+    if not get_predictions_for_backtest:
+        return []
+    start_ts = _parse_calibration_min_date_ts(sp)
+    rows = get_predictions_for_backtest(
+        start_ts=start_ts, resolved_only=True, config=cfg
+    ) or []
+    if start_ts is not None:
+        print(
+            f"[Calibration] Using resolved rows since {sp.calibration_min_date}: "
+            f"{len(rows)} sample(s)"
+        )
+    return rows
 
 
 def _load_blacklist_extra_file(path_str: str | None) -> set[str]:
@@ -4885,6 +4921,11 @@ def main():
     parser.add_argument("--reconcile-diagnostics", action="store_true", help="Print fill reconciliation counters (seen/inserted/duplicate/skipped) per platform")
     parser.add_argument("--reconcile-only", action="store_true", help="Run fill reconciliation pass only, print diagnostics, then exit")
     parser.add_argument("--show-config", action="store_true", help="Print resolved config (with env overrides) and exit (Freqtrade-style)")
+    parser.add_argument(
+        "--clear-emergency-stop",
+        action="store_true",
+        help="Set emergency_stop_reset_time to now at run start (testing helper)",
+    )
     parser.add_argument("--ticker", type=str, default="", help="Evaluate only this ticker (Kalshi or Gemini); skip all others (Gnosis pick-one pattern)")
     parser.add_argument(
         "--compare-strategies",
@@ -4912,6 +4953,13 @@ def _run(args) -> int:
     markets_list = cfg.get("markets", [])
     yf_mapping = cfg.get("yfinance_tickers", {})
     strategy = _effective_strategy_dict(cfg)
+    if bool(getattr(args, "clear_emergency_stop", False)):
+        now_ts = float(time.time())
+        strategy["emergency_stop_reset_time"] = now_ts
+        print(
+            f"[Risk] --clear-emergency-stop set emergency_stop_reset_time={int(now_ts)} "
+            "(current run only)."
+        )
     trading = cfg.get("trading", {})
     min_edge = float(strategy.get("min_edge", args.edge))
     use_kelly = strategy.get("use_kelly", False)
@@ -5333,11 +5381,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             pass
     calibration_engine: CalibrationEngine | None = None
     trust_scores: dict[str, float] = {}
+    resolved_history_for_calibration: list[dict] = []
     if get_predictions_for_backtest:
         try:
-            resolved_history = get_predictions_for_backtest(config=cfg, resolved_only=True)
-            if resolved_history:
-                calibration_engine = CalibrationEngine(resolved_history)
+            resolved_history_for_calibration = _load_resolved_history_for_calibration(sp, cfg)
+            if resolved_history_for_calibration:
+                calibration_engine = CalibrationEngine(resolved_history_for_calibration)
                 trust_scores = calibration_engine.get_series_trust_matrix()
                 brier = calibration_engine.compute_brier_score()
                 trust_overall = calibration_engine.compute_trust_score()
@@ -5555,7 +5604,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             )
         except Exception:
             series_pnl_kill = {}
-    probability_calibrator = fit_probability_calibrator(sp, cfg)
+    probability_calibrator = fit_probability_calibrator(sp, resolved_history_for_calibration)
     learned_signal_weights = fit_signal_model_weights(sp, cfg)
     if learned_signal_weights:
         merged = dict(sp.signal_model_weights or {})

@@ -85,6 +85,7 @@ class StrategyParams:
     calibration_hard_block_above_yes_min_avg_entry: float
     calibration_extra_edge_overall: float
     min_calibration_samples_overall: int
+    calibration_min_date: str
     use_bucket_penalty: bool
     min_bucket_samples: int
     min_vol_confidence_far_otm: float
@@ -447,6 +448,11 @@ def apply_recovery_overrides(cfg: dict) -> dict:
         s["intraday_other_min_p_win"] = float(r["intraday_other_min_p_win"])
     if r.get("intraday_other_min_p_win_with_vol") is not None:
         s["intraday_other_min_p_win_with_vol"] = float(r["intraday_other_min_p_win_with_vol"])
+    # Ultra-short confidence floors (15m/sub-hour). Allow recovery profile to relax/tighten independently.
+    if r.get("ultra_short_min_p_win") is not None:
+        s["ultra_short_min_p_win"] = float(r["ultra_short_min_p_win"])
+    if r.get("ultra_short_min_p_win_with_vol") is not None:
+        s["ultra_short_min_p_win_with_vol"] = float(r["ultra_short_min_p_win_with_vol"])
     if r.get("max_buy_limit_price") is not None:
         s["max_buy_limit_price"] = max(0.0, min(1.0, float(r["max_buy_limit_price"])))
     if r.get("enable_vol_regime_scaling") is not None:
@@ -683,6 +689,7 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         ),
         calibration_extra_edge_overall=float(strategy.get("calibration_extra_edge_overall", 0.02)),
         min_calibration_samples_overall=int(strategy.get("min_calibration_samples_overall", 20)),
+        calibration_min_date=str(strategy.get("calibration_min_date", "")).strip(),
         use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
         min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),

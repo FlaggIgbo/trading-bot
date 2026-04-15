@@ -25,6 +25,7 @@ recovery:
   vol_disagree_extra_edge: 0.01 # Relaxed
   yes_overconfidence_extra_edge: 0.0 # Suppressed
   ultra_short_min_edge_mult: 1.0 # (was 1.1)
+  ultra_short_min_p_win: 0.55 # Keep ultra-short confidence gate aligned with tuned runtime config
 
 strategy:
   strategy_engine: vol_regime
@@ -79,7 +80,7 @@ strategy:
 
   anti_hallucination:
     bayesian_enabled: true
-    bayesian_market_strength: 8.0 # Trusts market less (was 15.0)
+    bayesian_market_strength: 1.5 # Softer prior pull so model can disagree with market when signal is strong
     ewma_prob_enabled: true
     vol_zscore_enabled: true
     adaptive_edge_enabled: false # Disabled to increase volume
@@ -90,7 +91,7 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.15 # Tightened from 0.02 to focus on high-signal trades
+    min_edge: 0.05 # Fallback floor outside tiered bands; still conservative but not fully blocking flow
     min_edge_full: 0.15 # Lowered (was 0.08)
     skip_p_win_mid_band_enabled: false # Disabled
     kelly_dampen: 0.20 # (was 0.16)
@@ -125,8 +126,8 @@ strategy:
     min_edge: 0.15
     bands:
       - { lo: 0.00, hi: 0.02, min_edge: 0.25 }
-      - { lo: 0.02, hi: 0.15, min_edge: 0.20 }
-      - { lo: 0.15, hi: 0.40, min_edge: 0.15 }
+      - { lo: 0.02, hi: 0.15, min_edge: 0.10 }
+      - { lo: 0.15, hi: 0.40, min_edge: 0.05 }
       - { lo: 0.40, hi: 0.65, min_edge: 0.20 }
       - { lo: 0.65, hi: 1.00, min_edge: 0.15 }
 
