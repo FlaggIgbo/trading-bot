@@ -451,35 +451,50 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     # Commodities should not be at S&P 500 scale (4000-6000) unless there's hyperinflation.
     # S&P 500 should not be at commodity scale.
     
-    if t in ("RB=F", "CL=F", "BZ=F"):
-        if mx > 500.0: # Oil/Gas futures usually < $200
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 500.0) — index scale leakage?")
+    if t in ("RB=F", "CL=F", "BZ=F", "KC=F", "LE=F", "ZC=F"):
+        if mx > 1000.0: # Most energy/soft/grain futures < $1000
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $1000.0) — index scale leakage?")
+            return False
+    
+    if t == "ZS=F":
+        if mx > 3000.0: # Soybeans usually < $20 or 2000c
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $3000.0)")
+            return False
+
+    if t == "CC=F":
+        if mx > 20000.0: # Cocoa was ~$10k recently; cap at 20k
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $20000.0)")
+            return False
+
+    if t == "SB=F":
+        if mx > 100.0: # Sugar usually < $0.50 or 50c
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $100.0)")
             return False
     
     if t in ("^NDX", "NDX"):
         if mn < 2000.0: # Nasdaq-100 hasn't been below 2000 in a long time
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 2000.0) — likely commodity scale leakage")
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (min value {mn:.1f} < $2000.0) — likely commodity scale leakage")
             return False
             
     if t in ("^GSPC", "GSPC"):
         if mn < 1000.0: # S&P 500 hasn't been below 1000 in decades
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mn={mn:.1f} < 1000.0) — likely commodity scale leakage")
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (min value {mn:.1f} < $1000.0) — likely commodity scale leakage")
             return False
             
     if t == "SI=F":
         if mx > 200.0: # Silver usually < $50
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 200.0)")
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $200.0)")
             return False
             
     if t == "HG=F":
         # Copper usually ~4.50 USD. Reject if it hits 10.0+ (likely index scale)
         if mx > 10.0:
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 10.0) — likely index cross-pollination")
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $10.0) — likely index cross-pollination")
             return False
             
     if t == "GC=F":
         if mx > 10000.0: # Gold is ~$2500, shouldn't be 10k+
-            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (mx={mx:.1f} > 10000.0)")
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $10000.0)")
             return False
 
     # 2. PHANTOM CRASH VALIDATION:
@@ -579,22 +594,29 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
             tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
             for t in tickers_to_try:
                 try:
-                    hist = yf.download(t, start=start, end=end, interval="1d", progress=False)
+                    # Single-ticker downloads often return MultiIndex when threads=True in some yf versions; 
+                    # use threads=False to minimize cross-pollination and keep the structure simple.
+                    hist = yf.download(t, start=start, end=end, interval="1d", progress=False, threads=False)
                     if hist is None or hist.empty:
                         continue
+                    
                     closes_raw = None
+                    # Support both new yfinance (MultiIndex with 'Price') and older formats
                     if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
-                        closes = hist["Close"]
-                        if hasattr(closes, "ndim") and closes.ndim > 1:
-                            closes = closes.iloc[:, 0]
-                        closes_raw = closes.dropna()
+                        closes_raw = hist["Close"]
                     elif "Close" in hist.columns:
-                        closes_raw = hist["Close"].dropna()
-                    if closes_raw is not None and len(closes_raw) > 0:
-                        result = [float(x) for x in closes_raw.tolist()]
-                        if t == "SPY" and ticker in ("^GSPC", "GSPC"):
-                            result = [x * 10.0 for x in result]
-                        break
+                        closes_raw = hist["Close"]
+                        
+                    if closes_raw is not None and hasattr(closes_raw, "ndim") and closes_raw.ndim > 1:
+                        closes_raw = closes_raw.iloc[:, 0]
+                        
+                    if closes_raw is not None:
+                        closes_raw = closes_raw.dropna()
+                        if len(closes_raw) > 0:
+                            result = [float(x) for x in closes_raw.tolist()]
+                            if t == "SPY" and ticker in ("^GSPC", "GSPC"):
+                                result = [x * 10.0 for x in result]
+                            break
                 except Exception:
                     continue
 
@@ -669,7 +691,7 @@ def get_intraday_aggs_at_hour(
         try:
             end = datetime.now(UTC)
             start = end - timedelta(days=period_days)
-            hist = yf.download(t, start=start, end=end, interval="1h", progress=False, auto_adjust=True)
+            hist = yf.download(t, start=start, end=end, interval="1h", progress=False, auto_adjust=True, threads=False)
             if hist is None or hist.empty or "Close" not in hist.columns:
                 continue
             closes_col = hist["Close"]
@@ -763,7 +785,7 @@ def get_aggs_as_of(
         tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
         for t in tickers_to_try:
             try:
-                hist = yf.download(t, start=start, end=end, interval="1d", progress=False)
+                hist = yf.download(t, start=start, end=end, interval="1d", progress=False, threads=False)
                 if hist is None or hist.empty:
                     continue
                 closes_raw = None

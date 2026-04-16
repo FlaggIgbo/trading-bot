@@ -40,6 +40,12 @@ markets:
   - KXNATGASMON # Nat gas monthly — https://kalshi.com/markets/kxnatgasmon/natural-gas-monthly
   - KXHOILMON # Heating oil monthly — https://kalshi.com/markets/kxhoilmon/heating-oil-monthly
   - KXAAAGASW # AAA Gas weekly (RBOB proxy)
+  - KXCOFFEEW # Coffee (KC=F)
+  - KXLCATTLEW # Live Cattle (LE=F)
+  - KXSOYBEANW # Soybean (ZS=F)
+  - KXSUGARW # Sugar (SB=F)
+  - KXCORNW # Corn (ZC=F)
+  - KXCOCOAW # Cocoa (CC=F)
 
 # How often to poll markets (seconds)
 poll_interval_seconds: 60
@@ -78,6 +84,12 @@ yfinance_tickers:
   KXNATGASMON: "NG=F"
   KXHOILMON: "HO=F"
   KXAAAGASW: "RB=F" # RBOB gasoline futures (proxy for retail gas) — https://finance.yahoo.com/quote/RB=F/
+  KXCOFFEEW: "KC=F"
+  KXLCATTLEW: "LE=F"
+  KXSOYBEANW: "ZS=F"
+  KXSUGARW: "SB=F"
+  KXCORNW: "ZC=F"
+  KXCOCOAW: "CC=F"
   # Weather mapping: Series -> Weather City
   KXHIGHCHI: "WEATHER:CHI"
   KXHIGHTBOS: "WEATHER:BOS"
@@ -210,9 +222,9 @@ execution:
   limit_buy_medium_spread_fraction: 1.0 # Extremely aggressive (was 0.98)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
   limit_buy_cross_spread_min_edge: 0.04 # MOVED AGGRESSIVELY to improve fill rate (was 0.07)
-  limit_buy_near_market_min_edge: 0.02 # (was 0.03)
-  # Below this net edge, skip EV cross/medium tiers (maker-style dip/layered only). 0 = off.
-  limit_buy_passive_only_below_edge: 0.01 # (was 0.03)
+  limit_buy_near_market_min_edge: 0.03 # (was 0.02)
+  # Below this net edge, skip EV cross/near-market aggression (passive/layered only). 0 = off.
+  limit_buy_passive_only_below_edge: 0.04 # (was 0.01)
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
   limit_buy_escalation_price_enabled: true
   limit_buy_escalate_after_minutes_1: 1 # Faster (was 2)
@@ -225,7 +237,7 @@ execution:
   # EV-tier quotes also get a touch-lift to at least the bid when fair_cap allows.
   limit_buy_wide_book_coalesce_enabled: true
   limit_buy_wide_book_spread_rel: 0.12 # Tightened (was 0.15)
-  limit_buy_wide_book_anchor_fraction: 0.90 # Increased (was 0.80)
+  limit_buy_wide_book_anchor_fraction: 0.95 # Increased (was 0.90) to improve fill rate on thin books
   limit_buy_wide_book_conservative_substrings: []
   limit_buy_wide_book_conservative_yf_tickers: []
 
@@ -233,7 +245,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.05 # Tightened from 0.03
+  min_edge: 0.08 # Tightened from 0.05
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -259,14 +271,14 @@ recovery:
 
 # Strategy for compare_historical.py (BUY YES / BUY NO / SKIP)
 strategy:
-  emergency_stop_reset_time: 1773550140 # RESET: April 15, 2026
+  emergency_stop_reset_time: 1776313500 # RESET: April 16, 2026 (Manual Reset)
   # vol_regime | vol_regime_threshold (aliases): VolRegimeStrategy = DefaultThreshold recommend + vol mults in compare_historical
   strategy_engine: vol_regime
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
     # Net edge after maker fee; 3% base for higher hurdle (was 15%)
-    min_edge: 0.03
+    min_edge: 0.08
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: false # Disabled to allow more trades
     skip_p_win_mid_lo: 0.42
@@ -296,7 +308,7 @@ strategy:
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
-    min_edge: 0.03 # Relaxed to match simple_ev
+    min_edge: 0.08 # Relaxed to match simple_ev (was 0.03)
     bands:
       - { lo: 0.00, hi: 0.02, min_edge: 0.15 } # (was 0.25)
       - { lo: 0.02, hi: 0.15, min_edge: 0.10 } # (was 0.20)
@@ -312,7 +324,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.15 # Tightened from 0.04
+  min_edge: 0.18 # Tightened from 0.15
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: true # Re-enabled for conservative consensus (was false)
@@ -354,7 +366,7 @@ strategy:
   dte_edge_mult_long: 1.25 # More penalty for distant zones
   max_new_buy_dte_days: 14 # Added 14d cap (was 0)
   yes_overconfidence_extra_edge: 0.01 # Re-enabled (was 0)
-  model_probability_shrinkage: 0.20 # EXTREME TUNING (was 0.35): model is highly overconfident; pull harder to 50%
+  model_probability_shrinkage: 0.45 # EXTREME TUNING (was 0.20): model is highly overconfident; pull harder to 50%
   # Prefer strikes within ~25% of spot (relaxed from 5%)
   max_buy_yes_strike_above_pct: 0.15 # Tightened (was 0.25)
   max_buy_no_strike_above_pct: 0.15 # Tightened (was 0.25)
