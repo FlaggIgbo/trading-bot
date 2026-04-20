@@ -524,8 +524,8 @@ strategy:
   absolute_winner_max_contracts: 100 # (was 500)
   # Calibration: use historical prediction outcomes to improve recommendations (FreqAI-style)
   use_calibration: true # Consult resolved predictions; disable favor-YES when "above+YES" underperforms
-  favor_yes_when_above_strike: false # Disable SKIP→BUY YES upgrade to reduce YES bias
-  enforce_no_above_rule: true # Re-enabled to avoid buying YES when price already above (was false)
+  favor_yes_when_above_strike: true # RE-ENABLED (was false) to capture ITM momentum on YES
+  enforce_no_above_rule: false # DISABLED (was true) to allow YES buys when price is already above strike
   min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
   calibration_min_win_rate_above_yes: 0.65 # (was 0.55)
   calibration_extra_edge_above_yes: 0.08 # (was 0.03)
@@ -538,7 +538,7 @@ strategy:
   calibration_extra_edge_overall: 0.05 # (was 0.0)
   min_calibration_samples_overall: 10 # (was 20)
   use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected
-  bucket_override_weight: 0.8 # INCREASED (was 0.5): 80% weight to empirical reality
+  bucket_override_weight: 0.45 # REDUCED (was 0.8): calibration is advisory, not overriding
   min_bucket_samples: 3 # (was 5)
   min_vol_confidence_far_otm: 0.92 # (was 0.88)
   calibration_loss_weight: 2.0 # (was 1.5)
@@ -719,7 +719,7 @@ strategy:
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
     bayesian_enabled: true # Bayesian update: blend model P with market price as prior
-    bayesian_market_strength: 20.0 # INCREASED (was 10.0): trust market more as prior
+    bayesian_market_strength: 10.0 # REDUCED (was 20.0) to find more edge
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 7 # Faster response (was 14)
     ewma_prob_min_samples: 5 # (was 10)
@@ -750,7 +750,7 @@ strategy:
     buy_no_momentum_rsi_min: 55.0 # (was 60.0)
     regime_routing_enabled: true
     regime_block_buy_no_in_uptrend: true # Re-enabled
-    regime_block_buy_yes_in_downtrend: true # Re-enabled
+    regime_block_buy_yes_in_downtrend: false # REDUCED (was true): allow YES buys to test edges
   # Surgical kill switch: oil uptrend NO ban + per-series size haircut on bad 7d PnL (not blanket blacklist)
   dynamic_kill_switch:
     enabled: true

@@ -157,32 +157,42 @@ def _gemini_execution_side(fill: dict[str, Any]) -> str:
         return "buy"
     if sl in ("sell", "ask", "s", "short", "maker_sell", "taker_sell"):
         return "sell"
+    if sl in ("yes", "no", "y", "n"):
+        # Some Gemini feeds put YES/NO in the side field
+        return "buy"
     return sl
 
 
 def _gemini_contract_outcome(fill: dict[str, Any]) -> str:
-    o = (
-        fill.get("outcome")
-        or fill.get("label")
-        or fill.get("contractOutcome")
-        or fill.get("contract_outcome")
-        or fill.get("contractSide")
-        or fill.get("contract_side")
-        or fill.get("legOutcome")
-        or fill.get("leg_outcome")
-        or fill.get("position")
-        or fill.get("side") # Some Gemini endpoints put YES/NO in 'side'
-        or ""
-    )
-    s = str(o).lower().strip()
-    if s in ("yes", "no"):
-        return s
-    if s in ("y", "n"):
-        return "yes" if s == "y" else "no"
+    # 1. Look for explicit outcome/label/side keys
+    for k in (
+        "outcome",
+        "label",
+        "contractOutcome",
+        "contract_outcome",
+        "contractSide",
+        "contract_side",
+        "legOutcome",
+        "leg_outcome",
+        "position",
+        "side",
+        "orderSide",
+        "order_side",
+    ):
+        v = fill.get(k)
+        if v:
+            s = str(v).lower().strip()
+            if s in ("yes", "no"):
+                return s
+            if s in ("y", "n"):
+                return "yes" if s == "y" else "no"
+    
+    # 2. Look for boolean flags
     for k in ("isYes", "is_yes", "yesLeg", "yes_leg"):
         v = fill.get(k)
         if isinstance(v, bool):
             return "yes" if v else "no"
+            
     return ""
 
 
@@ -434,8 +444,15 @@ def reconcile_confirmed_fills(
                 if side_exec not in ("buy", ""):
                     gemini_skip += 1
                     continue
-                gemini_seen += 1
+                
                 outcome = _gemini_contract_outcome(f)
+                if outcome not in ("yes", "no"):
+                    if gemini_seen == 0 and gemini_raw_rows > 0:
+                        _log.debug("[Reconcile] Gemini debug: side_exec='%s' but outcome not found in: %s", side_exec, f)
+                    gemini_skip += 1
+                    continue
+
+                gemini_seen += 1
                 oid = str(f.get("orderId") or f.get("order_id") or "")
                 hints = _get_limit_order_hints(platform_gemini, oid, cfg) if oid else None
                 if outcome not in ("yes", "no") and hints:
