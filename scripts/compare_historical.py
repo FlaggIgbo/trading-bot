@@ -1815,7 +1815,9 @@ def _dynamic_empirical_weight(base_w: float | None, sample_n: int, n0: float, vo
     # Bayesian adjustment: confidence in historical empirical data decreases in high-vol regimes.
     if vol_ratio > 1.2:
         # e.g. vol_ratio 2.0 -> mult ~0.35; empirical weight contribution is slashed.
-        data_conf *= max(0.1, 1.0 / (vol_ratio ** 1.5))
+        # Strengthened as per feedback: more aggressive tilt toward Vol Model when ratio > 1.5
+        power = 1.5 if vol_ratio < 1.5 else 2.5
+        data_conf *= max(0.05, 1.0 / (vol_ratio ** power))
     
     # Blend configured preference with data confidence.
     w = 0.5 * base + 0.5 * data_conf
@@ -5492,6 +5494,14 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         f"[Adaptive] Loss streak: {streak} consecutive losses → "
                         f"+{streak_bump:.3f} extra edge (total bump now {adaptive_edge_bump:.3f})"
                     )
+                # Narrow market_prob_lo/hi during loss streaks to force 'fat pitch' selection
+                if streak >= 3:
+                     # e.g. streak 5 -> lo=0.15, hi=0.85
+                     narrow_lo = 0.01 + (min(20, streak) * 0.03)
+                     narrow_hi = 0.99 - (min(20, streak) * 0.03)
+                     sp.market_prob_lo = max(sp.market_prob_lo, narrow_lo)
+                     sp.market_prob_hi = min(sp.market_prob_hi, narrow_hi)
+                     print(f"[Adaptive] Loss streak {streak}: narrowing market probability window to [{sp.market_prob_lo:.1%}, {sp.market_prob_hi:.1%}]")
             if get_ewma_win_rate:
                 ewma_info = get_ewma_win_rate(
                     halflife_trades=sp.ewma_halflife_trades, config=cfg,
@@ -6197,7 +6207,11 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     hist_p = max(emp, vol_p)
             # Anti-gambler sanity buffer on vol/emp blend (before bucket & signal layers)
             if sp.enable_model_prob_hard_cap:
-                hist_p = max(sp.model_prob_hard_lo, min(sp.model_prob_hard_hi, float(hist_p)))
+                prob_cap_hi = sp.model_prob_hard_hi
+                # Stricter cap for intraday to prevent overconfidence (e.g. 0.92 per feedback)
+                if _is_intraday_or_ultra_short(m, yf_ticker, sp):
+                    prob_cap_hi = min(prob_cap_hi, 0.92)
+                hist_p = max(sp.model_prob_hard_lo, min(prob_cap_hi, float(hist_p)))
             # Bucket penalty + optional sklearn probability calibration.
             if calibration_engine and sp.use_bucket_penalty:
                 # Forceful Calibration: map predicted P to realized WR using CalibrationEngine buckets

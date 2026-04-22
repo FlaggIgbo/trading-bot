@@ -292,7 +292,7 @@ strategy:
 
     cheap_band_price_lo: 0.00
     cheap_band_price_hi: 0.10
-    cheap_band_min_net_edge: 0.06 # Relaxed (was 0.12)
+    cheap_band_min_net_edge: 0.04 # Relaxed further to capture high-edge lottery trades (was 0.06)
     kelly_dampen: 0.15 # Reduced (was 0.10)
     max_bankroll_fraction: 0.08 # Increased (was 0.05)
     # Strong-edge sizing: when net edge clears this, multiply spend fraction (still bounded by max_bankroll_fraction).

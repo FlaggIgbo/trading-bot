@@ -49,7 +49,7 @@ class AlphaEngineConfig:
     lead_lag_edge_bonus: float = 0.02
     lead_lag_lookback_bars: int = 5
 
-    # --- GBDT Signal Model (Phase 3) ---
+    # --- GBDT Signal Model ---
     gbdt_enabled: bool = True
     gbdt_min_samples: int = 250
     gbdt_params: dict = field(default_factory=lambda: {
@@ -62,7 +62,7 @@ class AlphaEngineConfig:
     gbdt_retrain_interval_trades: int = 250
     regime_vol_buckets: list[float] = field(default_factory=lambda: [0.3, 0.7, 1.2, 1.8])
 
-    # --- Regime Filters (Phase 3) ---
+    # --- Regime Filters ---
     regime_enabled: bool = True
     regime_vol_buckets: list[float] = field(default_factory=lambda: [0.01, 0.02, 0.04])
     regime_trend_ema_span: int = 24
@@ -142,7 +142,7 @@ def obi_edge_adjustment(
     rec: str,
     *,
     strong_threshold: float = 0.40,
-    max_bonus: float = 0.02,
+    max_bonus: float = 0.05, # Increased for continuous scaling (was 0.02)
 ) -> float:
     """
     Adjust effective edge requirement based on order book imbalance.
@@ -152,6 +152,8 @@ def obi_edge_adjustment(
 
     For BUY YES: positive OBI (buy pressure) → bonus; negative OBI → penalty.
     For BUY NO: negative OBI (sell pressure) → bonus; positive OBI → penalty.
+    
+    Using a continuous linear scale from 0.0 to 1.0 OBI.
     """
     if obi is None:
         return 0.0
@@ -163,14 +165,10 @@ def obi_edge_adjustment(
     else:
         return 0.0
 
-    if abs(aligned) < strong_threshold:
-        return 0.0
-
-    scale = min(1.0, (abs(aligned) - strong_threshold) / (1.0 - strong_threshold))
-    if aligned > 0:
-        return -max_bonus * scale
-    else:
-        return max_bonus * scale
+    # Continuous scaling: no hard threshold hurdle, but we still scale by magnitude
+    # Penalty = OBI * max_bonus
+    # If OBI is -0.8 (opposed), penalty is +0.8 * 0.05 = +0.04 (4% edge)
+    return -aligned * max_bonus
 
 
 # ---------------------------------------------------------------------------
@@ -398,23 +396,32 @@ def lead_lag_edge_adjustment(
     If SPY is sharply up and we're considering BUY YES on "above" contract,
     reduce required edge (bonus). If SPY is sharply down and we're buying
     YES on "above", increase edge (penalty).
+    
+    Also implements 'fighting the tape' filter: if signal opposes our direction
+    by more than min_move_pct * 3, we return a very high penalty to force a SKIP.
 
     Returns edge adjustment: negative = bonus, positive = penalty.
     """
     if signal == 0.0 or rec not in ("BUY YES", "BUY NO"):
         return 0.0
 
+    # Determine if trade is 'bullish' (BUY YES above / BUY NO below) or 'bearish'
+    is_bullish_trade = False
     if rec == "BUY YES":
-        if direction == "above":
-            return -edge_bonus if signal > 0 else edge_bonus
-        elif direction == "below":
-            return -edge_bonus if signal < 0 else edge_bonus
+        is_bullish_trade = (direction == "above")
     elif rec == "BUY NO":
-        if direction == "above":
-            return -edge_bonus if signal < 0 else edge_bonus
-        elif direction == "below":
-            return -edge_bonus if signal > 0 else edge_bonus
-    return 0.0
+        is_bullish_trade = (direction == "below")
+
+    # If SPY is up (signal > 0) and we're bullish, that's alignment.
+    alignment = 1.0 if (signal > 0) == is_bullish_trade else -1.0
+    
+    # Fighting the tape protection:
+    # If signal is against us and deep (e.g. signal -0.5% while we want to BUY YES above)
+    if alignment < 0 and abs(signal) > 0.005: 
+        return 0.50 # Massive penalty to block the trade
+
+    # Standard adjustment
+    return -edge_bonus * alignment if alignment > 0 else edge_bonus * abs(alignment / 0.003) * edge_bonus
 
 
 # ---------------------------------------------------------------------------

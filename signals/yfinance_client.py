@@ -383,6 +383,23 @@ def get_snapshot(ticker: str) -> float | None:
                     print(f"  [yfinance_client] yfinance failed for {t}: {e}")
                 continue
 
+    # --- DATA HYGIENE: Staleness Check ---
+    # Reject snapshots that are too old (e.g. > 1h) to avoid trading on stale information.
+    if price is not None:
+        try:
+            yf_t = yf.Ticker(ticker)
+            # Check market time from info or history index
+            mkt_time_raw = yf_t.info.get("regularMarketTime") or yf_t.info.get("lastTradeDate")
+            if mkt_time_raw:
+                mkt_ts = float(mkt_time_raw)
+                now_ts = datetime.utcnow().timestamp()
+                age_sec = now_ts - mkt_ts
+                if age_sec > 3600: # 1 hour stale
+                     print(f"  [yfinance_client] REJECTING stale snapshot for {ticker}: age {age_sec/60:.1f} min > 60 min")
+                     return None
+        except Exception:
+             pass
+
     # VALIDATION: Check against cached last close if available
     if price is not None:
         try:
