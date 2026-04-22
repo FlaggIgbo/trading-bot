@@ -42,7 +42,7 @@ def underlying_adjust_params(cfg: dict | None, kalshi_series: str) -> tuple[floa
         # specifically told to scale. The feedback says 6.24x discrepancy.
         # If Kalshi strike is 500 and Yahoo is 3120, we need mult 0.16? 
         # Actually, Kalshi S&P 500 is often 10x smaller than the index value (e.g. 540 strike for 5400 index).
-        return (0.1, 0.0)
+        return (1.0, 0.0)
 
     # 2. Config-driven overrides
     entry = _adjust_entry(cfg, kalshi_series)

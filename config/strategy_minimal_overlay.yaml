@@ -21,8 +21,8 @@ execution:
 
 recovery:
   min_edge: 0.08 # Match config.yaml
-  uncertainty_edge_mult: 0.20
-  vol_disagree_extra_edge: 0.03
+  uncertainty_edge_mult: 0.0
+  vol_disagree_extra_edge: 0.0
   yes_overconfidence_extra_edge: 0.01
   ultra_short_min_edge_mult: 1.2
   ultra_short_min_p_win: 0.55
@@ -95,7 +95,7 @@ strategy:
   min_order_book_depth: 20
   taker_edge_threshold: 0.20
 
-  parity_penalty_enabled: true
+  parity_penalty_enabled: false
   parity_lookback_days: 14 # Match feedback
   adaptive_learning_enabled: true
 
@@ -112,7 +112,7 @@ strategy:
 
   enable_vol_regime_scaling: true
   enable_vol_spike_safety: true
-  enable_defensive_mode: true
+  enable_defensive_mode: false
   dte_edge_scaling_enabled: true
 
   limit_order_mode: layered

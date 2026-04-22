@@ -252,13 +252,13 @@ recovery:
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
   # Without these, low min_edge is negated: calibration adds +edge when WR<50%; parity adds up to ~20% on the dominant side.
-  calibration_extra_edge_overall: 0.02 # Small penalty for bad history (was 0)
+  calibration_extra_edge_overall: 0.0 # Small penalty for bad history (was 0.02)
   # Looser than 0.07: allow momentum-style “price already above strike” YES without choking fills
-  calibration_extra_edge_above_yes: 0.05 # Tightened (was 0.03)
-  parity_penalty_enabled: true # Re-enabled to avoid one-sidedness (was false)
+  calibration_extra_edge_above_yes: 0.0 # Tightened (was 0.05)
+  parity_penalty_enabled: false # Re-enabled to avoid one-sidedness (was true)
   # Empirical CI + vol-disagree: re-enabled so required edge scales with data confidence and thin disagreements can trade.
-  uncertainty_edge_mult: 0.20 # Tightened (was 0.10)
-  vol_disagree_extra_edge: 0.03 # Tightened (was 0.01)
+  uncertainty_edge_mult: 0.0 # Tightened (was 0.20)
+  vol_disagree_extra_edge: 0.0 # Tightened (was 0.03)
   yes_overconfidence_extra_edge: 0.01 # Added small bias correction (was 0)
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
   enable_vol_regime_scaling: true # Re-enabled for risk scaling
@@ -530,14 +530,14 @@ strategy:
   enforce_no_above_rule: false # DISABLED (was true) to allow YES buys when price is already above strike
   min_calibration_samples: 5 # Min resolved "above+YES" trades before applying calibration penalty
   calibration_min_win_rate_above_yes: 0.65 # (was 0.55)
-  calibration_extra_edge_above_yes: 0.08 # (was 0.03)
+  calibration_extra_edge_above_yes: 0.0 # (was 0.03)
   # Hard block BUY YES on "above" only when slice WR is bad *and* avg entry is expensive
   # (cheap long-shots can show low WR while still EV+; do not block those).
   calibration_hard_block_above_yes_win_rate: 0.35 # (was 0.24)
   calibration_hard_block_above_yes_min_samples: 20 # (was 40)
   calibration_hard_block_above_yes_min_avg_entry: 0.25 # (was 0.36)
   calibration_min_date: "2026-04-15" # use only recent resolved history for trust/calibration fitting
-  calibration_extra_edge_overall: 0.05 # (was 0.0)
+  calibration_extra_edge_overall: 0.0 # (was 0.0)
   min_calibration_samples_overall: 10 # (was 20)
   use_bucket_penalty: false # DISABLED per feedback to break the death spiral
   bucket_override_weight: 0.15 # REDUCED per feedback (was 0.45)
@@ -581,7 +581,7 @@ strategy:
   empirical_recent_weight: 5.0 # (was 3.0)
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 60 # (was 90)
-  uncertainty_edge_mult: 0.20 # (was 0.05)
+  uncertainty_edge_mult: 0.0 # (was 0.05)
   stop_loss_pct: 0.25 # (was 0.35)
   # Book stop is still triggered by Kalshi bid vs entry; these only gate *when* it may fire:
   stop_loss_spot_itm_min_pct: 0.02 # (was 0.01)
@@ -611,8 +611,8 @@ strategy:
   enable_vol_spike_safety: true # Re-enabled (was false)
   vol_spike_threshold_mult: 2.5 # (was 3.0)
   vol_spike_edge_multiplier: 1.5 # (was 2.0)
-  enable_defensive_mode: true # Re-enabled (was false)
-  defensive_vol_ratio_threshold: 2.0 # (was 3.0)
+  enable_defensive_mode: false # Re-enabled (was false)
+  defensive_vol_ratio_threshold: 3.5 # (was 2.0)
   enable_dynamic_stability_window: true # Scale stability guard window with volatility regime (ATR/vol ratio proxy)
   stability_vol_ratio_ref: 1.0 # Vol-ratio reference where stability multiplier starts from 1x
   stability_max_multiplier: 10.0 # Cap on dynamic stability-window expansion in extreme volatility
@@ -626,7 +626,7 @@ strategy:
   enable_cross_exchange_sanity_gate: true # Block stale-side buys when one venue lags repricing during sharp spot moves
   cross_exchange_max_yes_gap: 0.08 # (was 0.15)
   cross_exchange_spot_move_threshold_pct: 0.02 # (was 0.05)
-  parity_penalty_enabled: true # Re-enabled (was false)
+  parity_penalty_enabled: false # Re-enabled (was false)
   parity_lookback_days: 14 # INCREASED (was 7) per feedback to reduce volatility
   parity_base_penalty: 0.05 # (was 0.025)
   parity_max_penalty: 0.25 # (was 0.16)
@@ -638,7 +638,7 @@ strategy:
   vol_distribution: student_t # Heavy-tail volatility distribution: normal or student_t
   vol_t_df: 3.5 # Fatter tails (was 4.5)
   vol_disagree_threshold: 0.20 # (was 0.30)
-  vol_disagree_extra_edge: 0.05 # (was 0.02)
+  vol_disagree_extra_edge: 0.0 # (was 0.02)
   vol_disagree_dampen_blend: 0.3 # (was 0.5)
   # When emp and vol *both* sit very high, disagreement logic never fires — pull blend toward 50% (PnL / overconfidence)
   joint_high_confidence_enabled: true
