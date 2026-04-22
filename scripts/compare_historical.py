@@ -5199,7 +5199,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             platform_kalshi=PLATFORM_KALSHI,
             platform_gemini=PLATFORM_GEMINI,
             logger=print,
-            lookback_hours=48,
+            lookback_hours=240,
             diagnostics=bool(getattr(args, "reconcile_diagnostics", False) or getattr(args, "reconcile_only", False)),
         )
         if bool(getattr(args, "reconcile_only", False)):

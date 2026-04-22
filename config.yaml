@@ -221,10 +221,10 @@ execution:
   limit_buy_weak_bid_min_edge: 0.03 # Lowered (was 0.04)
   limit_buy_skip_below_weak_edge: true
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 1.0 # Extremely aggressive (was 0.98)
+  limit_buy_medium_spread_fraction: 0.80 # Reduced from 1.0 per feedback
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.08 # Adjusted from 0.04 per feedback (originally ~0.07)
-  limit_buy_near_market_min_edge: 0.03 # (was 0.02)
+  limit_buy_cross_spread_min_edge: 0.02 # MOVED AGGRESSIVELY per feedback (was 0.08)
+  limit_buy_near_market_min_edge: 0.02 # (was 0.03)
   # Below this net edge, skip EV cross/near-market aggression (passive/layered only). 0 = off.
   limit_buy_passive_only_below_edge: 0.04 # (was 0.01)
   # Resting BUY: nudge limit +1¢ at each minute threshold (requires open order age from exchange).
@@ -536,12 +536,12 @@ strategy:
   calibration_hard_block_above_yes_win_rate: 0.35 # (was 0.24)
   calibration_hard_block_above_yes_min_samples: 20 # (was 40)
   calibration_hard_block_above_yes_min_avg_entry: 0.25 # (was 0.36)
-  calibration_min_date: "2026-04-01" # use only recent resolved history for trust/calibration fitting
+  calibration_min_date: "2026-04-15" # use only recent resolved history for trust/calibration fitting
   calibration_extra_edge_overall: 0.05 # (was 0.0)
   min_calibration_samples_overall: 10 # (was 20)
-  use_bucket_penalty: true # Scale hist_p down when hist_p bucket has lower win rate than expected
-  bucket_override_weight: 0.45 # REDUCED (was 0.8): calibration is advisory, not overriding
-  min_bucket_samples: 3 # (was 5)
+  use_bucket_penalty: false # DISABLED per feedback to break the death spiral
+  bucket_override_weight: 0.15 # REDUCED per feedback (was 0.45)
+  min_bucket_samples: 15 # INCREASED per feedback (was 3)
   min_vol_confidence_far_otm: 0.92 # (was 0.88)
   calibration_loss_weight: 2.0 # (was 1.5)
   enable_sell_and_rebuy: false # Off by default — reduces fee churn and re-entry into the same bad tick on fast markets

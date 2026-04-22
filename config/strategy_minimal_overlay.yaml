@@ -1,7 +1,7 @@
 # =============================================================================
 # Minimal baseline — merged on top of config.yaml by config.get_config() by default.
 # Goal: HIGH PNL + HIGH VOLUME — addressing overconfidence and passive execution.
-# UPDATED: Applying user-recommended action plan.
+# UPDATED: Applying latest user-recommended action plan to break death spiral.
 # =============================================================================
 
 execution:
@@ -9,10 +9,10 @@ execution:
   limit_offset_cents: 3 # Match config.yaml
   resting_cancel_if_market_bid_above_limit_by: 0.01
   limit_buy_edge_aggression_enabled: true
-  limit_buy_cross_spread_min_edge: 0.08 # Match feedback
-  limit_buy_near_market_min_edge: 0.03
+  limit_buy_cross_spread_min_edge: 0.02 # Match feedback (was 0.08)
+  limit_buy_near_market_min_edge: 0.02 # Match feedback (was 0.03)
   limit_buy_passive_only_below_edge: 0.04
-  limit_buy_medium_spread_fraction: 1.0
+  limit_buy_medium_spread_fraction: 0.80 # Match feedback (was 1.0)
   limit_buy_escalation_price_enabled: true
   limit_buy_escalate_after_minutes_1: 1.0
   limit_buy_escalate_after_minutes_2: 3.0
@@ -50,12 +50,14 @@ strategy:
   drawdown_stop_trading_pct: 0.50
   drawdown_cooldown_hours: 6.0
   
-  use_bucket_penalty: true
-  bucket_override_weight: 0.45
+  use_bucket_penalty: false # Match feedback
+  bucket_override_weight: 0.15 # Match feedback
+  min_bucket_samples: 15 # Match feedback
   use_calibration: true
   use_sklearn_calibration: true
   enable_signal_model: true
   enable_auto_signal_weight_fit: true
+  calibration_min_date: "2026-04-15" # Match feedback
 
   # Disagreement dip
   enable_disagreement_dip: true
