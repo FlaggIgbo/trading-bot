@@ -247,7 +247,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.08 # Tightened from 0.05
+  min_edge: 0.03 # Lowered to match simple_ev (was 0.08) to capture more volume on small balances
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -279,8 +279,8 @@ strategy:
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
-    # Net edge after maker fee; 3% base for higher hurdle (was 15%)
-    min_edge: 0.08
+    # Net edge after maker fee; 2% base for higher hurdle (relaxed from 8% to capture more trades)
+    min_edge: 0.03
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: false # Disabled to allow more trades
     skip_p_win_mid_lo: 0.42
@@ -310,7 +310,7 @@ strategy:
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
-    min_edge: 0.08 # Relaxed to match simple_ev (was 0.03)
+    min_edge: 0.03 # Relaxed to capture more volume (was 0.08)
     bands:
       - { lo: 0.00, hi: 0.02, min_edge: 0.15 } # (was 0.25)
       - { lo: 0.02, hi: 0.15, min_edge: 0.10 } # (was 0.20)
@@ -379,6 +379,14 @@ strategy:
   # Force exploration: if no trades (fills) in 2h, temporarily reduce min_edge by 30%
   force_exploration_reduction: 0.0 # Disabled penalty (was 0.30)
   force_exploration_hours: 2.0
+  # Balance-aware Survival Mode (Tuning for ~$5 accounts)
+  starting_balance_cents: 2500 # Treat $25 as the nominal starting point for regime ratios (was $100)
+  balance_regime_low_ratio: 0.05 # Entry to survival at $1.25 (was 0.3 or $30)
+  balance_regime_medium_ratio: 0.20 # Entry to caution at $5.00 (was 0.5 or $50)
+  balance_regime_low_min_edge_add: 0.02 # Relaxed survival penalty (was 0.10)
+  balance_regime_medium_min_edge_add: 0.01 # (was 0.05)
+  balance_regime_low_kelly_mult: 0.5 # Less aggressive deleveraging in survival (was 0.1)
+  min_bet_size_bankroll_pct: 0.001 # 0.1% of $5 is 0.5 cents; allows $0.15 contracts to clear budget (was 0.5%)
   # Dynamic series hurdles (replaces hard Paper-Only block)
   series_hurdle_enabled: true
   series_hurdle_paper_penalty: 0.10 # Add 10% edge req for poor performers
@@ -655,7 +663,7 @@ strategy:
   # Win-rate shortfall must exceed this t-stat vs 50% (rough two-sided test); also skips bump if window PnL ≥ 0.
   adaptive_edge_confidence_t_stat: 1.2 # (was 1.5)
   adaptive_edge_scale_per_pct: 0.005 # (was 0.002)
-  adaptive_edge_max_extra: 0.10 # (was 0.06)
+  adaptive_edge_max_extra: 0.03 # Capped penalty for bad recent performance (was 0.10)
   loss_streak_threshold: 3 # (was 5)
   loss_streak_extra_edge: 0.05 # (was 0.03)
   # Trust-the-model: lower = milder compounding on long streaks
@@ -803,8 +811,8 @@ storage:
 # Underlying: yfinance + live snapshot — not exchange websocket latency; favor limit/maker fills (taker fees are higher).
 trading:
   dry_run: false # Set true for paper runs until forward performance recovers (preview: --preview --no-llm)
-  max_pct_of_balance: 0.20 # INCREASED (was 0.10) to allow meaningful trades on small balance
-  max_total_buy_pct: 0.50 # INCREASED (was 0.30)
+  max_pct_of_balance: 0.40 # INCREASED (was 0.20) to allow single $2 trades on $5 accounts
+  max_total_buy_pct: 0.80 # INCREASED (was 0.50) to avoid skipping trades on small balances
   min_contracts: 1 # skip if capped count < this
   # Dust-to-trade: when venue balance ≤ threshold, promote best zero-count BUY to x1 after budget pass (data + compounding on micro bankrolls)
   dust_trade_enabled: true
