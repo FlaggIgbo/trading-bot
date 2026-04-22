@@ -187,6 +187,8 @@ yfinance_underlying_adjust:
     # Residual error vs gasprices.aaa.com (Kalshi source): wider strike sanity + higher edge hurdle
     extra_min_edge: 0.025
     strike_validation_tolerance_pct: 0.09
+  KXHYPE15M:
+    extra_min_edge: 0.0 # Widen case for analysis-requested trades
 
 # Optional execution overrides (merged into strategy in compare_historical.py)
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢
@@ -221,7 +223,7 @@ execution:
   limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
   limit_buy_medium_spread_fraction: 1.0 # Extremely aggressive (was 0.98)
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
-  limit_buy_cross_spread_min_edge: 0.04 # MOVED AGGRESSIVELY to improve fill rate (was 0.07)
+  limit_buy_cross_spread_min_edge: 0.08 # Adjusted from 0.04 per feedback (originally ~0.07)
   limit_buy_near_market_min_edge: 0.03 # (was 0.02)
   # Below this net edge, skip EV cross/near-market aggression (passive/layered only). 0 = off.
   limit_buy_passive_only_below_edge: 0.04 # (was 0.01)
@@ -366,7 +368,7 @@ strategy:
   dte_edge_mult_long: 1.25 # More penalty for distant zones
   max_new_buy_dte_days: 14 # Added 14d cap (was 0)
   yes_overconfidence_extra_edge: 0.01 # Re-enabled (was 0)
-  model_probability_shrinkage: 0.45 # EXTREME TUNING (was 0.20): model is highly overconfident; pull harder to 50%
+  model_probability_shrinkage: 1.0 # RE-ENABLED (was 0.45): using Forceful mapping as primary calibrator
   # Prefer strikes within ~25% of spot (relaxed from 5%)
   max_buy_yes_strike_above_pct: 0.15 # Tightened (was 0.25)
   max_buy_no_strike_above_pct: 0.15 # Tightened (was 0.25)
@@ -424,9 +426,9 @@ strategy:
   # Hard cap blended model P before edge/Kelly (100% vol P → full Kelly is unsafe on $5 bankroll)
   enable_model_prob_hard_cap: true
   model_prob_hard_lo: 0.05 # Increased floor (was 0.01)
-  model_prob_hard_hi: 0.70 # Decreased cap (was 0.75)
+  model_prob_hard_hi: 0.85 # INCREASED (was 0.70) per feedback to allow ITM trades
   max_dip_cap: 0.01 # Tightened (was 0.03)
-  limit_dip_pct: 0.005 # Extremely aggressive limit to improve 1.8% fill rate (was 0.03)
+  limit_dip_pct: 0.02 # WIDENED (was 0.005) per feedback to catch more fills
   limit_order_mode: layered # fixed_pct | dynamic_tick | layered
   tick_offset: 1 # Penny-jump one tick above best bid when mode uses dynamic ticks
   max_inventory_skew_pct: 0.05 # Tightened (was 0.10)
@@ -625,7 +627,7 @@ strategy:
   cross_exchange_max_yes_gap: 0.08 # (was 0.15)
   cross_exchange_spot_move_threshold_pct: 0.02 # (was 0.05)
   parity_penalty_enabled: true # Re-enabled (was false)
-  parity_lookback_days: 7 # (was 14)
+  parity_lookback_days: 14 # INCREASED (was 7) per feedback to reduce volatility
   parity_base_penalty: 0.05 # (was 0.025)
   parity_max_penalty: 0.25 # (was 0.16)
   enable_strike_validation: true # Cross-check extracted strike against current price + market odds
@@ -718,7 +720,7 @@ strategy:
         rsi_norm: -1.0
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
-    bayesian_enabled: true # Bayesian update: blend model P with market price as prior
+    bayesian_enabled: false # DISABLED (was true) to consolidate calibration logic
     bayesian_market_strength: 10.0 # REDUCED (was 20.0) to find more edge
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 7 # Faster response (was 14)

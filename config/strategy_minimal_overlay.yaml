@@ -1,152 +1,127 @@
 # =============================================================================
 # Minimal baseline — merged on top of config.yaml by config.get_config() by default.
 # Goal: HIGH PNL + HIGH VOLUME — addressing overconfidence and passive execution.
-# UPDATED: Applying user-recommended action plan (70% shrinkage, 3% edge, 75% cap).
+# UPDATED: Applying user-recommended action plan.
 # =============================================================================
 
 execution:
   price_strategy: aggressive
-  limit_offset_cents: 2 # More aggressive penny jump
-  resting_cancel_if_market_bid_above_limit_by: 0.01 # Tightened to re-quote faster
+  limit_offset_cents: 3 # Match config.yaml
+  resting_cancel_if_market_bid_above_limit_by: 0.01
   limit_buy_edge_aggression_enabled: true
-  limit_buy_cross_spread_min_edge: 0.10 # Take liquidity (was 0.08)
-  limit_buy_near_market_min_edge: 0.05  # (was 0.04)
-  limit_buy_passive_only_below_edge: 0.03 # (was 0.02)
-  limit_buy_medium_spread_fraction: 0.95 # COMPETITIVE: 95% of spread (was 0.40)
+  limit_buy_cross_spread_min_edge: 0.08 # Match feedback
+  limit_buy_near_market_min_edge: 0.03
+  limit_buy_passive_only_below_edge: 0.04
+  limit_buy_medium_spread_fraction: 1.0
   limit_buy_escalation_price_enabled: true
-  limit_buy_escalate_after_minutes_1: 2.0 # Faster
-  limit_buy_escalate_after_minutes_2: 5.0 # Faster
+  limit_buy_escalate_after_minutes_1: 1.0
+  limit_buy_escalate_after_minutes_2: 3.0
   limit_buy_wide_book_coalesce_enabled: true
-  passive_limit_quote: mid # Quote mid instead of dip when passive
+  passive_limit_quote: mid
 
 recovery:
-  min_edge: 0.03 # Relaxed to 3%
-  uncertainty_edge_mult: 0.10 # (was 0.25)
-  vol_disagree_extra_edge: 0.01 # Relaxed
-  yes_overconfidence_extra_edge: 0.0 # Suppressed
-  ultra_short_min_edge_mult: 1.0 # (was 1.1)
-  ultra_short_min_p_win: 0.55 # Keep ultra-short confidence gate aligned with tuned runtime config
+  min_edge: 0.08 # Match config.yaml
+  uncertainty_edge_mult: 0.20
+  vol_disagree_extra_edge: 0.03
+  yes_overconfidence_extra_edge: 0.01
+  ultra_short_min_edge_mult: 1.2
+  ultra_short_min_p_win: 0.55
 
 strategy:
   strategy_engine: vol_regime
-  vol_blend_weight: 0.30 # Lowered weight on vol model
+  vol_blend_weight: 0.40
   use_intraday_empirical: true
-  empirical_recent_days: 90
-  empirical_recent_weight: 3.0
+  empirical_recent_days: 60
+  empirical_recent_weight: 5.0
   
-  # Market probability filters (skip deep OTM/ITM tails)
-  market_prob_lo: 0.02 # Relaxed (was 0.05)
-  market_prob_hi: 0.98 # Relaxed (was 0.95)
-  # Max contracts per underlying in a single evaluation run (forced diversification)
-  max_contracts_per_underlying: 10
-  # Prefer strikes within ~25% of spot
-  max_buy_yes_strike_above_pct: 0.25 # Relaxed (was 0.05)
-  max_buy_no_strike_above_pct: 0.25 # Relaxed (was 0.05)
+  # Market probability filters
+  market_prob_lo: 0.01
+  market_prob_hi: 0.99
+  max_contracts_per_underlying: 5
+  max_buy_yes_strike_above_pct: 0.15
+  max_buy_no_strike_above_pct: 0.15
 
-  # Structural Convexity Protection (loosen)
-  no_trade_penalty: 0.01 # Lowered
-  yes_bias_bonus: 0.0
-  
-  # Probability shrinkage: 0.20 pulls to 0.5
-  model_probability_shrinkage: 0.20 # EXTREME TUNING (was 0.35)
+  # Probability shrinkage: 1.0 = disabled (using Forceful mapping)
+  model_probability_shrinkage: 1.0
   enable_model_prob_hard_cap: true
-  model_prob_hard_lo: 0.05 # Increased floor
-  model_prob_hard_hi: 0.70 # Cap overconfident tape (was 0.75)
-  tail_cutoff_min_p: 0.02
-  vol_model_zero_drift: true
+  model_prob_hard_lo: 0.05
+  model_prob_hard_hi: 0.85 # Match feedback
   
-  starting_balance_cents: 10000
-  balance_regime_medium_ratio: 0.5
-  balance_regime_low_ratio: 0.3
-  balance_regime_medium_kelly_mult: 1.0 # (was 0.7)
-  balance_regime_low_kelly_mult: 0.5    # (was 0.3)
-  balance_regime_medium_min_edge_add: 0.0 # Lowered
-  balance_regime_low_min_edge_add: 0.01 # Lowered (was 0.05)
-  min_bet_size_bankroll_pct: 0.005
-  low_balance_min_price: 0.01 # Allow cheap contracts
-  drawdown_stop_trading_pct: 0.35 # More room (was 0.25)
-  drawdown_cooldown_hours: 4.0 # (was 8.0)
+  drawdown_stop_trading_pct: 0.50
+  drawdown_cooldown_hours: 6.0
   
   use_bucket_penalty: true
-  bucket_override_weight: 1.0 # FULL OVERRIDE: model -> empirical reality (was default 0.5)
+  bucket_override_weight: 0.45
   use_calibration: true
   use_sklearn_calibration: true
   enable_signal_model: true
   enable_auto_signal_weight_fit: true
 
-  # Re-enable "Fat Pitch" logic (exploration)
+  # Disagreement dip
   enable_disagreement_dip: true
-  max_model_vs_market_diff: 0.40
+  disagreement_dip_min_gap: 0.35
 
   anti_hallucination:
-    bayesian_enabled: true
-    bayesian_market_strength: 1.5 # Softer prior pull so model can disagree with market when signal is strong
+    bayesian_enabled: false # Consolidated
+    bayesian_market_strength: 10.0
     ewma_prob_enabled: true
+    ewma_prob_blend_weight: 0.60
     vol_zscore_enabled: true
-    adaptive_edge_enabled: false # Disabled to increase volume
+    adaptive_edge_enabled: true
     regime_filter_enabled: true
-    momentum_crash_threshold_pct: -0.10 # Relaxed (was -0.15)
-    regime_block_buy_no_in_uptrend: false # Relaxed
+    regime_block_buy_no_in_uptrend: true
     regime_block_buy_yes_in_downtrend: false
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.05 # Fallback floor outside tiered bands; still conservative but not fully blocking flow
-    min_edge_full: 0.15 # Lowered (was 0.08)
-    skip_p_win_mid_band_enabled: false # Disabled
-    kelly_dampen: 0.20 # (was 0.16)
-    max_bankroll_fraction: 0.05 # (was 0.024)
-    edge_size_boost_edge: 0.10 # (was 0.12)
-    edge_size_boost_mult: 1.5 # (was 1.22)
-    spread_wide_fraction: 0.10 # Relaxed
-    spread_wide_size_mult: 0.5
-    ultra_short_size_mult: 0.8 # (was 0.4)
+    min_edge: 0.08
+    kelly_dampen: 0.15
+    max_bankroll_fraction: 0.08
+    edge_size_boost_edge: 0.10
+    edge_size_boost_mult: 1.5
+    ultra_short_size_mult: 0.8
 
   log_effective_min_edge: true
   log_decision_diagnostics: true
   filter_disjoint_underlying_buys: false
-  max_bankroll_fraction_per_underlying: 0.40
-  max_bankroll_fraction_per_direction: 0.30
-  min_edge: 0.02
+  max_bankroll_fraction_per_underlying: 0.20
+  max_bankroll_fraction_per_direction: 0.15
+  min_edge: 0.18
   
-  # Execution Friction Gates (loosen)
-  max_spread_pct: 0.50 # Relaxed (was 0.35)
-  min_order_book_depth: 10 # Lowered
-  taker_edge_threshold: 0.25 # Relaxed
+  # Execution Friction Gates
+  max_spread_pct: 0.18
+  min_order_book_depth: 20
+  taker_edge_threshold: 0.20
 
-  uncertainty_edge_mult: 0.05 # Relaxed
-  vol_disagree_extra_edge: 0.01 # Relaxed
-  yes_overconfidence_extra_edge: 0.0 # Relaxed
-  parity_penalty_enabled: false # Temporarily disable to increase volume
-  adaptive_learning_enabled: false # Disabled to increase volume
+  parity_penalty_enabled: true
+  parity_lookback_days: 14 # Match feedback
+  adaptive_learning_enabled: true
 
-  # Tiered min edge: Tightened to focus on signal
+  # Tiered min edge
   tiered_min_edge:
     enabled: true
-    min_edge: 0.15
+    min_edge: 0.08
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.25 }
+      - { lo: 0.00, hi: 0.02, min_edge: 0.15 }
       - { lo: 0.02, hi: 0.15, min_edge: 0.10 }
       - { lo: 0.15, hi: 0.40, min_edge: 0.05 }
-      - { lo: 0.40, hi: 0.65, min_edge: 0.20 }
-      - { lo: 0.65, hi: 1.00, min_edge: 0.15 }
+      - { lo: 0.40, hi: 0.65, min_edge: 0.08 }
+      - { lo: 0.65, hi: 1.00, min_edge: 0.05 }
 
-  enable_vol_regime_scaling: false # Disable to prevent threshold bloat
-  enable_vol_spike_safety: false # Relaxed
-  enable_defensive_mode: false # Relaxed
-  dte_edge_scaling_enabled: false # Relaxed
-  ultra_short_min_edge_mult: 1.0
-  ultra_short_late_min_edge_mult: 1.0 
+  enable_vol_regime_scaling: true
+  enable_vol_spike_safety: true
+  enable_defensive_mode: true
+  dte_edge_scaling_enabled: true
 
   limit_order_mode: layered
-  limit_dip_pct: 0.02 # More aggressive limits
-  max_dip_cap: 0.05
+  limit_dip_pct: 0.02 # Match feedback
+  max_dip_cap: 0.01
 
-  max_pct_of_book_volume: 0.50
-  stop_loss_pct: 0.35
+  max_pct_of_book_volume: 0.25
+  stop_loss_pct: 0.25
   
   alpha_engine:
     obi_enabled: true
     markout_enabled: true
     lead_lag_enabled: true
-    vol_adjusted_kelly_enabled: true
+    vol_kelly_enabled: true

@@ -193,6 +193,13 @@ def _gemini_contract_outcome(fill: dict[str, Any]) -> str:
         if isinstance(v, bool):
             return "yes" if v else "no"
             
+    # 3. Try parsing from symbol (e.g. "BTC-2026-04-21-YES" or "BTC...-Y")
+    symbol = str(fill.get("symbol") or "").upper()
+    if symbol.endswith("-YES") or symbol.endswith("-Y"):
+        return "yes"
+    if symbol.endswith("-NO") or symbol.endswith("-N"):
+        return "no"
+
     return ""
 
 
