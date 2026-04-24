@@ -691,8 +691,8 @@ strategy:
   market_relative_scoring_enabled: true # EDGE MODEL: predict (outcome - market_prob) instead of absolute P
   ensemble_scoring_enabled: true # Use multiple weight sets and uncertainty gating
   use_sklearn_calibration: true # Fit calibrator from resolved predictions (hist_p -> outcome)
-  sklearn_calibration_method: isotonic # isotonic or platt
-  sklearn_calibration_min_samples: 30 # (was 50)
+  sklearn_calibration_method: platt # isotonic or platt
+  sklearn_calibration_min_samples: 100 # (was 50)
   enable_auto_signal_weight_fit: true # Learn signal-model feature weights from resolved predictions
   signal_weight_fit_min_samples: 100 # (was 150)
   signal_weight_fit_l2_c: 0.5 # (was 1.0)
@@ -731,9 +731,9 @@ strategy:
     bayesian_enabled: false # DISABLED (was true) to consolidate calibration logic
     bayesian_market_strength: 10.0 # REDUCED (was 20.0) to find more edge
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
-    ewma_prob_span: 7 # Faster response (was 14)
+    ewma_prob_span: 14 # Faster response (was 14)
     ewma_prob_min_samples: 5 # (was 10)
-    ewma_prob_blend_weight: 0.60 # INCREASED (was 0.50)
+    ewma_prob_blend_weight: 0.35 # INCREASED (was 0.50)
     vol_zscore_enabled: true # Vol Z-score gate: dampen confidence during vol spikes
     vol_zscore_short_window: 12 # (was 24)
     vol_zscore_long_window: 168 # Long vol window (bars) for baseline
@@ -760,14 +760,14 @@ strategy:
     buy_no_momentum_rsi_min: 55.0 # (was 60.0)
     regime_routing_enabled: true
     regime_block_buy_no_in_uptrend: true # Re-enabled
-    regime_block_buy_yes_in_downtrend: false # REDUCED (was true): allow YES buys to test edges
+    regime_block_buy_yes_in_downtrend: true # REDUCED (was true): allow YES buys to test edges
   # Surgical kill switch: oil uptrend NO ban + per-series size haircut on bad 7d PnL (not blanket blacklist)
   dynamic_kill_switch:
     enabled: true
     oil_series_prefix: KXWTI
     oil_block_buy_no_uptrend: true
     series_pnl_lookback_hours: 168
-    pnl_cents_floor: -2000 # −$20 in window (was -$50)
+    pnl_cents_floor: -500 # −$20 in window (was -$50)
     min_trades: 2 # (was 3)
     poor_pnl_size_mult: 0.3 # (was 0.5)
   # Alpha engine: OBI, markout PnL, vol-adjusted Kelly, lead-lag signal
