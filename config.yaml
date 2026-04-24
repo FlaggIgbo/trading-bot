@@ -247,7 +247,7 @@ execution:
 # recovery.min_edge overrides strategy.min_edge (legacy path). With simple_ev on, simple_ev_decision.min_edge is the base gate.
 recovery:
   # Merged into strategy.min_edge — keep aligned with simple_ev / strategy min_edge
-  min_edge: 0.03 # Lowered to match simple_ev (was 0.08) to capture more volume on small balances
+  min_edge: 0.02 # Lowered to match simple_ev (was 0.08) to capture more volume on small balances
   adaptive_edge_max_extra: 0.0 # 0 = no recent-WR bump while in recovery; when lifting recovery, strategy uses capped extras above
   loss_streak_max_extra: 0.0 # 0 = no streak bump while in recovery; pair with adaptive_learning_enabled when you re-enable
   force_min_buy_contracts_one: true # After budget pass, promote best-edge zero-count BUY to x1 if it fits max_total_buy_pct slice
@@ -280,7 +280,7 @@ strategy:
   simple_ev_decision:
     enabled: true
     # Net edge after maker fee; 2% base for higher hurdle (relaxed from 8% to capture more trades)
-    min_edge: 0.03
+    min_edge: 0.02
     # No BUY when model P(win) on the bought side is in this band (ambiguous “coin flip” zone).
     skip_p_win_mid_band_enabled: false # Disabled to allow more trades
     skip_p_win_mid_lo: 0.42
@@ -310,7 +310,7 @@ strategy:
   # Dynamic edge by price band: require higher edge for 'coin flip' zones (40-60c) or weak bands.
   tiered_min_edge:
     enabled: true
-    min_edge: 0.03 # Relaxed to capture more volume (was 0.08)
+    min_edge: 0.02 # Relaxed to capture more volume (was 0.08)
     bands:
       - { lo: 0.00, hi: 0.02, min_edge: 0.15 } # (was 0.25)
       - { lo: 0.02, hi: 0.15, min_edge: 0.10 } # (was 0.20)
@@ -326,7 +326,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   # Base min_edge (overridden by recovery.min_edge when set). Net edge after fees: model P − market − fee must clear this.
   # Used when simple_ev_decision.enabled is false. With simple EV on, simple_ev_decision.min_edge is the active gate.
-  min_edge: 0.18 # Tightened from 0.15
+  min_edge: 0.02 # Tightened from 0.15
   # Barbell: only "base" (high-P consensus) or "alpha" (cheap + large net edge after fees); middle-priced edges skipped.
   # Off while simple_ev_decision is primary — avoids subtle double-routing; re-enable after baseline is stable.
   barbell_enabled: true # Re-enabled for conservative consensus (was false)
@@ -740,12 +740,12 @@ strategy:
     vol_zscore_threshold: 1.2 # TIGHTENED (was 1.5)
     vol_zscore_tail_mult: 0.4 # TIGHTENED (was 0.5)
     adaptive_edge_enabled: true # Re-enabled
-    adaptive_edge_cheap_threshold: 0.20 # (was 0.15)
-    adaptive_edge_expensive_threshold: 0.80 # (was 0.85)
+    adaptive_edge_cheap_threshold: 0.40 # (was 0.20)
+    adaptive_edge_expensive_threshold: 0.60 # (was 0.80)
     adaptive_edge_otm_base_mult: 2.5 # (was 1.8)
     adaptive_edge_trend_opposed_mult: 2.0 # (was 1.5)
     adaptive_edge_strike_dist_mult: 1.5 # (was 1.2)
-    regime_filter_enabled: true # Master switch for regime + BUY NO momentum gates
+    regime_filter_enabled: false # Master switch for regime + BUY NO momentum gates
     regime_ema_period: 20 # Slow EMA for trend score + legacy BUY YES gate
     regime_ema_fast_period: 10 # Fast EMA for trend slope
     trend_score_w_level: 1.0
@@ -754,13 +754,13 @@ strategy:
     trend_score_up_threshold: 0.005 # (was 0.008)
     trend_score_down_threshold: 0.005 # (was 0.008)
     regime_require_alignment: true # Legacy: block counter-trend BUY YES vs slow EMA
-    buy_no_momentum_gate_enabled: true # Block BUY NO when price > EMA10 and RSI >= threshold
+    buy_no_momentum_gate_enabled: false # Block BUY NO when price > EMA10 and RSI >= threshold
     buy_no_momentum_ema_period: 10
     buy_no_momentum_rsi_period: 14
     buy_no_momentum_rsi_min: 55.0 # (was 60.0)
     regime_routing_enabled: true
-    regime_block_buy_no_in_uptrend: true # Re-enabled
-    regime_block_buy_yes_in_downtrend: true # REDUCED (was true): allow YES buys to test edges
+    regime_block_buy_no_in_uptrend: false # Re-enabled
+    regime_block_buy_yes_in_downtrend: false # REDUCED (was true): allow YES buys to test edges
   # Surgical kill switch: oil uptrend NO ban + per-series size haircut on bad 7d PnL (not blanket blacklist)
   dynamic_kill_switch:
     enabled: true
@@ -816,10 +816,10 @@ trading:
   min_contracts: 1 # skip if capped count < this
   # Dust-to-trade: when venue balance ≤ threshold, promote best zero-count BUY to x1 after budget pass (data + compounding on micro bankrolls)
   dust_trade_enabled: true
-  dust_trade_max_balance_cents: 500 # Reduced from 1000
+  dust_trade_max_balance_cents: 1000 # Reduced from 1000
   # Pre-budget: if balance ≤ cap (or ≤ dust_trade_max when unset), force count=1 on BUY rows still at 0
   micro_balance_force_min_one_contract: true
-  micro_balance_max_balance_cents: 0 # 0 = reuse dust_trade_max_balance_cents ($10); set e.g. 300 for $3-only
+  micro_balance_max_balance_cents: 500 # 0 = reuse dust_trade_max_balance_cents ($10); set e.g. 300 for $3-only
   # Kalshi: when a buy would skip, place 1 contract at max affordable price (see kalshi_client).
   # Gemini: when balance_cents < this threshold, sizing uses 100% of balance for max_spend (not only max_pct_of_balance).
   # Set above your typical small balance (e.g. 500 = $5) so $3 wallets are not stuck at 18%×$3 < min contract.
@@ -841,7 +841,7 @@ backtest:
   pre_push_days: 30 # Guard lookback window
   pre_push_min_trades: 20 # Minimum trades required for meaningful gate
   pre_push_fail_on_insufficient_trades: false # true blocks push if trades < min_trades
-  pre_push_min_win_rate: 0.35 # High-edge books can look “low WR”; PnL-first: pair with pre_push_min_pnl_cents / Sharpe flags
+  pre_push_min_win_rate: 0.20 # High-edge books can look “low WR”; PnL-first: pair with pre_push_min_pnl_cents / Sharpe flags
   pre_push_min_pnl_cents: 0 # Block push when realized PnL (¢) in window is below this — primary $ guard vs WR alone
   pre_push_require_positive_sharpe: false # Optional stricter risk-adjusted gate
   taker_edge_threshold: 0.25

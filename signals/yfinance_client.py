@@ -434,9 +434,9 @@ def _filter_cross_pollinated_prices(ticker: str, prices: list[float]) -> list[fl
     for x in prices or []:
         if x <= 0:
             continue
-        if t in ("^GSPC", "GSPC") and x < 1000.0:
+        if t in ("^GSPC", "GSPC") and (x < 1000.0 or x > 100000.0):
             continue
-        if t in ("^NDX", "NDX") and x < 2000.0:
+        if t in ("^NDX", "NDX") and (x < 2000.0 or x > 100000.0):
             continue
         if t == "SI=F" and x > 200.0:
             continue
@@ -493,10 +493,16 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
         if mn < 2000.0: # Nasdaq-100 hasn't been below 2000 in a long time
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (min value {mn:.1f} < $2000.0) — likely commodity scale leakage")
             return False
+        if mx > 100000.0: # Cap at 100k to catch ~10x-100x scaling bugs
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $100000.0) — scaling bug?")
+            return False
             
     if t in ("^GSPC", "GSPC"):
         if mn < 1000.0: # S&P 500 hasn't been below 1000 in decades
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (min value {mn:.1f} < $1000.0) — likely commodity scale leakage")
+            return False
+        if mx > 100000.0: # Cap at 100k to catch ~10x-100x scaling bugs
+            print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $100000.0) — scaling bug?")
             return False
             
     if t == "SI=F":

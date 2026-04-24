@@ -20,7 +20,7 @@ execution:
   passive_limit_quote: mid
 
 recovery:
-  min_edge: 0.08 # Match config.yaml
+  min_edge: 0.02 # Match feedback (was 0.08)
   uncertainty_edge_mult: 0.0
   vol_disagree_extra_edge: 0.0
   yes_overconfidence_extra_edge: 0.01
@@ -70,13 +70,16 @@ strategy:
     ewma_prob_blend_weight: 0.60
     vol_zscore_enabled: true
     adaptive_edge_enabled: true
-    regime_filter_enabled: true
-    regime_block_buy_no_in_uptrend: true
+    adaptive_edge_cheap_threshold: 0.40 # Match feedback (was 0.20)
+    adaptive_edge_expensive_threshold: 0.60 # Match feedback (was 0.80)
+    regime_filter_enabled: false # Match feedback (was true)
+    regime_block_buy_no_in_uptrend: false
     regime_block_buy_yes_in_downtrend: false
+    buy_no_momentum_gate_enabled: false
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.08
+    min_edge: 0.02 # Match feedback (was 0.08)
     kelly_dampen: 0.15
     max_bankroll_fraction: 0.08
     edge_size_boost_edge: 0.10
@@ -88,7 +91,7 @@ strategy:
   filter_disjoint_underlying_buys: false
   max_bankroll_fraction_per_underlying: 0.20
   max_bankroll_fraction_per_direction: 0.15
-  min_edge: 0.18
+  min_edge: 0.02 # Match feedback (was 0.18)
   
   # Execution Friction Gates
   max_spread_pct: 0.18
@@ -102,7 +105,7 @@ strategy:
   # Tiered min edge
   tiered_min_edge:
     enabled: true
-    min_edge: 0.08
+    min_edge: 0.02 # Match feedback (was 0.08)
     bands:
       - { lo: 0.00, hi: 0.02, min_edge: 0.15 }
       - { lo: 0.02, hi: 0.15, min_edge: 0.10 }

@@ -5495,7 +5495,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                         f"+{streak_bump:.3f} extra edge (total bump now {adaptive_edge_bump:.3f})"
                     )
                 # Narrow market_prob_lo/hi during loss streaks to force 'fat pitch' selection
-                if streak >= 3:
+                # DISABLED per user feedback - Acorns strategy requires wide liquid window [40%, 60%] even in streaks
+                if False and streak >= 3:
                      # e.g. streak 5 -> lo=0.15, hi=0.85
                      narrow_lo = 0.01 + (min(20, streak) * 0.03)
                      narrow_hi = 0.99 - (min(20, streak) * 0.03)
