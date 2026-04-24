@@ -52,8 +52,9 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = get_config()
-    end_ts = datetime.utcnow().timestamp()
-    start_ts = (datetime.utcnow() - timedelta(days=args.days)).timestamp() if args.days > 0 else None
+    import time
+    end_ts = time.time()
+    start_ts = (end_ts - (args.days * 86400)) if args.days > 0 else None
 
     # Param grid: backtest realism params (affect fill simulation)
     backtest = cfg.get("backtest", {})

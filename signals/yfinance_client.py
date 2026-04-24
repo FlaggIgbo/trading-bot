@@ -391,8 +391,9 @@ def get_snapshot(ticker: str) -> float | None:
             # Check market time from info or history index
             mkt_time_raw = yf_t.info.get("regularMarketTime") or yf_t.info.get("lastTradeDate")
             if mkt_time_raw:
+                import time
                 mkt_ts = float(mkt_time_raw)
-                now_ts = datetime.utcnow().timestamp()
+                now_ts = time.time()
                 age_sec = now_ts - mkt_ts
                 if age_sec > 3600: # 1 hour stale
                      print(f"  [yfinance_client] REJECTING stale snapshot for {ticker}: age {age_sec/60:.1f} min > 60 min")

@@ -619,8 +619,9 @@ def main() -> int:
     start_ts = None
     end_ts = None
     if args.days > 0:
-        end_ts = datetime.utcnow().timestamp()
-        start_ts = (datetime.utcnow() - timedelta(days=args.days)).timestamp()
+        import time
+        end_ts = time.time()
+        start_ts = end_ts - (args.days * 86400)
 
     if args.mode == "real":
         out = _run_real(cfg, start_ts, end_ts)

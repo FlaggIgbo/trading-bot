@@ -49,8 +49,9 @@ def main() -> int:
     require_positive_sharpe = bool(bt_cfg.get("pre_push_require_positive_sharpe", False))
     fail_on_insufficient = bool(bt_cfg.get("pre_push_fail_on_insufficient_trades", False))
 
-    end_ts = datetime.utcnow().timestamp()
-    start_ts = (datetime.utcnow() - timedelta(days=max(0, days))).timestamp() if days > 0 else None
+    import time
+    end_ts = time.time()
+    start_ts = (end_ts - (max(0, days) * 86400)) if days > 0 else None
 
     bt = _load_backtest_module()
     if mode == "synthetic":

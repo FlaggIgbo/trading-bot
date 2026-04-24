@@ -91,8 +91,9 @@ def main() -> int:
         print("storage not available; use --demo")
         return 1
 
-    end_ts = datetime.utcnow().timestamp()
-    start_ts = (datetime.utcnow() - timedelta(days=max(0, args.days))).timestamp() if args.days > 0 else None
+    import time
+    end_ts = time.time()
+    start_ts = (end_ts - (max(0, args.days) * 86400)) if args.days > 0 else None
 
     rows = (
         get_market_snapshots_for_backtest(

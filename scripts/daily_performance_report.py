@@ -29,8 +29,9 @@ def _load_backtest_module():
 
 
 def _run_range(bt_mod, cfg: dict, mode: str, days: int) -> dict:
-    end_ts = datetime.utcnow().timestamp()
-    start_ts = (datetime.utcnow() - timedelta(days=days)).timestamp() if days > 0 else None
+    import time
+    end_ts = time.time()
+    start_ts = (end_ts - (days * 86400)) if days > 0 else None
     if mode == "synthetic":
         return bt_mod._run_synthetic(cfg, start_ts, end_ts)
     return bt_mod._run_real(cfg, start_ts, end_ts)
@@ -338,9 +339,10 @@ def main() -> int:
     )
 
     if get_bet_accuracy_stats:
-        end_ts = datetime.utcnow().timestamp()
-        start_short = (datetime.utcnow() - timedelta(days=report_days_short)).timestamp()
-        start_long = (datetime.utcnow() - timedelta(days=report_days_long)).timestamp()
+        import time
+        end_ts = time.time()
+        start_short = end_ts - (report_days_short * 86400)
+        start_long = end_ts - (report_days_long * 86400)
         acc_short = get_bet_accuracy_stats(cfg, start_ts=start_short, end_ts=end_ts)
         acc_long = get_bet_accuracy_stats(cfg, start_ts=start_long, end_ts=end_ts)
         for acc_data, label in [
