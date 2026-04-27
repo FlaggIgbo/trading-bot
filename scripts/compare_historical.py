@@ -6235,6 +6235,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 hist_p = probability_calibrator(hist_p)
             if sp.model_probability_shrinkage < 1.0:
                 hist_p = 0.5 + sp.model_probability_shrinkage * (hist_p - 0.5)
+            
+            # --- GLOBAL TRUST HUMILITY SHIFT ---
+            if calibration_engine:
+                _trust_score = calibration_engine.compute_trust_score(min_samples=15)
+                # If trust is below threshold, aggressively pull hist_p towards 0.5 (model humility)
+                if _trust_score < sp.trust_circuit_breaker_threshold:
+                    _orig_p = hist_p
+                    hist_p = calibration_engine.get_humble_probability(hist_p, min_samples=15)
+                    if abs(_orig_p - hist_p) > 0.01 and getattr(args, "verbose", False):
+                        print(f"    [Trust Engine] Humble shift (Trust={_trust_score:.2f} < {sp.trust_circuit_breaker_threshold}): {_orig_p:.1%} -> {hist_p:.1%}")
             no_bid_signal = float(m.get("no_bid_dollars") or 0) or (1.0 - yes_bid)
             yes_ask_signal = float(m.get("yes_ask_dollars") or 0) or None
             spread_bps_signal = None

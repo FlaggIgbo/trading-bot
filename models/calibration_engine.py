@@ -152,6 +152,24 @@ class CalibrationEngine:
         score = total_realized_win / total_p_win
         return min(1.5, score)
 
+    def apply_trust_shrinkage(self, edge: float, min_samples: int = 10) -> float:
+        """
+        Shrinks predicted edge based on trust score.
+        If Trust=0, edge becomes 0. If Trust=0.5, edge is halved.
+        """
+        trust = self.compute_trust_score(min_samples=min_samples)
+        # Apply a floor so we don't divide by zero, but aggressively penalize low trust
+        return float(edge) * max(0.0, trust)
+
+    def get_humble_probability(self, p_yes: float, min_samples: int = 15) -> float:
+        """
+        Shrinks probability towards 0.5 based on trust score.
+        Formula: p_humble = 0.5 + (p_yes - 0.5) * trust
+        """
+        trust = self.compute_trust_score(min_samples=min_samples)
+        # If trust is 0, we treat it as a coin flip (0.5)
+        return 0.5 + (float(p_yes) - 0.5) * max(0.0, min(1.0, trust))
+
     def compute_brier_score(self) -> float | None:
         """Mean Squared Error of predictions. 0.0 = perfect, 1.0 = total failure."""
         if not self.predictions:

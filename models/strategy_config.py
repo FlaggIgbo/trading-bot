@@ -88,6 +88,7 @@ class StrategyParams:
     calibration_min_date: str
     use_bucket_penalty: bool
     min_bucket_samples: int
+    bucket_override_weight: float
     min_vol_confidence_far_otm: float
     enable_sell_and_rebuy: bool
     dynamic_sell_threshold: bool
@@ -129,6 +130,7 @@ class StrategyParams:
     use_volatility_by_default: bool
     vol_dynamic_n0: float
     uncertainty_edge_mult: float
+    trust_circuit_breaker_threshold: float
     stop_loss_pct: float
     stop_loss_min_model_conf: float
     stop_loss_spot_itm_min_pct: float
@@ -692,6 +694,7 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         calibration_min_date=str(strategy.get("calibration_min_date", "")).strip(),
         use_bucket_penalty=bool(strategy.get("use_bucket_penalty", True)),
         min_bucket_samples=int(strategy.get("min_bucket_samples", 5)),
+        bucket_override_weight=float(strategy.get("bucket_override_weight", 0.0)),
         min_vol_confidence_far_otm=float(strategy.get("min_vol_confidence_far_otm", 0.97)),
         enable_sell_and_rebuy=bool(strategy.get("enable_sell_and_rebuy", False)),
         dynamic_sell_threshold=bool(strategy.get("dynamic_sell_threshold", True)),
@@ -733,6 +736,7 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         use_volatility_by_default=bool(strategy.get("use_volatility_by_default", True)),
         vol_dynamic_n0=float(strategy.get("vol_dynamic_n0", 90.0)),
         uncertainty_edge_mult=float(strategy.get("uncertainty_edge_mult", 0.5)),
+        trust_circuit_breaker_threshold=float(strategy.get("trust_circuit_breaker_threshold", 0.20)),
         stop_loss_pct=float(strategy.get("stop_loss_pct", 0.5)),
         stop_loss_min_model_conf=float(strategy.get("stop_loss_min_model_conf", 1.0)),
         stop_loss_spot_itm_min_pct=max(0.0, float(strategy.get("stop_loss_spot_itm_min_pct", 0.01))),

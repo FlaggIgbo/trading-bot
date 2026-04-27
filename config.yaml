@@ -187,6 +187,12 @@ yfinance_underlying_adjust:
     # Residual error vs gasprices.aaa.com (Kalshi source): wider strike sanity + higher edge hurdle
     extra_min_edge: 0.025
     strike_validation_tolerance_pct: 0.09
+  KXCORNW:
+    extra_min_edge: 0.10 # High slippage/volatility on corn
+    strike_validation_tolerance_pct: 0.15
+  KXBRENTMON:
+    extra_min_edge: 0.05 # High variance on monthly Brent wicks
+    strike_validation_tolerance_pct: 0.10
   KXHYPE15M:
     extra_min_edge: 0.0 # Widen case for analysis-requested trades
 
@@ -257,7 +263,8 @@ recovery:
   calibration_extra_edge_above_yes: 0.0 # Tightened (was 0.05)
   parity_penalty_enabled: false # Re-enabled to avoid one-sidedness (was true)
   # Empirical CI + vol-disagree: re-enabled so required edge scales with data confidence and thin disagreements can trade.
-  uncertainty_edge_mult: 0.0 # Tightened (was 0.20)
+  uncertainty_edge_mult: 1.5 # (was 0.0) Substantial safety buffer per persistent losses feedback
+  trust_circuit_breaker_threshold: 0.3 # Humble shift probability toward 0.5 when overall trust < this
   vol_disagree_extra_edge: 0.0 # Tightened (was 0.03)
   yes_overconfidence_extra_edge: 0.01 # Added small bias correction (was 0)
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
@@ -368,7 +375,7 @@ strategy:
   dte_edge_mult_long: 1.25 # More penalty for distant zones
   max_new_buy_dte_days: 14 # Added 14d cap (was 0)
   yes_overconfidence_extra_edge: 0.01 # Re-enabled (was 0)
-  model_probability_shrinkage: 1.0 # RE-ENABLED (was 0.45): using Forceful mapping as primary calibrator
+  model_probability_shrinkage: 0.8 # (was 1.0) Global humility for predicted edges
   # Prefer strikes within ~25% of spot (relaxed from 5%)
   max_buy_yes_strike_above_pct: 0.15 # Tightened (was 0.25)
   max_buy_no_strike_above_pct: 0.15 # Tightened (was 0.25)
@@ -547,9 +554,9 @@ strategy:
   calibration_min_date: "2026-04-15" # use only recent resolved history for trust/calibration fitting
   calibration_extra_edge_overall: 0.0 # (was 0.0)
   min_calibration_samples_overall: 10 # (was 20)
-  use_bucket_penalty: false # DISABLED per feedback to break the death spiral
-  bucket_override_weight: 0.15 # REDUCED per feedback (was 0.45)
-  min_bucket_samples: 15 # INCREASED per feedback (was 3)
+  use_bucket_penalty: true # Re-enabled to address non-monotonic edge with high override weight
+  bucket_override_weight: 0.7 # (was 0.5) More aggressive blend with empirical reality to fix non-monotonic edge
+  min_bucket_samples: 5 # Reduced to allow faster adaptation
   min_vol_confidence_far_otm: 0.92 # (was 0.88)
   calibration_loss_weight: 2.0 # (was 1.5)
   enable_sell_and_rebuy: false # Off by default — reduces fee churn and re-entry into the same bad tick on fast markets
@@ -589,7 +596,7 @@ strategy:
   empirical_recent_weight: 5.0 # (was 3.0)
   use_volatility_by_default: true # Use volatility model even without --use-volatility
   vol_dynamic_n0: 60 # (was 90)
-  uncertainty_edge_mult: 0.0 # (was 0.05)
+  uncertainty_edge_mult: 1.5 # (was 0.0) Match strategy section
   stop_loss_pct: 0.25 # (was 0.35)
   # Book stop is still triggered by Kalshi bid vs entry; these only gate *when* it may fire:
   stop_loss_spot_itm_min_pct: 0.02 # (was 0.01)

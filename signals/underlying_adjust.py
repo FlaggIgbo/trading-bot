@@ -35,6 +35,12 @@ def underlying_adjust_params(cfg: dict | None, kalshi_series: str) -> tuple[floa
         return (0.01, 0.0) # cents to USD
     if ks in ("KXLCATTLEW", "KXLCATTLED"):
         return (0.01, 0.0) # cents to USD
+    if ks == "KXCORNW":
+        return (0.01, 0.0) # cents to USD
+    if ks == "KXSUGARW":
+        return (0.01, 0.0) # cents to USD
+    if ks == "KXCOCOAW":
+        return (1.0, 0.0) # Cocoa is in USD already on Yahoo (e.g. 10000)
     if ks == "KXINXU":
         # S&P 500 unit check: if Yahoo returns e.g. 50000 instead of 5000
         # This is a safety check; if we see a 6x discrepancy, we might need a mult.

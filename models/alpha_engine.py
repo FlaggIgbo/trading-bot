@@ -28,7 +28,7 @@ class AlphaEngineConfig:
     markout_enabled: bool = True
     markout_windows_minutes: list[int] = field(default_factory=lambda: [1, 5, 15])
     markout_toxic_threshold_bps: float = -50.0
-    markout_edge_penalty: float = 0.03
+    markout_edge_penalty: float = 0.05
     markout_penalty_multiplier: float = 1.0  # Multiplier for continuous penalty scaling
     markout_min_samples: int = 5
 

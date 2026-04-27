@@ -215,8 +215,40 @@ def _extract_closes_from_hist(hist) -> list[float]:
     return [float(x) for x in closes_raw.tolist()]
 
 
+def _yf_download_with_retry(ticker: str, **kwargs) -> Any:
+    """Wrapper for yf.download with common User-Agent and retry for 401s."""
+    import random
+    import time
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    ]
+    
+    # Ensure threads=False to minimize cross-pollination and session issues
+    kwargs.setdefault("threads", False)
+    kwargs.setdefault("progress", False)
+    
+    for attempt in range(3):
+        try:
+            # yfinance now often handles sessions internally with curl_cffi.
+            # We just ensure threads=False and progress=False to minimize crumb corruption.
+            hist = yf.download(ticker, **kwargs)
+            if hist is not None and not hist.empty:
+                return hist
+            # If empty but no exception, might be valid (e.g. no data for period)
+            if attempt == 2: return hist
+            time.sleep(1 * (attempt + 1))
+        except Exception as e:
+            if "401" in str(e) or "Unauthorized" in str(e) or "Crumb" in str(e):
+                if _DEBUG: print(f"  [yfinance_client] 401/Auth error for {ticker}, retrying ({attempt+1}/3)...")
+                time.sleep(1 * (attempt + 1))
+                continue
+            raise e
+    return None
+
 def _yf_daily_closes(ticker: str, start: datetime, end: datetime) -> list[float]:
-    hist = yf.download(ticker, start=start, end=end, interval="1d", progress=False)
+    hist = _yf_download_with_retry(ticker, start=start, end=end, interval="1d")
     return _extract_closes_from_hist(hist)
 
 
@@ -472,21 +504,37 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
     if t in ("RB=F", "CL=F", "BZ=F", "KC=F", "LE=F", "ZC=F"):
         if mx > 1000.0: # Most energy/soft/grain futures < $1000
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $1000.0) — index scale leakage?")
+            try:
+                from storage import clear_yf_cache
+                clear_yf_cache(ticker)
+            except Exception: pass
             return False
     
     if t == "ZS=F":
         if mx > 3000.0: # Soybeans usually < $20 or 2000c
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $3000.0)")
+            try:
+                from storage import clear_yf_cache
+                clear_yf_cache(ticker)
+            except Exception: pass
             return False
 
     if t == "CC=F":
         if mx > 20000.0: # Cocoa was ~$10k recently; cap at 20k
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $20000.0)")
+            try:
+                from storage import clear_yf_cache
+                clear_yf_cache(ticker)
+            except Exception: pass
             return False
 
     if t == "SB=F":
         if mx > 100.0: # Sugar usually < $0.50 or 50c
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $100.0)")
+            try:
+                from storage import clear_yf_cache
+                clear_yf_cache(ticker)
+            except Exception: pass
             return False
     
     if t in ("^NDX", "NDX"):
@@ -620,7 +668,7 @@ def get_aggs(ticker: str, days_back: int = 30, config: dict | None = None) -> li
                 try:
                     # Single-ticker downloads often return MultiIndex when threads=True in some yf versions; 
                     # use threads=False to minimize cross-pollination and keep the structure simple.
-                    hist = yf.download(t, start=start, end=end, interval="1d", progress=False, threads=False)
+                    hist = _yf_download_with_retry(t, start=start, end=end, interval="1d")
                     if hist is None or hist.empty:
                         continue
                     
@@ -715,7 +763,7 @@ def get_intraday_aggs_at_hour(
         try:
             end = datetime.now(UTC)
             start = end - timedelta(days=period_days)
-            hist = yf.download(t, start=start, end=end, interval="1h", progress=False, auto_adjust=True, threads=False)
+            hist = _yf_download_with_retry(t, start=start, end=end, interval="1h", auto_adjust=True)
             if hist is None or hist.empty or "Close" not in hist.columns:
                 continue
             closes_col = hist["Close"]
@@ -809,7 +857,7 @@ def get_aggs_as_of(
         tickers_to_try.extend(_TICKER_FALLBACKS.get(ticker, []))
         for t in tickers_to_try:
             try:
-                hist = yf.download(t, start=start, end=end, interval="1d", progress=False, threads=False)
+                hist = _yf_download_with_retry(t, start=start, end=end, interval="1d")
                 if hist is None or hist.empty:
                     continue
                 closes_raw = None
