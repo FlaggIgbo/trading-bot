@@ -199,35 +199,23 @@ yfinance_underlying_adjust:
 # Optional execution overrides (merged into strategy in compare_historical.py)
 # passive + limit_offset_cents: 0 → quote mid (spread squeeze); 1 → bid + 1¢
 execution:
-  price_strategy: aggressive # passive | aggressive | market — cross spread when edge clears (PnL / fills on fast crypto books)
-  # Penny-jump: bid+1¢ (or min with ask−1¢) for queue priority vs stink bids
-  limit_offset_cents: 3 # Increased from 2 for better queue priority
-  # PnL: if passive/mid, force dip-style limits when time-to-resolution ≤ this many hours (inclusive at boundary)
-  near_expiry_aggressive_hours: 4.0 # Increased from 2.0 to capture more short-dated wicks
-  # Cancel resting BUY when live bid has risen this far above our limit (frees capital; reprices next cycle).
-  resting_cancel_if_market_bid_above_limit_by: 0.01 # Tightened from 0.01 (already tight)
-  # Sell held side when net edge (model − bid − maker fee) falls below this floor; 0 = off.
-  # Negative value = require clear reversal before exiting (hysteresis buffer).
-  position_exit_min_net_edge: 0.02 # Exit as soon as edge is gone (was 0.01)
-  # Minimum minutes to hold a position before discretionary exits (edge-exit, likely-loser, flip).
-  # Stop-loss and rule-violation still fire immediately. 0 = off.
-  position_min_hold_minutes: 3 # Reduced from 5 to allow faster exits on bad trades
-  # Conviction-based hold: if entry edge was >= this, use the stronger (more negative) exit floor below.
-  position_exit_strong_entry_edge: 0.25 # Increased from 0.20
-  position_exit_strong_entry_floor: -0.01 # Tightened (was -0.02)
-  # After this many minutes, if held net edge is still below position_exit_stale_edge_floor, exit (slow bleed / bag-hold).
-  # Not blocked by min-hold. 0 = off.
-  position_exit_stale_minutes: 15 # Reduced from 30
-  # Stale exit when held_edge < this (default 0 = any negative edge after stale_minutes).
-  position_exit_stale_edge_floor: 0.04 # Tightened (was 0.02)
-  # When true: large net edge → quote just inside ask; medium → bid+tick; else dip/layered path.
-  limit_buy_edge_aggression_enabled: true
-  # EV-tier pricing (PnL / fills): strong → at ask; medium → bid + fraction×spread or mid; weak → bid; else skip.
+  price_strategy: passive # PIVOT: Act as a Maker (Acorns-style) to earn/save the spread
+  # Penny-jump: stay at top of queue
+  limit_offset_cents: 1 # Tightened for maker priority
+  # Force dip-style limits only when very close to expiry
+  near_expiry_aggressive_hours: 2.0 
+  # Sell held side when net edge (model − bid − maker fee) falls below this floor
+  position_exit_min_net_edge: 0.01 
+  position_min_hold_minutes: 2 # Faster churn for high volume
+  
+  # Maker-specific scaling
+  layered_order_levels: 5 # Increased from 3 to catch more wicks/volatility
+  max_pct_of_book_volume: 0.25 # Don't be more than 25% of the visible book
+  
+  limit_buy_edge_aggression_enabled: false # Disable 'cross-spread' aggression
   limit_buy_ev_tier_pricing: true
-  limit_buy_weak_bid_min_edge: 0.03 # Lowered (was 0.04)
-  limit_buy_skip_below_weak_edge: true
-  limit_buy_medium_quote_mode: spread_fraction # spread_fraction | mid
-  limit_buy_medium_spread_fraction: 0.80 # Reduced from 1.0 per feedback
+  limit_buy_weak_bid_min_edge: 0.01 # Lowered to increase trade frequency
+  limit_buy_medium_quote_mode: mid # PIVOT: Quote the mid-price for better fills as a maker
   # Tier thresholds (cross ≥ near ≥ weak). Align with recovery/strategy min_edge where possible.
   limit_buy_cross_spread_min_edge: 0.02 # MOVED AGGRESSIVELY per feedback (was 0.08)
   limit_buy_near_market_min_edge: 0.02 # (was 0.03)
