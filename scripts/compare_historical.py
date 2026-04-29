@@ -451,6 +451,7 @@ class StrategyParams:
     use_volatility_by_default: bool
     vol_dynamic_n0: float
     uncertainty_edge_mult: float
+    trust_circuit_breaker_threshold: float
     stop_loss_pct: float
     stop_loss_min_model_conf: float
     # Book stop gates: underlying context + persistence (does not replace book trigger).
@@ -841,6 +842,7 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         use_volatility_by_default=bool(strategy.get("use_volatility_by_default", True)),
         vol_dynamic_n0=float(strategy.get("vol_dynamic_n0", 90.0)),
         uncertainty_edge_mult=float(strategy.get("uncertainty_edge_mult", 0.5)),
+        trust_circuit_breaker_threshold=float(strategy.get("trust_circuit_breaker_threshold", 0.20)),
         stop_loss_pct=float(strategy.get("stop_loss_pct", 0.5)),
         stop_loss_min_model_conf=float(strategy.get("stop_loss_min_model_conf", 1.0)),
         stop_loss_spot_itm_min_pct=max(0.0, float(strategy.get("stop_loss_spot_itm_min_pct", 0.01))),
@@ -6022,9 +6024,17 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
             # --- Maximum Spread Cap: Skip illiquid/toxic books ---
             _y_ask = float(m.get("yes_ask_dollars") or 0)
             if _y_ask > yes_bid > 0:
-                spread_pct = (_y_ask - yes_bid) / yes_bid
-                if spread_pct > sp.max_spread_pct:
-                    print(f"  {ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
+                # PnL: Acorns-style volume needs smarter spread check.
+                # For cheap contracts, percentage of bid is too sensitive (e.g. 1c vs 2c is 100%).
+                # Use mid-price relative spread or allow small absolute spreads.
+                mid = (yes_bid + _y_ask) / 2.0
+                spread_rel = (_y_ask - yes_bid) / mid
+                abs_spread = (_y_ask - yes_bid)
+                
+                # If absolute spread is <= 4 cents, we usually want to trade it for volume
+                # if the edge is there, regardless of percentage.
+                if abs_spread > 0.04 and spread_rel > sp.max_spread_pct:
+                    print(f"  {ticker}: SKIP (spread {spread_rel:.1%} > {sp.max_spread_pct:.1%} cap, abs {abs_spread:.2f} > 0.04) | {title}")
                     continue
 
             threshold, direction, threshold_hi = extract_strike(m)
@@ -6288,10 +6298,12 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     if len(_ensemble_scores) > 1:
                         _std = math.sqrt(sum((s - hist_p)**2 for s in _ensemble_scores) / (len(_ensemble_scores) - 1))
                         _edge_vs_mkt = abs(hist_p - yes_bid)
-                        if _edge_vs_mkt < _std:
+                        # PnL: Use uncertainty_edge_mult to scale the ensemble disagreement block.
+                        # If mult=0, this block is disabled.
+                        if _edge_vs_mkt < _std * sp.uncertainty_edge_mult:
                             rec = REC_SKIP
                             _scores_str = ", ".join([f"{s:.1%}" for s in _ensemble_scores])
-                            print(f"  [Uncertainty] {ticker} → SKIP (Edge {_edge_vs_mkt:.1%} < Uncertainty {_std:.1%}) | Ensemble: [{_scores_str}]")
+                            print(f"  [Uncertainty] {ticker} → SKIP (Edge {_edge_vs_mkt:.1%} < Uncertainty {(_std * sp.uncertainty_edge_mult):.1%}) | Ensemble: [{_scores_str}]")
                 else:
                     hist_p = strategy_engine.score_signal_probability(
                         features=feats,
@@ -7450,13 +7462,15 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     no_p = get_no_price(_get_no_contract(evt) or {})
                 if impl > 0 and no_p > 0:
                     # For Gemini, impl is YES bid, no_p is NO bid.
-                    # Binary spread: (1 - yes_bid - no_bid). Relative spread vs mid or bid.
-                    # We'll use the same formula as Kalshi if we had both YES bid/ask.
-                    # On Gemini we have YES bid and NO bid. YES ask is ~ 1 - NO bid.
+                    # YES ask is ~ 1 - NO bid.
                     _yes_ask_gem = 1.0 - no_p
-                    spread_pct = (_yes_ask_gem - impl) / impl
-                    if spread_pct > sp.max_spread_pct:
-                        print(f"  [Gemini] {g_ticker}: SKIP (spread {spread_pct:.1%} > {sp.max_spread_pct:.1%} cap) | {title}")
+                    
+                    mid_gem = (impl + _yes_ask_gem) / 2.0
+                    spread_rel_gem = (_yes_ask_gem - impl) / mid_gem
+                    abs_spread_gem = (_yes_ask_gem - impl)
+                    
+                    if abs_spread_gem > 0.04 and spread_rel_gem > sp.max_spread_pct:
+                        print(f"  [Gemini] {g_ticker}: SKIP (spread {spread_rel_gem:.1%} > {sp.max_spread_pct:.1%} cap, abs {abs_spread_gem:.2f} > 0.04) | {title}")
                         continue
 
                 # --- Near-the-Money Filter: Focus on contracts within tight gap of spot ---

@@ -363,10 +363,10 @@ strategy:
   dte_edge_mult_long: 1.25 # More penalty for distant zones
   max_new_buy_dte_days: 14 # Added 14d cap (was 0)
   yes_overconfidence_extra_edge: 0.01 # Re-enabled (was 0)
-  model_probability_shrinkage: 0.8 # (was 1.0) Global humility for predicted edges
-  # Prefer strikes within ~25% of spot (relaxed from 5%)
-  max_buy_yes_strike_above_pct: 0.15 # Tightened (was 0.25)
-  max_buy_no_strike_above_pct: 0.15 # Tightened (was 0.25)
+  model_probability_shrinkage: 0.6 # Global humility (was 0.8) for predicted edges
+  # Prefer strikes within ~15% of spot (tightened from 25%)
+  max_buy_yes_strike_above_pct: 0.15 
+  max_buy_no_strike_above_pct: 0.15 
   min_no_price: 0.02 # Skip BUY NO when NO bid < 2¢ (was 1¢)
   days_back: 730 # ~2y historical for P(above/below); launchd passes --days 730 to match
   days_to_expiry: 30 # For volatility model (log-normal)
@@ -392,9 +392,9 @@ strategy:
   market_prob_lo: 0.01 # RELAXED (was 0.05) to capture high-edge tail signals
   market_prob_hi: 0.99 # RELAXED (was 0.95)
   # Max contracts per underlying in a single evaluation run (forced diversification)
-  max_contracts_per_underlying: 5 # Tightened (was 10)
+  max_contracts_per_underlying: 25 # Increased for Acorns-style volume (was 5)
   # Refined strategy params from agent review
-  taker_edge_threshold: 0.20 # MOVED AGGRESSIVELY (was 0.35): take liquidity more often to improve fill rate and avoid adverse selection
+  taker_edge_threshold: 0.15 # Aggressive liquidity taking (was 0.20)
   # Aggression scaling: reduce taker threshold by this mult * (edge - min_edge)
   # e.g. 0.5 mult means if we have 25% edge vs 15% hurdle, threshold drops by 0.5 * 0.10 = 5% (to 0.15)
   edge_aggression_scaling: 0.5

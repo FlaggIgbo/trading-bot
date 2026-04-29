@@ -37,12 +37,12 @@ strategy:
   # Market probability filters
   market_prob_lo: 0.01
   market_prob_hi: 0.99
-  max_contracts_per_underlying: 5
+  max_contracts_per_underlying: 25 # Increased for Acorns-style volume
   max_buy_yes_strike_above_pct: 0.15
   max_buy_no_strike_above_pct: 0.15
 
-  # Probability shrinkage: 1.0 = disabled (using Forceful mapping)
-  model_probability_shrinkage: 1.0
+  # Probability shrinkage: Humble the model (was 1.0) to fix the loss streak
+  model_probability_shrinkage: 0.6
   enable_model_prob_hard_cap: true
   model_prob_hard_lo: 0.05
   model_prob_hard_hi: 0.85 # Match feedback
@@ -79,24 +79,24 @@ strategy:
 
   simple_ev_decision:
     enabled: true
-    min_edge: 0.02 # Match feedback (was 0.08)
+    min_edge: 0.01 # Lowered for volume (was 0.02)
     kelly_dampen: 0.15
-    max_bankroll_fraction: 0.08
-    edge_size_boost_edge: 0.10
+    max_bankroll_fraction: 0.10 # Increased for volume (was 0.08)
+    edge_size_boost_edge: 0.08 # Lowered (was 0.10)
     edge_size_boost_mult: 1.5
     ultra_short_size_mult: 0.8
 
   log_effective_min_edge: true
   log_decision_diagnostics: true
   filter_disjoint_underlying_buys: false
-  max_bankroll_fraction_per_underlying: 0.20
-  max_bankroll_fraction_per_direction: 0.15
-  min_edge: 0.02 # Match feedback (was 0.18)
+  max_bankroll_fraction_per_underlying: 0.25 # Increased (was 0.20)
+  max_bankroll_fraction_per_direction: 0.20 # Increased (was 0.15)
+  min_edge: 0.01 # Lowered for volume (was 0.02)
   
   # Execution Friction Gates
-  max_spread_pct: 0.18
-  min_order_book_depth: 20
-  taker_edge_threshold: 0.20
+  max_spread_pct: 0.20 # Slightly loosened to capture more volume (was 0.18)
+  min_order_book_depth: 10 # Loosened for volume (was 20)
+  taker_edge_threshold: 0.15 # Aggressive liquidity taking (was 0.20)
 
   parity_penalty_enabled: false
   parity_lookback_days: 14 # Match feedback
@@ -105,13 +105,13 @@ strategy:
   # Tiered min edge
   tiered_min_edge:
     enabled: true
-    min_edge: 0.02 # Match feedback (was 0.08)
+    min_edge: 0.01 # Lowered for volume (was 0.02)
     bands:
-      - { lo: 0.00, hi: 0.02, min_edge: 0.15 }
-      - { lo: 0.02, hi: 0.15, min_edge: 0.10 }
-      - { lo: 0.15, hi: 0.40, min_edge: 0.05 }
-      - { lo: 0.40, hi: 0.65, min_edge: 0.08 }
-      - { lo: 0.65, hi: 1.00, min_edge: 0.05 }
+      - { lo: 0.00, hi: 0.02, min_edge: 0.10 } # (was 0.15)
+      - { lo: 0.02, hi: 0.15, min_edge: 0.05 } # (was 0.10)
+      - { lo: 0.15, hi: 0.40, min_edge: 0.02 } # (was 0.05)
+      - { lo: 0.40, hi: 0.65, min_edge: 0.04 } # (was 0.08)
+      - { lo: 0.65, hi: 1.00, min_edge: 0.02 } # (was 0.05)
 
   enable_vol_regime_scaling: true
   enable_vol_spike_safety: true

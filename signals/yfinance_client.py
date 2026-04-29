@@ -219,10 +219,12 @@ def _yf_download_with_retry(ticker: str, **kwargs) -> Any:
     """Wrapper for yf.download with common User-Agent and retry for 401s."""
     import random
     import time
+    import requests
+    
     user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     ]
     
     # Ensure threads=False to minimize cross-pollination and session issues
@@ -231,18 +233,24 @@ def _yf_download_with_retry(ticker: str, **kwargs) -> Any:
     
     for attempt in range(3):
         try:
-            # yfinance now often handles sessions internally with curl_cffi.
-            # We just ensure threads=False and progress=False to minimize crumb corruption.
-            hist = yf.download(ticker, **kwargs)
+            # Create a fresh session with a random UA to avoid crumb issues
+            session = requests.Session()
+            session.headers.update({"User-Agent": random.choice(user_agents)})
+            
+            # yfinance allows passing a session
+            hist = yf.download(ticker, session=session, **kwargs)
+            
             if hist is not None and not hist.empty:
                 return hist
+            
             # If empty but no exception, might be valid (e.g. no data for period)
             if attempt == 2: return hist
-            time.sleep(1 * (attempt + 1))
+            time.sleep(1.5 * (attempt + 1))
         except Exception as e:
-            if "401" in str(e) or "Unauthorized" in str(e) or "Crumb" in str(e):
-                if _DEBUG: print(f"  [yfinance_client] 401/Auth error for {ticker}, retrying ({attempt+1}/3)...")
-                time.sleep(1 * (attempt + 1))
+            err_msg = str(e)
+            if "401" in err_msg or "Unauthorized" in err_msg or "Crumb" in err_msg or "Cookie" in err_msg:
+                if _DEBUG: print(f"  [yfinance_client] 401/Auth error for {ticker}, retrying ({attempt+1}/3)... {err_msg[:100]}")
+                time.sleep(2 * (attempt + 1))
                 continue
             raise e
     return None
