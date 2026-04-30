@@ -468,9 +468,11 @@ _TICKER_FALLBACKS: dict[str, list[str]] = {
 
 
 def _filter_cross_pollinated_prices(ticker: str, prices: list[float]) -> list[float]:
-    """Remove values that are clearly from a different asset scale."""
+    """Remove values that are clearly from a different asset scale or phantom moves."""
     t = (ticker or "").strip().upper()
     cleaned: list[float] = []
+    
+    # 1. Scale-based filtering
     for x in prices or []:
         if x <= 0:
             continue
@@ -485,6 +487,23 @@ def _filter_cross_pollinated_prices(ticker: str, prices: list[float]) -> list[fl
         if t == "GC=F" and x > 10000.0:
             continue
         cleaned.append(float(x))
+
+    # 2. Phantom Move Filtering (Sudden >50% jumps/drops)
+    # Only apply to non-crypto (indices, commodities) as crypto can actually move that much
+    is_crypto = t.endswith("-USD") or t in ("DOGE-USD", "PEPE-USD", "SHIB-USD")
+    if not is_crypto and len(cleaned) > 2:
+        final_cleaned: list[float] = [cleaned[0]]
+        for i in range(1, len(cleaned)):
+            prev = final_cleaned[-1]
+            curr = cleaned[i]
+            if prev > 0:
+                ratio = curr / prev
+                if ratio > 1.5 or ratio < 0.5:
+                    print(f"  [yfinance_client] WARNING: Filtering phantom move for {t}: {prev:.2f} -> {curr:.2f} ({ratio-1:.1%})")
+                    continue # Skip this bar
+            final_cleaned.append(curr)
+        return final_cleaned
+
     return cleaned
 
 
@@ -576,19 +595,6 @@ def _yf_daily_closes_plausible(ticker: str, closes: list[float]) -> bool:
         if mx > 10000.0: # Gold is ~$2500, shouldn't be 10k+
             print(f"  [yfinance_client] WARNING: Rejecting corrupted {t} data (max value {mx:.1f} > $10000.0)")
             return False
-
-    # 2. PHANTOM CRASH VALIDATION:
-    # Large single-day jumps (>50% or < -50%) are almost always data errors for these assets.
-    for i in range(1, len(closes)):
-        prev = closes[i-1]
-        curr = closes[i]
-        if prev > 0:
-            ratio = curr / prev
-            if ratio > 2.0 or ratio < 0.5:
-                # Exception for ultra-volatile crypto if needed, but for indices and commodities it's definitely an error.
-                if t not in ("DOGE-USD", "SHIB-USD", "PEPE-USD"):
-                    print(f"  [yfinance_client] WARNING: Rejecting {t} data due to phantom move: {prev:.2f} -> {curr:.2f} ({ratio-1:.1%})")
-                    return False
 
     return True
 

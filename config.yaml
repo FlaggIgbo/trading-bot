@@ -252,7 +252,7 @@ recovery:
   parity_penalty_enabled: false # Re-enabled to avoid one-sidedness (was true)
   # Empirical CI + vol-disagree: re-enabled so required edge scales with data confidence and thin disagreements can trade.
   uncertainty_edge_mult: 1.5 # (was 0.0) Substantial safety buffer per persistent losses feedback
-  trust_circuit_breaker_threshold: 0.3 # Humble shift probability toward 0.5 when overall trust < this
+  trust_circuit_breaker_threshold: 0.15 # Lowered (was 0.3) for more aggressive signal usage
   vol_disagree_extra_edge: 0.0 # Tightened (was 0.03)
   yes_overconfidence_extra_edge: 0.01 # Added small bias correction (was 0)
   # Turn off multipliers that were inflating required edge ~1.08× + DTE scaling on top of CI.
@@ -271,6 +271,13 @@ strategy:
   emergency_stop_reset_time: 1776313500 # RESET: April 16, 2026 (Manual Reset)
   # vol_regime | vol_regime_threshold (aliases): VolRegimeStrategy = DefaultThreshold recommend + vol mults in compare_historical
   strategy_engine: vol_regime
+  
+  # --- Momentum Sniper (Acorns Strategy) ---
+  momentum_sniper_enabled: true
+  momentum_sniper_min_ret: 0.005 # 0.5% move required
+  momentum_sniper_price_lo: 0.25 # Widened to capture more volume
+  momentum_sniper_price_hi: 0.50
+  momentum_sniper_edge_bonus: 0.04 # Substantial bonus (4%) for trending markets
   # When simple_ev_decision.enabled is true: single net-edge gate + Kelly sizing; barbell/parity/vol-disagree do not stack on min_edge.
   simple_ev_decision:
     enabled: true
@@ -609,8 +616,8 @@ strategy:
   # Bankroll-% caps on this batch’s pending BUY notionals (Kalshi+Gemini combined); trims worst edge/efficiency first.
   max_bankroll_fraction_per_underlying: 0.20 # (was 0.40)
   max_bankroll_fraction_per_direction: 0.15 # (was 0.30)
-  max_daily_loss_pct: 0.10 # Re-enabled (was 0)
-  max_daily_loss_cents: 100 # Added $1 cap
+  max_daily_loss_pct: 0.25 # Relaxed to allow for higher volume/variance
+  max_daily_loss_cents: 500 # Increased $5 cap
   enable_vol_spike_safety: true # Re-enabled (was false)
   vol_spike_threshold_mult: 2.5 # (was 3.0)
   vol_spike_edge_multiplier: 1.5 # (was 2.0)

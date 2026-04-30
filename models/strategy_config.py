@@ -143,6 +143,11 @@ class StrategyParams:
     stop_loss_gradient_per_edge: float
     weekend_edge_multiplier: float
     enable_momentum_protection: bool
+    momentum_sniper_enabled: bool
+    momentum_sniper_min_ret: float
+    momentum_sniper_price_lo: float
+    momentum_sniper_price_hi: float
+    momentum_sniper_edge_bonus: float
     momentum_crash_threshold_pct: float
     max_cross_platform_exposure: float
     max_bankroll_fraction_per_underlying: float
@@ -756,7 +761,13 @@ def load_strategy_params(strategy: dict) -> StrategyParams:
         stop_loss_gradient_per_edge=max(0.0, float(strategy.get("stop_loss_gradient_per_edge", 10.0))),
         weekend_edge_multiplier=float(strategy.get("weekend_edge_multiplier", 1.0)),
         enable_momentum_protection=bool(strategy.get("enable_momentum_protection", False)),
-        momentum_crash_threshold_pct=float(strategy.get("momentum_crash_threshold_pct", -0.02)),
+        momentum_sniper_enabled=bool(strategy.get("momentum_sniper_enabled", False)),
+        momentum_sniper_min_ret=float(strategy.get("momentum_sniper_min_ret", 0.005)),
+        momentum_sniper_price_lo=float(strategy.get("momentum_sniper_price_lo", 0.30)),
+        momentum_sniper_price_hi=float(strategy.get("momentum_sniper_price_hi", 0.45)),
+        momentum_sniper_edge_bonus=float(strategy.get("momentum_sniper_edge_bonus", 0.02)),
+        momentum_crash_threshold_pct=float(strategy.get("momentum_crash_threshold_pct", -0.15)),
+
         max_cross_platform_exposure=float(strategy.get("max_cross_platform_exposure", 0.30)),
         max_bankroll_fraction_per_underlying=max(
             0.0, min(1.0, float(strategy.get("max_bankroll_fraction_per_underlying", 0.0)))

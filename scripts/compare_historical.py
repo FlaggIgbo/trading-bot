@@ -467,6 +467,11 @@ class StrategyParams:
     stop_loss_gradient_per_edge: float
     weekend_edge_multiplier: float
     enable_momentum_protection: bool
+    momentum_sniper_enabled: bool
+    momentum_sniper_min_ret: float
+    momentum_sniper_price_lo: float
+    momentum_sniper_price_hi: float
+    momentum_sniper_edge_bonus: float
     momentum_crash_threshold_pct: float
     max_cross_platform_exposure: float
     # Combined Kalshi+Gemini notionals in one batch: cap stacking without disjoint logical filters.
@@ -862,6 +867,11 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         stop_loss_gradient_per_edge=max(0.0, float(strategy.get("stop_loss_gradient_per_edge", 10.0))),
         weekend_edge_multiplier=float(strategy.get("weekend_edge_multiplier", 1.0)),
         enable_momentum_protection=bool(strategy.get("enable_momentum_protection", False)),
+        momentum_sniper_enabled=bool(strategy.get("momentum_sniper_enabled", False)),
+        momentum_sniper_min_ret=float(strategy.get("momentum_sniper_min_ret", 0.005)),
+        momentum_sniper_price_lo=float(strategy.get("momentum_sniper_price_lo", 0.30)),
+        momentum_sniper_price_hi=float(strategy.get("momentum_sniper_price_hi", 0.45)),
+        momentum_sniper_edge_bonus=float(strategy.get("momentum_sniper_edge_bonus", 0.02)),
         momentum_crash_threshold_pct=float(strategy.get("momentum_crash_threshold_pct", -0.02)),
         max_cross_platform_exposure=float(strategy.get("max_cross_platform_exposure", 0.30)),
         max_bankroll_fraction_per_underlying=max(
@@ -6370,10 +6380,33 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 )
                 _proxy_edge_simple = float(proxy_basis_extra_min_edge(cfg, series))
                 effective_min = float(_eff_after_simple_bundle) + _proxy_edge_simple
+                
+                # --- Momentum Sniper (Acorns Strategy) ---
+                momentum_bonus_yes = 0.0
+                momentum_bonus_no = 0.0
+                if sp.momentum_sniper_enabled:
+                    if sp.momentum_sniper_price_lo <= yes_bid <= sp.momentum_sniper_price_hi:
+                        # Aligned for YES: Price moving UP in an 'above' contract
+                        if momentum_ret >= sp.momentum_sniper_min_ret and direction == "above":
+                            momentum_bonus_yes = sp.momentum_sniper_edge_bonus
+                    
+                    no_bid_val = no_bid_early
+                    if sp.momentum_sniper_price_lo <= no_bid_val <= sp.momentum_sniper_price_hi:
+                        # Aligned for NO: Price moving DOWN in an 'above' contract
+                        if momentum_ret <= -sp.momentum_sniper_min_ret and direction == "above":
+                            momentum_bonus_no = sp.momentum_sniper_edge_bonus
+
                 if _proxy_edge_simple > 0.0 and _us_edge_detail is not None:
                     _us_edge_detail = {**_us_edge_detail, "proxy_basis_extra_min_edge": _proxy_edge_simple}
-                effective_min_yes = effective_min
-                effective_min_no = effective_min
+                
+                effective_min_yes = effective_min - momentum_bonus_yes
+                effective_min_no = effective_min - momentum_bonus_no
+                
+                if (momentum_bonus_yes > 0 or momentum_bonus_no > 0) and getattr(args, "verbose", False):
+                    _b = momentum_bonus_yes if momentum_bonus_yes > 0 else momentum_bonus_no
+                    _s = "YES" if momentum_bonus_yes > 0 else "NO"
+                    print(f"    ├─ momentum sniper bonus ({_s}): -{_b:.2%} (ret {momentum_ret:.2%})")
+
                 obi_adj_yes = obi_adj_no = 0.0
                 obi_val = None
                 ll_adj_yes = ll_adj_no = 0.0

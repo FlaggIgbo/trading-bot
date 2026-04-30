@@ -1,0 +1,10 @@
+usage: compare_historical.py [-h] [--days DAYS] [--markets MARKETS]
+                             [--edge EDGE] [--no-llm] [--verbose] [--preview]
+                             [--execute] [--use-volatility] [--log [DIR]]
+                             [--limit-analysis] [--position-eval-analysis]
+                             [--reconcile-diagnostics] [--reconcile-only]
+                             [--show-config] [--clear-emergency-stop]
+                             [--ticker TICKER]
+                             [--compare-strategies COMPARE_STRATEGIES]
+                             [--force-trades]
+compare_historical.py: error: unrecognized arguments: --nollm

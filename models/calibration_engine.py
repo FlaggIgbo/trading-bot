@@ -150,7 +150,8 @@ class CalibrationEngine:
             return 1.0
             
         score = total_realized_win / total_p_win
-        return min(1.5, score)
+        # Add a floor to prevent complete signal lockout during losing streaks
+        return max(0.20, min(1.5, score))
 
     def apply_trust_shrinkage(self, edge: float, min_samples: int = 10) -> float:
         """
