@@ -509,11 +509,11 @@ strategy:
   intraday_other_min_p_win: 0.65 # (was 0.60)
   intraday_other_min_p_win_with_vol: 0.60 # (was 0.55)
   # Sub-hour / 15m (Kalshi KX*15M e.g. KXBTC15M/KXDOGE15M, Gemini *15M* tickers, or DTE <= ultra_short_dte_hours)
-  ultra_short_dte_hours: 1.0
+  ultra_short_dte_hours: 1.2 # ENABLED: Detect markets resolving within 72 minutes as ultra-short
   ultra_short_min_p_win: 0.55 # relaxed to allow 55–65% confidence edges on ultra-short contracts
   ultra_short_min_p_win_with_vol: 0.52 # relaxed vol-path gate for ultra-short contracts
   # 15m / sub-hour: extra × on required min_edge (settable here; code default is 1.0)
-  ultra_short_min_edge_mult: 1.0
+  ultra_short_min_edge_mult: 1.5 # Require 50% more edge for ultra-short contracts
   # When time-to-resolution is under this many minutes, multiply required net edge again (late books more efficient).
   ultra_short_late_minutes_threshold: 5.0 # (was 3.0)
   ultra_short_late_min_edge_mult: 1.2 # (was 1.0)
@@ -700,69 +700,54 @@ strategy:
   signal_weight_fit_l2_c: 0.5 # (was 1.0)
   signal_model_weights:
     bias: 0.0
-    emp_p: 1.2 # FURTHER REDUCED (was 1.5): focus on higher-confidence signals
-    vol_p: 0.8 # FURTHER REDUCED (was 1.0)
-    market_yes: 0.7 # INCREASED (was 0.5): trust market price more to dampen overconfidence
-    edge_yes: 0.8 # REDUCED (was 1.0)
-    edge_no: -0.4 # REDUCED (was -0.5)
-    moneyness: 0.3 # (was 0.2)
-    dte_norm: 0.2 # (was 0.1)
-    spread_norm: -1.2 # INCREASED PENALTY (was -0.8): avoid wide spreads
-    liquidity_consistency: 0.7 # INCREASED (was 0.5)
-    rsi_norm: -0.5 # (was -0.3)
+    emp_p: 1.0 # REDUCED (was 1.2): focus on higher-confidence signals
+    vol_p: 1.0 # INCREASED (was 0.8)
+    market_yes: 0.85 # INCREASED (was 0.7): trust market price more to dampen overconfidence
+    edge_yes: 0.7 # REDUCED (was 0.8)
+    edge_no: -0.3 # REDUCED (was -0.4)
+    moneyness: 0.3
+    dte_norm: 0.2
+    spread_norm: -1.5 # INCREASED PENALTY (was -1.2)
+    liquidity_consistency: 0.8 # INCREASED (was 0.7)
+    rsi_norm: -0.4
     vwap_dist: 0.5
-    price_trend: 0.3
+    price_trend: 0.4 # (was 0.3)
   signal_model_ensemble_weights:
     - name: "Conservative Consensus"
       weights:
-        emp_p: 1.5
-        vol_p: 1.0
-        market_yes: 1.0
+        emp_p: 1.2
+        vol_p: 1.2
+        market_yes: 1.2
         liquidity_consistency: 1.2
         spread_norm: -1.5
     - name: "Alpha Residual"
       weights:
-        edge_yes: 1.5
-        edge_no: -1.0
+        edge_yes: 1.2
+        edge_no: -0.8
         vwap_dist: 1.2
-        price_trend: 0.8
+        price_trend: 1.0
         spread_norm: -1.0
-        rsi_norm: -1.0
+        rsi_norm: -0.8
   # Anti-hallucination layers: reduce model overconfidence vs market reality
   anti_hallucination:
-    bayesian_enabled: false # DISABLED (was true) to consolidate calibration logic
-    bayesian_market_strength: 10.0 # REDUCED (was 20.0) to find more edge
+    bayesian_enabled: true # RE-ENABLED (was false) to fix overconfidence engine
+    bayesian_market_strength: 15.0 # INCREASED (was 10.0) to trust market more
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
-    ewma_prob_span: 14 # Faster response (was 14)
+    ewma_prob_span: 10 # Faster response (was 14)
     ewma_prob_min_samples: 5 # (was 10)
-    ewma_prob_blend_weight: 0.35 # INCREASED (was 0.50)
+    ewma_prob_blend_weight: 0.40 # INCREASED (was 0.35)
     vol_zscore_enabled: true # Vol Z-score gate: dampen confidence during vol spikes
     vol_zscore_short_window: 12 # (was 24)
     vol_zscore_long_window: 168 # Long vol window (bars) for baseline
     vol_zscore_threshold: 1.2 # TIGHTENED (was 1.5)
     vol_zscore_tail_mult: 0.4 # TIGHTENED (was 0.5)
     adaptive_edge_enabled: true # Re-enabled
-    adaptive_edge_cheap_threshold: 0.40 # (was 0.20)
-    adaptive_edge_expensive_threshold: 0.60 # (was 0.80)
+    adaptive_edge_cheap_threshold: 0.35 # (was 0.40)
+    adaptive_edge_expensive_threshold: 0.65 # (was 0.60)
     adaptive_edge_otm_base_mult: 2.5 # (was 1.8)
     adaptive_edge_trend_opposed_mult: 2.0 # (was 1.5)
     adaptive_edge_strike_dist_mult: 1.5 # (was 1.2)
-    regime_filter_enabled: false # Master switch for regime + BUY NO momentum gates
-    regime_ema_period: 20 # Slow EMA for trend score + legacy BUY YES gate
-    regime_ema_fast_period: 10 # Fast EMA for trend slope
-    trend_score_w_level: 1.0
-    trend_score_w_slope: 1.0 # (was 0.8)
-    trend_score_w_ret: 0.8 # (was 0.5)
-    trend_score_up_threshold: 0.005 # (was 0.008)
-    trend_score_down_threshold: 0.005 # (was 0.008)
-    regime_require_alignment: true # Legacy: block counter-trend BUY YES vs slow EMA
-    buy_no_momentum_gate_enabled: false # Block BUY NO when price > EMA10 and RSI >= threshold
-    buy_no_momentum_ema_period: 10
-    buy_no_momentum_rsi_period: 14
-    buy_no_momentum_rsi_min: 55.0 # (was 60.0)
-    regime_routing_enabled: true
-    regime_block_buy_no_in_uptrend: false # Re-enabled
-    regime_block_buy_yes_in_downtrend: false # REDUCED (was true): allow YES buys to test edges
+    regime_filter_enabled: true # RE-ENABLED (was false) to master switch for regime + BUY NO momentum gates
   # Surgical kill switch: oil uptrend NO ban + per-series size haircut on bad 7d PnL (not blanket blacklist)
   dynamic_kill_switch:
     enabled: true

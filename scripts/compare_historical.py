@@ -83,6 +83,7 @@ from models.anti_hallucination import (
     adaptive_min_edge,
     apply_anti_hallucination_pipeline,
     classify_trend_regime,
+    compute_ema,
     directional_regime_should_skip,
     load_anti_hallucination_config,
 )
@@ -241,6 +242,7 @@ from yfinance_client import (
     get_aggs as yf_get_aggs,
     get_intraday_aggs_at_hour as yf_get_intraday_aggs,
     get_snapshot as yf_get_snapshot,
+    get_high_frequency_closes as yf_get_hf_closes,
 )
 from underlying_adjust import (
     apply_underlying_closes,
@@ -5802,38 +5804,45 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     use_vol = bool(getattr(args, "use_volatility", False) or sp.use_volatility_by_default)
 
     # Parallel Yahoo/Gemini spot history + snapshot prefetch (one thread per series)
-    def _prefetch_series_yf(series_raw: str) -> tuple[str, str | None, list[float] | None, float | None, str]:
+    def _prefetch_series_yf(series_raw: str) -> tuple[str, str | None, list[float] | None, float | None, str, list[float] | None]:
         s = series_raw.strip()
         yt = yf_mapping.get(s.upper())
         if not yt:
-            return s, None, None, None, "no_map"
+            return s, None, None, None, "no_map", None
         try:
             if yt.startswith("WEATHER:"):
                 # Warm weather cache if needed, but the model handles it fine
-                return s, yt, [], None, "ok"
+                return s, yt, [], None, "ok", None
             cl = yf_get_aggs(yt, days_back=hist_lookback, config=cfg)
             if not cl:
-                return s, yt, None, None, "no_closes"
+                return s, yt, None, None, "no_closes", None
             cl = apply_underlying_closes(cfg, s, cl)
             snap = yf_get_snapshot(yt) if sp.use_live_price else None
             if snap is not None:
                 snap = apply_underlying_price(cfg, s, snap)
-            return s, yt, cl, snap, "ok"
+            
+            # Prefetch high-frequency data for crypto (1m for 1d) to support ultra-short vol model
+            hf_cl = None
+            if yt in GEMINI_CRYPTO_YF or "-USD" in yt:
+                 hf_cl = yf_get_hf_closes(yt, interval="1m", period="1d")
+            
+            return s, yt, cl, snap, "ok", hf_cl
         except Exception:
-            return s, yt, None, None, "err"
+            return s, yt, None, None, "err", None
 
-    _yf_series_cache: dict[str, tuple[str | None, list[float] | None, float | None, str]] = {}
+    _yf_series_cache: dict[str, tuple[str | None, list[float] | None, float | None, str, list[float] | None]] = {}
     _yf_workers = min(8, max(1, len(markets_list)))
     with ThreadPoolExecutor(max_workers=_yf_workers) as _yf_ex:
         _yf_futs = [_yf_ex.submit(_prefetch_series_yf, s) for s in markets_list]
         for _fut in as_completed(_yf_futs):
-            s_key, yt, cl, snap, st = _fut.result()
-            _yf_series_cache[s_key] = (yt, cl, snap, st)
+            res = _fut.result()
+            s_key, yt, cl, snap, st, hf_cl = res
+            _yf_series_cache[s_key] = (yt, cl, snap, st, hf_cl)
 
     for series in markets_list:
         series = series.strip()
-        _cached = _yf_series_cache.get(series, (None, None, None, "no_map"))
-        yf_ticker, closes, snap_pref, _pst = _cached
+        _cached = _yf_series_cache.get(series, (None, None, None, "no_map", None))
+        yf_ticker, closes, snap_pref, _pst, hf_closes = _cached
         if _pst == "no_map" or not yf_ticker:
             print(f"[{series}] No yfinance_tickers mapping - skip")
             continue
@@ -6179,9 +6188,24 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 hist_p = emp
             dte = get_days_to_expiry_from_market(m, yf_ticker, sp.days_to_expiry)
             ewma_lambda_used = _ewma_lambda_for_market(sp, m, yf_ticker)
+            
+            # --- Ultra-short Volatility Model Upgrade ---
+            # If dte < ultra_short_dte_hours (e.g. 1.5h) and we have HF closes (1m), 
+            # calculate sigma_annual from HF data instead of daily closes.
+            _use_hf_vol = False
+            _vol_closes = closes
+            _ann_factor = None
+            if use_vol and is_ultra_short_horizon(m, yf_ticker, sp.ultra_short_dte_hours) and hf_closes:
+                _use_hf_vol = True
+                _vol_closes = hf_closes
+                # Annualization for 1m data (crypto 24/7): sqrt(60 * 24 * 365)
+                _ann_factor = math.sqrt(60 * 24 * 365)
+                if getattr(args, "verbose", False):
+                    print(f"    [Vol Model] Using 1m high-frequency data for ultra-short horizon ({len(hf_closes)} bars)")
+
             vol_p = (
                 volatility_probability_with_mc(
-                    closes,
+                    _vol_closes,
                     threshold,
                     direction,
                     dte,
@@ -6198,6 +6222,7 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     mc_paths=sp.mc_paths if sp.mc_enabled else 0,
                     mc_blend_weight=sp.mc_blend_weight,
                     zero_drift=sp.vol_model_zero_drift,
+                    annualization_factor=_ann_factor,
                 )
                 if use_vol else None
             )
@@ -6341,6 +6366,20 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                 if abs(drift_bonus) > 0.005:
                     hist_p = max(0.01, min(0.99, hist_p + drift_bonus))
                     print(f"    [Alpha] Drift adjustment: {hist_p_raw:.1%} → {hist_p:.1%} (trend_score {rs.trend_score:.2f})")
+                
+                # --- Acorns Appreciation Alpha ---
+                # If the long-term trend (e.g. 50-day EMA > 200-day EMA) is positive,
+                # add a small bias towards YES on 'above' contracts to align with market appreciation goals.
+                ema50 = compute_ema(closes, 50)
+                ema200 = compute_ema(closes, 200)
+                if ema50 and ema200 and ema50 > ema200:
+                    acorns_bonus = 0.0
+                    if direction == "above":
+                        acorns_bonus = 0.015 # 1.5% bonus for appreciation
+                    if acorns_bonus > 0:
+                        hist_p = max(0.01, min(0.99, hist_p + acorns_bonus))
+                        if getattr(args, "verbose", False):
+                            print(f"    [Acorns] Appreciation bias: +{acorns_bonus:.1%} (Bullish EMA stack)")
             except Exception:
                 pass
 

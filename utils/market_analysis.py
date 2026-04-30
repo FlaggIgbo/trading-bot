@@ -265,6 +265,7 @@ def volatility_probability(
     distribution: str = "normal",
     t_df: float = 6.0,
     zero_drift: bool = False,
+    annualization_factor: float | None = None,
 ) -> float | None:
     """
     Log-normal / Black-Scholes style: P(price above/below K at expiry) using historical vol.
@@ -292,8 +293,14 @@ def volatility_probability(
         variance = ewma_variance(returns, ewma_lambda)
     if variance <= 0:
         variance = sample_variance(returns)
-    sigma_daily = variance ** 0.5
-    sigma_annual = sigma_daily * (252 ** 0.5)
+    sigma_step = variance ** 0.5
+    
+    # Default annualization factor is sqrt(252) for daily data.
+    if annualization_factor is not None:
+        sigma_annual = sigma_step * annualization_factor
+    else:
+        sigma_annual = sigma_step * (252 ** 0.5)
+
     # OTM smile adjustment
     if enable_otm_smile_adjustment and sigma_annual > 0:
         m = math.log(max(1e-12, threshold / S0))
@@ -402,6 +409,7 @@ def volatility_probability_with_mc(
     mc_paths: int = 10000,
     mc_blend_weight: float = 0.3,
     zero_drift: bool = False,
+    annualization_factor: float | None = None,
 ) -> float | None:
     """Blended analytical + Monte Carlo volatility probability."""
     analytical = volatility_probability(
@@ -414,6 +422,7 @@ def volatility_probability_with_mc(
         otm_smile_max_mult=otm_smile_max_mult,
         distribution=distribution, t_df=t_df,
         zero_drift=zero_drift,
+        annualization_factor=annualization_factor,
     )
     if analytical is None:
         return None
@@ -436,8 +445,13 @@ def volatility_probability_with_mc(
         variance = ewma_variance(returns, ewma_lambda)
     if variance <= 0:
         variance = sample_variance(returns)
-    sigma_daily = variance ** 0.5
-    sigma_annual = sigma_daily * (252 ** 0.5)
+    sigma_step = variance ** 0.5
+    
+    if annualization_factor is not None:
+        sigma_annual = sigma_step * annualization_factor
+    else:
+        sigma_annual = sigma_step * (252 ** 0.5)
+
     if enable_otm_smile_adjustment and sigma_annual > 0:
         m = math.log(max(1e-12, threshold / S0))
         is_otm_for_yes = (direction == "above" and threshold > S0) or (

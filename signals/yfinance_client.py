@@ -837,6 +837,41 @@ def get_intraday_aggs_at_hour(
     return result
 
 
+def get_high_frequency_closes(ticker: str, interval: str = "1m", period: str = "1d") -> list[float]:
+    """
+    Fetch high-frequency intraday data from yfinance.
+    Intervals: 1m (max 7 days), 5m, 15m, 1h.
+    Period: 1d, 5d.
+    Returns list of close prices (oldest first).
+    """
+    try:
+        # Avoid thread issues in yfinance
+        hist = _yf_download_with_retry(ticker, period=period, interval=interval, threads=False)
+        if hist is None or hist.empty:
+            return []
+        
+        closes_raw = None
+        if hasattr(hist.columns, "get_level_values") and "Close" in hist.columns.get_level_values(0):
+            closes_raw = hist["Close"]
+        elif "Close" in hist.columns:
+            closes_raw = hist["Close"]
+            
+        if closes_raw is not None and hasattr(closes_raw, "ndim") and closes_raw.ndim > 1:
+            closes_raw = closes_raw.iloc[:, 0]
+            
+        if closes_raw is not None:
+            closes_raw = closes_raw.dropna()
+            if len(closes_raw) > 0:
+                result = [float(x) for x in closes_raw.tolist()]
+                if ticker == "SPY":
+                    result = [x * 10.0 for x in result]
+                return result
+    except Exception as e:
+        if _DEBUG:
+            print(f"  [yfinance_client] high-frequency download failed for {ticker}: {e}")
+    return []
+
+
 def get_aggs_as_of(
     ticker: str,
     end_date: datetime | str | None = None,
