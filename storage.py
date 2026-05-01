@@ -2482,6 +2482,7 @@ def get_recent_performance(
 def get_recent_performance_by_series(
     *,
     lookback_hours: float = 12.0,
+    min_ts: float | None = None,
     config: dict | None = None,
 ) -> dict[str, dict[str, Any]]:
     """
@@ -2492,6 +2493,8 @@ def get_recent_performance_by_series(
     if not conn:
         return {}
     cutoff = time.time() - lookback_hours * 3600
+    if min_ts is not None:
+        cutoff = max(cutoff, min_ts)
     try:
         rows = conn.execute(
             """SELECT ticker, outcome, COALESCE(realized_pnl_cents, pnl_cents, 0) AS pnl,

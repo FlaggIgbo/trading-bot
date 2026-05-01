@@ -714,6 +714,10 @@ class StrategyParams:
     stop_loss_regime_persist_enabled: bool
     stop_loss_book_persist_counter_trend_seconds: float
     stop_loss_book_persist_trend_aligned_seconds: float
+    series_guard_min_win_rate: float
+    series_guard_max_consecutive_losses: int
+    series_guard_lookback_hours: float
+    series_guard_reset_time: float | None
     ah_cfg: AntiHallucinationConfig = None  # type: ignore[assignment]
     ae_cfg: AlphaEngineConfig = None  # type: ignore[assignment]
 
@@ -998,6 +1002,10 @@ def _load_strategy_params(strategy: dict) -> StrategyParams:
         adaptive_edge_idle_decay_halflife_hours=max(0.01, float(strategy.get("adaptive_edge_idle_decay_halflife_hours", 10.0))),
         adaptive_stress_size_edge_threshold=max(0.0, float(strategy.get("adaptive_stress_size_edge_threshold", 0.06))),
         adaptive_stress_size_min_mult=max(0.05, min(1.0, float(strategy.get("adaptive_stress_size_min_mult", 0.60)))),
+        series_guard_min_win_rate=float(strategy.get("series_guard_min_win_rate", 0.25)),
+        series_guard_max_consecutive_losses=int(strategy.get("series_guard_max_consecutive_losses", 5)),
+        series_guard_lookback_hours=float(strategy.get("series_guard_lookback_hours", 24.0)),
+        series_guard_reset_time=strategy.get("series_guard_reset_time"),
         force_exploration_reduction=max(0.0, min(1.0, float(strategy.get("force_exploration_reduction", 0.0)))),
         force_exploration_hours=max(0.0, float(strategy.get("force_exploration_hours", 0.0))),
         barbell_enabled=bool(strategy.get("barbell_enabled", False)),
@@ -5340,12 +5348,16 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     trusted_series = set()
     if get_recent_performance_by_series:
         try:
-            series_perf = get_recent_performance_by_series(lookback_hours=24.0, config=cfg)
+            series_perf = get_recent_performance_by_series(
+                lookback_hours=sp.series_guard_lookback_hours,
+                min_ts=sp.series_guard_reset_time,
+                config=cfg,
+            )
             for s_prefix, p in series_perf.items():
                 if p.get("total", 0) >= sp.series_trusted_min_samples:
                     wr = p.get("win_rate")
                     cl = p.get("consecutive_losses", 0)
-                    if (wr is not None and wr < 0.25) or cl >= 5:
+                    if (wr is not None and wr < sp.series_guard_min_win_rate) or cl >= sp.series_guard_max_consecutive_losses:
                         paper_only_series.add(s_prefix)
                         print(f"[Series Guard] {s_prefix} → PAPER ONLY (WR {wr:.1%}, {cl} consecutive losses)")
                     elif (wr is not None and wr >= sp.series_trusted_min_win_rate):
@@ -8227,7 +8239,9 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _vp_g = _display_model_probability(vol_p_gem, sp)
                     _vp_g_note = "" if _vp_g is None or abs(float(_vp_g) - float(vol_p_gem)) < 1e-9 else " (display capped)"
                     print(f"    ├─ Volatility P: {_vp_g:.1%}{_vp_g_note}  (model based on current price + DTE)")
-                    print(f"    ├─ Blended P:    {hist_p_gem:.1%}  (final model probability)")
+                    ah_delta_g = abs(hist_p_gem - hist_p_raw_g)
+                    ah_tag_g = f"  (AH: {hist_p_raw_g:.1%}→{hist_p_gem:.1%})" if ah_delta_g >= 0.02 else ""
+                    print(f"    ├─ Blended P:    {hist_p_gem:.1%}  (final model probability){ah_tag_g}")
                     _print_barbell_joint_blend_diagnostic(
                         sp,
                         emp=emp,
@@ -10614,9 +10628,21 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
     print("=" * 75)
     print(f"  Markets evaluated:   {_eval_count_total}")
     print(f"  Recommendations:     {_eval_count_buy} BUY  |  {_eval_count_skip} SKIP")
-    print(f"  Proposed buys:       {len(pending_orders)}")
-    print(f"  Proposed sells:      {len(pending_sells)}")
+    
     funded_buys = [o for o in pending_orders if int(o.get("count", 0) or 0) > 0]
+    if funded_buys:
+        print("\n  Top Opportunities (Highest Edge):")
+        sorted_opps = sorted(funded_buys, key=lambda x: float(x.get("edge", 0.0) or 0.0), reverse=True)[:5]
+        for opp in sorted_opps:
+            _edge = float(opp.get("edge", 0.0) or 0.0)
+            _ticker = opp.get("ticker", "?")
+            _side = opp.get("side", "?")
+            _price = float(opp.get("price", 0.0) or 0.0)
+            _plat = opp.get("platform", "?")
+            print(f"    - {_ticker} ({_plat}): BUY {_side} @ ${_price:.2f} | Edge: {_edge:+.1%}")
+
+    print(f"\n  Proposed buys:       {len(pending_orders)}")
+    print(f"  Proposed sells:      {len(pending_sells)}")
     print(
         f"  Funnel (this run):   recommended={_eval_count_buy} -> proposed={len(pending_orders)} "
         f"-> funded={len(funded_buys)}"

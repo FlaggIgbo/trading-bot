@@ -26,6 +26,10 @@ class AntiHallucinationConfig:
     # --- Bayesian update ---
     bayesian_enabled: bool = True
     bayesian_market_strength: float = 2.0
+    
+    # --- Linear Market Blend ---
+    market_blend_enabled: bool = True
+    market_blend_model_weight: float = 0.25 # Weight given to model (0.75 to market)
 
     # --- EWMA probability ---
     ewma_prob_enabled: bool = True
@@ -106,6 +110,8 @@ def load_anti_hallucination_config(strategy: dict) -> AntiHallucinationConfig:
         regime_routing_enabled=bool(ah.get("regime_routing_enabled", True)),
         regime_block_buy_no_in_uptrend=bool(ah.get("regime_block_buy_no_in_uptrend", True)),
         regime_block_buy_yes_in_downtrend=bool(ah.get("regime_block_buy_yes_in_downtrend", False)),
+        market_blend_enabled=bool(ah.get("market_blend_enabled", True)),
+        market_blend_model_weight=float(ah.get("market_blend_model_weight", 0.25)),
     )
 
 
@@ -150,7 +156,24 @@ def bayesian_update(
     posterior = alpha_post / (alpha_post + beta_post)
     return max(1e-6, min(1 - 1e-6, posterior))
 
-
+def market_linear_blend(
+    model_p: float,
+    market_p: float,
+    model_weight: float = 0.25,
+) -> float:
+    """
+    Linear blend between market probability and model probability.
+    
+    If model_weight = 0.25, the result is 75% market and 25% model.
+    This anchors predictions to market reality while allowing the model 
+    to 'tilt' the probability in the direction of its edge.
+    """
+    m_p = max(0.001, min(0.999, float(market_p)))
+    p_p = max(0.001, min(0.999, float(model_p)))
+    w = max(0.0, min(1.0, float(model_weight)))
+    
+    blended = (1 - w) * m_p + w * p_p
+    return max(1e-6, min(1 - 1e-6, blended))
 
 # ---------------------------------------------------------------------------
 # Layer 2: EWMA Probability Estimation
@@ -508,6 +531,9 @@ def apply_anti_hallucination_pipeline(
 
     if cfg.bayesian_enabled:
         p = bayesian_update(p, market_p, cfg.bayesian_market_strength, liquidity_consistency=liquidity_consistency)
+
+    if cfg.market_blend_enabled:
+        p = market_linear_blend(p, market_p, model_weight=cfg.market_blend_model_weight)
 
     return max(1e-6, min(1 - 1e-6, p))
 

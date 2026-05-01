@@ -395,6 +395,12 @@ strategy:
   series_hurdle_trusted_bonus: 0.05 # Reduce 5% edge req for proven performers
   series_trusted_min_win_rate: 0.65
   series_trusted_min_samples: 5
+  
+  # Series Guard thresholds (for Paper-Only status)
+  series_guard_min_win_rate: 0.25
+  series_guard_max_consecutive_losses: 5
+  series_guard_lookback_hours: 24.0
+  series_guard_reset_time: 1777660455 # RESET: May 1, 2026 (Now)
   # Market probability filters (skip deep OTM/ITM tails)
   market_prob_lo: 0.01 # RELAXED (was 0.05) to capture high-edge tail signals
   market_prob_hi: 0.99 # RELAXED (was 0.95)
@@ -732,6 +738,11 @@ strategy:
   anti_hallucination:
     bayesian_enabled: true # RE-ENABLED (was false) to fix overconfidence engine
     bayesian_market_strength: 15.0 # INCREASED (was 10.0) to trust market more
+    
+    # Linear Market Blend: final_p = (1-w)*market + w*model
+    market_blend_enabled: true
+    market_blend_model_weight: 0.20 # 80% market, 20% model tilt (as suggested by user)
+    
     ewma_prob_enabled: true # EWMA probability: weight recent data exponentially
     ewma_prob_span: 10 # Faster response (was 14)
     ewma_prob_min_samples: 5 # (was 10)
