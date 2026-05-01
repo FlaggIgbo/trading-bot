@@ -8239,8 +8239,8 @@ def _run_impl(args, cfg, markets_list, yf_mapping, strategy, use_kelly, kelly_fr
                     _vp_g = _display_model_probability(vol_p_gem, sp)
                     _vp_g_note = "" if _vp_g is None or abs(float(_vp_g) - float(vol_p_gem)) < 1e-9 else " (display capped)"
                     print(f"    ├─ Volatility P: {_vp_g:.1%}{_vp_g_note}  (model based on current price + DTE)")
-                    ah_delta_g = abs(hist_p_gem - hist_p_raw_g)
-                    ah_tag_g = f"  (AH: {hist_p_raw_g:.1%}→{hist_p_gem:.1%})" if ah_delta_g >= 0.02 else ""
+                    ah_delta_g = abs(hist_p_gem - hist_p_gem_raw)
+                    ah_tag_g = f"  (AH: {hist_p_gem_raw:.1%}→{hist_p_gem:.1%})" if ah_delta_g >= 0.02 else ""
                     print(f"    ├─ Blended P:    {hist_p_gem:.1%}  (final model probability){ah_tag_g}")
                     _print_barbell_joint_blend_diagnostic(
                         sp,
