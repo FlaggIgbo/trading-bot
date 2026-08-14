@@ -682,15 +682,16 @@ class KalshiClient:
         """
         side_clean = side.lower()
 
-        # EV Rule 1: Target Maker limit price at (Bid + 1c) to save 1c-3c on entry cost
+        # Taker Buy Execution Buffer (ask + 1¢):
+        # Adding +1¢ buffer to current ask ensures immediate taker fill even if ask ticks up by 1¢ during network latency.
         if maker_bid_cents is not None:
             effective_buy_cents = min(buy_price_cents, maker_bid_cents + 1)
         else:
-            effective_buy_cents = buy_price_cents
+            effective_buy_cents = min(99, buy_price_cents + 1)
 
         log.info(
             f"{LogTag.TRADE_EXECUTION.value} Market: {ticker} | Side: {side_clean.upper()} | "
-            f"Maker Buy Price: {effective_buy_cents}¢ (Saved vs Ask!) | Target TP: {take_profit_cents}¢"
+            f"Ask: {buy_price_cents}¢ | Order Limit (Ask + 1¢): {effective_buy_cents}¢ | Target TP: {take_profit_cents}¢"
         )
 
         now_ms = int(time.time() * 1000)
@@ -961,15 +962,23 @@ class KalshiClient:
             if not cancellation_ok:
                 log.warning(f"⚠️ Proceeding with stop-loss exit for {ticker} despite pending order cancellation check.")
 
-            # Step 2: Submit Sell order to close position immediately
+            # Step 2: Submit Sell order with a -2¢ aggressive buffer (sell - 2¢) to guarantee immediate taker fill.
+            # Why -2¢ buffer is critical:
+            # When liquidating a losing position, placing a sell limit exactly at current_price leaves
+            # the order resting on the book if the bid drops by 1¢-2¢ during latency.
+            # Setting the exit limit to (current_price - 2¢) ensures the order crosses the orderbook
+            # and fills immediately against available bids even if the price slips down.
+            exit_buffer_cents = 2
+            aggressive_sell_cents = max(1, current_price - exit_buffer_cents)
             now_ms = int(time.time() * 1000)
+
             if side == "yes":
                 sell_payload = {
                     "ticker": ticker,
                     "client_order_id": f"stoploss_yes_{ticker}_{now_ms}",
                     "side": "ask",
                     "count": str(position_count),
-                    "price": f"0.{max(1, current_price):02d}00",
+                    "price": f"0.{aggressive_sell_cents:02d}00",
                     "time_in_force": "good_till_canceled",
                     "self_trade_prevention_type": "taker_at_cross",
                 }
@@ -979,7 +988,7 @@ class KalshiClient:
                     "client_order_id": f"stoploss_no_{ticker}_{now_ms}",
                     "side": "bid",
                     "count": str(position_count),
-                    "price": f"0.{(100 - max(1, current_price)):02d}00",
+                    "price": f"0.{(100 - aggressive_sell_cents):02d}00",
                     "time_in_force": "good_till_canceled",
                     "self_trade_prevention_type": "taker_at_cross",
                 }
@@ -1065,15 +1074,23 @@ class KalshiClient:
             if not cancellation_ok:
                 log.warning(f"⚠️ Proceeding with 5-min cut-loss exit for {ticker} despite pending order cancellation check.")
 
-            # Step 2: Submit Sell order to close position immediately
+            # Step 2: Submit Sell order with a -2¢ aggressive buffer (sell - 2¢) to guarantee immediate taker fill.
+            # Why -2¢ buffer is critical:
+            # When liquidating a position at 5m cut-loss, placing a sell limit exactly at current_price leaves
+            # the order resting on the book if the bid drops by 1¢-2¢ during latency.
+            # Setting the exit limit to (current_price - 2¢) ensures the order crosses the orderbook
+            # and fills immediately against available bids even if the price slips down.
+            exit_buffer_cents = 2
+            aggressive_sell_cents = max(1, current_price - exit_buffer_cents)
             now_ms = int(time.time() * 1000)
+
             if side == "yes":
                 sell_payload = {
                     "ticker": ticker,
                     "client_order_id": f"cutloss_yes_{ticker}_{now_ms}",
                     "side": "ask",
                     "count": str(position_count),
-                    "price": f"0.{max(1, current_price):02d}00",
+                    "price": f"0.{aggressive_sell_cents:02d}00",
                     "time_in_force": "good_till_canceled",
                     "self_trade_prevention_type": "taker_at_cross",
                 }
@@ -1083,7 +1100,7 @@ class KalshiClient:
                     "client_order_id": f"cutloss_no_{ticker}_{now_ms}",
                     "side": "bid",
                     "count": str(position_count),
-                    "price": f"0.{(100 - max(1, current_price)):02d}00",
+                    "price": f"0.{(100 - aggressive_sell_cents):02d}00",
                     "time_in_force": "good_till_canceled",
                     "self_trade_prevention_type": "taker_at_cross",
                 }
