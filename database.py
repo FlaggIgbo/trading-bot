@@ -153,9 +153,12 @@ def save_portfolio_pnl(pnl_summary: dict) -> bool:
     if collection is None:
         return False
 
+    ex_name = str(pnl_summary.get("exchange") or "kalshi").lower()
+
     try:
         doc = {
             "ts": int(pnl_summary.get("ts") or 0),
+            "ex": ex_name,
             "balance_dollars": pnl_summary.get("balance_dollars"),
             "portfolio_value_dollars": pnl_summary.get("portfolio_value_dollars"),
             "open_positions_count": pnl_summary.get("open_positions_count"),
@@ -167,17 +170,17 @@ def save_portfolio_pnl(pnl_summary: dict) -> bool:
             "total_settled_cost_dollars": pnl_summary.get("total_settled_cost_dollars"),
         }
         collection.insert_one(doc)
-        log.info("💰 Successfully recorded Portfolio PnL snapshot to MongoDB Atlas!")
+        log.info(f"💰 [{ex_name.upper()}] Successfully recorded Portfolio PnL snapshot to MongoDB Atlas!")
         return True
     except Exception as error:
-        log.error(f"Failed to insert portfolio PnL snapshot to MongoDB: {error}")
+        log.error(f"Failed to insert [{ex_name.upper()}] portfolio PnL snapshot to MongoDB: {error}")
         return False
 
 
 def save_settlements(settlements: list[dict]) -> int:
     """
     Upserts settled market trade records into the MongoDB 'settlements' collection.
-    Prevents duplicate entries by keying on (ticker, settled_time).
+    Prevents duplicate entries by keying on (ticker, ex, settled_time).
 
     Args:
         settlements: List of settlement records with payout, cost, and pnl.
@@ -197,16 +200,18 @@ def save_settlements(settlements: list[dict]) -> int:
         for s in settlements:
             ticker = s.get("ticker")
             settled_time = s.get("settled_time")
+            ex_name = str(s.get("exchange") or s.get("ex") or "kalshi").lower()
             if not ticker:
                 continue
 
-            filter_query = {"ticker": ticker}
+            filter_query = {"ticker": ticker, "ex": ex_name}
             if settled_time:
                 filter_query["settled_time"] = settled_time
 
+            s_doc = {**s, "ex": ex_name}
             collection.update_one(
                 filter_query,
-                {"$set": s},
+                {"$set": s_doc},
                 upsert=True,
             )
             saved_count += 1

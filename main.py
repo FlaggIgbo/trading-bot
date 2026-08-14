@@ -178,11 +178,12 @@ def _execute_buy_flow(
     """Helper to execute trade and construct trade snapshot payload."""
     side_lower = side.lower()
     side_upper = side.upper()
+    ex_name = getattr(client, "exchange_name", "Exchange")
     momentum_label = "Bullish" if side_lower == "yes" else "Bearish"
 
     log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
     log_action = f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL." if dry_run else f"Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
-    log.info(f"{log_prefix} {ticker} -> {side_upper} price is {price_cents}¢ (between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). {log_action}")
+    log.info(f"{log_prefix} [{ex_name}] {ticker} -> {side_upper} price is {price_cents}¢ (between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). {log_action}")
 
     effective_buy = price_cents
     if not dry_run:
@@ -197,11 +198,12 @@ def _execute_buy_flow(
             )
             effective_buy = buy_res.get("buy_price_cents", price_cents)
         except Exception as error:
-            log.error(f"❌ Failed to execute {side_upper} trade on {ticker}: {error}")
+            log.error(f"❌ [{ex_name}] Failed to execute {side_upper} trade on {ticker}: {error}")
             return False, None
 
     trade_details = {
         **({"dry_run": True} if dry_run else {}),
+        "ex": ex_name.lower(),
         "action": "buy_opened",
         "side": side_lower,
         "buy": effective_buy,
@@ -288,7 +290,9 @@ def process_single_market(
         if isinstance(sl_res, dict) and sl_res.get("triggered"):
             trade_executed = True
             sl_side = sl_res.get("side", "yes")
+            ex_name = getattr(client, "exchange_name", "Exchange")
             trade_details = {
+                "ex": ex_name.lower(),
                 "action": "stop_loss_sold",
                 "side": sl_side,
                 "exit_price": sl_res.get("exit_price"),
@@ -318,7 +322,9 @@ def process_single_market(
                     )
                     if isinstance(cut_res, dict) and cut_res.get("triggered"):
                         trade_executed = True
+                        ex_name = getattr(client, "exchange_name", "Exchange")
                         trade_details = {
+                            "ex": ex_name.lower(),
                             "action": "early_loss_cut",
                             "side": side,
                             "exit_price": cut_res.get("exit_price"),
@@ -329,10 +335,11 @@ def process_single_market(
                         cut_loss_executed = True
 
         # Handle position gates and buy evaluation cleanly:
+        ex_name = getattr(client, "exchange_name", "Exchange")
         if cut_loss_executed:
-            log.info(f"{LogTag.OPEN_POSITION_GATE.value} 5-Min Cut-Loss executed for {ticker}. Skipping buy evaluation in this pass.")
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] 5-Min Cut-Loss executed for {ticker}. Skipping buy evaluation in this pass.")
         elif pos is not None:
-            log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
             if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not dry_run:
                 client.place_take_profit_order(
                     ticker=ticker,
@@ -341,7 +348,7 @@ def process_single_market(
                     take_profit_cents=take_profit_cents,
                 )
         elif client.has_existing_position_or_order(ticker):
-            log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold an active position or resting order for {ticker}. Skipping buy.")
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
             candidate_sides = []
             for side, p_cents, aligned in [

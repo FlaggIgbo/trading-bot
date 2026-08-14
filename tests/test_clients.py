@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+from database import save_portfolio_pnl, save_settlements
 from main import extract_asset_symbol, extract_price_cents, is_spot_momentum_aligned, process_single_market
 from signals.gemini_client import GeminiClient, GeminiPredictionClient, GeminiTradingClient
 from signals.kalshi_client import KalshiClient, round_price_to_tick
@@ -62,6 +63,7 @@ class TestClientInterfaces(unittest.TestCase):
 
     def test_process_single_market_snapshot(self):
         client = MagicMock()
+        client.exchange_name = "Gemini"
         client.get_market_position.return_value = None
         client.has_existing_position_or_order.return_value = False
 
@@ -92,6 +94,23 @@ class TestClientInterfaces(unittest.TestCase):
         self.assertEqual(snapshot["ex"], "gemini")
         self.assertEqual(snapshot["y"], 42)
         self.assertEqual(snapshot["n"], 58)
+
+    @patch("database.get_mongo_collection")
+    def test_database_exchange_tagging(self, mock_get_coll):
+        mock_coll = MagicMock()
+        mock_get_coll.return_value = mock_coll
+
+        pnl_data = {
+            "ts": 1234567890,
+            "exchange": "gemini",
+            "balance_dollars": 100.0,
+            "portfolio_value_dollars": 100.0,
+        }
+        res = save_portfolio_pnl(pnl_data)
+        self.assertTrue(res)
+        mock_coll.insert_one.assert_called_once()
+        inserted_doc = mock_coll.insert_one.call_args[0][0]
+        self.assertEqual(inserted_doc["ex"], "gemini")
 
 
 if __name__ == "__main__":
