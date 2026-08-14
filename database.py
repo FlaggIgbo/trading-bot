@@ -57,6 +57,11 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load configuration from .env file if available
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 log = logging.getLogger(__name__)
 

@@ -9,7 +9,14 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from database import save_portfolio_pnl, save_settlements
-from main import extract_asset_symbol, extract_price_cents, is_spot_momentum_aligned, process_single_market
+from main import (
+    batch_fetch_crypto_spot_prices,
+    calculate_seconds_until_next_5min_mark,
+    extract_asset_symbol,
+    extract_price_cents,
+    is_spot_momentum_aligned,
+    process_single_market,
+)
 from signals.gemini_client import GeminiClient, GeminiPredictionClient, GeminiTradingClient
 from signals.kalshi_client import KalshiClient, round_price_to_tick
 
@@ -32,6 +39,19 @@ class TestClientInterfaces(unittest.TestCase):
         self.assertEqual(headers["X-GEMINI-APIKEY"], "test_key")
         self.assertIn("X-GEMINI-PAYLOAD", headers)
         self.assertIn("X-GEMINI-SIGNATURE", headers)
+
+    def test_gemini_balance_multi_currency(self):
+        client = GeminiTradingClient()
+        # Mock _post response with USD, GUSD, and other tokens
+        mock_balances = [
+            {"currency": "USD", "amount": "10.50", "available": "10.50"},
+            {"currency": "GUSD", "amount": "25.00", "available": "25.00"},
+            {"currency": "BTC", "amount": "0.5", "available": "0.5"},
+        ]
+        with patch.object(client, "_post", return_value=mock_balances):
+            bal = client.get_balance()
+            self.assertEqual(bal["balance"], 35.50)
+            self.assertEqual(bal["available"], 35.50)
 
     def test_price_helper_functions(self):
         self.assertEqual(round_price_to_tick(0.423), "0.42")
@@ -87,6 +107,7 @@ class TestClientInterfaces(unittest.TestCase):
             client=client,
             now_utc=now,
             minute_past_hour=0,
+            spot_cache={"BTC": 60100.0},
             dry_run=True,
         )
 
@@ -94,6 +115,55 @@ class TestClientInterfaces(unittest.TestCase):
         self.assertEqual(snapshot["ex"], "gemini")
         self.assertEqual(snapshot["y"], 42)
         self.assertEqual(snapshot["n"], 58)
+        self.assertEqual(snapshot["p"], 60100.0)
+
+    def test_stop_loss_exclusive_gating(self):
+        client = MagicMock()
+        client.exchange_name = "Gemini"
+        client.evaluate_and_execute_stop_loss.return_value = {
+            "triggered": True,
+            "side": "yes",
+            "loss_cents": 12,
+            "exit_price": 28,
+        }
+
+        market = {
+            "ticker": "BTC15M-TEST",
+            "series_ticker": "BTC15M",
+            "yes_ask": 28,
+            "no_ask": 72,
+            "floor_strike": 60000.0,
+            "exchange": "gemini",
+        }
+        now = datetime.now(timezone.utc)
+
+        # At minute 10 (% 15 == 10) -> is_stop_loss_interval is True
+        snapshot = process_single_market(
+            market=market,
+            is_trading_interval=True,  # Even if force_trade is set
+            client=client,
+            now_utc=now,
+            minute_past_hour=10,
+            spot_cache={"BTC": 59900.0},
+            dry_run=True,
+        )
+
+        self.assertIn("trd", snapshot)
+        self.assertEqual(snapshot["trd"]["action"], "stop_loss_sold")
+        # Ensure buy was not evaluated after stop loss trigger
+        client.buy_and_set_take_profit.assert_not_called()
+
+    def test_batch_fetch_crypto_spot_prices(self):
+        with patch("main.get_crypto_spot_price", side_effect=lambda sym: 60000.0 if sym == "BTC" else 2000.0):
+            res = batch_fetch_crypto_spot_prices(["BTC", "ETH", "BTC"])
+            self.assertEqual(len(res), 2)
+            self.assertEqual(res["BTC"], 60000.0)
+            self.assertEqual(res["ETH"], 2000.0)
+
+    def test_calculate_seconds_until_next_5min_mark(self):
+        sec = calculate_seconds_until_next_5min_mark(offset_seconds=30.0)
+        self.assertGreaterEqual(sec, 15.0)
+        self.assertLessEqual(sec, 600.0)
 
     @patch("database.get_mongo_collection")
     def test_database_exchange_tagging(self, mock_get_coll):

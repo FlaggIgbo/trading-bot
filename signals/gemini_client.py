@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -102,6 +103,8 @@ class GeminiPredictionClient:
             log.debug(f"Error fetching Gemini prediction events: {e}")
 
         normalized_markets = []
+        now_utc = datetime.now(timezone.utc)
+
         for evt in events:
             if not isinstance(evt, dict):
                 continue
@@ -113,6 +116,16 @@ class GeminiPredictionClient:
             # Filter for 15M / 15-minute crypto prediction series
             if "15M" not in series.upper() and "15M" not in event_ticker.upper():
                 continue
+
+            # Only include markets for the current active cycle (expiring within the next 15-16 minutes)
+            if expiry:
+                try:
+                    expiry_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+                    seconds_to_expiry = (expiry_dt - now_utc).total_seconds()
+                    if seconds_to_expiry <= 0 or seconds_to_expiry > (15 * 60 + 60):
+                        continue
+                except Exception:
+                    pass
 
             contracts = evt.get("contracts", [])
             if not isinstance(contracts, list) or not contracts:
@@ -206,11 +219,25 @@ class GeminiPredictionClient:
                 bids = bd.get("bids", [])
                 yes_ask = asks[0]["price"] if asks and isinstance(asks, list) and asks[0].get("price") else None
                 yes_bid = bids[0]["price"] if bids and isinstance(bids, list) and bids[0].get("price") else None
+                no_ask = None
+                no_bid = None
+                if yes_bid is not None:
+                    try:
+                        no_ask = f"{(1.0 - float(yes_bid)):.4f}"
+                    except (ValueError, TypeError):
+                        pass
+                if yes_ask is not None:
+                    try:
+                        no_bid = f"{(1.0 - float(yes_ask)):.4f}"
+                    except (ValueError, TypeError):
+                        pass
                 return {
                     "market": {
                         "ticker": ticker,
                         "yes_ask_dollars": yes_ask,
                         "yes_bid_dollars": yes_bid,
+                        "no_ask_dollars": no_ask,
+                        "no_bid_dollars": no_bid,
                     }
                 }
         except Exception as e:
@@ -285,12 +312,19 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         return {}
 
     def get_balance(self) -> dict:
-        """Fetches available USD balance from Gemini account."""
+        """Fetches available USD / stablecoin (USD, GUSD, USDC) balance from Gemini account."""
         res = self._post("/v1/balances")
+        total_bal = 0.0
+        total_avail = 0.0
         if isinstance(res, list):
             for b in res:
-                if isinstance(b, dict) and b.get("currency") == "USD":
-                    return {"balance": float(b.get("amount", 0)), "available": float(b.get("available", 0))}
+                if isinstance(b, dict) and b.get("currency") in ("USD", "GUSD", "USDC"):
+                    try:
+                        total_bal += float(b.get("amount", 0))
+                        total_avail += float(b.get("available", 0))
+                    except (ValueError, TypeError):
+                        pass
+            return {"balance": total_bal, "available": total_avail}
         return {"balance": 0.0, "available": 0.0}
 
     def get_portfolio_pnl_summary(self) -> dict:

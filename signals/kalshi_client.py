@@ -218,6 +218,9 @@ class KalshiClient(BaseTradingClient):
                 "KALSHI_API_KEY_ID is missing! Please set it in your .env file."
             )
 
+        # Persistent HTTP session for connection pooling across 24/7 execution
+        self.session = requests.Session()
+
     def _build_auth_headers(self, http_method: str, path: str) -> dict[str, str]:
         """
         Generates required authentication HTTP headers for Kalshi requests.
@@ -254,34 +257,49 @@ class KalshiClient(BaseTradingClient):
     # -----------------------------------------------------------------------
 
     def get(self, endpoint: str, params: dict | None = None) -> dict:
-        """Sends an authenticated HTTP GET request to Kalshi."""
+        """Sends an authenticated HTTP GET request to Kalshi using connection pooling."""
         signing_path = self._get_signing_path(endpoint)
         full_url = self._build_full_url(endpoint, params)
         headers = self._build_auth_headers("GET", signing_path)
 
-        response = requests.get(full_url, headers=headers, timeout=30)
+        response = self.session.get(full_url, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json() if response.text else {}
+        if response.text:
+            try:
+                return response.json()
+            except (ValueError, json.JSONDecodeError):
+                log.debug(f"Non-JSON response from Kalshi GET {endpoint}: {response.text[:200]}")
+        return {}
 
     def post(self, endpoint: str, payload: dict | None = None) -> dict:
-        """Sends an authenticated HTTP POST request to Kalshi."""
+        """Sends an authenticated HTTP POST request to Kalshi using connection pooling."""
         signing_path = self._get_signing_path(endpoint)
         full_url = self._build_full_url(endpoint)
         headers = self._build_auth_headers("POST", signing_path)
 
-        response = requests.post(full_url, headers=headers, json=payload or {}, timeout=30)
+        response = self.session.post(full_url, headers=headers, json=payload or {}, timeout=30)
         response.raise_for_status()
-        return response.json() if response.text else {}
+        if response.text:
+            try:
+                return response.json()
+            except (ValueError, json.JSONDecodeError):
+                log.debug(f"Non-JSON response from Kalshi POST {endpoint}: {response.text[:200]}")
+        return {}
 
     def delete(self, endpoint: str) -> dict:
-        """Sends an authenticated HTTP DELETE request to Kalshi."""
+        """Sends an authenticated HTTP DELETE request to Kalshi using connection pooling."""
         signing_path = self._get_signing_path(endpoint)
         full_url = self._build_full_url(endpoint)
         headers = self._build_auth_headers("DELETE", signing_path)
 
-        response = requests.delete(full_url, headers=headers, timeout=30)
+        response = self.session.delete(full_url, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json() if response.text else {}
+        if response.text:
+            try:
+                return response.json()
+            except (ValueError, json.JSONDecodeError):
+                log.debug(f"Non-JSON response from Kalshi DELETE {endpoint}: {response.text[:200]}")
+        return {}
 
     # -----------------------------------------------------------------------
     # Account & Portfolio Endpoints
