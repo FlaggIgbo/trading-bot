@@ -2,19 +2,24 @@
 
 A clean, human-readable Python trading bot designed to trade 15-minute crypto prediction markets on Kalshi and record time-series market snapshots into MongoDB Atlas for data engineering and volatility analysis.
 
+### Stack & Architecture
+- **Exchange API**: Kalshi Trade API (RSA-PSS signature authentication)
+- **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`)
+- **Hosting**: Render.com Background Worker (runs continuous self-scheduling loop)
+
 ---
 
 ## Strategy & Clock Alignment Workflow
 
 ### 1. Continuous 24/7 Self-Scheduling Loop
-The bot runs continuously 24/7 as a **Render Background Worker** (`python main.py` or `python3 main.py`):
-- **Clock Alignment**: The source code calculates the exact number of seconds until the next 5-minute clock boundary (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55) and sleeps for that exact duration.
-- **On 15-Minute Marks (:00, :15, :30, :45)**:
+The bot runs continuously 24/7 as a background worker (`python main.py` or `python3 main.py`):
+- **Clock Alignment**: Calculates exact seconds until 30 seconds past the next 5-minute mark (:00:30, :05:30, :10:30, :15:30, :20:30, :25:30, :30:30, :35:30, :40:30, :45:30, :50:30, :55:30) and sleeps for that exact duration.
+- **On 15-Minute Marks (:00:30, :15:30, :30:30, :45:30)**:
   - **TRADING + DATA LOGGING**: Evaluates active 15-minute crypto markets (`KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`).
   - If YES or NO is priced **between 25¢ and 45¢**, buys 1 contract (share).
   - Immediately places a resting limit SELL order at **75¢** for auto-selling (take profit).
   - Records ultra-compact market snapshot documents into MongoDB Atlas.
-- **On Intermediate Marks (:05, :10, :20, :25, :35, :40, :50, :55)**:
+- **On Intermediate Marks (:05:30, :10:30, :20:30, :25:30, :35:30, :40:30, :50:30, :55:30)**:
   - **DATA LOGGING ONLY**: Records current market prices into MongoDB for time-series graphing, but places NO trades.
 
 ### 2. Storage Optimization (MongoDB Atlas Free Tier - 512MB Cap)
@@ -33,38 +38,9 @@ Snapshots are saved in an ultra-compact schema (~50 bytes per document):
 
 ---
 
-## Render.com Background Worker Configuration
+## Local Testing Commands
 
-> **Account & Worker Status**:
-> - ✅ **Render Background Worker Service**: [`srv-d7fq0gjbc2fs739p38ng`](https://dashboard.render.com/worker/srv-d7fq0gjbc2fs739p38ng/settings)
-> - ✅ **MongoDB Atlas Cluster**: Created & live (`cluster0.kygmg3k.mongodb.net`).
-
-### Configuring Your Render Background Worker Settings
-
-1. Open your Render Service Settings at [`srv-d7fq0gjbc2fs739p38ng`](https://dashboard.render.com/worker/srv-d7fq0gjbc2fs739p38ng/settings).
-2. Set the **Start Command**:
-   ```bash
-   python3 main.py
-   ```
-3. Under **Environment Variables**, configure the following variables:
-   - `MONGODB_URI`:
-     ```text
-     mongodb+srv://theotherogeflagg_db_user:FAwQEHMXrqwSyPas@cluster0.kygmg3k.mongodb.net/?retryWrites=true&w=majority
-     ```
-   - `KALSHI_API_KEY_ID`:
-     ```text
-     82787744-e854-4524-9a93-dc5a516b75c6
-     ```
-   - `KALSHI_PRIVATE_KEY`:
-     *(Paste the full contents of your RSA `.key` file including BEGIN and END header lines)*
-   - `KALSHI_USE_DEMO`:
-     `false` (or `true` for paper trading)
-
----
-
-## Local Testing Commands (macOS / Linux)
-
-On macOS, system Python 3 is invoked using `python3` or via the project's virtual environment (`.venv/bin/python`):
+You can test the bot locally using these command-line flags:
 
 ```bash
 # Preview what the bot would trade right now (dry-run mode):
@@ -96,7 +72,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # 1. Connect to your MongoDB Atlas Cluster
-uri = "mongodb+srv://theotherogeflagg_db_user:FAwQEHMXrqwSyPas@cluster0.kygmg3k.mongodb.net/?retryWrites=true&w=majority"
+uri = "YOUR_MONGODB_URI"
 client = pymongo.MongoClient(uri)
 collection = client["trading_bot_db"]["market_snapshots"]
 

@@ -2,8 +2,8 @@
 15-Minute Crypto Prediction Trading & Data Pipeline Bot
 =========================================================
 
-High School Computer Science Explainer:
---------------------------------------
+Overview & Architecture:
+------------------------
 This bot runs continuously 24/7 as a Render Background Worker.
 
 1. Why We Execute 30 Seconds Past the 5-Minute Mark (:00:30, :05:30, :10:30...):
