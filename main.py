@@ -91,6 +91,42 @@ def parse_cents(val_dollars: str | float | None, val_cents: int | str | None) ->
     return None
 
 
+def is_spot_momentum_aligned(
+    side: str,
+    spot_price: float | None,
+    target_price: float | None,
+    otm_pct_threshold: float = 0.05,
+) -> bool:
+    """
+    Relative Distance Gate / Out-Of-The-Money Spot Filter (Option 2):
+    
+    1. Dead-Heat Zone (|pct_dist| <= 0.05%):
+       If spot price is within 0.05% of target strike (~$0.94 on ETH, ~$31 on BTC),
+       the market is in a dead heat. Buying YES or NO in the 35¢-45¢ range is allowed!
+       
+    2. Out-Of-The-Money Zone (|pct_dist| > 0.05%):
+       If spot price is significantly far from strike, enforce momentum direction:
+       - YES is allowed ONLY IF spot_price >= target_price.
+       - NO is allowed ONLY IF spot_price < target_price.
+    """
+    if spot_price is None or target_price is None or target_price <= 0:
+        return True
+
+    diff = spot_price - target_price
+    pct_dist = (diff / target_price) * 100.0
+
+    # Near At-The-Money Zone (<= 0.05% distance): Allow both YES and NO
+    if abs(pct_dist) <= otm_pct_threshold:
+        return True
+
+    # Significantly Out-Of-The-Money (> 0.05% distance): Enforce momentum direction
+    if side.lower() == "yes":
+        return pct_dist >= 0
+    else:
+        return pct_dist < 0
+
+
+
 def extract_price_cents(market: dict, side: str, kalshi_client: KalshiClient | None = None) -> int | None:
     """Extracts the price in cents (1-99) for either 'yes' or 'no' with client fallback on missing data."""
     is_yes = side.lower() == "yes"
@@ -265,9 +301,9 @@ def process_single_market(
         except (ValueError, TypeError):
             pass
 
-    # 4. Strategy Rules & Interval Evaluation
-    spot_bullish = (spot_price is not None and target_price is not None and spot_price >= target_price)
-    spot_bearish = (spot_price is not None and target_price is not None and spot_price < target_price)
+    # 4. Strategy Rules & Interval Evaluation (Option 2: Relative Distance Gate)
+    spot_bullish = is_spot_momentum_aligned("yes", spot_price, target_price)
+    spot_bearish = is_spot_momentum_aligned("no", spot_price, target_price)
 
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
