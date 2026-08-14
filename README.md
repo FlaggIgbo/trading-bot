@@ -44,7 +44,7 @@ Snapshots are saved in an ultra-compact schema (~50 bytes per document):
 1. Open your Render Service Settings at [`srv-d7fq0gjbc2fs739p38ng`](https://dashboard.render.com/worker/srv-d7fq0gjbc2fs739p38ng/settings).
 2. Set the **Start Command**:
    ```bash
-   python main.py
+   python3 main.py
    ```
 3. Under **Environment Variables**, configure the following variables:
    - `MONGODB_URI`:
