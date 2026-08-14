@@ -15,18 +15,17 @@ This bot runs continuously 24/7 as a Render Background Worker.
      :35:30, :40:30, :45:30, :50:30, :55:30), we give Kalshi's API 30 seconds to populate 
      active, live bids and asks!
 
-2. Trading Strategy (25¢ - 45¢ Buy Rule on 15-Min Marks):
-   - Every 15-minute mark (:00:30, :15:30, :30:30, :45:30):
-     - If YES price is between 25¢ and 45¢ (inclusive):
-         1. Buy 1 share of YES.
-         2. Place a resting Sell limit order at 75¢ (Take Profit auto-sell).
-     - If NO price is between 25¢ and 45¢ (inclusive):
-         1. Buy 1 share of NO.
-         2. Place a resting Sell limit order at 75¢ (Take Profit auto-sell).
+2. Dynamic Trading Strategy & Risk Management:
+   - Market Start Mark (:00, :15, :30, :45): Buy YES/NO if price is between 35¢ and 45¢.
+   - 5-Min Past Mark (:05, :20, :35, :50): Tighter Buy YES/NO if price is between 40¢ and 45¢.
+   - 10-Min Past Mark (:10, :25, :40, :55): Evaluate Stop-Loss (Sell open position if loss >= 15¢).
+   - 75¢ Auto-Sell: Places a resting limit Sell order at 75¢ immediately upon buy execution.
+   - Open Position Gate: Skips buying if an active position/order already exists for that market.
 
 3. Data Logging & MongoDB Atlas (Every 5 Minutes):
    - At every 5-minute mark (:00:30, :05:30, :10:30...), ultra-compact snapshot records 
-     (~50 bytes each) are saved to MongoDB Atlas for volatility graphing.
+     (~100 bytes each) are saved to MongoDB Atlas for 12 crypto assets (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC).
+   - Captures orderbook depth (bids/asks), spread, spot price % distance, time decay, volume, and counterfactual trade outcomes.
 """
 
 from __future__ import annotations

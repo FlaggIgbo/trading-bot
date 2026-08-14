@@ -1,96 +1,78 @@
 # Kalshi 15-Minute Crypto Trading & Data Pipeline Bot
 
-A clean, human-readable Python trading bot designed to trade 15-minute crypto prediction markets on Kalshi and record time-series market snapshots into MongoDB Atlas for data engineering and volatility analysis.
+A clean, human-readable Python trading bot designed to trade 15-minute crypto prediction markets on Kalshi and record time-series market snapshots into MongoDB Atlas for quantitative analysis and volatility research.
 
 ### Stack & Architecture
-- **Exchange API**: Kalshi Trade API (RSA-PSS signature authentication)
+- **Exchange API**: Kalshi Trade API V2 (RSA-PSS signature authentication)
 - **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`)
-- **Hosting**: Render.com Background Worker (runs continuous self-scheduling loop)
+- **Hosting**: Render.com Background Worker (runs continuous 24/7 self-scheduling loop)
+- **Assets Covered (12 Crypto Series)**: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `HYPE`, `ADA`, `TON`, `BCH`, `NEAR`, `ZEC`
 
 ---
 
-## Strategy & Clock Alignment Workflow
+## Strategy & Risk Management Rules
 
-### 1. Continuous 24/7 Self-Scheduling Loop
-The bot runs continuously 24/7 as a background worker (`python main.py` or `python3 main.py`):
-- **Clock Alignment**: Calculates exact seconds until 30 seconds past the next 5-minute mark (:00:30, :05:30, :10:30, :15:30, :20:30, :25:30, :30:30, :35:30, :40:30, :45:30, :50:30, :55:30) and sleeps for that exact duration.
-- **On 15-Minute Marks (:00:30, :15:30, :30:30, :45:30)**:
-  - **TRADING + DATA LOGGING**: Evaluates active 15-minute crypto markets (`KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`).
-  - If YES or NO is priced **between 25¢ and 45¢**, buys 1 contract (share).
-  - Immediately places a resting limit SELL order at **75¢** for auto-selling (take profit).
-  - Records ultra-compact market snapshot documents into MongoDB Atlas.
-- **On Intermediate Marks (:05:30, :10:30, :20:30, :25:30, :35:30, :40:30, :50:30, :55:30)**:
-  - **DATA LOGGING ONLY**: Records current market prices into MongoDB for time-series graphing, but places NO trades.
+### 1. Dynamic Buy Ranges
+- **Market Start Mark (`:00`, `:15`, `:30`, `:45`)**: High volatility at market opening. Buys 1 contract if YES or NO is priced between **35¢ and 45¢**.
+- **5-Minute Past Mark (`:05`, `:20`, `:35`, `:50`)**: Tighter volatility band (10 mins remaining). Buys 1 contract if YES or NO is priced between **40¢ and 45¢**.
 
-### 2. Storage Optimization (MongoDB Atlas Free Tier - 512MB Cap)
-Snapshots are saved in an ultra-compact schema (~50 bytes per document):
+### 2. Auto-Sell Take Profit (75¢)
+- Immediately upon buy order execution, the bot places a resting limit **SELL** order at **75¢** for automatic take-profit execution.
+
+### 3. Stop-Loss Evaluation (15¢ Loss Threshold at `:10`, `:25`, `:40`, `:55`)
+- At 10 minutes past market start (`:10`, `:25`, `:40`, `:55`), active open positions are evaluated.
+- If a position is suffering a loss $\ge 15\text{¢}$ relative to entry, the bot cancels the resting 75¢ limit order and **sells immediately at current market price** to cap losses.
+
+### 4. Open Position Gate
+- The bot checks active market positions and resting orders before buying, ensuring it never over-accumulates multiple contracts for the same ticker.
+
+---
+
+## Data Engineering & Microstructure Logging
+
+Every 5 minutes, an ultra-compact snapshot (~100 bytes) is saved to MongoDB Atlas:
+
 ```json
 {
-  "ts": 1786675912,
-  "m": 45,
+  "ts": 1786680114,
+  "m": 1,
   "sym": "BTC",
-  "tick": "KXBTC15M-26AUG132300-00",
-  "y": 68,
-  "n": 33
+  "tick": "KXBTC15M-26AUG140015-15",
+  "y": 41,
+  "n": 60,
+  "y_bid": 40,
+  "y_ask": 41,
+  "n_bid": 59,
+  "n_ask": 60,
+  "sprd": 1,
+  "p": 63223.035,
+  "tgt": 63252.79,
+  "diff": -29.755,
+  "pct": -0.047,
+  "rem": 13.1,
+  "vol": 189046
 }
 ```
-*Total consumption: ~100 KB per day (~3 MB per month). The 512MB free tier cluster can store years of data.*
+
+### Counterfactual Trade Outcomes Tracked
+- `sold_early_would_have_won`: Sold early on Stop-Loss, but market ultimately expired a winner (False Alarm).
+- `sold_early_saved_from_loss`: Exited early on 75¢ Take-Profit, and market subsequently reversed into a loss (Saved from reversal).
+- `sl_cap_saved`: Sold early on Stop-Loss, and market rightfully expired a loss (Rightful stop-loss).
+- `tp_full_win`: Exited early on Take-Profit, and market expired a winner.
 
 ---
 
-## Local Testing Commands
-
-You can test the bot locally using these command-line flags:
+## Local Commands
 
 ```bash
-# Preview what the bot would trade right now (dry-run mode):
+# Preview trading decisions right now (dry-run mode):
 python3 main.py --dry-run --force-trade
-# OR using virtual environment:
-.venv/bin/python main.py --dry-run --force-trade
 
-# Single-pass live mode (runs 1 pass and exits):
+# Run 1 single-pass pass and exit:
 python3 main.py --once
 
-# Continuous worker mode (runs 24/7 aligned to 5-min clock marks):
+# Continuous 24/7 background worker mode (30s clock-aligned loop):
 python3 main.py
-```
-
----
-
-## Data Engineering: Plotting Volatility Graphs
-
-Each document saved to MongoDB Atlas contains:
-- `ts`: Unix timestamp integer (X-axis)
-- `sym`: Crypto asset symbol (`BTC`, `ETH`, `SOL`, etc.)
-- `y`: Price of YES in cents (Y-axis)
-- `n`: Price of NO in cents (Y-axis)
-
-### Example Python Script to Query MongoDB Atlas & Plot Volatility:
-```python
-import pymongo
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# 1. Connect to your MongoDB Atlas Cluster
-uri = "YOUR_MONGODB_URI"
-client = pymongo.MongoClient(uri)
-collection = client["trading_bot_db"]["market_snapshots"]
-
-# 2. Fetch data and load into Pandas
-df = pd.DataFrame(list(collection.find({}, {"_id": 0})))
-df['datetime'] = pd.to_datetime(df['ts'], unit='s')
-
-# 3. Plot Time-Series Graph
-plt.figure(figsize=(12, 6))
-for sym, group in df.groupby('sym'):
-    plt.plot(group['datetime'], group['y'], label=f"{sym} (YES)")
-
-plt.title("Kalshi 15-Minute Crypto Volatility & Probability Tracking")
-plt.xlabel("Time")
-plt.ylabel("Price / Chance (Cents)")
-plt.legend()
-plt.grid(True)
-plt.show()
 ```
 
 ---
@@ -99,14 +81,11 @@ plt.show()
 
 ```
 trading-bot/
-├── main.py              # 24/7 Render Worker script with clock-alignment loop
-├── database.py          # MongoDB Atlas logger module (ultra-compact schema)
+├── main.py              # 24/7 Render Worker script with clock-alignment loop & strategy logic
+├── database.py          # MongoDB Atlas logger module (microstructure & outcome schema)
 ├── kalshi_client.py     # Root shim re-exporting KalshiClient
-├── gemini_client.py     # Root shim (commented-out Gemini API)
-├── requirements.txt     # Dependencies (requests, cryptography, pymongo)
-├── .env.example         # Environment template
+├── requirements.txt     # Python dependencies (requests, cryptography, pymongo, pandas, matplotlib)
 └── signals/
     ├── __init__.py      # Module exports
-    ├── kalshi_client.py # Kalshi API client & 15m crypto retrieval
-    └── gemini_client.py # Commented-out Gemini API client
+    └── kalshi_client.py # Kalshi V2 API client, order execution, & stop-loss logic
 ```

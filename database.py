@@ -10,17 +10,25 @@ we store snapshots as ultra-compact JSON documents (~50 bytes per document):
 Compact Field Schema:
   `ts`   : Unix timestamp integer (e.g. 1786675912) -> 4 bytes
   `m`    : Minute past hour int (e.g. 0, 5, 15, 30) -> 1 byte
-  `sym`  : Asset symbol (e.g. "BTC", "ETH", "SOL") -> 3-4 bytes
-  `tick` : Market ticker (e.g. "KXBTC15M-26AUG132300-00") -> 22 bytes
+  `sym`  : Asset symbol (e.g. "BTC", "ETH", "SOL", "ADA", "TON", etc.) -> 3-4 bytes
+  `tick` : Market ticker (e.g. "KXBTC15M-26AUG140015-15") -> 22 bytes
   `y`    : YES price in cents integer (1-99) -> 1 byte
   `n`    : NO price in cents integer (1-99) -> 1 byte
+  `y_bid`: YES top bid in cents -> 1 byte
+  `y_ask`: YES top ask in cents -> 1 byte
+  `n_bid`: NO top bid in cents -> 1 byte
+  `n_ask`: NO top ask in cents -> 1 byte
+  `sprd` : Bid-Ask spread in cents -> 1 byte
   `p`    : Live underlying asset spot price (e.g. 63270.94) -> 8 bytes
   `tgt`  : Target strike price to beat for YES to win (e.g. 63318.74) -> 8 bytes
   `diff` : Difference float (current_price - price_to_beat) -> 8 bytes
-  `trd`  : Optional trade object (only present if a trade triggered) -> ~20 bytes
+  `pct`  : Percentage distance float ((spot - strike) / strike * 100) -> 8 bytes
+  `rem`  : Minutes remaining to contract expiration -> 4 bytes
+  `vol`  : Traded contract volume -> 4 bytes
+  `trd`  : Optional trade object (includes action, buy, tp, sl, outcome) -> ~30 bytes
 
-With 7 crypto markets checked every 5 minutes (2,016 docs/day):
-- Storage consumption is only ~150 KB per day (~4.5 MB per month).
+With 12 crypto markets checked every 5 minutes (3,456 docs/day):
+- Storage consumption is ~300 KB per day (~9 MB per month).
 - A 512MB free tier database can easily store years of market data!
 """
 
