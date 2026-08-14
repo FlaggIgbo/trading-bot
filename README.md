@@ -16,8 +16,8 @@ A high-performance Python trading bot for 15-minute crypto prediction markets on
 - Submits Maker Limit Buy orders at `Bid + 1¢` (or current Bid) instead of crossing the spread as a Taker, maximizing profit margins on every entry.
 
 ### 2. Relative Distance Gate / Spot Momentum Filter 🎯
-- **Dead-Heat Zone ($|\text{pct\_dist}| \le 0.05$%)**: Within 0.05% of the strike target, buying YES or NO between 35¢–45¢ is allowed.
-- **Directional Zone ($|\text{pct\_dist}| > 0.05$%)**:
+- **Dead-Heat Zone (|pct_dist| ≤ 0.05%)**: Within 0.05% of the strike target, buying YES or NO between 35¢–45¢ is allowed.
+- **Directional Zone (|pct_dist| > 0.05%)**:
   - **Buy YES Only If**: `spot_price >= target_price`.
   - **Buy NO Only If**: `spot_price < target_price`.
 
@@ -25,7 +25,7 @@ A high-performance Python trading bot for 15-minute crypto prediction markets on
 - **Minute 00 Entry**: Targets **82¢** Take-Profit (15 mins remaining).
 - **Minute 05 Entry**: Targets **76¢** Take-Profit (10 mins remaining).
 - **Fill-Gated Execution**: Take-Profit orders are placed only after buy fill confirmation, avoiding phantom resting orders.
-- **Run to 100¢ Settlement**: If position price reaches $\ge 70$¢ at $t = 10$m, the resting Take-Profit order is canceled to capture the full 100¢ payout.
+- **Run to 100¢ Settlement**: If position price reaches ≥ 70¢ at t = 10m, the resting Take-Profit order is canceled to capture the full 100¢ payout.
 
 ### 4. 10-Minute Stop-Loss (10¢ Loss Limit / 30¢ Price Floor) 🛑
 - Evaluated at `:10`, `:25`, `:40`, `:55` past the hour.
