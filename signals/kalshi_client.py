@@ -382,6 +382,71 @@ class KalshiClient:
         order_payload.update(kwargs)
         return self.post("/portfolio/orders", payload=order_payload)
 
+    def buy_and_set_take_profit(
+        self,
+        ticker: str,
+        side: str,
+        buy_price_cents: int,
+        take_profit_cents: int = 75,
+        count: int = 1,
+    ) -> dict:
+        """
+        Executes a 2-step trade strategy for auto-selling:
+        1. Submits a Buy order for `count` contracts of `side` ('yes' or 'no') at `buy_price_cents`.
+        2. Immediately places a resting Sell limit order at `take_profit_cents` (75¢)
+           so that Kalshi automatically takes profit when the price reaches 75¢.
+
+        Returns:
+            dict containing details of both the buy order and the auto-sell limit order.
+        """
+        side_clean = side.lower()
+        log.info(
+            f"[TRADE EXECUTION] Market: {ticker} | Side: {side_clean.upper()} | "
+            f"Buy Price: {buy_price_cents}¢ | Target Take Profit: {take_profit_cents}¢"
+        )
+
+        # Step 1: Submit Buy Order (1 contract)
+        buy_payload = {
+            "ticker": ticker,
+            "side": side_clean,
+            "action": "buy",
+            "count": count,
+            "yes_price": buy_price_cents if side_clean == "yes" else None,
+            "no_price": buy_price_cents if side_clean == "no" else None,
+            "time_in_force": "good_till_canceled",
+        }
+        filtered_buy = {k: v for k, v in buy_payload.items() if v is not None}
+        buy_order_res = self.post("/portfolio/orders", payload=filtered_buy)
+
+        # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 75¢)
+        sell_payload = {
+            "ticker": ticker,
+            "side": side_clean,
+            "action": "sell",
+            "count": count,
+            "yes_price": take_profit_cents if side_clean == "yes" else None,
+            "no_price": take_profit_cents if side_clean == "no" else None,
+            "time_in_force": "good_till_canceled",
+        }
+        filtered_sell = {k: v for k, v in sell_payload.items() if v is not None}
+
+        sell_order_res = None
+        try:
+            sell_order_res = self.post("/portfolio/orders", payload=filtered_sell)
+            log.info(
+                f"[AUTO-SELL SET] Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
+            )
+        except Exception as error:
+            log.warning(f"Could not place resting auto-sell limit order: {error}")
+
+        return {
+            "buy_order": buy_order_res,
+            "sell_auto_take_profit_order": sell_order_res,
+            "side": side_clean,
+            "buy_price_cents": buy_price_cents,
+            "take_profit_cents": take_profit_cents,
+        }
+
     def cancel_order(self, order_id: str) -> dict:
         """Cancels an existing order by its unique order ID."""
         return self.delete(f"/portfolio/orders/{order_id}")
