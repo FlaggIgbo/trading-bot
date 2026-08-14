@@ -324,18 +324,27 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
                         total_avail += float(b.get("available", 0))
                     except (ValueError, TypeError):
                         pass
-            return {"balance": total_bal, "available": total_avail}
-        return {"balance": 0.0, "available": 0.0}
+            return {
+                "balance": max(total_bal, total_avail),
+                "available": total_avail,
+                "amount": total_bal,
+            }
+        return {"balance": 0.0, "available": 0.0, "amount": 0.0}
 
     def get_portfolio_pnl_summary(self) -> dict:
         """Calculates portfolio PnL summary for Gemini account."""
         bal = self.get_balance()
-        bal_usd = bal.get("balance", 0.0)
+        avail_usd = bal.get("available", 0.0)
+        total_open_cost = sum(
+            (pos.get("entry_price_cents", 0) / 100.0) * pos.get("count", 1)
+            for pos in self._positions_cache.values()
+        )
+        port_val = avail_usd + total_open_cost
         return {
-            "balance_dollars": bal_usd,
-            "portfolio_value_dollars": bal_usd,
+            "balance_dollars": avail_usd,
+            "portfolio_value_dollars": port_val,
             "open_positions_count": len(self._positions_cache),
-            "open_exposure_dollars": 0.0,
+            "open_exposure_dollars": total_open_cost,
             "total_realized_pnl_dollars": 0.0,
             "total_realized_pnl_cents": 0,
             "settlements_count": 0,

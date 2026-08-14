@@ -53,6 +53,18 @@ class TestClientInterfaces(unittest.TestCase):
             self.assertEqual(bal["balance"], 35.50)
             self.assertEqual(bal["available"], 35.50)
 
+    def test_gemini_instant_deposit_balance(self):
+        client = GeminiTradingClient()
+        # Mock pending ACH / instant deposit where available > amount
+        mock_balances = [
+            {"currency": "USD", "amount": "0.001", "available": "10.001", "availableForWithdrawal": "0.001"},
+        ]
+        with patch.object(client, "_post", return_value=mock_balances):
+            bal = client.get_balance()
+            self.assertAlmostEqual(bal["available"], 10.001)
+            pnl = client.get_portfolio_pnl_summary()
+            self.assertAlmostEqual(pnl["balance_dollars"], 10.001)
+
     def test_price_helper_functions(self):
         self.assertEqual(round_price_to_tick(0.423), "0.42")
         self.assertEqual(round_price_to_tick(0.001), "0.01")
