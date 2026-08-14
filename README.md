@@ -15,9 +15,11 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 ### 1. Maker Limit Entry Pricing (Save 1¢–3¢ per Entry) 💰
 - Instead of crossing the spread as a Taker at Ask price, buy orders target Maker limit pricing at `Bid + 1¢` (or current Bid), saving **1¢–3¢** per entry and boosting profit margins on every winning trade.
 
-### 2. Spot Momentum Gate Filter (Avoid Bad Traps) 🎯
-- **Buy YES Only If**: The underlying spot price is ABOVE or EQUAL to the strike target (`spot_price >= target_price` / `pct_dist >= 0.0`).
-- **Buy NO Only If**: The underlying spot price is BELOW the strike target (`spot_price < target_price` / `pct_dist < 0.0`).
+### 2. Relative Distance Gate / Spot Momentum Filter (Option 2) 🎯
+- **Dead-Heat / Near-Strike Zone ($|\text{pct\_dist}| \le 0.05\%$)**: If spot price is within 0.05% of the strike target (~$0.94 on ETH, ~$31 on BTC), buying YES or NO in the 35¢–45¢ range is allowed.
+- **Out-of-The-Money Zone ($|\text{pct\_dist}| > 0.05\%$)**: Enforces directional momentum:
+  - **Buy YES Only If**: `spot_price >= target_price` (`pct_dist >= 0.0`).
+  - **Buy NO Only If**: `spot_price < target_price` (`pct_dist < 0.0`).
 
 ### 3. Dynamic Take-Profit (82¢ Target & 100¢ Expiration Run) 🚀
 - **Primary Target**: Places a resting Sell limit order at **82¢** (up from 75¢) upon entry execution.
@@ -29,6 +31,9 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 
 ### 5. Open Position Gate 🛡️
 - Checks active positions and resting orders before placing a buy, preventing over-accumulating contracts on the same market.
+
+### 6. Standardized `LogTag` Enum Logging 📋
+- All info log brackets use the `LogTag` Enum class with clear code comments and emojis (`🎯`, `🚀`, `🛑`, `📊`, `⚡`, `🛡️`, `💰`, `⏱️`).
 
 ---
 
@@ -87,9 +92,11 @@ python3 main.py
 trading-bot/
 ├── main.py              # 24/7 Render Worker script with clock-alignment loop & strategy logic
 ├── database.py          # MongoDB Atlas logger module (microstructure & outcome schema)
-├── kalshi_client.py     # Root shim re-exporting KalshiClient
 ├── requirements.txt     # Python dependencies (requests, cryptography, pymongo, pandas, matplotlib)
+├── README.md            # Strategy & data pipeline documentation
+├── .env.example         # Environment configuration template
+├── .gitignore           # Git exclusion rules
 └── signals/
     ├── __init__.py      # Module exports
-    └── kalshi_client.py # Kalshi V2 API client, order execution, & stop-loss logic
+    └── kalshi_client.py # Kalshi V2 API client, order execution, LogTag enum, & stop-loss logic
 ```
