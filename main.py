@@ -51,7 +51,13 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from database import save_market_snapshots, save_portfolio_pnl, save_settlements
+from database import (
+    get_dynamic_filter_for_market,
+    get_dynamic_price_filter_map,
+    save_market_snapshots,
+    save_portfolio_pnl,
+    save_settlements,
+)
 from signals.base_client import BaseTradingClient, LogTag
 from signals.gemini_client import GeminiClient
 from signals.kalshi_client import KalshiClient
@@ -356,13 +362,17 @@ def process_single_market(
         except (ValueError, TypeError):
             pass
 
-    # 4. Strategy Rules & Interval Evaluation
+    # 4. Strategy Rules & Dynamic Price Filter Lookup
+    # Strategy Concept: Instead of hardcoded one-size-fits-all numbers, we ask
+    # our in-memory engine for the optimal buy & sell targets for THIS specific coin and timing mark!
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
     is_5min_mark = (minute_into_market == 5)
-    min_buy_price = 40 if is_5min_mark else 35
-    max_buy_price = 49
-    take_profit_cents = 76 if is_5min_mark else 82
+
+    dynamic_filters = get_dynamic_filter_for_market(asset_symbol, is_5min_mark)
+    min_buy_price = dynamic_filters["min_buy"]
+    max_buy_price = dynamic_filters["max_buy"]
+    take_profit_cents = dynamic_filters["tp"]
 
     trade_executed = False
     trade_details = None
@@ -532,6 +542,9 @@ def run_pipeline_pass(
            else "DATA COLLECTION ONLY MARK")
     )
     log.info("=================================================================")
+
+    # Ensure dynamic price filters are in memory (auto-refreshes every 6 hours or on cold start)
+    get_dynamic_price_filter_map(now_utc=now_utc)
 
     # Initialize fallback clients if persistent instances were not passed
     active_clients = []

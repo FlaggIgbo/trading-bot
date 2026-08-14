@@ -57,6 +57,10 @@ from __future__ import annotations
 
 import logging
 import os
+import statistics
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -66,9 +70,12 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 log = logging.getLogger(__name__)
 
 
+_GLOBAL_MONGO_CLIENT = None
+
+
 def get_mongo_collection(collection_name: str = "market_snapshots"):
     """
-    Establishes a connection to MongoDB Atlas using the MONGODB_URI environment variable.
+    Establishes or reuses a connection to MongoDB Atlas using MONGODB_URI.
     Handles TLS/SSL certificate verification safely across Linux containers (e.g. Render.com).
 
     Args:
@@ -77,6 +84,8 @@ def get_mongo_collection(collection_name: str = "market_snapshots"):
     Returns:
         pymongo.collection.Collection object if connected, or None if URI is missing/fails.
     """
+    global _GLOBAL_MONGO_CLIENT
+
     mongo_uri = os.getenv("MONGODB_URI")
 
     if not mongo_uri:
@@ -89,22 +98,25 @@ def get_mongo_collection(collection_name: str = "market_snapshots"):
     try:
         import pymongo
 
-        # Native MongoClient initialization using MongoDB SRV connection string
-        try:
-            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-            client.admin.command("ping")
-        except Exception as err:
-            log.debug(f"Standard SRV connection attempt failed, trying fallback: {err}")
-            # Fallback for container SSL handshake compatibility
-            client = pymongo.MongoClient(
-                mongo_uri,
-                serverSelectionTimeoutMS=5000,
-                tls=True,
-                tlsAllowInvalidCertificates=True,
-            )
+        if _GLOBAL_MONGO_CLIENT is None:
+            # Native MongoClient initialization using MongoDB SRV connection string
+            try:
+                client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+                client.admin.command("ping")
+                _GLOBAL_MONGO_CLIENT = client
+            except Exception as err:
+                log.debug(f"Standard SRV connection attempt failed, trying fallback: {err}")
+                # Fallback for container SSL handshake compatibility
+                client = pymongo.MongoClient(
+                    mongo_uri,
+                    serverSelectionTimeoutMS=5000,
+                    tls=True,
+                    tlsAllowInvalidCertificates=True,
+                )
+                _GLOBAL_MONGO_CLIENT = client
 
         # Access database 'trading_bot_db' and requested collection
-        db = client.get_database("trading_bot_db")
+        db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
         return db.get_collection(collection_name)
     except Exception as error:
         log.error(f"Could not connect to MongoDB Atlas: {error}")
@@ -227,4 +239,313 @@ def save_settlements(settlements: list[dict]) -> int:
     except Exception as error:
         log.error(f"Failed to upsert settlements to MongoDB: {error}")
         return 0
+
+
+# ===========================================================================
+# Dynamic Price Filters & 6-Hour In-Memory Calibration Engine
+# ===========================================================================
+# Intuitive Core Concept:
+# ------------------------
+# Imagine you are shopping for sneakers to resell online:
+# 1. "min_buy" (e.g. 35¢): If a pair is selling for dirt cheap (like 10¢),
+#    it's almost certainly broken or fake (a "cheap trap"). So we don't buy below min_buy.
+# 2. "max_buy" (e.g. 45¢): You never want to overpay. If you buy above max_buy,
+#    your profit margin is too small to justify the risk.
+# 3. "tp" (Take-Profit Sell Price, e.g. 82¢): As soon as we buy a contract, we immediately
+#    list it for sale at this target price to lock in a profit before the 15-minute game ends!
+#
+# Why make this dynamic?
+# Every crypto asset behaves differently! Some coins (like ZEC and NEAR) bounce up and
+# down wildly (high volatility), so they need deeper buy discounts and can target higher
+# sell prices. Other coins (like BTC and BNB) move steadily.
+#
+# This engine looks at real historical trades in MongoDB Atlas every 6 hours
+# (at 00:00, 06:00, 12:00, 18:00 UTC) and automatically tunes the best buy & sell prices!
+# ===========================================================================
+
+DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int]]] = {
+    "BTC": {
+        "00": {"min_buy": 35, "max_buy": 47, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+    },
+    "ETH": {
+        "00": {"min_buy": 35, "max_buy": 46, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+    },
+    "SOL": {
+        "00": {"min_buy": 35, "max_buy": 46, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+    },
+    "ZEC": {
+        "00": {"min_buy": 30, "max_buy": 42, "tp": 85},  # High volatility: wider discount, higher TP
+        "05": {"min_buy": 37, "max_buy": 43, "tp": 78},
+    },
+    "NEAR": {
+        "00": {"min_buy": 30, "max_buy": 42, "tp": 85},  # High volatility: wider discount, higher TP
+        "05": {"min_buy": 40, "max_buy": 45, "tp": 78},
+    },
+    "DEFAULT": {
+        "00": {"min_buy": 35, "max_buy": 45, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+    },
+}
+
+# In-memory global cache variables (so the bot doesn't slow down by querying Mongo every 5 seconds)
+_DYNAMIC_PRICE_MAP_CACHE: dict[str, dict[str, dict[str, int]]] | None = None
+_LAST_MAP_REFRESH_TIME: float = 0.0
+_CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
+
+
+def should_refresh_dynamic_map(
+    now_utc: datetime | None = None,
+    last_refresh_time: float | None = None,
+    cache_is_empty: bool | None = None,
+) -> bool:
+    """
+    Decides whether it's time to pull fresh trading data from MongoDB.
+
+    Rule 1 (Cold Start): If memory is empty (bot just booted up), refresh immediately!
+    Rule 2 (6-Hour Expiry): If more than 6 hours passed since last refresh, refresh!
+    Rule 3 (Clock Markers): If current UTC time hits 00:00, 06:00, 12:00, or 18:00 UTC, refresh!
+    """
+    if cache_is_empty is None:
+        cache_is_empty = (_DYNAMIC_PRICE_MAP_CACHE is None)
+    if cache_is_empty:
+        return True
+
+    if last_refresh_time is None:
+        last_refresh_time = _LAST_MAP_REFRESH_TIME
+    if last_refresh_time <= 0:
+        return True
+
+    now = now_utc or datetime.now(timezone.utc)
+    current_ts = now.timestamp()
+    elapsed = current_ts - last_refresh_time
+
+    # 1. Check if 6 full hours (21,600 seconds) have passed
+    if elapsed >= _CACHE_TTL_SECONDS:
+        return True
+
+    # 2. Check if we are at a 6-hour clock mark (00:00, 06:00, 12:00, 18:00 UTC) and haven't refreshed this hour
+    if now.hour in (0, 6, 12, 18) and now.minute < 10:
+        hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
+        if last_refresh_time < hour_start_ts:
+            return True
+
+    return False
+
+
+def calibrate_dynamic_price_map_from_db(
+    max_history_hours: int = 48,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """
+    Reads recent trade data from MongoDB and calculates the smartest buy and sell prices.
+
+    How the math works:
+    -------------------
+    Step 1 (Volatility):
+      - We measure how wildly each coin moves (standard deviation of % price swings).
+      - Wild coins (like ZEC/NEAR) get a cheaper buy ceiling (e.g. 42¢) so we don't buy during a drop,
+        and a higher sell target (e.g. 85¢) to capture big upswings.
+      - Steady coins (like BTC/BNB) use balanced numbers (35¢-47¢, TP 82¢).
+
+    Step 2 (Winning Trade History):
+      - We look at what prices actually won in past settlements.
+      - We set max_buy near the median winning price + 3¢.
+      - If an asset has 0 wins at high prices, we lower max_buy to 38¢ to stop overpaying.
+
+    Step 3 (Safety Guardrails):
+      - min_buy is always clamped between 25¢ and 42¢.
+      - max_buy is always clamped between 38¢ and 48¢.
+      - tp (take-profit sell price) is always clamped between 70¢ and 90¢.
+    """
+    # Start with a clean copy of default fallback map
+    calibrated_map: dict[str, dict[str, dict[str, int]]] = {
+        k: {m: dict(v) for m, v in marks.items()}
+        for k, marks in DEFAULT_DYNAMIC_PRICE_MAP.items()
+    }
+
+    try:
+        snap_col = get_mongo_collection("market_snapshots")
+        settle_col = get_mongo_collection("settlements")
+
+        if snap_col is None or settle_col is None:
+            log.warning("MongoDB collections unavailable. Using default price filter map.")
+            return calibrated_map
+
+        # 1. Fetch recent snapshots and settlements
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_ts = now_ts - (max_history_hours * 3600)
+
+        # Pull snapshots (either from cutoff_ts or fallback to latest 3,000 documents)
+        recent_snapshots = list(snap_col.find({"ts": {"$gte": cutoff_ts}}))
+        if not recent_snapshots:
+            recent_snapshots = list(snap_col.find().sort("ts", -1).limit(3000))
+
+        recent_settlements = list(settle_col.find())
+        settlement_map = {s.get("ticker"): s for s in recent_settlements if s.get("ticker")}
+
+        if not recent_snapshots:
+            log.info("No snapshots found in MongoDB. Using default price filter map.")
+            return calibrated_map
+
+        # 2. Group historical trades and volatility by asset and timing mark
+        volatility_by_sym: dict[str, list[float]] = defaultdict(list)
+        trades_by_sym_mark: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+
+        for s in recent_snapshots:
+            sym = s.get("sym")
+            if not sym:
+                continue
+
+            # Record percentage distance to measure coin volatility
+            pct = s.get("pct")
+            if pct is not None:
+                volatility_by_sym[sym].append(pct)
+
+            # Record trade entry if snapshot had an executed buy order
+            trd = s.get("trd")
+            m = s.get("m")
+            tick = s.get("tick")
+            if trd and m is not None and tick and "buy" in trd:
+                buy_p = trd.get("buy")
+                side = trd.get("side", "").lower()
+                settle = settlement_map.get(tick)
+                
+                # Check if this trade was a winner
+                won = False
+                if settle:
+                    mkt_res = (settle.get("market_result") or "").lower()
+                    if mkt_res and side:
+                        won = (side == mkt_res)
+                    elif (settle.get("pnl_cents") or 0) > 0:
+                        won = True
+
+                timing_mark = "05" if (m % 15 >= 5) else "00"
+                if buy_p:
+                    trades_by_sym_mark[sym][timing_mark].append({
+                        "buy": int(buy_p),
+                        "won": won,
+                        "side": side,
+                    })
+
+        # 3. Calibrate parameters for each symbol
+        all_symbols = set(volatility_by_sym.keys()).union(trades_by_sym_mark.keys())
+        for sym in all_symbols:
+            # Measure asset volatility (standard deviation of % move)
+            pct_samples = volatility_by_sym.get(sym, [])
+            vol_std = statistics.stdev(pct_samples) if len(pct_samples) > 1 else 0.08
+
+            calibrated_map[sym] = {}
+            for mark in ("00", "05"):
+                trades = trades_by_sym_mark.get(sym, {}).get(mark, [])
+
+                # Step 1: Base parameters based on asset volatility
+                if vol_std > 0.15:
+                    # Ultra-high volatility (e.g. ZEC, NEAR)
+                    base_min_buy = 30
+                    base_max_buy = 42
+                    base_tp = 85 if mark == "00" else 78
+                elif vol_std > 0.08:
+                    # Moderate volatility (e.g. SOL, DOGE, XRP, HYPE)
+                    base_min_buy = 34
+                    base_max_buy = 45
+                    base_tp = 82 if mark == "00" else 76
+                else:
+                    # Low volatility / stable (e.g. BTC, BNB, ETH)
+                    base_min_buy = 35 if mark == "00" else 40
+                    base_max_buy = 47
+                    base_tp = 82 if mark == "00" else 76
+
+                # Step 2: Fine-tune using winning trade history if we have >= 5 samples
+                min_buy = base_min_buy
+                max_buy = base_max_buy
+                tp_price = base_tp
+
+                if len(trades) >= 5:
+                    win_prices = [t["buy"] for t in trades if t["won"]]
+                    if win_prices:
+                        calibrated_max = int(statistics.median(win_prices) + 3)
+                        calibrated_min = max(28, min(win_prices) - 2)
+                        max_buy = min(base_max_buy, calibrated_max)
+                        min_buy = max(base_min_buy, calibrated_min)
+                    else:
+                        # If 0 wins historically, lower max_buy ceiling to 38¢ to force deep discount
+                        max_buy = min(base_max_buy, 38)
+                        min_buy = base_min_buy
+
+                # Step 3: Safety Guardrails (Clamping)
+                min_buy = max(25, min(min_buy, 42))
+                max_buy = max(min_buy + 2, min(max_buy, 48))
+                tp_price = max(max_buy + 15, min(tp_price, 90))
+
+                calibrated_map[sym][mark] = {
+                    "min_buy": min_buy,
+                    "max_buy": max_buy,
+                    "tp": tp_price,
+                }
+
+        log.info(
+            f"🧠 [DYNAMIC CALIBRATION] Calibrated dynamic price filter map for {len(all_symbols)} assets from MongoDB!"
+        )
+        return calibrated_map
+
+    except Exception as err:
+        log.error(f"Error while calibrating dynamic price map from MongoDB: {err}")
+        return calibrated_map
+
+
+def get_dynamic_price_filter_map(
+    force_refresh: bool = False,
+    now_utc: datetime | None = None,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """
+    Retrieves the in-memory dynamic price filter map.
+    If the cache is empty or 6 hours have passed, automatically queries MongoDB to refresh.
+
+    Returns:
+        Dictionary map structured as: { Asset -> { "00": {min_buy, max_buy, tp}, "05": {...} } }
+    """
+    global _DYNAMIC_PRICE_MAP_CACHE, _LAST_MAP_REFRESH_TIME
+
+    now = now_utc or datetime.now(timezone.utc)
+    needs_refresh = force_refresh or should_refresh_dynamic_map(
+        now_utc=now,
+        last_refresh_time=_LAST_MAP_REFRESH_TIME,
+        cache_is_empty=(_DYNAMIC_PRICE_MAP_CACHE is None),
+    )
+
+    if needs_refresh:
+        log.info("🔄 [CACHE REFRESH] Pulling fresh 6-hour trade & volatility data from MongoDB Atlas...")
+        new_map = calibrate_dynamic_price_map_from_db(max_history_hours=48)
+        _DYNAMIC_PRICE_MAP_CACHE = new_map
+        _LAST_MAP_REFRESH_TIME = now.timestamp()
+        log.info("✅ [CACHE REFRESH] In-memory dynamic price filter map updated successfully.")
+
+    return _DYNAMIC_PRICE_MAP_CACHE or DEFAULT_DYNAMIC_PRICE_MAP
+
+
+def get_dynamic_filter_for_market(
+    asset_symbol: str,
+    is_5min_mark: bool,
+    dynamic_map: dict[str, dict[str, dict[str, int]]] | None = None,
+) -> dict[str, int]:
+    """
+    Convenience lookup to get exact (min_buy, max_buy, tp) numbers for a specific market.
+
+    Args:
+        asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "ZEC").
+        is_5min_mark: True if running at the 5-minute mark (:05), False if at minute 00 (:00).
+        dynamic_map: Optional preloaded map. If None, uses cached in-memory map.
+
+    Returns:
+        Dictionary: {"min_buy": int, "max_buy": int, "tp": int}
+    """
+    active_map = dynamic_map or get_dynamic_price_filter_map()
+    mark = "05" if is_5min_mark else "00"
+
+    sym_clean = (asset_symbol or "").upper()
+    asset_filters = active_map.get(sym_clean) or active_map.get("DEFAULT") or DEFAULT_DYNAMIC_PRICE_MAP["DEFAULT"]
+    return asset_filters.get(mark) or asset_filters.get("00") or {"min_buy": 35, "max_buy": 45, "tp": 82}
+
 
