@@ -2,7 +2,7 @@
 15-Minute Crypto Prediction Trading & Data Pipeline Bot
 =========================================================
 
-What is this bot? (A High School Friendly Explanation)
+What is this bot?
 ------------------------------------------------------
 Imagine a prediction game where you can bet on whether cryptocurrency prices (like Bitcoin or Ethereum)
 will go UP or DOWN over the next 15 minutes.
