@@ -23,14 +23,14 @@ This bot runs automatically every 5 minutes (triggered by a host like Render.com
        1. Buy 1 share of NO.
        2. Place a resting Sell limit order at 75¢ (Take Profit auto-sell).
 
-3. Data Engineering Goal:
-   - Every single 5-minute run logs snapshot documents into MongoDB Atlas.
-   - You can plot graphs where X-axis = Time and Y-axis = Price/Probability over time.
+3. Dry-Run Mode (--dry-run):
+   - Run `python main.py --dry-run` to preview strategy evaluation without placing any real orders.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timezone
 
 from database import save_market_snapshots
@@ -48,29 +48,32 @@ log = logging.getLogger(__name__)
 def extract_price_cents(market: dict, side: str) -> int | None:
     """
     Extracts the price in cents (1-99) for either 'yes' or 'no' from a Kalshi market dict.
-    Prefer 'yes_ask'/'no_ask' (the cost to buy), falling back to 'yes_bid'/'no_bid' or 'last_price'.
+    Supports both dollar string fields (e.g. '0.3500') and integer cent fields.
     """
     side_clean = side.lower()
-    
+
     if side_clean == "yes":
-        # Check yes_ask (cost to buy YES), then yes_bid, then last_price
-        price = market.get("yes_ask") or market.get("yes_bid") or market.get("last_price")
+        dollar_str = market.get("yes_ask_dollars") or market.get("yes_bid_dollars")
+        cent_val = market.get("yes_ask") or market.get("yes_bid") or market.get("last_price")
     else:
-        # Check no_ask (cost to buy NO). If no_ask missing, calculate 100 - yes_bid
-        price = market.get("no_ask") or market.get("no_bid")
-        if price is None and market.get("yes_bid") is not None:
-            price = 100 - market.get("yes_bid")
+        dollar_str = market.get("no_ask_dollars") or market.get("no_bid_dollars")
+        cent_val = market.get("no_ask") or market.get("no_bid")
 
-    if price is None:
-        return None
+    if dollar_str is not None:
+        try:
+            val = int(round(float(dollar_str) * 100))
+            if 1 <= val <= 99:
+                return val
+        except (ValueError, TypeError):
+            pass
 
-    try:
-        price_int = int(price)
-        # Kalshi valid prices are between 1 cent and 99 cents
-        if 1 <= price_int <= 99:
-            return price_int
-    except (ValueError, TypeError):
-        pass
+    if cent_val is not None:
+        try:
+            val = int(cent_val)
+            if 1 <= val <= 99:
+                return val
+        except (ValueError, TypeError):
+            pass
 
     return None
 
@@ -81,6 +84,7 @@ def process_single_market(
     kalshi_client: KalshiClient,
     timestamp_iso: str,
     minute_past_hour: int,
+    dry_run: bool = False,
 ) -> dict:
     """
     Processes a single 15-minute crypto market:
@@ -103,41 +107,67 @@ def process_single_market(
     if is_trading_interval:
         # Check YES price condition: between 25¢ and 45¢ (inclusive)
         if yes_price_cents is not None and 25 <= yes_price_cents <= 45:
-            log.info(
-                f"[STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
-                f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
-            )
-            try:
-                result = kalshi_client.buy_and_set_take_profit(
-                    ticker=ticker,
-                    side="yes",
-                    buy_price_cents=yes_price_cents,
-                    take_profit_cents=75,
-                    count=1,
+            if dry_run:
+                log.info(
+                    f"🎯 [DRY-RUN MATCH] {ticker} -> YES price is {yes_price_cents}¢ "
+                    f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
                 )
-                trade_executed = True
-                trade_details = result
-            except Exception as error:
-                log.error(f"Failed to execute YES trade on {ticker}: {error}")
+                trade_details = {
+                    "dry_run": True,
+                    "action": "would_buy",
+                    "side": "yes",
+                    "buy_price_cents": yes_price_cents,
+                    "take_profit_cents": 75,
+                }
+            else:
+                log.info(
+                    f"[STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
+                    f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
+                )
+                try:
+                    result = kalshi_client.buy_and_set_take_profit(
+                        ticker=ticker,
+                        side="yes",
+                        buy_price_cents=yes_price_cents,
+                        take_profit_cents=75,
+                        count=1,
+                    )
+                    trade_executed = True
+                    trade_details = result
+                except Exception as error:
+                    log.error(f"Failed to execute YES trade on {ticker}: {error}")
 
         # Check NO price condition: between 25¢ and 45¢ (inclusive)
         elif no_price_cents is not None and 25 <= no_price_cents <= 45:
-            log.info(
-                f"[STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
-                f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
-            )
-            try:
-                result = kalshi_client.buy_and_set_take_profit(
-                    ticker=ticker,
-                    side="no",
-                    buy_price_cents=no_price_cents,
-                    take_profit_cents=75,
-                    count=1,
+            if dry_run:
+                log.info(
+                    f"🎯 [DRY-RUN MATCH] {ticker} -> NO price is {no_price_cents}¢ "
+                    f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
                 )
-                trade_executed = True
-                trade_details = result
-            except Exception as error:
-                log.error(f"Failed to execute NO trade on {ticker}: {error}")
+                trade_details = {
+                    "dry_run": True,
+                    "action": "would_buy",
+                    "side": "no",
+                    "buy_price_cents": no_price_cents,
+                    "take_profit_cents": 75,
+                }
+            else:
+                log.info(
+                    f"[STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
+                    f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
+                )
+                try:
+                    result = kalshi_client.buy_and_set_take_profit(
+                        ticker=ticker,
+                        side="no",
+                        buy_price_cents=no_price_cents,
+                        take_profit_cents=75,
+                        count=1,
+                    )
+                    trade_executed = True
+                    trade_details = result
+                except Exception as error:
+                    log.error(f"Failed to execute NO trade on {ticker}: {error}")
 
     # Step 3: Build structured MongoDB snapshot document
     snapshot_document = {
@@ -146,10 +176,10 @@ def process_single_market(
         "ticker": ticker,
         "title": title,
         "series_ticker": series_ticker,
-        "yes_bid": market.get("yes_bid"),
-        "yes_ask": market.get("yes_ask"),
-        "no_bid": market.get("no_bid"),
-        "no_ask": market.get("no_ask"),
+        "yes_bid_dollars": market.get("yes_bid_dollars"),
+        "yes_ask_dollars": market.get("yes_ask_dollars"),
+        "no_bid_dollars": market.get("no_bid_dollars"),
+        "no_ask_dollars": market.get("no_ask_dollars"),
         "yes_price_cents": yes_price_cents,
         "no_price_cents": no_price_cents,
         "volume": market.get("volume"),
@@ -164,24 +194,30 @@ def process_single_market(
 
 def main():
     """
-    Main bot execution loop for Render.com (run every 5 minutes).
+    Main bot execution loop. Supports --dry-run / --force-trade flags for testing.
     """
-    # Get current UTC time and minute past the hour
+    args = sys.argv[1:]
+    dry_run = "--dry-run" in args or "-d" in args
+    force_trade_mark = "--force-trade" in args or "-f" in args
+
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
     timestamp_iso = now_utc.isoformat()
 
     # Determine if current minute is a 15-minute trading mark (:00, :15, :30, :45)
-    is_trading_interval = (current_minute % 15 == 0)
+    is_trading_interval = (current_minute % 15 == 0) or force_trade_mark
 
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {timestamp_iso}")
     log.info(f"Current Minute Past Hour: :{current_minute:02d}")
     
+    if dry_run:
+        log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
+    
     if is_trading_interval:
-        log.info("--> MODE: 15-MINUTE TRADING & DATA COLLECTION MARK (:00, :15, :30, :45)")
+        log.info("--> INTERVAL: 15-MINUTE TRADING & DATA COLLECTION MARK (:00, :15, :30, :45)")
     else:
-        log.info("--> MODE: DATA COLLECTION ONLY MARK (:05, :10, :20, :25, :35, :40, :50, :55)")
+        log.info("--> INTERVAL: DATA COLLECTION ONLY MARK (:05, :10, :20, :25, :35, :40, :50, :55)")
     log.info("=================================================================")
 
     # Initialize Kalshi API Client
@@ -209,10 +245,10 @@ def main():
             kalshi_client=client,
             timestamp_iso=timestamp_iso,
             minute_past_hour=current_minute,
+            dry_run=dry_run,
         )
         snapshots_to_save.append(snapshot)
         
-        # Log market summary
         ticker = snapshot["ticker"]
         y_cents = snapshot["yes_price_cents"]
         n_cents = snapshot["no_price_cents"]
