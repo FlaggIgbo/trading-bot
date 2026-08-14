@@ -1,13 +1,7 @@
 """
-Signals layer: data source clients for market data ingestion.
-
-Provides API clients for Kalshi, Gemini, Yahoo Finance, and LLM-based analysis.
-These are the INPUT layer of the ML pipeline — they fetch raw market signals
-that feed into the models layer for feature engineering and prediction.
-
-Submodules:
-    signals.kalshi_client   - Kalshi exchange API client
-    signals.gemini_client   - Gemini prediction markets API client
-    signals.yfinance_client - Yahoo Finance historical/live data
-    signals.ollama_analysis - LLM-powered trade analysis
+Signals module: Kalshi exchange API client (active) and Gemini prediction markets client (commented out).
 """
+from signals.kalshi_client import KalshiClient, SERIES_15M_CRYPTO  # noqa: F401
+
+# Gemini client commented out for now
+# from signals.gemini_client import GeminiPredictionClient, GeminiTradingClient  # noqa: F401

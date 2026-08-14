@@ -1,15 +1,37 @@
 """
-Kalshi API client with RSA-PSS signature authentication.
-Based on: https://docs.kalshi.com/getting_started/quick_start_authenticated_requests
+Kalshi API Client & 15-Minute Crypto Market Data Retriever
+===========================================================
+
+What is Kalshi?
+---------------
+Kalshi is a regulated prediction market exchange where users buy and sell contracts 
+based on the outcome of future events (e.g., "Will Bitcoin price increase in the next 15 minutes?").
+Contracts settle at either $1.00 (100 cents) if YES occurs, or $0.00 if NO occurs.
+
+Authentication Explained:
+-------------------------
+Kalshi uses RSA-PSS digital signatures for API security rather than traditional password tokens:
+1. Every request header includes a millisecond timestamp, API key ID, and an RSA signature.
+2. The signature is created by signing the concatenated string `timestamp + HTTP_METHOD + path`
+   using an RSA private key file (`.key`).
+3. Kalshi verifies this signature using your public key on file.
+
+Price Structure:
+----------------
+- Kalshi prices are expressed as cents (1¢ to 99¢) or dollar floats ($0.01 to $0.99).
+- 1 contract cost = contract price (e.g., 50¢).
+- Max payout = $1.00 per contract.
 """
+
 from __future__ import annotations
 
 import base64
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import requests
 from cryptography.hazmat.backends import default_backend
@@ -17,17 +39,35 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
 
-# Load .env from project root so it's used regardless of cwd
+# Load configuration from the project's .env file if available
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 log = logging.getLogger(__name__)
 
-# API endpoints per Kalshi docs (https://docs.kalshi.com)
-DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
-PRODUCTION_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+# ---------------------------------------------------------------------------
+# API Base Endpoints
+# ---------------------------------------------------------------------------
+# Demo/Sandbox URL (for safe paper trading & testing)
+DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 
-# Kalshi 400 error codes (from API error response: {"error":{"code":"...","message":"..."}})
-# See: https://docs.kalshi.com/fix/error-handling
+# Production URL (for live real-money trading)
+PRODUCTION_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
+# ---------------------------------------------------------------------------
+# 15-Minute Crypto Series Tickers
+# ---------------------------------------------------------------------------
+# Kalshi groups 15-minute crypto markets under these series identifiers:
+SERIES_15M_CRYPTO = [
+    "KXBTC15M",   # Bitcoin 15-minute up/down
+    "KXETH15M",   # Ethereum 15-minute up/down
+    "KXSOL15M",   # Solana 15-minute up/down
+    "KXXRP15M",   # Ripple 15-minute up/down
+    "KXDOGE15M",  # Dogecoin 15-minute up/down
+    "KXBNB15M",   # Binance Coin 15-minute up/down
+    "KXHYPE15M",  # Hyperliquid 15-minute up/down
+]
+
+# Common Kalshi API 400 error codes
 KALSHI_ERROR_INSUFFICIENT_BALANCE = "insufficient_balance"
 KALSHI_ERROR_INVALID_PRICE = "invalid_price"
 KALSHI_ERROR_UNKNOWN_SYMBOL = "unknown_symbol"
@@ -35,105 +75,108 @@ KALSHI_ERROR_MARKET_CLOSED = "market_closed"
 KALSHI_ERROR_DUPLICATE_ORDER = "duplicate_order"
 
 
-def parse_kalshi_error(response) -> tuple[str | None, str]:
+# ---------------------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------------------
+
+def parse_kalshi_error(response: requests.Response | dict) -> tuple[str | None, str]:
     """
-    Parse Kalshi 400 error response. Returns (error_code, message).
-    Response can be requests.Response or dict with 'error' key.
+    Extracts the error code and error message from a Kalshi HTTP error response.
+    
+    Returns:
+        tuple of (error_code, error_message)
     """
-    err_obj = None
+    error_data = None
     if hasattr(response, "text") and response.text:
         try:
             data = json.loads(response.text)
-            err_obj = data.get("error") or data
+            error_data = data.get("error") or data
         except Exception:
             return None, (response.text or "")[:200]
     elif isinstance(response, dict):
-        err_obj = response.get("error") or response
-    if not err_obj:
-        return None, ""
-    code = err_obj.get("code") if isinstance(err_obj, dict) else None
-    msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
-    return code, msg
+        error_data = response.get("error") or response
+
+    if not error_data or not isinstance(error_data, dict):
+        return None, str(error_data or "")
+
+    code = error_data.get("code")
+    message = error_data.get("message") or str(error_data)
+    return code, message
 
 
-def round_price_to_tick(
-    price_dollars: float | str,
-    price_ranges: list[dict] | None = None,
-) -> str:
+def round_price_to_tick(price_dollars: float | str) -> str:
     """
-    Round price to valid Kalshi tick. Kalshi uses price_level_structure:
-    - linear_cent: step $0.01 (most markets)
-    - tapered_deci_cent: $0.001 at tails, $0.01 in middle
-    - deci_cent: step $0.001
-    Without price_ranges, default to 0.01 (safe for linear_cent).
+    Rounds a dollar price float (e.g. 0.523) to a valid Kalshi tick ($0.01 step).
+    Prices must remain within the open interval ($0.01 to $0.99).
     """
-    p = float(price_dollars)
-    if p <= 0 or p >= 1:
-        return f"{max(0.01, min(0.99, p)):.2f}"
-
-    if price_ranges:
-        for r in price_ranges:
-            start = float(r.get("start", 0))
-            end = float(r.get("end", 1))
-            step = float(r.get("step", 0.01))
-            if start <= p <= end and step > 0:
-                n = round((p - start) / step)
-                rounded = start + n * step
-                rounded = max(start, min(end, rounded))
-                decimals = len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 2
-                return f"{rounded:.{decimals}f}"
-    # Default: linear_cent (1¢ ticks)
-    return f"{round(p * 100) / 100:.2f}"
-
-
-# ---------------------------------------------------------------------------
-# Auth helpers (RSA-PSS signature)
-# ---------------------------------------------------------------------------
+    price_val = float(price_dollars)
+    # Clamp price between 1 cent ($0.01) and 99 cents ($0.99)
+    clamped_price = max(0.01, min(0.99, price_val))
+    # Round to 2 decimal places (1 cent ticks)
+    rounded_cents = round(clamped_price * 100) / 100
+    return f"{rounded_cents:.2f}"
 
 
 def _load_private_key():
-    """Load RSA private key from file path or env var (PEM content)."""
+    """
+    Loads an RSA private key from either a local file path (KALSHI_PRIVATE_KEY_PATH)
+    or directly from an environment variable string (KALSHI_PRIVATE_KEY).
+    """
     key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
     key_content = os.getenv("KALSHI_PRIVATE_KEY")
 
     if key_path:
         path = Path(key_path).expanduser().resolve()
         if not path.exists():
-            raise FileNotFoundError(f"Private key file not found: {path}")
-        pem = path.read_bytes()
+            raise FileNotFoundError(f"RSA Private Key file not found at path: {path}")
+        pem_bytes = path.read_bytes()
     elif key_content:
-        # Support multiline PEM in env (e.g. \n for newlines)
-        pem = key_content.replace("\\n", "\n").encode("utf-8")
+        pem_bytes = key_content.replace("\\n", "\n").encode("utf-8")
     else:
         raise ValueError(
-            "Set KALSHI_PRIVATE_KEY_PATH (path to .key file) or KALSHI_PRIVATE_KEY (PEM content)"
+            "Missing RSA key. Set KALSHI_PRIVATE_KEY_PATH (path to .key file) "
+            "or KALSHI_PRIVATE_KEY (PEM string) in your .env file."
         )
 
-    return serialization.load_pem_private_key(pem, password=None, backend=default_backend())
+    # Parse and return the RSA private key object
+    return serialization.load_pem_private_key(
+        pem_bytes, password=None, backend=default_backend()
+    )
 
 
-def _sign_request(private_key, timestamp: str, method: str, path: str) -> str:
-    """Sign timestamp + method + path (without query params) using RSA-PSS SHA256."""
-    path_without_query = path.split("?")[0]
-    message = f"{timestamp}{method}{path_without_query}".encode("utf-8")
-    signature = private_key.sign(
-        message,
+def _sign_request(private_key, timestamp_ms: str, http_method: str, request_path: str) -> str:
+    """
+    Generates an RSA-PSS SHA-256 digital signature for API request authentication.
+    
+    The message signed is: `timestamp_ms + HTTP_METHOD + path_without_query_params`
+    """
+    # Strip any query parameters (e.g., '?limit=100') before signing
+    clean_path = request_path.split("?")[0]
+    message_to_sign = f"{timestamp_ms}{http_method}{clean_path}".encode("utf-8")
+
+    # Generate RSA-PSS signature
+    raw_signature = private_key.sign(
+        message_to_sign,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
             salt_length=padding.PSS.DIGEST_LENGTH,
         ),
         hashes.SHA256(),
     )
-    return base64.b64encode(signature).decode("utf-8")
+
+    # Convert binary signature to base64 string
+    return base64.b64encode(raw_signature).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
-# API client
+# Main Kalshi API Client Class
 # ---------------------------------------------------------------------------
-
 
 class KalshiClient:
-    """Client for Kalshi Trade API with authenticated requests."""
+    """
+    Authenticated Client for interacting with the Kalshi Exchange REST API.
+    Provides methods to query balances, fetch 15-minute crypto markets, and place orders.
+    """
 
     def __init__(
         self,
@@ -141,119 +184,159 @@ class KalshiClient:
         private_key=None,
         base_url: str | None = None,
     ):
+        """
+        Initializes the Kalshi API client.
+        
+        Args:
+            api_key_id: Your Kalshi API key ID (UUID format).
+            private_key: Loaded RSA private key object (optional; loaded automatically if None).
+            base_url: Overriding API base URL (optional; defaults to Demo or Production).
+        """
         self.api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID")
         self.private_key = private_key or _load_private_key()
+
+        # Determine base URL (Demo vs Production)
         use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
-        default_base = DEMO_BASE if use_demo else PRODUCTION_BASE
-        self.base_url = (
-            base_url or os.getenv("KALSHI_BASE_URL") or default_base
-        ).rstrip("/")
+        default_base = DEMO_BASE_URL if use_demo else PRODUCTION_BASE_URL
+        self.base_url = (base_url or os.getenv("KALSHI_BASE_URL") or default_base).rstrip("/")
 
         if not self.api_key_id:
-            raise ValueError("KALSHI_API_KEY_ID must be set")
+            raise ValueError(
+                "KALSHI_API_KEY_ID is missing! Please set it in your .env file."
+            )
 
-    def _auth_headers(self, method: str, path: str) -> dict:
-        import time
+    def _build_auth_headers(self, http_method: str, path: str) -> dict[str, str]:
+        """
+        Generates required authentication HTTP headers for Kalshi requests.
+        Headers include Access Key, Timestamp in ms, and RSA-PSS Signature.
+        """
+        timestamp_ms = str(int(time.time() * 1000))
+        signature = _sign_request(self.private_key, timestamp_ms, http_method, path)
 
-        timestamp = str(int(time.time() * 1000))
-        signature = _sign_request(self.private_key, timestamp, method, path)
         return {
             "KALSHI-ACCESS-KEY": self.api_key_id,
-            "KALSHI-ACCESS-TIMESTAMP": timestamp,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
             "KALSHI-ACCESS-SIGNATURE": signature,
         }
 
-    def _path(self, endpoint: str) -> str:
-        return endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    def _get_signing_path(self, endpoint: str) -> str:
+        """Extracts URL path without domain name (e.g. '/trade-api/v2/portfolio/balance')."""
+        clean_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        full_url = f"{self.base_url}{clean_endpoint}"
+        return urlparse(full_url).path
 
-    def _url(self, endpoint: str, params: dict | None = None) -> str:
-        path = self._path(endpoint)
-        url = f"{self.base_url}{path}"
+    def _build_full_url(self, endpoint: str, params: dict | None = None) -> str:
+        """Constructs full URL with optional query parameters."""
+        clean_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        full_url = f"{self.base_url}{clean_endpoint}"
         if params:
-            from urllib.parse import urlencode
+            # Filter out None values and encode query parameters
+            filtered_params = {k: v for k, v in params.items() if v is not None}
+            if filtered_params:
+                full_url = f"{full_url}?{urlencode(filtered_params)}"
+        return full_url
 
-            url = f"{url}?{urlencode({k: v for k, v in params.items() if v is not None})}"
-        return url
-
-    def _sign_path(self, endpoint: str, params: dict | None = None) -> str:
-        """Full path for signing (includes /trade-api/v2, no query string)."""
-        full = f"{self.base_url}{self._path(endpoint)}"
-        return urlparse(full).path
+    # -----------------------------------------------------------------------
+    # Core HTTP Request Methods (GET, POST, DELETE)
+    # -----------------------------------------------------------------------
 
     def get(self, endpoint: str, params: dict | None = None) -> dict:
-        path = self._sign_path(endpoint, params)
-        url = self._url(endpoint, params)
-        headers = self._auth_headers("GET", path)
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json() if resp.text else {}
+        """Sends an authenticated HTTP GET request to Kalshi."""
+        signing_path = self._get_signing_path(endpoint)
+        full_url = self._build_full_url(endpoint, params)
+        headers = self._build_auth_headers("GET", signing_path)
 
-    def post(self, endpoint: str, json: dict | None = None) -> dict:
-        path = self._sign_path(endpoint)
-        url = self._url(endpoint)
-        headers = self._auth_headers("POST", path)
-        resp = requests.post(url, headers=headers, json=json or {}, timeout=30)
-        resp.raise_for_status()
-        return resp.json() if resp.text else {}
+        response = requests.get(full_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json() if response.text else {}
+
+    def post(self, endpoint: str, payload: dict | None = None) -> dict:
+        """Sends an authenticated HTTP POST request to Kalshi."""
+        signing_path = self._get_signing_path(endpoint)
+        full_url = self._build_full_url(endpoint)
+        headers = self._build_auth_headers("POST", signing_path)
+
+        response = requests.post(full_url, headers=headers, json=payload or {}, timeout=30)
+        response.raise_for_status()
+        return response.json() if response.text else {}
 
     def delete(self, endpoint: str) -> dict:
-        path = self._sign_path(endpoint)
-        url = self._url(endpoint)
-        headers = self._auth_headers("DELETE", path)
-        resp = requests.delete(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json() if resp.text else {}
+        """Sends an authenticated HTTP DELETE request to Kalshi."""
+        signing_path = self._get_signing_path(endpoint)
+        full_url = self._build_full_url(endpoint)
+        headers = self._build_auth_headers("DELETE", signing_path)
 
-    # --- Portfolio ---
-    # Balance in cents; positions and orders are per-ticker
+        response = requests.delete(full_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json() if response.text else {}
+
+    # -----------------------------------------------------------------------
+    # Account & Portfolio Endpoints
+    # -----------------------------------------------------------------------
+
     def get_balance(self) -> dict:
+        """
+        Fetches portfolio balance in cents.
+        Example return: `{"balance": 1298}` -> representing $12.98 USD available.
+        """
         return self.get("/portfolio/balance")
 
     def get_positions(self, **params) -> dict:
+        """Fetches current open positions in your portfolio."""
         return self.get("/portfolio/positions", params)
 
     def get_orders(self, **params) -> dict:
+        """Fetches active resting orders in your portfolio."""
         return self.get("/portfolio/orders", params)
 
-    def get_settlements(self, **params) -> dict:
-        """Fetch settlement records. Supports ticker, event_ticker, limit, cursor."""
-        return self.get("/portfolio/settlements", params)
-
     def get_fills(self, **params) -> dict:
-        """Fetch recent order fills. Supports ticker, min_ts, max_ts, limit, cursor."""
+        """Fetches recent order execution fills."""
         return self.get("/portfolio/fills", params)
 
-    # --- Markets (public data also available unauthenticated) ---
+    # -----------------------------------------------------------------------
+    # Market Data & 15-Minute Crypto Retrieval
+    # -----------------------------------------------------------------------
+
     def get_markets(self, **params) -> dict:
+        """Queries markets from Kalshi (supports filtering by series_ticker, status, limit)."""
         return self.get("/markets", params)
 
+    def get_15m_crypto_markets(self, status: str = "open", limit: int = 100) -> list[dict]:
+        """
+        Retrieves active 15-minute crypto prediction markets across all 7 crypto series:
+        BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE.
+        
+        Returns:
+            list[dict]: A list of market dictionaries matching active 15m crypto contracts.
+        """
+        all_15m_markets = []
+
+        for series_ticker in SERIES_15M_CRYPTO:
+            try:
+                response = self.get_markets(
+                    series_ticker=series_ticker, status=status, limit=limit
+                )
+                markets = response.get("markets", [])
+                all_15m_markets.extend(markets)
+            except Exception as error:
+                log.warning(
+                    f"Could not fetch 15m markets for series '{series_ticker}': {error}"
+                )
+
+        return all_15m_markets
+
     def get_market(self, ticker: str) -> dict:
+        """Fetches detailed information for a single market ticker."""
         return self.get(f"/markets/{ticker}")
 
-    def get_historical_market(self, ticker: str) -> dict:
-        """Fetch settled market from historical API. Use for backtest outcome inference."""
-        return self.get(f"/historical/markets/{ticker}")
-
     def get_orderbook(self, ticker: str) -> dict:
+        """Fetches current orderbook (bids and asks) for a given market ticker."""
         return self.get(f"/markets/{ticker}/orderbook")
 
-    def get_market_candlesticks(
-        self,
-        ticker: str,
-        series_ticker: str,
-        period_minutes: int = 60,
-        start_ts: int | None = None,
-        end_ts: int | None = None,
-    ) -> dict:
-        """Historical candlesticks. period_minutes: 1, 60, or 1440 (day). Requires series_ticker."""
-        params = {"period_interval": period_minutes}
-        if start_ts is not None:
-            params["start_ts"] = start_ts
-        if end_ts is not None:
-            params["end_ts"] = end_ts
-        return self.get(f"/series/{series_ticker}/markets/{ticker}/candlesticks", params)
+    # -----------------------------------------------------------------------
+    # Order Placement & Execution
+    # -----------------------------------------------------------------------
 
-    # --- Orders ---
     def create_order(
         self,
         ticker: str,
@@ -267,232 +350,53 @@ class KalshiClient:
         time_in_force: str = "good_till_canceled",
         **kwargs,
     ) -> dict:
-        """Create order. side: yes|no, action: buy|sell. Price as cents (1-99) or dollars string."""
-        payload = {"ticker": ticker, "side": side, "action": action, "count": count}
+        """
+        Submits an order to Kalshi.
+        
+        Args:
+            ticker: Market identifier (e.g. 'KXBTC15M-26AUG132245-45')
+            side: 'yes' or 'no'
+            action: 'buy' or 'sell'
+            count: Number of contracts to buy/sell
+            yes_price / no_price: Price in cents (1-99)
+            yes_price_dollars / no_price_dollars: Price as float string (e.g. '0.50')
+        """
+        order_payload = {
+            "ticker": ticker,
+            "side": side.lower(),
+            "action": action.lower(),
+            "count": count,
+            "time_in_force": time_in_force,
+        }
+
         if yes_price is not None:
-            payload["yes_price"] = yes_price
+            order_payload["yes_price"] = yes_price
         elif yes_price_dollars is not None:
-            payload["yes_price_dollars"] = yes_price_dollars
+            order_payload["yes_price_dollars"] = yes_price_dollars
+
         if no_price is not None:
-            payload["no_price"] = no_price
+            order_payload["no_price"] = no_price
         elif no_price_dollars is not None:
-            payload["no_price_dollars"] = no_price_dollars
-        payload["time_in_force"] = time_in_force
-        payload.update(kwargs)
-        return self.post("/portfolio/orders", json=payload)
+            order_payload["no_price_dollars"] = no_price_dollars
+
+        order_payload.update(kwargs)
+        return self.post("/portfolio/orders", payload=order_payload)
 
     def cancel_order(self, order_id: str) -> dict:
+        """Cancels an existing order by its unique order ID."""
         return self.delete(f"/portfolio/orders/{order_id}")
 
-    def cancel_order_safe(self, order_id: str, ticker: str = "") -> bool:
+    def cancel_order_safe(self, order_id: str) -> bool:
         """
-        Cancel order; never raises on 4xx (e.g. order already filled). Returns True on success.
+        Safely attempts to cancel an order. Returns True if canceled, 
+        or False if order is already filled/closed (without throwing an error).
         """
         try:
             self.cancel_order(order_id)
             return True
-        except requests.HTTPError as e:
-            if e.response is not None and 400 <= e.response.status_code < 500:
-                code, msg = parse_kalshi_error(e.response)
-                log.warning("cancel_order_safe: failed %s %s - %s", order_id, ticker or "", code or msg)
-            else:
-                raise
-            return False
-
-    def create_order_safe(
-        self,
-        ticker: str,
-        side: str,
-        action: str,
-        count: int,
-        yes_price: int | None = None,
-        yes_price_dollars: str | None = None,
-        no_price: int | None = None,
-        no_price_dollars: str | None = None,
-        time_in_force: str = "good_till_canceled",
-        max_pct_of_balance: float = 0.90,
-        min_balance_for_limit_fallback_cents: int = 0,
-        price_ranges: list[dict] | None = None,
-        **kwargs,
-    ) -> dict | None:
-        """
-        Create order, capping size by balance (buy) or position (sell).
-        Never raises on 4xx (e.g. insufficient funds); logs and returns None so scripts continue.
-        When balance_cents **is below** min_balance_for_limit_fallback_cents and a buy would
-        otherwise be skipped (count<=0 after balance cap), place a 1-contract limit at the
-        highest price still affordable (up to 99¢). Higher threshold = fallback applies for
-        more balance levels (e.g. $2 with threshold 250 still triggers 200<250).
-        """
-        # Validate ticker (Ollama-suggested: ensure we have a valid market identifier)
-        if not ticker or not str(ticker).strip():
-            log.warning("create_order_safe: empty ticker")
-            return None
-        if count < 1:
-            log.warning("create_order_safe: count must be >= 1")
-            return None
-        if side.lower() not in ("yes", "no"):
-            log.warning("create_order_safe: side must be yes or no")
-            return None
-        # Resolve price in cents (Kalshi: 1-99 cents per contract)
-        price_cents: int | None = None
-        if action == "buy":
-            if side == "yes":
-                if yes_price is not None:
-                    price_cents = int(yes_price)
-                elif yes_price_dollars:
-                    price_cents = int(float(yes_price_dollars) * 100)
-            elif side == "no":
-                if no_price is not None:
-                    price_cents = int(no_price)
-                elif no_price_dollars:
-                    price_cents = int(float(no_price_dollars) * 100)
-        else:
-            # sell: use bid price (yes_bid for sell YES, no_bid for sell NO)
-            if side == "yes":
-                if yes_price is not None:
-                    price_cents = int(yes_price)
-                elif yes_price_dollars:
-                    price_cents = int(float(yes_price_dollars) * 100)
-            elif side == "no":
-                if no_price is not None:
-                    price_cents = int(no_price)
-                elif no_price_dollars:
-                    price_cents = int(float(no_price_dollars) * 100)
-
-        if not price_cents or price_cents < 1 or price_cents > 99:
-            log.warning("create_order_safe: invalid price (Kalshi: 1-99 cents; need yes_price/no_price)")
-            return None
-
-        max_count: int
-        balance_cents = 0
-        if action == "sell":
-            # Cap by position size. Kalshi API: position_fp is signed (positive=YES, negative=NO)
-            try:
-                r = self.get_positions(ticker=ticker)
-                positions = r.get("market_positions") or []
-                side_lower = side.lower()
-                pos = None
-                for p in positions:
-                    if p.get("ticker") != ticker:
-                        continue
-                    fp_val = float(p.get("position_fp") or p.get("position") or 0)
-                    if side_lower == "yes" and fp_val > 0:
-                        pos = p
-                        break
-                    if side_lower == "no" and fp_val < 0:
-                        pos = p
-                        break
-                fp_raw = pos.get("position_fp") or pos.get("position") or "0" if pos else "0"
-                position_count = int(abs(float(fp_raw))) if pos else 0
-                max_count = position_count
-            except Exception as e:
-                log.warning("create_order_safe: could not fetch positions: %s", e)
-                return None
-        else:
-            # buy: cap by balance
-            try:
-                bal = self.get_balance()
-                balance_cents = int(bal.get("balance", 0) or 0)
-            except Exception as e:
-                log.warning("create_order_safe: could not fetch balance: %s", e)
-                return None
-            max_spend = int(balance_cents * max_pct_of_balance)
-            max_count = max_spend // price_cents if price_cents else 0
-
-        count = min(count, max_count) if max_count else 0
-
-        # Low-balance limit-order fallback: when we'd skip a buy due to insufficient balance,
-        # place a 1-contract limit at a price we can afford instead of skipping
-        if (
-            count <= 0
-            and action == "buy"
-            and balance_cents > 0
-            and min_balance_for_limit_fallback_cents > 0
-            and balance_cents < min_balance_for_limit_fallback_cents
-        ):
-            max_spend = int(balance_cents * max_pct_of_balance)
-            if max_spend >= 1:  # Can afford at least 1¢ (Kalshi min)
-                fallback_price_cents = min(99, max(1, max_spend))
-                fallback_price_str = round_price_to_tick(fallback_price_cents / 100, price_ranges)
-                try:
-                    result = self.create_order(
-                        ticker=ticker,
-                        side=side,
-                        action=action,
-                        count=1,
-                        yes_price_dollars=fallback_price_str if side.lower() == "yes" else None,
-                        no_price_dollars=fallback_price_str if side.lower() == "no" else None,
-                        time_in_force=time_in_force,
-                    )
-                    log.info(
-                        "create_order_safe: low-balance limit fallback - placed 1 @ %d¢ (balance $%.2f)",
-                        fallback_price_cents,
-                        balance_cents / 100,
-                    )
-                    return result
-                except requests.exceptions.HTTPError as e:
-                    if e.response is not None and 400 <= e.response.status_code < 500:
-                        log.warning(
-                            "create_order_safe: low-balance limit fallback rejected %s - %s",
-                            ticker,
-                            (e.response.text or "")[:200],
-                        )
-                        return None
-                    raise
-
-        if count <= 0:
-            if action == "sell":
-                log.info(
-                    "create_order_safe: skip - no position in %s %s (max %d contracts)",
-                    ticker,
-                    side,
-                    max_count,
-                )
-            else:
-                log.info(
-                    "create_order_safe: skip - balance $%.2f insufficient for %s @ %d¢ (max %d contracts)",
-                    balance_cents / 100,
-                    ticker,
-                    price_cents,
-                    max_count,
-                )
-            return None
-
-        # Round prices to valid Kalshi tick (avoids invalid_price for linear_cent markets)
-        yes_rounded = None
-        no_rounded = None
-        if yes_price_dollars:
-            yes_rounded = round_price_to_tick(yes_price_dollars, price_ranges)
-        if no_price_dollars:
-            no_rounded = round_price_to_tick(no_price_dollars, price_ranges)
-
-        try:
-            return self.create_order(
-                ticker=ticker,
-                side=side,
-                action=action,
-                count=count,
-                yes_price=yes_price,
-                yes_price_dollars=yes_rounded or yes_price_dollars,
-                no_price=no_price,
-                no_price_dollars=no_rounded or no_price_dollars,
-                time_in_force=time_in_force,
-                **kwargs,
-            )
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and 400 <= e.response.status_code < 500:
-                code, msg = parse_kalshi_error(e.response)
-                hint = ""
-                if code == KALSHI_ERROR_INVALID_PRICE:
-                    hint = " (round price to market tick; see round_price_to_tick)"
-                elif code == KALSHI_ERROR_INSUFFICIENT_BALANCE:
-                    hint = " (check balance/position; may have been filled or closed)"
-                log.warning(
-                    "create_order_safe: order rejected %s %s - %s%s",
-                    ticker,
-                    code or "4xx",
-                    msg or (e.response.text or "")[:150],
-                    hint,
-                )
-                return None
+        except requests.HTTPError as error:
+            if error.response is not None and 400 <= error.response.status_code < 500:
+                code, msg = parse_kalshi_error(error.response)
+                log.warning(f"Could not cancel order {order_id}: {code or msg}")
+                return False
             raise
