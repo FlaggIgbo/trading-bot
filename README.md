@@ -4,12 +4,13 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 
 ---
 
-## Strategy & Workflow Overview
+## Strategy & Clock Alignment Workflow
 
-### 1. The 5-Minute Schedule
-The bot runs every 5 minutes (triggered by Render.com Cron Job `*/5 * * * *`):
+### 1. Continuous 24/7 Self-Scheduling Loop
+The bot runs continuously 24/7 as a **Render Background Worker** (`python main.py`):
+- **Clock Alignment**: The source code calculates the exact number of seconds until the next 5-minute clock boundary (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55) and sleeps for that exact duration.
 - **On 15-Minute Marks (:00, :15, :30, :45)**:
-  - **TRADING + DATA LOGGING**: Checks active 15-minute crypto markets (`KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`).
+  - **TRADING + DATA LOGGING**: Evaluates active 15-minute crypto markets (`KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`).
   - If YES or NO is priced **between 25¢ and 45¢**, buys 1 contract (share).
   - Immediately places a resting limit SELL order at **75¢** for auto-selling (take profit).
   - Records ultra-compact market snapshot documents into MongoDB Atlas.
@@ -17,7 +18,7 @@ The bot runs every 5 minutes (triggered by Render.com Cron Job `*/5 * * * *`):
   - **DATA LOGGING ONLY**: Records current market prices into MongoDB for time-series graphing, but places NO trades.
 
 ### 2. Storage Optimization (MongoDB Atlas Free Tier - 512MB Cap)
-To ensure database storage stays small and never hits limits, snapshots are saved as ultra-compact JSON documents (~50 bytes per document):
+Snapshots are saved in an ultra-compact schema (~50 bytes per document):
 ```json
 {
   "ts": 1786675912,
@@ -32,44 +33,48 @@ To ensure database storage stays small and never hits limits, snapshots are save
 
 ---
 
-## Account Status & Next Setup Steps
+## Render.com Background Worker Configuration
 
-> **Status Check**: 
-> - ✅ **MongoDB Atlas Cluster**: Created & configured (`cluster0.kygmg3k.mongodb.net`).
-> - ✅ **Render.com Account**: Created & ready for deployment.
+> **Account & Worker Status**:
+> - ✅ **Render Background Worker Service**: [`srv-d7fq0gjbc2fs739p38ng`](https://dashboard.render.com/worker/srv-d7fq0gjbc2fs739p38ng/settings)
+> - ✅ **MongoDB Atlas Cluster**: Created & live (`cluster0.kygmg3k.mongodb.net`).
 
-### What To Do Next:
+### Configuring Your Render Background Worker Settings
 
-#### Step 1: Set Environment Variables on Render.com
-In your [Render.com Dashboard](https://dashboard.render.com), navigate to your service and add the following **Environment Variables**:
-
-1. `MONGODB_URI`:
-   ```text
-   mongodb+srv://theotherogeflagg_db_user:FAwQEHMXrqwSyPas@cluster0.kygmg3k.mongodb.net/?retryWrites=true&w=majority
+1. Open your Render Service Settings at [`srv-d7fq0gjbc2fs739p38ng`](https://dashboard.render.com/worker/srv-d7fq0gjbc2fs739p38ng/settings).
+2. Set the **Start Command**:
+   ```bash
+   python main.py
    ```
-2. `KALSHI_API_KEY_ID`:
-   ```text
-   82787744-e854-4524-9a93-dc5a516b75c6
-   ```
-3. `KALSHI_PRIVATE_KEY`:
-   *(Paste the contents of your RSA `.key` file)*
-4. `KALSHI_USE_DEMO`:
-   `false` (or `true` for paper trading)
+3. Under **Environment Variables**, configure the following variables:
+   - `MONGODB_URI`:
+     ```text
+     mongodb+srv://theotherogeflagg_db_user:FAwQEHMXrqwSyPas@cluster0.kygmg3k.mongodb.net/?retryWrites=true&w=majority
+     ```
+   - `KALSHI_API_KEY_ID`:
+     ```text
+     82787744-e854-4524-9a93-dc5a516b75c6
+     ```
+   - `KALSHI_PRIVATE_KEY`:
+     *(Paste the full contents of your RSA `.key` file including BEGIN and END header lines)*
+   - `KALSHI_USE_DEMO`:
+     `false` (or `true` for paper trading)
 
-#### Step 2: Deploy the Cron Job on Render.com
-1. Click **New +** -> **Cron Job**.
-2. Connect your GitHub repository (`FlaggIgbo/trading-bot`).
-3. Set the following parameters:
-   - **Environment**: `Python 3`
-   - **Schedule**: `*/5 * * * *` (runs every 5 minutes)
-   - **Command**: `python main.py`
-4. Click **Create Cron Job**.
+---
 
-#### Step 3: Test Locally with Dry-Run Mode
-You can preview live strategy decisions and test MongoDB storage locally without placing real trades:
+## Local Testing Commands
+
+You can test the bot locally using these command-line flags:
+
 ```bash
-# Preview what the bot would trade right now:
+# Continuous worker mode (default, runs 24/7 aligned to 5-min clock marks):
+python main.py
+
+# Single-pass preview mode (evaluates strategy without placing real orders):
 python main.py --dry-run --force-trade
+
+# Single-pass live mode (runs 1 pass and exits):
+python main.py --once
 ```
 
 ---
@@ -116,7 +121,7 @@ plt.show()
 
 ```
 trading-bot/
-├── main.py              # Main 5-min execution script & trading logic
+├── main.py              # 24/7 Render Worker script with clock-alignment loop
 ├── database.py          # MongoDB Atlas logger module (ultra-compact schema)
 ├── kalshi_client.py     # Root shim re-exporting KalshiClient
 ├── gemini_client.py     # Root shim (commented-out Gemini API)

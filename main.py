@@ -2,41 +2,34 @@
 15-Minute Crypto Prediction Trading & Data Pipeline Bot
 =========================================================
 
-High School Computer Science Explainer:
---------------------------------------
-This bot runs automatically every 5 minutes (triggered by a host like Render.com).
+Render.com Background Worker Mode:
+----------------------------------
+This script is designed to run continuously 24/7 as a Render Background Worker.
 
-1. How the Schedule Works (Modulo Operator %):
-   - The current minute is fetched (e.g. 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55).
-   - We use the modulo operator `% 15` to test if the minute is divisible by 15.
-   - If `minute % 15 == 0` (i.e. minute is :00, :15, :30, or :45):
-       --> TRADING + DATA COLLECTION MARK: We check prices, buy if between 25¢-45¢, set 75¢ auto-sell, and log to MongoDB.
-   - If `minute % 15 != 0` (i.e. minute is :05, :10, :20, :25, :35, :40, :50, or :55):
-       --> DATA COLLECTION ONLY MARK: We record prices into MongoDB for graphing/volatility engineering, but place NO trades.
+1. Clock-Aligned 5-Minute Loop:
+   - On startup, the bot executes an immediate check.
+   - It calculates the exact number of seconds until the next 5-minute clock boundary:
+     (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55).
+   - It sleeps for that exact duration, ensuring every execution occurs ON THE DOT.
 
-2. Trading Strategy (25¢ - 45¢ Buy Rule):
-   - For active 15-minute crypto markets (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE):
-   - If YES price is between 25¢ and 45¢ (inclusive):
-       1. Buy 1 share of YES.
-       2. Place a resting Sell limit order at 75¢ (Take Profit auto-sell).
-   - If NO price is between 25¢ and 45¢ (inclusive):
-       1. Buy 1 share of NO.
-       2. Place a resting Sell limit order at 75¢ (Take Profit auto-sell).
+2. Trading vs Data Collection Marks (% Modulo Math):
+   - At every 5-minute mark, data is logged to MongoDB Atlas.
+   - If `minute % 15 == 0` (:00, :15, :30, :45):
+       --> TRADING MARK: Evaluates 25¢-45¢ buy rule, places order + 75¢ auto-sell target.
+   - If `minute % 15 != 0` (:05, :10, :20, :25, :35, :40, :50, :55):
+       --> DATA COLLECTION ONLY: Records prices to MongoDB for volatility graphing.
 
-3. MongoDB Storage Optimization (512MB Free Tier Cap):
-   - Snapshots are stored in an ultra-compact schema (~50 bytes per document):
-     `ts`: Unix timestamp integer, `m`: Minute int, `sym`: Asset string, `tick`: Market ticker,
-     `y`: YES cents int, `n`: NO cents int, `trd`: Optional trade dict.
-   - Consumes only ~3 MB per month, keeping your MongoDB Atlas database well within the free tier!
-
-4. Dry-Run Mode (--dry-run):
-   - Run `python main.py --dry-run` to preview strategy evaluation without placing any real orders.
+3. Command Line Arguments:
+   - `python main.py`           : Runs continuously 24/7 (default for Render Worker).
+   - `python main.py --once`    : Runs a single 5-minute pass and exits.
+   - `python main.py --dry-run` : Runs in preview mode without submitting real orders.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+import time
 from datetime import datetime, timezone
 
 from database import save_market_snapshots
@@ -49,6 +42,20 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+def calculate_seconds_until_next_5min_mark() -> float:
+    """
+    Calculates the exact number of seconds to sleep until the next 5-minute clock mark
+    (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55).
+    """
+    now = datetime.now(timezone.utc)
+    # Calculate seconds elapsed past the previous 5-minute mark
+    seconds_past_mark = (now.minute % 5) * 60 + now.second + now.microsecond / 1_000_000.0
+    # Wait time = 300 seconds (5 mins) minus elapsed seconds
+    wait_seconds = 300.0 - seconds_past_mark
+    # Ensure wait_seconds is at least 0.5s to avoid double-triggering
+    return max(0.5, wait_seconds)
 
 
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
@@ -111,7 +118,6 @@ def process_single_market(
     series_ticker = market.get("series_ticker", "UNKNOWN")
     asset_symbol = extract_asset_symbol(series_ticker, ticker)
 
-    # Extract prices in cents
     yes_price_cents = extract_price_cents(market, "yes")
     no_price_cents = extract_price_cents(market, "no")
 
@@ -202,26 +208,20 @@ def process_single_market(
         "n": no_price_cents,              # NO price in cents
     }
 
-    # Only include 'trd' field if a trade took place to keep document size tiny
     if trade_executed and trade_details:
         compact_document["trd"] = trade_details
 
     return compact_document
 
 
-def main():
+def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
     """
-    Main bot execution loop. Supports --dry-run / --force-trade flags for testing.
+    Executes a single market processing & trading pass.
     """
-    args = sys.argv[1:]
-    dry_run = "--dry-run" in args or "-d" in args
-    force_trade_mark = "--force-trade" in args or "-f" in args
-
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
     timestamp_iso = now_utc.isoformat()
 
-    # Determine if current minute is a 15-minute trading mark (:00, :15, :30, :45)
     is_trading_interval = (current_minute % 15 == 0) or force_trade_mark
 
     log.info("=================================================================")
@@ -272,11 +272,42 @@ def main():
         n_cents = snapshot["n"]
         log.info(f"  • Market [{sym} | {ticker}] -> YES: {y_cents}¢ | NO: {n_cents}¢")
 
-    # Step 4: Save all collected snapshot documents to MongoDB Atlas
+    # Save collected snapshot documents to MongoDB Atlas
     log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
     save_market_snapshots(snapshots_to_save)
+    log.info("Pass complete.")
 
-    log.info("Execution complete.")
+
+def main():
+    """
+    Main bot execution loop.
+    Runs continuously on Render Background Worker by default, aligning every 5 minutes.
+    Use --once for a single pass or --dry-run for preview mode.
+    """
+    args = sys.argv[1:]
+    dry_run = "--dry-run" in args or "-d" in args
+    force_trade_mark = "--force-trade" in args or "-f" in args
+    run_once = "--once" in args or "-o" in args
+
+    if run_once or dry_run:
+        # Run a single pass and exit (useful for testing or single-run execution)
+        run_pipeline_pass(dry_run=dry_run, force_trade_mark=force_trade_mark)
+    else:
+        # Continuous Render Background Worker loop
+        log.info("Starting Trading Bot in Continuous Render Background Worker Mode...")
+        while True:
+            try:
+                run_pipeline_pass(dry_run=dry_run, force_trade_mark=force_trade_mark)
+            except Exception as error:
+                log.error(f"Unexpected error in loop pass: {error}")
+
+            # Calculate exact seconds until next 5-minute clock boundary (:00, :05, :10, :15...)
+            sleep_seconds = calculate_seconds_until_next_5min_mark()
+            next_mark_min = (datetime.now(timezone.utc).minute // 5 * 5 + 5) % 60
+            log.info(
+                f"\n[CLOCK ALIGNMENT] Sleeping {sleep_seconds:.1f}s until next 5-minute mark (:{next_mark_min:02d})...\n"
+            )
+            time.sleep(sleep_seconds)
 
 
 if __name__ == "__main__":
