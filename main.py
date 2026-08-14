@@ -150,6 +150,27 @@ def get_crypto_spot_price(symbol: str) -> float | None:
     return None
 
 
+def parse_cents(val_dollars, val_cents) -> int | None:
+    """Parses cent values (1-99) from either string dollars (e.g. '0.3500') or integer cents."""
+    if val_dollars is not None:
+        try:
+            res = int(round(float(val_dollars) * 100))
+            if 1 <= res <= 99:
+                return res
+        except (ValueError, TypeError):
+            pass
+
+    if val_cents is not None:
+        try:
+            res = int(val_cents)
+            if 1 <= res <= 99:
+                return res
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
 def process_single_market(
     market: dict,
     is_trading_interval: bool,
@@ -160,10 +181,11 @@ def process_single_market(
 ) -> dict:
     """
     Processes a single 15-minute crypto market:
-    1. Reads YES and NO prices (with fallback to fresh detail if needed).
-    2. Reads current underlying spot price, target strike price to beat, and price difference.
-    3. Evaluates 25¢-45¢ buy condition if it is a trading mark (:00, :05, :15, :20, :30, :35...).
-    4. Returns an ultra-compact snapshot dictionary to save into MongoDB.
+    1. Reads YES/NO prices, orderbook depth (bids/asks), and bid-ask spread.
+    2. Reads underlying spot price, target strike price to beat, price diff, and % distance.
+    3. Calculates minutes remaining until contract expiration and market volume.
+    4. Evaluates 25¢-45¢ buy condition if it is a trading mark (:00, :05, :15, :20, :30, :35...).
+    5. Returns an expanded ultra-compact snapshot dictionary to save into MongoDB.
     """
     ticker = market.get("ticker", "UNKNOWN")
     series_ticker = market.get("series_ticker", "UNKNOWN")
@@ -173,14 +195,47 @@ def process_single_market(
     yes_price_cents = extract_price_cents(market, "yes", kalshi_client=kalshi_client)
     no_price_cents = extract_price_cents(market, "no", kalshi_client=kalshi_client)
 
-    # Extract underlying asset spot price and target strike to beat
+    # Extract top-of-book quotes for YES and NO sides
+    y_ask = parse_cents(market.get("yes_ask_dollars"), market.get("yes_ask"))
+    y_bid = parse_cents(market.get("yes_bid_dollars"), market.get("yes_bid"))
+    n_ask = parse_cents(market.get("no_ask_dollars"), market.get("no_ask"))
+    n_bid = parse_cents(market.get("no_bid_dollars"), market.get("no_bid"))
+
+    # Bid-Ask Spread in cents
+    sprd = (y_ask - y_bid) if (y_ask is not None and y_bid is not None) else None
+
+    # Underlying asset spot price, target strike price, difference ($), and % distance
     spot_price = get_crypto_spot_price(asset_symbol)
     target_price = market.get("floor_strike")
 
     price_diff = None
+    pct_dist = None
     if spot_price is not None and target_price is not None:
         try:
-            price_diff = round(float(spot_price) - float(target_price), 4)
+            p_float = float(spot_price)
+            tgt_float = float(target_price)
+            price_diff = round(p_float - tgt_float, 4)
+            if tgt_float > 0:
+                pct_dist = round(((p_float - tgt_float) / tgt_float) * 100.0, 4)
+        except (ValueError, TypeError):
+            pass
+
+    # Minutes remaining until contract expiration/close
+    close_iso = market.get("close_time") or market.get("expected_expiration_time")
+    rem_mins = None
+    if close_iso:
+        try:
+            close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
+            rem_mins = round(max(0.0, (close_dt - now_utc).total_seconds() / 60.0), 1)
+        except Exception:
+            pass
+
+    # Market traded volume
+    vol_str = market.get("volume_fp") or market.get("volume_24h_fp")
+    vol_count = None
+    if vol_str is not None:
+        try:
+            vol_count = int(round(float(vol_str)))
         except (ValueError, TypeError):
             pass
 
@@ -270,7 +325,7 @@ def process_single_market(
                     except Exception as error:
                         log.error(f"Failed to execute NO trade on {ticker}: {error}")
 
-    # Step 3: Build ultra-compact MongoDB snapshot document (~70 bytes)
+    # Step 3: Build expanded ultra-compact MongoDB snapshot document (~100 bytes)
     compact_document = {
         "ts": int(now_utc.timestamp()),   # Unix epoch timestamp (int)
         "m": minute_past_hour,            # Minute int (e.g. 0, 5, 15)
@@ -278,9 +333,17 @@ def process_single_market(
         "tick": ticker,                   # Full market ticker
         "y": yes_price_cents,             # YES price in cents
         "n": no_price_cents,              # NO price in cents
-        "p": spot_price,                  # Live underlying asset spot price (e.g. 63267.69)
-        "tgt": target_price,              # Strike price to beat for YES to win (e.g. 63318.74)
-        "diff": price_diff,               # Price difference (current_price - price_to_beat)
+        "y_bid": y_bid,                   # YES top bid in cents
+        "y_ask": y_ask,                   # YES top ask in cents
+        "n_bid": n_bid,                   # NO top bid in cents
+        "n_ask": n_ask,                   # NO top ask in cents
+        "sprd": sprd,                     # YES Bid-Ask spread in cents
+        "p": spot_price,                  # Live underlying asset spot price (e.g. 63270.94)
+        "tgt": target_price,              # Target strike price to beat (e.g. 63318.74)
+        "diff": price_diff,               # Spot - Strike ($ diff)
+        "pct": pct_dist,                  # Spot - Strike (% diff)
+        "rem": rem_mins,                  # Minutes remaining to contract expiration
+        "vol": vol_count,                 # Market contract volume
     }
 
     if trade_executed and trade_details:
