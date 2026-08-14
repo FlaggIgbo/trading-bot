@@ -7,7 +7,7 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 ## Strategy & Clock Alignment Workflow
 
 ### 1. Continuous 24/7 Self-Scheduling Loop
-The bot runs continuously 24/7 as a **Render Background Worker** (`python main.py`):
+The bot runs continuously 24/7 as a **Render Background Worker** (`python main.py` or `python3 main.py`):
 - **Clock Alignment**: The source code calculates the exact number of seconds until the next 5-minute clock boundary (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55) and sleeps for that exact duration.
 - **On 15-Minute Marks (:00, :15, :30, :45)**:
   - **TRADING + DATA LOGGING**: Evaluates active 15-minute crypto markets (`KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`).
@@ -62,19 +62,21 @@ Snapshots are saved in an ultra-compact schema (~50 bytes per document):
 
 ---
 
-## Local Testing Commands
+## Local Testing Commands (macOS / Linux)
 
-You can test the bot locally using these command-line flags:
+On macOS, system Python 3 is invoked using `python3` or via the project's virtual environment (`.venv/bin/python`):
 
 ```bash
-# Continuous worker mode (default, runs 24/7 aligned to 5-min clock marks):
-python main.py
-
-# Single-pass preview mode (evaluates strategy without placing real orders):
-python main.py --dry-run --force-trade
+# Preview what the bot would trade right now (dry-run mode):
+python3 main.py --dry-run --force-trade
+# OR using virtual environment:
+.venv/bin/python main.py --dry-run --force-trade
 
 # Single-pass live mode (runs 1 pass and exits):
-python main.py --once
+python3 main.py --once
+
+# Continuous worker mode (runs 24/7 aligned to 5-min clock marks):
+python3 main.py
 ```
 
 ---
