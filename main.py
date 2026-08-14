@@ -128,23 +128,28 @@ def is_spot_momentum_aligned(
 
 
 def extract_price_cents(market: dict, side: str, kalshi_client: KalshiClient | None = None) -> int | None:
-    """Extracts the price in cents (1-99) for either 'yes' or 'no' with client fallback on missing data."""
+    """
+    Extracts the Ask price in cents (1-99) for either 'yes' or 'no'.
+    Never falls back to Bid or last_price to ensure entry decisions and
+    maker/taker pricing strictly reflect live seller ask liquidity.
+    """
     is_yes = side.lower() == "yes"
     prefix = "yes" if is_yes else "no"
 
-    dollar_str = market.get(f"{prefix}_ask_dollars") or market.get(f"{prefix}_bid_dollars")
-    cent_val = market.get(f"{prefix}_ask") or market.get(f"{prefix}_bid") or (market.get("last_price") if is_yes else None)
+    dollar_str = market.get(f"{prefix}_ask_dollars")
+    cent_val = market.get(f"{prefix}_ask")
 
-    # Fallback API detail call if fields are missing in market payload
+    # Fallback API detail call if ask fields are missing in market payload
     if dollar_str is None and cent_val is None and kalshi_client and market.get("ticker"):
         try:
             detail = kalshi_client.get_market(market["ticker"]).get("market", {})
-            dollar_str = detail.get(f"{prefix}_ask_dollars") or detail.get(f"{prefix}_bid_dollars")
-            cent_val = detail.get(f"{prefix}_ask") or detail.get(f"{prefix}_bid") or (detail.get("last_price") if is_yes else None)
+            dollar_str = detail.get(f"{prefix}_ask_dollars")
+            cent_val = detail.get(f"{prefix}_ask")
         except Exception as err:
             log.debug(f"Fallback get_market failed for {market.get('ticker')}: {err}")
 
     return parse_cents(dollar_str, cent_val)
+
 
 
 def get_crypto_spot_price(symbol: str) -> float | None:
