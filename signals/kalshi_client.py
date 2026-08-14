@@ -61,10 +61,15 @@ SERIES_15M_CRYPTO = [
     "KXBTC15M",   # Bitcoin 15-minute up/down
     "KXETH15M",   # Ethereum 15-minute up/down
     "KXSOL15M",   # Solana 15-minute up/down
-    "KXXRP15M",   # Ripple 15-minute up/down
+    "KXXRP15M",   # Ripple / XRP 15-minute up/down
     "KXDOGE15M",  # Dogecoin 15-minute up/down
-    "KXBNB15M",   # Binance Coin 15-minute up/down
-    "KXHYPE15M",  # Hyperliquid 15-minute up/down
+    "KXBNB15M",   # Binance Coin (BNB) 15-minute up/down
+    "KXHYPE15M",  # Hyperliquid (HYPE) 15-minute up/down
+    "KXADA15M",   # Cardano (ADA) 15-minute up/down
+    "KXTON15M",   # Toncoin (TON) 15-minute up/down
+    "KXBCH15M",   # Bitcoin Cash (BCH) 15-minute up/down
+    "KXNEAR15M",  # NEAR Protocol 15-minute up/down
+    "KXZEC15M",   # Zcash (ZEC) 15-minute up/down
 ]
 
 # Common Kalshi API 400 error codes

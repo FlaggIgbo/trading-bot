@@ -74,9 +74,9 @@ def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> floa
 
 
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
-    """Extracts short crypto asset symbol (e.g. 'BTC', 'ETH', 'SOL')."""
+    """Extracts short crypto asset symbol (e.g. 'BTC', 'ETH', 'SOL', 'ADA', 'TON', etc.)."""
     combined = f"{series_ticker} {ticker}".upper()
-    for symbol in ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]:
+    for symbol in ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC"]:
         if symbol in combined:
             return symbol
     return series_ticker or "CRYPTO"
