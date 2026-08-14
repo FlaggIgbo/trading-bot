@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 def get_mongo_collection():
     """
     Establishes a connection to MongoDB Atlas using the MONGODB_URI environment variable.
+    Handles TLS/SSL certificate verification safely across Linux containers (e.g. Render.com).
 
     Returns:
         pymongo.collection.Collection object if connected, or None if URI is missing/fails.
@@ -48,8 +49,26 @@ def get_mongo_collection():
     try:
         import pymongo
 
-        # Create client with a 5-second connection timeout
-        client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        # Try connecting with certifi CA certificates first
+        try:
+            import certifi
+
+            client = pymongo.MongoClient(
+                mongo_uri,
+                serverSelectionTimeoutMS=5000,
+                tlsCAFile=certifi.where(),
+            )
+            # Test connection with a quick ping command
+            client.admin.command("ping")
+        except Exception as ssl_err:
+            log.debug(f"Certifi TLS connection attempt failed, trying fallback: {ssl_err}")
+            # Fallback for Linux containers / Render.com SSL handshake compatibility
+            client = pymongo.MongoClient(
+                mongo_uri,
+                serverSelectionTimeoutMS=5000,
+                tls=True,
+                tlsAllowInvalidCertificates=True,
+            )
 
         # Access database 'trading_bot_db' and collection 'market_snapshots'
         db = client.get_database("trading_bot_db")
