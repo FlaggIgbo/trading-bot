@@ -21,9 +21,10 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
   - **Buy YES Only If**: `spot_price >= target_price` (`pct_dist >= 0.0`).
   - **Buy NO Only If**: `spot_price < target_price` (`pct_dist < 0.0`).
 
-### 3. Dynamic Take-Profit (82¢ Target & 100¢ Expiration Run) 🚀
-- **Primary Target**: Places a resting Sell limit order at **82¢** (up from 75¢) upon entry execution.
-- **Run to 100¢ Settlement**: At $t = 10\text{m}$, if the position is performing strongly ($\ge 70\text{¢}$), the bot cancels the resting 82¢ limit order and lets the contract settle for full **100¢**.
+### 3. Dynamic Take-Profit Targets Based on Market Age 🚀
+- **Minute 00 Entry (15 Mins Remaining)**: Sets resting Take-Profit limit order at **82¢** (plenty of time for full swing).
+- **Minute 05 Entry (10 Mins Remaining)**: Sets resting Take-Profit limit order at **76¢** (shorter runway; securing a profit at 76¢ is statistically safer).
+- **Run to 100¢ Settlement**: At $t = 10\text{m}$, if the position is performing strongly ($\ge 70\text{¢}$), the bot cancels the resting Take-Profit order and lets the contract settle for full **100¢**.
 
 ### 4. Tightened 10-Minute Stop-Loss (10¢ Loss Limit / 30¢ Price Floor) 🛑
 - At 10 minutes past market start (`:10`, `:25`, `:40`, `:55`), active positions are evaluated:

@@ -193,6 +193,7 @@ def _execute_buy_flow(
     maker_bid: int | None,
     min_buy: int,
     max_buy: int,
+    take_profit_cents: int,
     spot_price: float | None,
     target_price: float | None,
     market_result: str | None,
@@ -207,28 +208,28 @@ def _execute_buy_flow(
         log.info(
             f"🎯 [DRY-RUN MATCH] {ticker} -> {side_upper} price is {price_cents}¢ "
             f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). "
-            f"WOULD BUY 1 SHARE OF [{side_upper}] + SET 82¢ AUTO-SELL."
+            f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL."
         )
         return True, {
             "dry_run": True,
             "action": "buy_opened",
             "side": side.lower(),
             "buy": price_cents,
-            "tp": 82,
+            "tp": take_profit_cents,
             "sl": 10,
             "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market_result),
         }
 
     log.info(
         f"⚡ [STRATEGY MATCH] {ticker} {side_upper} price is {price_cents}¢ "
-        f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). Executing Maker Buy + 82¢ Auto-Sell!"
+        f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
     )
     try:
         kalshi_client.buy_and_set_take_profit(
             ticker=ticker,
             side=side.lower(),
             buy_price_cents=price_cents,
-            take_profit_cents=82,
+            take_profit_cents=take_profit_cents,
             count=1,
             maker_bid_cents=maker_bid,
         )
@@ -236,7 +237,7 @@ def _execute_buy_flow(
             "action": "buy_opened",
             "side": side.lower(),
             "buy": price_cents,
-            "tp": 82,
+            "tp": take_profit_cents,
             "sl": 10,
             "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market_result),
         }
@@ -309,6 +310,9 @@ def process_single_market(
     is_stop_loss_interval = (minute_into_market == 10)
     min_buy_price = 40 if minute_into_market == 5 else 35
     max_buy_price = 45
+    
+    # Dynamic Take-Profit Target based on market age
+    take_profit_cents = 76 if minute_into_market == 5 else 82
 
     trade_executed = False
     trade_details = None
@@ -366,12 +370,12 @@ def process_single_market(
             if chosen_side == "yes":
                 trade_executed, trade_details = _execute_buy_flow(
                     ticker, "yes", yes_price_cents, y_bid, min_buy_price, max_buy_price,
-                    spot_price, target_price, market.get("result"), kalshi_client, dry_run
+                    take_profit_cents, spot_price, target_price, market.get("result"), kalshi_client, dry_run
                 )
             elif chosen_side == "no":
                 trade_executed, trade_details = _execute_buy_flow(
                     ticker, "no", no_price_cents, n_bid, min_buy_price, max_buy_price,
-                    spot_price, target_price, market.get("result"), kalshi_client, dry_run
+                    take_profit_cents, spot_price, target_price, market.get("result"), kalshi_client, dry_run
                 )
 
     # 5. Build Compact Snapshot Document (~100 bytes)
