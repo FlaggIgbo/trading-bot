@@ -684,18 +684,26 @@ class KalshiClient:
 
             # Step 2: Submit Sell order to close position immediately
             now_ms = int(time.time() * 1000)
-            exit_side = "ask" if side == "yes" else "bid"
-            exit_price_str = f"0.{max(1, current_price):02d}00" if side == "yes" else f"0.{(100 - max(1, current_price)):02d}00"
-
-            sell_payload = {
-                "ticker": ticker,
-                "client_order_id": f"stoploss_{side}_{ticker}_{now_ms}",
-                "side": exit_side,
-                "count": "1",
-                "price": exit_price_str,
-                "time_in_force": "good_till_canceled",
-                "self_trade_prevention_type": "taker_at_cross",
-            }
+            if side == "yes":
+                sell_payload = {
+                    "ticker": ticker,
+                    "client_order_id": f"stoploss_yes_{ticker}_{now_ms}",
+                    "side": "ask",
+                    "count": "1",
+                    "price": f"0.{max(1, current_price):02d}00",
+                    "time_in_force": "good_till_canceled",
+                    "self_trade_prevention_type": "taker_at_cross",
+                }
+            else:
+                sell_payload = {
+                    "ticker": ticker,
+                    "client_order_id": f"stoploss_no_{ticker}_{now_ms}",
+                    "side": "bid",
+                    "count": "1",
+                    "price": f"0.{(100 - max(1, current_price)):02d}00",
+                    "time_in_force": "good_till_canceled",
+                    "self_trade_prevention_type": "taker_at_cross",
+                }
 
             try:
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
