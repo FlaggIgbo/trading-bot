@@ -15,10 +15,12 @@ This bot runs continuously 24/7 as a Render Background Worker.
 
 2. Dynamic Trading Strategy & Risk Management:
    - Market Start Mark (:00, :15, :30, :45): Buy YES/NO if price is between 35¢ and 49¢.
-   - 5-Min Past Mark (:05, :20, :35, :50): Tighter Buy YES/NO if price is between 40¢ and 49¢.
+   - 5-Min Past Mark (:05, :20, :35, :50): 
+     * Early Cut-Loss: If position bought at :00 is below 40¢ (< 40¢-49¢ range), sell immediately to cut losses.
+     * Tighter Buy Entry: If no position held, buy YES/NO if price is between 40¢ and 49¢.
    - Spot Momentum Filter: Buy YES only if spot >= target; Buy NO only if spot < target.
-   - 10-Min Past Mark (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 10¢).
-   - 82¢ Auto-Sell: Places a resting limit Sell order at 82¢ immediately upon buy execution.
+   - 10-Min Past Mark (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 10¢ or price <= 30¢; let run if >= 70¢).
+   - 82¢ / 76¢ Auto-Sell: Places a resting limit Sell order immediately upon buy execution.
    - Open Position Gate: Skips buying if an active position/order already exists for that market.
 
 3. Data Logging & MongoDB Atlas (Every 5 Minutes):
@@ -184,7 +186,7 @@ def determine_counterfactual_outcome(
 
     trade_would_have_won = (trade_side.lower() == winning_side)
 
-    if action_type == "stop_loss_sold":
+    if action_type in ("stop_loss_sold", "early_loss_cut"):
         return "sold_early_would_have_won" if trade_would_have_won else "sl_cap_saved"
     elif action_type == "take_profit_sold":
         return "tp_full_win" if trade_would_have_won else "sold_early_saved_from_loss"
@@ -315,11 +317,12 @@ def process_single_market(
 
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
-    min_buy_price = 40 if minute_into_market == 5 else 35
+    is_5min_mark = (minute_into_market == 5)
+    min_buy_price = 40 if is_5min_mark else 35
     max_buy_price = 49
     
     # Dynamic Take-Profit Target based on market age
-    take_profit_cents = 76 if minute_into_market == 5 else 82
+    take_profit_cents = 76 if is_5min_mark else 82
 
     trade_executed = False
     trade_details = None
@@ -344,7 +347,7 @@ def process_single_market(
                 "outcome": determine_counterfactual_outcome(sl_side, "stop_loss_sold", spot_price, target_price, market.get("result")),
             }
 
-    # Step 4B: Buy Strategy Decision (0m and 5m past start: :00, :05, :15, :20...)
+    # Step 4B: Buy Strategy Decision & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
     if is_trading_interval:
         # Step 4B-1: Prune stale unfilled BUY orders from prior passes (keeps Take-Profit SELL orders intact)
         if not dry_run:
@@ -352,18 +355,43 @@ def process_single_market(
 
         pos = kalshi_client.get_market_position(ticker)
         if pos is not None:
-            log.info(
-                f"🛡️ [OPEN POSITION GATE] Already hold an active {pos['side'].upper()} "
-                f"position of {pos['count']} contract(s) for {ticker}. Skipping buy."
-            )
-            # Ensure resting Take-Profit order is set for this confirmed active position
-            if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
-                kalshi_client.place_take_profit_order(
-                    ticker=ticker,
-                    side=pos["side"],
-                    count=pos["count"],
-                    take_profit_cents=take_profit_cents,
+            # 5-Minute Early Cut-Loss Check:
+            # If asset was bought at the :00 mark and is below the 40¢-49¢ range (< 40¢) at the :05 mark, sell immediately to cut losses.
+            if is_5min_mark:
+                side = pos["side"]
+                pos_price = yes_price_cents if side == "yes" else no_price_cents
+                if pos_price is not None and pos_price < 40:
+                    cut_res = kalshi_client.evaluate_and_execute_5min_cut_loss(
+                        ticker=ticker,
+                        current_yes_price=yes_price_cents,
+                        current_no_price=no_price_cents,
+                        min_price_threshold=40,
+                        dry_run=dry_run,
+                    )
+                    if isinstance(cut_res, dict) and cut_res.get("triggered"):
+                        trade_executed = True
+                        trade_details = {
+                            "action": "early_loss_cut",
+                            "side": side,
+                            "exit_price": cut_res.get("exit_price"),
+                            "loss_cents": cut_res.get("loss_cents"),
+                            "outcome": determine_counterfactual_outcome(side, "early_loss_cut", spot_price, target_price, market.get("result")),
+                        }
+                        pos = None  # Position liquidated; prevent setting take-profit order
+
+            if pos is not None:
+                log.info(
+                    f"🛡️ [OPEN POSITION GATE] Already hold an active {pos['side'].upper()} "
+                    f"position of {pos['count']} contract(s) for {ticker}. Skipping buy."
                 )
+                # Ensure resting Take-Profit order is set for this confirmed active position
+                if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
+                    kalshi_client.place_take_profit_order(
+                        ticker=ticker,
+                        side=pos["side"],
+                        count=pos["count"],
+                        take_profit_cents=take_profit_cents,
+                    )
         elif kalshi_client.has_existing_position_or_order(ticker):
             log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
@@ -447,7 +475,7 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
 
     if is_trading_interval:
-        log.info("--> INTERVAL: BUY TRADING & DATA COLLECTION MARK (:00, :05, :15, :20...)")
+        log.info("--> INTERVAL: BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)")
     elif is_stop_loss_interval:
         log.info("--> INTERVAL: STOP-LOSS EVALUATION & DATA COLLECTION MARK (:10, :25...)")
     else:
