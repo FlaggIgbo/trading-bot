@@ -35,6 +35,9 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 ### 6. Standardized `LogTag` Enum Logging 📋
 - All info log brackets use the `LogTag` Enum class with clear code comments and emojis (`🎯`, `🚀`, `🛑`, `📊`, `⚡`, `🛡️`, `💰`, `⏱️`).
 
+### 7. Cheapest Entry Tiebreaker ⚖️
+- When both YES and NO qualify during a dead heat (e.g. YES is 43¢ and NO is 40¢), the bot dynamically selects $\min(\text{yes\_price}, \text{no\_price})$ to buy the cheaper side (NO at 40¢), injecting +3¢ of EV into the trade instead of favoring YES by default.
+
 ---
 
 ## 📊 Data Engineering & Microstructure Logging

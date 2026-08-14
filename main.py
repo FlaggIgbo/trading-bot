@@ -338,14 +338,37 @@ def process_single_market(
         if kalshi_client.has_existing_position_or_order(ticker):
             log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or order for {ticker}. Skipping buy.")
         else:
-            # Evaluate YES Entry
-            if yes_price_cents and min_buy_price <= yes_price_cents <= max_buy_price and spot_bullish:
+            # Cheapest Entry Tiebreaker: Check eligibility for both YES and NO
+            yes_eligible = (
+                yes_price_cents is not None 
+                and min_buy_price <= yes_price_cents <= max_buy_price 
+                and spot_bullish
+            )
+            no_eligible = (
+                no_price_cents is not None 
+                and min_buy_price <= no_price_cents <= max_buy_price 
+                and spot_bearish
+            )
+
+            chosen_side = None
+            if yes_eligible and no_eligible:
+                # Both qualify! Pick whichever side offers the cheaper entry (e.g., 40¢ vs 43¢) to maximize EV!
+                if no_price_cents < yes_price_cents:
+                    chosen_side = "no"
+                else:
+                    chosen_side = "yes"
+            elif yes_eligible:
+                chosen_side = "yes"
+            elif no_eligible:
+                chosen_side = "no"
+
+            # Execute trade for the chosen side
+            if chosen_side == "yes":
                 trade_executed, trade_details = _execute_buy_flow(
                     ticker, "yes", yes_price_cents, y_bid, min_buy_price, max_buy_price,
                     spot_price, target_price, market.get("result"), kalshi_client, dry_run
                 )
-            # Evaluate NO Entry
-            elif no_price_cents and min_buy_price <= no_price_cents <= max_buy_price and spot_bearish:
+            elif chosen_side == "no":
                 trade_executed, trade_details = _execute_buy_flow(
                     ticker, "no", no_price_cents, n_bid, min_buy_price, max_buy_price,
                     spot_price, target_price, market.get("result"), kalshi_client, dry_run
