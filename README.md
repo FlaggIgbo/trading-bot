@@ -78,6 +78,32 @@ Every 5 minutes, an ultra-compact snapshot (~100 bytes) is saved to MongoDB Atla
 
 ---
 
+## ❓ Quantitative Questions Solved By Our Dataset
+
+Our MongoDB Atlas logging pipeline is designed to answer key quantitative trading questions:
+
+1. **Asset Volatility Profiling 📈**:
+   - *Question*: How volatile is each crypto asset across 15-minute market cycles?
+   - *Data*: Computes standard deviation and range of `diff` (spot - strike) and `pct` distance across `sym`.
+
+2. **Complete Trade Outcome Matrix 🎯**:
+   - **Bought & Won**: Entries that hit Take-Profit (82¢/76¢) or settled at 100¢.
+   - **Bought & Lost**: Entries that expired OTM at 0¢.
+   - **Sold & Won**: Positions exited early on Take-Profit that saved us from subsequent reversals (`sold_early_saved_from_loss`).
+   - **Sold & Lost**: Positions exited early on Stop-Loss capping loss at 10¢ before full 0¢ crash (`sl_cap_saved`).
+
+3. **Price vs. Win Ratio (Empirical Calibration Curve) ⚖️**:
+   - *Question*: Statistically, if you enter at price $X\text{¢}$ (e.g. 35¢ vs 40¢ vs 45¢), what is your exact empirical $Y\%$ chance of winning?
+   - *Data*: Groups entry prices `y`/`n` against final market resolution (`yes_won`).
+
+4. **Time Decay & Runway Efficiency ⏱️**:
+   - *Question*: How does win probability and $EV$ differ between entries at Minute 00 (15 mins remaining) vs Minute 05 (10 mins remaining)?
+
+5. **Counterfactual Opportunity Analysis 🔮**:
+   - *Question*: How much revenue did we gain or forfeit by exiting early on 82¢/76¢ Take-Profit vs holding every position to 100¢ settlement?
+
+---
+
 ## 💻 Local Commands
 
 ```bash

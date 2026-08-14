@@ -30,6 +30,26 @@ Compact Field Schema:
 With 12 crypto markets checked every 5 minutes (3,456 docs/day):
 - Storage consumption is ~300 KB per day (~9 MB per month).
 - A 512MB free tier database can easily store years of market data!
+
+Quantitative Analytical Questions Solved By This Dataset:
+---------------------------------------------------------
+1. Asset Volatility Profiling:
+   - How volatile is each crypto asset across 15-minute intervals? (Tracks std dev of spot_price vs target_strike).
+
+2. Complete Trade Outcome Matrix:
+   - Bought & Won  : Entries that hit Take-Profit (82¢) or settled at 100¢.
+   - Bought & Lost : Entries that expired OTM at 0¢.
+   - Sold & Won    : Stop-Loss exits that saved capital from a full crash (Rightful Stop-Loss).
+   - Sold & Lost   : Stop-Loss exits where position would have recovered to win (False Alarm).
+
+3. Price vs. Win Ratio (Empirical Calibration Curve):
+   - Statistically, if you enter at X¢ (e.g. 35¢ vs 40¢ vs 45¢), what is your exact Y% chance of winning?
+
+4. Time Decay & Runway Efficiency:
+   - Win rate and EV comparison for entries at Minute 00 (15 mins remaining) vs Minute 05 (10 mins remaining).
+
+5. Counterfactual Opportunity Analysis:
+   - Comparing actual strategy returns against holding every contract to full 100¢ settlement.
 """
 
 from __future__ import annotations
