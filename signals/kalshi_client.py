@@ -40,38 +40,15 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
 
+from signals.base_client import BaseTradingClient, LogTag
+
 # Load configuration from the project's .env file if available
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Log Tag Enum Definitions (Human-Readable Info Brackets)
-# ---------------------------------------------------------------------------
-class LogTag(str, Enum):
-    """
-    Log Tag Enums representing info log event categories with code comments:
-    """
-    CLOCK_ALIGNMENT = "[CLOCK ALIGNMENT] ⏱️"          # Sleep timer waiting for 30s past next 5-min mark
-    BUY_MATCH = "⚡ [STRATEGY MATCH]"                 # Dynamic buy strategy criteria met (price range + spot momentum)
-    DRY_RUN_MATCH = "🎯 [DRY-RUN MATCH]"              # Preview buy match in dry-run mode
-    DRY_RUN_PREVIEW = "🎯 [DRY-RUN PREVIEW]"          # Dry-run pipeline mode indicator
-    OPEN_POSITION_GATE = "🛡️ [OPEN POSITION GATE]"     # Skipping buy order because open position or order exists
-    STOP_LOSS_EVALUATION = "📊 [STOP-LOSS EVALUATION]"    # Evaluating 10m stop-loss condition
-    STOP_LOSS_TRIGGERED = "🛑 [STOP-LOSS TRIGGERED]"      # Liquidating position immediately (loss >= 10¢ or price <= 30¢)
-    DRY_RUN_STOP_LOSS = "🛑 [DRY-RUN STOP-LOSS]"        # Preview stop-loss liquidation in dry-run mode
-    EARLY_CUT_LOSS_TRIGGERED = "✂️ [5-MIN CUT-LOSS TRIGGERED]"  # Liquidating 00m entry below 40¢ at 5m mark
-    DRY_RUN_EARLY_CUT_LOSS = "✂️ [DRY-RUN 5-MIN CUT-LOSS]"      # Preview 5m cut-loss liquidation in dry-run mode
-    POSITION_CHECK = "📊 [5-MIN POSITION CHECK]"      # Inspecting 5m open position status
-    LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Canceling 82¢ TP at 10m for strong winners (>= 70¢) to get 100¢
-    TRADE_EXECUTION = "🎯 [TRADE EXECUTION]"          # Submitting Maker buy order to Kalshi V2 API
-    MAKER_BUY_RESTING = "⏳ [MAKER BUY RESTING]"       # Maker buy order submitted and resting on book
-    AUTO_SELL_SET = "💰 [AUTO-SELL SET]"              # Placing resting 82¢ limit sell order for take-profit
-    POSITION_EXISTS = "🛡️ [POSITION EXISTS]"          # Active market position found in Kalshi portfolio
-    ORDER_EXISTS = "🛡️ [ORDER EXISTS]"                # Resting order found in Kalshi portfolio
-    PRUNE_STALE_BUY = "🧹 [PRUNED STALE BUY]"         # Canceled unfilled resting buy order from prior pass
-    PORTFOLIO_PNL = "💰 [PORTFOLIO PNL]"              # Real-time portfolio balance and realized PnL summary
+
 
 
 # ---------------------------------------------------------------------------
@@ -207,11 +184,12 @@ def _sign_request(private_key, timestamp_ms: str, http_method: str, request_path
 # Main Kalshi API Client Class
 # ---------------------------------------------------------------------------
 
-class KalshiClient:
+class KalshiClient(BaseTradingClient):
     """
     Authenticated Client for interacting with the Kalshi Exchange REST API.
     Provides methods to query balances, fetch 15-minute crypto markets, and place orders.
     """
+    exchange_name = "Kalshi"
 
     def __init__(
         self,
@@ -880,244 +858,36 @@ class KalshiClient:
 
         return False
 
-    def evaluate_and_execute_stop_loss(
-        self,
-        ticker: str,
-        current_yes_price: int | None,
-        current_no_price: int | None,
-        dry_run: bool = False,
-        stop_loss_threshold_cents: int = 10,
-    ) -> dict:
-        """
-        Evaluates active positions for `ticker` at the 10-minute mark (:10, :25, :40, :55):
-        1. Checks actual position from Kalshi portfolio (YES if position_fp > 0, NO if position_fp < 0).
-        2. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
-        3. Let Winners Run: If position price >= 70¢, cancels resting TP limit order for 100¢ settlement.
-        """
-        # Step 1: Query current position
-        pos = self.get_market_position(ticker)
-        if pos is None:
-            # If no active position is held, prune any lingering resting orders
-            if not dry_run:
-                self.cancel_and_verify_resting_orders(ticker)
-            return {"triggered": False}
-
-        side = pos["side"]  # 'yes' or 'no'
-        position_count = pos["count"]
-        entry_price = pos["entry_price_cents"] or 40  # Fallback to ~40¢ if exposure is 0
-
-        current_price = current_yes_price if side == "yes" else current_no_price
-
-        if current_price is None:
-            log.warning(f"⚠️ Cannot evaluate stop-loss for {ticker}: current {side.upper()} price is unavailable.")
-            return {"triggered": False}
-
-        # Calculate current PnL in cents (loss is positive, gain is negative)
-        loss_cents = entry_price - current_price
-        pnl_label = f"Gain: +{abs(loss_cents)}¢ (Profit)" if loss_cents < 0 else f"Loss: -{loss_cents}¢"
-
-        log.info(
-            f"{LogTag.STOP_LOSS_EVALUATION.value} Market: {ticker} | Side: {side.upper()} | "
-            f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
-        )
-
-        # Optimization Rule 3B: Let Winners Run to 100¢ if price >= 70¢ at minute 10
-        if current_price >= 70:
-            log.info(
-                f"{LogTag.LET_IT_RUN.value} {ticker} ({side.upper()}) is performing strongly at {current_price}¢ (>= 70¢)! "
-                f"Canceling resting TP order to capture 100¢ settlement."
-            )
-            if not dry_run:
-                self.cancel_and_verify_resting_orders(ticker)
-            return {"triggered": False, "action": "canceled_tp_let_run"}
-
-        # Optimization Rule 4: Trigger Stop-Loss if loss >= 10¢ OR price <= 30¢
-        is_loss_exceeded = loss_cents >= stop_loss_threshold_cents
-        is_below_floor = current_price <= 30
-
-        if is_loss_exceeded or is_below_floor:
-            reason = f"loss is {loss_cents}¢ (>= {stop_loss_threshold_cents}¢ limit)" if is_loss_exceeded else f"price is {current_price}¢ (<= 30¢ floor)"
-
-            if dry_run:
-                log.info(
-                    f"{LogTag.DRY_RUN_STOP_LOSS.value} {ticker} ({side.upper()}) {reason}. "
-                    f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY."
-                )
-                return {
-                    "triggered": True,
-                    "side": side,
-                    "loss_cents": loss_cents,
-                    "exit_price": current_price,
-                    "dry_run": True,
-                }
-
-            log.info(
-                f"{LogTag.STOP_LOSS_TRIGGERED.value} {ticker} ({side.upper()}) {reason}. "
-                f"Canceling resting orders and closing position at market!"
-            )
-
-            # Step 1: Cancel resting limit orders and wait until confirmed cleared
-            # This prevents Kalshi from rejecting the exit order due to locked contract positions.
-            cancellation_ok = self.cancel_and_verify_resting_orders(ticker)
-            if not cancellation_ok:
-                log.warning(f"⚠️ Proceeding with stop-loss exit for {ticker} despite pending order cancellation check.")
-
-            # Step 2: Submit Sell order with a -2¢ aggressive buffer (sell - 2¢) to guarantee immediate taker fill.
-            # Why -2¢ buffer is critical:
-            # When liquidating a losing position, placing a sell limit exactly at current_price leaves
-            # the order resting on the book if the bid drops by 1¢-2¢ during latency.
-            # Setting the exit limit to (current_price - 2¢) ensures the order crosses the orderbook
-            # and fills immediately against available bids even if the price slips down.
-            exit_buffer_cents = 2
-            aggressive_sell_cents = max(1, current_price - exit_buffer_cents)
-            now_ms = int(time.time() * 1000)
-
-            if side == "yes":
-                sell_payload = {
-                    "ticker": ticker,
-                    "client_order_id": f"stoploss_yes_{ticker}_{now_ms}",
-                    "side": "ask",
-                    "count": str(position_count),
-                    "price": f"0.{aggressive_sell_cents:02d}00",
-                    "time_in_force": "good_till_canceled",
-                    "self_trade_prevention_type": "taker_at_cross",
-                }
-            else:
-                sell_payload = {
-                    "ticker": ticker,
-                    "client_order_id": f"stoploss_no_{ticker}_{now_ms}",
-                    "side": "bid",
-                    "count": str(position_count),
-                    "price": f"0.{(100 - aggressive_sell_cents):02d}00",
-                    "time_in_force": "good_till_canceled",
-                    "self_trade_prevention_type": "taker_at_cross",
-                }
-
-            try:
-                res = self.post("/portfolio/events/orders", payload=sell_payload)
-                log.info(f"✅ Successfully executed stop-loss exit order for {ticker}: {res}")
-                return {
-                    "triggered": True,
-                    "side": side,
-                    "loss_cents": loss_cents,
-                    "exit_price": current_price,
-                    "order": res,
-                }
-            except Exception as error:
-                log.error(f"❌ Failed to execute stop-loss exit order for {ticker}: {error}")
-                return {"triggered": False, "error": str(error)}
-
-        return {"triggered": False}
-
-    def evaluate_and_execute_5min_cut_loss(
-        self,
-        ticker: str,
-        current_yes_price: int | None,
-        current_no_price: int | None,
-        min_price_threshold: int = 40,
-        dry_run: bool = False,
-    ) -> dict:
-        """
-        Evaluates active positions for `ticker` at the 5-minute mark (:05, :20, :35, :50):
-        If an asset bought at the 00-minute mark drops below the 40¢-49¢ range (< 40¢),
-        cancels resting take-profit limit orders and immediately liquidates the position to cut losses early.
-        """
-        # Step 1: Check real active position
-        pos = self.get_market_position(ticker)
-        if pos is None:
-            return {"triggered": False}
-
-        side = pos["side"]  # 'yes' or 'no'
-        position_count = pos["count"]
-        entry_price = pos["entry_price_cents"] or 40
-
-        current_price = current_yes_price if side == "yes" else current_no_price
-
-        if current_price is None:
-            log.warning(f"⚠️ Cannot evaluate 5-min cut-loss for {ticker}: current {side.upper()} price is unavailable.")
-            return {"triggered": False}
-
-        # Calculate current PnL in cents
-        loss_cents = entry_price - current_price
-        pnl_label = f"Gain: +{abs(loss_cents)}¢ (Profit)" if loss_cents < 0 else f"Loss: -{loss_cents}¢"
-
-        log.info(
-            f"{LogTag.POSITION_CHECK.value} Market: {ticker} | Side: {side.upper()} | "
-            f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
-        )
-
-        # Trigger Early Cut-Loss if price dropped below 40¢ (< 40¢ - 49¢ target range)
-        if current_price < min_price_threshold:
-            reason = f"price is {current_price}¢ (below {min_price_threshold}¢-49¢ target range)"
-
-            if dry_run:
-                log.info(
-                    f"{LogTag.DRY_RUN_EARLY_CUT_LOSS.value} {ticker} ({side.upper()}) {reason}. "
-                    f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY TO CUT LOSSES."
-                )
-                return {
-                    "triggered": True,
-                    "side": side,
-                    "loss_cents": loss_cents,
-                    "exit_price": current_price,
-                    "dry_run": True,
-                }
-
-            log.info(
-                f"{LogTag.EARLY_CUT_LOSS_TRIGGERED.value} {ticker} ({side.upper()}) {reason}. "
-                f"Canceling resting orders and closing position at market to cut losses!"
-            )
-
-            # Step 1: Cancel resting limit orders (e.g. resting TP order) and wait until confirmed cleared
-            # This prevents Kalshi from rejecting the exit order due to locked contract positions.
-            cancellation_ok = self.cancel_and_verify_resting_orders(ticker)
-            if not cancellation_ok:
-                log.warning(f"⚠️ Proceeding with 5-min cut-loss exit for {ticker} despite pending order cancellation check.")
-
-            # Step 2: Submit Sell order with a -2¢ aggressive buffer (sell - 2¢) to guarantee immediate taker fill.
-            # Why -2¢ buffer is critical:
-            # When liquidating a position at 5m cut-loss, placing a sell limit exactly at current_price leaves
-            # the order resting on the book if the bid drops by 1¢-2¢ during latency.
-            # Setting the exit limit to (current_price - 2¢) ensures the order crosses the orderbook
-            # and fills immediately against available bids even if the price slips down.
-            exit_buffer_cents = 2
-            aggressive_sell_cents = max(1, current_price - exit_buffer_cents)
-            now_ms = int(time.time() * 1000)
-
-            if side == "yes":
-                sell_payload = {
-                    "ticker": ticker,
-                    "client_order_id": f"cutloss_yes_{ticker}_{now_ms}",
-                    "side": "ask",
-                    "count": str(position_count),
-                    "price": f"0.{aggressive_sell_cents:02d}00",
-                    "time_in_force": "good_till_canceled",
-                    "self_trade_prevention_type": "taker_at_cross",
-                }
-            else:
-                sell_payload = {
-                    "ticker": ticker,
-                    "client_order_id": f"cutloss_no_{ticker}_{now_ms}",
-                    "side": "bid",
-                    "count": str(position_count),
-                    "price": f"0.{(100 - aggressive_sell_cents):02d}00",
-                    "time_in_force": "good_till_canceled",
-                    "self_trade_prevention_type": "taker_at_cross",
-                }
-
-            try:
-                res = self.post("/portfolio/events/orders", payload=sell_payload)
-                log.info(f"✅ Successfully executed 5-min cut-loss exit order for {ticker}: {res}")
-                return {
-                    "triggered": True,
-                    "side": side,
-                    "loss_cents": loss_cents,
-                    "exit_price": current_price,
-                    "order": res,
-                }
-            except Exception as error:
-                log.error(f"❌ Failed to execute 5-min cut-loss exit order for {ticker}: {error}")
-                return {"triggered": False, "error": str(error)}
-
-        return {"triggered": False}
+    def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
+        """Executes a market liquidation sell order on Kalshi for position."""
+        now_ms = int(time.time() * 1000)
+        exit_buffer_cents = 2
+        aggressive_sell_cents = max(1, current_price - exit_buffer_cents)
+        if side == "yes":
+            sell_payload = {
+                "ticker": ticker,
+                "client_order_id": f"liq_yes_{ticker}_{now_ms}",
+                "side": "ask",
+                "count": str(count),
+                "price": f"0.{aggressive_sell_cents:02d}00",
+                "time_in_force": "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
+            }
+        else:
+            sell_payload = {
+                "ticker": ticker,
+                "client_order_id": f"liq_no_{ticker}_{now_ms}",
+                "side": "bid",
+                "count": str(count),
+                "price": f"0.{(100 - aggressive_sell_cents):02d}00",
+                "time_in_force": "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
+            }
+        try:
+            res = self.post("/portfolio/events/orders", payload=sell_payload)
+            log.info(f"✅ Executed liquidation exit order for {ticker}: {res}")
+            return res
+        except Exception as error:
+            log.error(f"❌ Failed to execute liquidation exit order for {ticker}: {error}")
+            return {}
 

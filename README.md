@@ -1,10 +1,12 @@
-# Kalshi 15-Minute Crypto Trading & Data Pipeline Bot 🚀
+# Kalshi & Gemini 15-Minute Crypto Trading & Data Pipeline Bot 🚀
 
-A high-performance Python trading bot for 15-minute crypto prediction markets on Kalshi, recording microstructure snapshots to MongoDB Atlas for Expected Value (EV) optimization and volatility analysis.
+A high-performance Python trading bot for 15-minute crypto prediction markets on **Kalshi** and **Gemini**, recording microstructure snapshots to MongoDB Atlas for Expected Value (EV) optimization and volatility analysis.
 
 ## 🛠️ Architecture & Stack
-- **Exchange API**: Kalshi Trade API V2 (`POST /portfolio/events/orders` with RSA-PSS authentication)
-- **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`)
+- **Exchange APIs**:
+  - **Kalshi Trade API V2** (`POST /portfolio/events/orders` with RSA-PSS authentication)
+  - **Gemini Prediction Markets API** (HMAC-SHA384 signature headers)
+- **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`, `portfolio_pnl`, `settlements`)
 - **Hosting**: 24/7 Render.com Background Worker (30s past 5‑min clock alignment)
 - **Tracked Assets (12 Series)**: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `HYPE`, `ADA`, `TON`, `BCH`, `NEAR`, `ZEC`
 
@@ -53,6 +55,7 @@ Every 5 minutes, an ultra‑compact snapshot (~100 bytes) is saved to MongoDB At
   "m": 1,
   "sym": "BTC",
   "tick": "KXBTC15M-26AUG140015-15",
+  "ex": "kalshi",
   "y": 41,
   "n": 60,
   "y_bid": 40,
@@ -73,7 +76,7 @@ Every 5 minutes, an ultra‑compact snapshot (~100 bytes) is saved to MongoDB At
 
 ## 💰 Portfolio Balance & Realized PnL Tracking
 
-The bot queries native Kalshi REST API endpoints (`/portfolio/balance`, `/portfolio/positions`, `/portfolio/settlements`) on each pass to log and store account financial metrics:
+The bot queries native exchange REST API endpoints on each pass to log and store account financial metrics:
 
 - **Collections**:
   - `trading_bot_db.market_snapshots`: 5-minute pricing and trade execution snapshots.
@@ -81,6 +84,6 @@ The bot queries native Kalshi REST API endpoints (`/portfolio/balance`, `/portfo
   - `trading_bot_db.settlements`: Individual market settlement records with cost, revenue, and net profit/loss.
 - **Console Log Output**:
   ```text
-  💰 [PORTFOLIO PNL] Cash: $500.00 | Port Value: $520.00 | Settled PnL: +$14.20 (+1420¢ across 8 mkts) | Active: 2 pos ($0.80)
+  💰 [PORTFOLIO PNL] [Kalshi] Cash: $500.00 | Port Value: $520.00 | Settled PnL: +$14.20 (+1420¢ across 8 mkts) | Active: 2 pos ($0.80)
+  💰 [PORTFOLIO PNL] [Gemini] Cash: $350.00 | Port Value: $350.00 | Settled PnL: $0.00 (0¢ across 0 mkts) | Active: 0 pos ($0.00)
   ```
-

@@ -4,14 +4,15 @@
 
 Overview & Architecture:
 ------------------------
-This bot runs continuously 24/7 as a Render Background Worker.
+This bot runs continuously 24/7 as a Render Background Worker supporting prediction market
+exchanges (Kalshi & Gemini).
 
 1. Why We Execute 30 Seconds Past the 5-Minute Mark (:00:30, :05:30, :10:30...):
-   - At exactly :00.000, :15.000, etc., Kalshi's exchange engine is actively expiring
+   - At exactly :00.000, :15.000, etc., exchange engines are actively expiring
      the old 15-minute contracts and initializing the new ones.
    - Quicker API requests right at :00.000 can catch the orderbook in a brief reset state
      (returning `None` for bid/ask prices).
-   - By adding a 30-second buffer, we give Kalshi's API 30 seconds to populate live bids and asks.
+   - By adding a 30-second buffer, we give exchange APIs 30 seconds to populate live bids and asks.
 
 2. Dynamic Trading Strategy & Risk Management:
    - Market Start Mark (:00, :15, :30, :45): Buy YES/NO if price is between 35¢ and 49¢.
@@ -19,7 +20,7 @@ This bot runs continuously 24/7 as a Render Background Worker.
      * Early Cut-Loss: If position bought at :00 is below 40¢ (< 40¢-49¢ range), sell immediately to cut losses.
      * Tighter Buy Entry: If no position held, buy YES/NO if price is between 40¢ and 49¢.
    - Spot Momentum Filter (Coinbase Ground Truth):
-     * Kalshi prices represent prediction odds; Coinbase spot represents the live asset price.
+     * Contract prices reflect prediction odds; Coinbase spot represents the live asset price.
      * Prevents 'cheap trap' entries: Buy YES only if spot >= target; Buy NO only if spot < target.
      * Dead-heat buffer (0.05%) allows flexibility when spot is actively straddling the strike.
    - 10-Min Past Mark (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 10¢ or price <= 30¢; let run if >= 70¢).
@@ -27,7 +28,7 @@ This bot runs continuously 24/7 as a Render Background Worker.
    - Open Position Gate: Skips buying if an active position/order already exists for that market.
 
 3. Data Logging & MongoDB Atlas (Every 5 Minutes):
-   - Saves ultra-compact snapshot records (~100 bytes each) for 12 crypto assets.
+   - Saves ultra-compact snapshot records (~100 bytes each) for 12 crypto assets across Kalshi and Gemini.
 """
 
 from __future__ import annotations
@@ -40,7 +41,9 @@ from datetime import datetime, timezone
 import requests
 
 from database import save_market_snapshots, save_portfolio_pnl, save_settlements
-from signals.kalshi_client import KalshiClient, LogTag
+from signals.base_client import LogTag
+from signals.gemini_client import GeminiClient
+from signals.kalshi_client import KalshiClient
 
 # Set up logging format
 logging.basicConfig(
@@ -88,9 +91,9 @@ def is_spot_momentum_aligned(
     otm_pct_threshold: float = 0.05,
 ) -> bool:
     """
-    Spot Momentum Reality Check (Coinbase Spot vs. Kalshi Strike):
-    --------------------------------------------------------------
-    Kalshi contract prices reflect market betting sentiment, not underlying spot reality.
+    Spot Momentum Reality Check (Coinbase Spot vs. Exchange Strike):
+    ----------------------------------------------------------------
+    Prediction contract prices reflect market betting sentiment, not underlying spot reality.
     We consult Coinbase's live spot price as the 'scoreboard' before taking a trade:
       - Dead-Heat / ATM Zone (|pct_dist| <= 0.05%): Market is balanced; allow either YES or NO.
       - Bullish Momentum (spot >= target): Only permit YES buys (prevents buying cheap YES on a losing asset).
@@ -106,15 +109,15 @@ def is_spot_momentum_aligned(
     return (pct_dist >= 0) if side.lower() == "yes" else (pct_dist < 0)
 
 
-def extract_price_cents(market: dict, side: str, kalshi_client: KalshiClient | None = None) -> int | None:
+def extract_price_cents(market: dict, side: str, client: KalshiClient | GeminiClient | None = None) -> int | None:
     """Extracts the Ask price in cents (1-99) for either 'yes' or 'no'."""
     prefix = side.lower()
     dollar_str, cent_val = market.get(f"{prefix}_ask_dollars"), market.get(f"{prefix}_ask")
 
     # Fallback API detail call if ask fields are missing in market payload
-    if dollar_str is None and cent_val is None and kalshi_client and market.get("ticker"):
+    if dollar_str is None and cent_val is None and client and market.get("ticker"):
         try:
-            detail = kalshi_client.get_market(market["ticker"]).get("market", {})
+            detail = client.get_market(market["ticker"]).get("market", {})
             dollar_str = detail.get(f"{prefix}_ask_dollars")
             cent_val = detail.get(f"{prefix}_ask")
         except Exception as err:
@@ -169,7 +172,7 @@ def _execute_buy_flow(
     spot_price: float | None,
     target_price: float | None,
     market_result: str | None,
-    kalshi_client: KalshiClient,
+    client: KalshiClient | GeminiClient,
     dry_run: bool,
 ) -> tuple[bool, dict | None]:
     """Helper to execute trade and construct trade snapshot payload."""
@@ -184,7 +187,7 @@ def _execute_buy_flow(
     effective_buy = price_cents
     if not dry_run:
         try:
-            buy_res = kalshi_client.buy_and_set_take_profit(
+            buy_res = client.buy_and_set_take_profit(
                 ticker=ticker,
                 side=side_lower,
                 buy_price_cents=price_cents,
@@ -212,7 +215,7 @@ def _execute_buy_flow(
 def process_single_market(
     market: dict,
     is_trading_interval: bool,
-    kalshi_client: KalshiClient,
+    client: KalshiClient | GeminiClient,
     now_utc: datetime,
     minute_past_hour: int,
     dry_run: bool = False,
@@ -223,8 +226,8 @@ def process_single_market(
     asset_symbol = extract_asset_symbol(series_ticker, ticker)
 
     # 1. Parse top-of-book prices and spreads
-    yes_price_cents = extract_price_cents(market, "yes", kalshi_client=kalshi_client)
-    no_price_cents = extract_price_cents(market, "no", kalshi_client=kalshi_client)
+    yes_price_cents = extract_price_cents(market, "yes", client=client)
+    no_price_cents = extract_price_cents(market, "no", client=client)
 
     quotes = {
         k: parse_cents(market.get(f"{k}_dollars"), market.get(k))
@@ -275,7 +278,7 @@ def process_single_market(
 
     # Step 4A: Stop-Loss Evaluation (:10, :25, :40, :55)
     if is_stop_loss_interval:
-        sl_res = kalshi_client.evaluate_and_execute_stop_loss(
+        sl_res = client.evaluate_and_execute_stop_loss(
             ticker=ticker,
             current_yes_price=yes_price_cents,
             current_no_price=no_price_cents,
@@ -296,17 +299,17 @@ def process_single_market(
     # Step 4B: Buy Strategy Decision & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
     if is_trading_interval:
         if not dry_run:
-            kalshi_client.cancel_unfilled_buy_orders(ticker)
+            client.cancel_unfilled_buy_orders(ticker)
 
         cut_loss_executed = False
-        pos = kalshi_client.get_market_position(ticker)
+        pos = client.get_market_position(ticker)
 
         if pos is not None:
             if is_5min_mark:
                 side = pos["side"]
                 pos_price = yes_price_cents if side == "yes" else no_price_cents
                 if pos_price is not None and pos_price < 40:
-                    cut_res = kalshi_client.evaluate_and_execute_5min_cut_loss(
+                    cut_res = client.evaluate_and_execute_5min_cut_loss(
                         ticker=ticker,
                         current_yes_price=yes_price_cents,
                         current_no_price=no_price_cents,
@@ -327,22 +330,19 @@ def process_single_market(
 
         # Handle position gates and buy evaluation cleanly:
         if cut_loss_executed:
-            # Prevent instant re-entry right after liquidating a position at the 5-minute mark
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} 5-Min Cut-Loss executed for {ticker}. Skipping buy evaluation in this pass.")
         elif pos is not None:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
-            if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
-                kalshi_client.place_take_profit_order(
+            if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not dry_run:
+                client.place_take_profit_order(
                     ticker=ticker,
                     side=pos["side"],
                     count=pos["count"],
                     take_profit_cents=take_profit_cents,
                 )
-        elif kalshi_client.has_existing_position_or_order(ticker):
+        elif client.has_existing_position_or_order(ticker):
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
-            # Evaluate eligible sides: verify price is in discount range (35¢-49¢ / 40¢-49¢)
-            # AND confirm real underlying asset momentum aligns via Coinbase spot price
             candidate_sides = []
             for side, p_cents, aligned in [
                 ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
@@ -356,7 +356,7 @@ def process_single_market(
                 chosen_bid = quotes["yes_bid"] if chosen_side == "yes" else quotes["no_bid"]
                 trade_executed, trade_details = _execute_buy_flow(
                     ticker, chosen_side, chosen_price, chosen_bid, min_buy_price, max_buy_price,
-                    take_profit_cents, spot_price, target_price, market.get("result"), kalshi_client, dry_run
+                    take_profit_cents, spot_price, target_price, market.get("result"), client, dry_run
                 )
 
     # 5. Build Compact Snapshot Document (~100 bytes)
@@ -365,6 +365,7 @@ def process_single_market(
         "m": minute_past_hour,
         "sym": asset_symbol,
         "tick": ticker,
+        "ex": market.get("exchange", "kalshi"),
         "y": yes_price_cents,
         "n": no_price_cents,
         "y_bid": quotes["yes_bid"],
@@ -387,7 +388,7 @@ def process_single_market(
 
 
 def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
-    """Executes a single market processing & trading pass."""
+    """Executes a single market processing & trading pass across all exchanges."""
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
 
@@ -407,51 +408,65 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
     )
     log.info("=================================================================")
 
+    active_clients = []
     try:
-        client = KalshiClient()
+        active_clients.append(("Kalshi", KalshiClient()))
     except Exception as error:
         log.error(f"Could not initialize KalshiClient: {error}")
-        return
 
-    # Fetch real-time Portfolio PnL & Balance
     try:
-        pnl = client.get_portfolio_pnl_summary()
-        pnl["ts"] = int(now_utc.timestamp())
-        sign = "+" if pnl["total_realized_pnl_dollars"] >= 0 else ""
-
-        log.info(
-            f"{LogTag.PORTFOLIO_PNL.value} Cash: ${pnl['balance_dollars']:.2f} | "
-            f"Port Value: ${pnl['portfolio_value_dollars']:.2f} | "
-            f"Settled PnL: {sign}${pnl['total_realized_pnl_dollars']:.2f} ({sign}{pnl['total_realized_pnl_cents']}¢ across {pnl['settlements_count']} mkts) | "
-            f"Active: {pnl['open_positions_count']} pos (${pnl['open_exposure_dollars']:.2f})"
-        )
-
-        if not dry_run:
-            save_portfolio_pnl(pnl)
-            if pnl.get("settlements"):
-                save_settlements(pnl["settlements"])
-    except Exception as err:
-        log.warning(f"Could not retrieve portfolio PnL summary from Kalshi: {err}")
-
-    log.info("Fetching active 15-minute crypto markets from Kalshi...")
-    try:
-        markets = client.get_15m_crypto_markets(status="open")
-        log.info(f"Retrieved {len(markets)} active 15-minute crypto markets.")
+        active_clients.append(("Gemini", GeminiClient()))
     except Exception as error:
-        log.error(f"Failed to fetch 15-minute crypto markets: {error}")
+        log.error(f"Could not initialize GeminiClient: {error}")
+
+    if not active_clients:
+        log.error("No active exchange clients initialized. Exiting pipeline pass.")
         return
 
     snapshots_to_save = []
-    for market in markets:
-        snapshot = process_single_market(market, is_trading_interval, client, now_utc, current_minute, dry_run=dry_run)
-        snapshots_to_save.append(snapshot)
+    for exchange_name, client in active_clients:
+        log.info(f"\n--- [{exchange_name.upper()} EXCHANGE PIPELINE] ---")
 
-        diff_val = snapshot.get("diff")
-        diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
-        log.info(
-            f"  • Market [{snapshot['sym']} | {snapshot['tick']}] -> YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
-            f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
-        )
+        # Fetch real-time Portfolio PnL & Balance
+        try:
+            pnl = client.get_portfolio_pnl_summary()
+            pnl["ts"] = int(now_utc.timestamp())
+            pnl["exchange"] = exchange_name.lower()
+            sign = "+" if pnl.get("total_realized_pnl_dollars", 0) >= 0 else ""
+
+            log.info(
+                f"{LogTag.PORTFOLIO_PNL.value} [{exchange_name}] Cash: ${pnl.get('balance_dollars', 0.0):.2f} | "
+                f"Port Value: ${pnl.get('portfolio_value_dollars', 0.0):.2f} | "
+                f"Settled PnL: {sign}${pnl.get('total_realized_pnl_dollars', 0.0):.2f} ({sign}{pnl.get('total_realized_pnl_cents', 0)}¢ across {pnl.get('settlements_count', 0)} mkts) | "
+                f"Active: {pnl.get('open_positions_count', 0)} pos (${pnl.get('open_exposure_dollars', 0.0):.2f})"
+            )
+
+            if not dry_run:
+                save_portfolio_pnl(pnl)
+                if pnl.get("settlements"):
+                    save_settlements(pnl["settlements"])
+        except Exception as err:
+            log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
+
+        log.info(f"Fetching active 15-minute crypto markets from {exchange_name}...")
+        try:
+            markets = client.get_15m_crypto_markets(status="open")
+            log.info(f"Retrieved {len(markets)} active 15-minute crypto markets from {exchange_name}.")
+        except Exception as error:
+            log.error(f"Failed to fetch 15-minute crypto markets from {exchange_name}: {error}")
+            continue
+
+        for market in markets:
+            snapshot = process_single_market(market, is_trading_interval, client, now_utc, current_minute, dry_run=dry_run)
+            snapshot["ex"] = exchange_name.lower()
+            snapshots_to_save.append(snapshot)
+
+            diff_val = snapshot.get("diff")
+            diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
+            log.info(
+                f"  • [{exchange_name}] Market [{snapshot['sym']} | {snapshot['tick']}] -> YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
+                f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
+            )
 
     # Save non-empty price snapshots to MongoDB Atlas
     valid_snapshots = [s for s in snapshots_to_save if s.get("y") is not None or s.get("n") is not None]
