@@ -98,7 +98,7 @@ def is_spot_momentum_aligned(
     otm_pct_threshold: float = 0.05,
 ) -> bool:
     """
-    Relative Distance Gate / Out-Of-The-Money Spot Filter (Option 2):
+    Relative Distance Gate / Out-Of-The-Money Spot Filter:
     
     1. Dead-Heat Zone (|pct_dist| <= 0.05%):
        If spot price is within 0.05% of target strike (~$0.94 on ETH, ~$31 on BTC),
@@ -301,7 +301,7 @@ def process_single_market(
         except (ValueError, TypeError):
             pass
 
-    # 4. Strategy Rules & Interval Evaluation (Option 2: Relative Distance Gate)
+    # 4. Strategy Rules & Interval Evaluation: Relative Distance Gate)
     spot_bullish = is_spot_momentum_aligned("yes", spot_price, target_price)
     spot_bearish = is_spot_momentum_aligned("no", spot_price, target_price)
 
