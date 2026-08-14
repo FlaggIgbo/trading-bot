@@ -46,6 +46,19 @@ SERIES_15M_GEMINI = [
 ]
 
 
+def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = None) -> int | None:
+    """Safely converts string dollars (e.g. '0.3500') or cent integers to an integer cent value (1-99)."""
+    for val, multiplier in ((val_dollars, 100), (val_cents, 1)):
+        if val is not None:
+            try:
+                res = int(round(float(val) * multiplier))
+                if 1 <= res <= 99:
+                    return res
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Public Gemini Prediction Market Client
 # ---------------------------------------------------------------------------
@@ -74,63 +87,134 @@ class GeminiPredictionClient:
     def get_15m_crypto_markets(self, status: str = "open", limit: int = 100) -> list[dict]:
         """
         Retrieves active 15-minute crypto prediction events from Gemini.
-        Searches for 15M tickers (e.g. BTC15M, ETH15M, SOL15M, XRP15M) and normalizes output.
+        Parses contract structures, prices, strike values, and expiration dates.
         """
         events = []
-        for ticker_term in SERIES_15M_GEMINI:
-            try:
-                url = f"{self.base_url}/v1/prediction-markets/events"
-                params = {"category": "crypto", "status": "active", "search": ticker_term}
-                r = self.session.get(url, params=params, timeout=10)
-                if r.status_code == 200 and r.text:
-                    data = r.json().get("data", [])
-                    if isinstance(data, list):
-                        events.extend(data)
-            except Exception as e:
-                log.debug(f"Error fetching Gemini 15m events for {ticker_term}: {e}")
+        try:
+            url = f"{self.base_url}/v1/prediction-markets/events"
+            params = {"category": "crypto", "status": "active"}
+            resp = self.session.get(url, params=params, timeout=10)
+            if resp.status_code == 200 and resp.text:
+                data = resp.json().get("data", [])
+                if isinstance(data, list):
+                    events.extend(data)
+        except Exception as e:
+            log.debug(f"Error fetching Gemini prediction events: {e}")
 
         normalized_markets = []
         for evt in events:
             if not isinstance(evt, dict):
                 continue
-            ticker = evt.get("ticker") or evt.get("symbol") or evt.get("event_id")
-            if not ticker:
+
+            event_ticker = str(evt.get("ticker", ""))
+            series = str(evt.get("series") or evt.get("series_ticker") or "")
+            expiry = evt.get("expiryDate") or evt.get("close_time") or evt.get("expiration_time")
+
+            # Filter for 15M / 15-minute crypto prediction series
+            if "15M" not in series.upper() and "15M" not in event_ticker.upper():
                 continue
-            series = evt.get("series_ticker") or evt.get("series") or "CRYPTO15M"
 
-            yes_ask_c = evt.get("yes_ask") or evt.get("yes_ask_cents")
-            yes_bid_c = evt.get("yes_bid") or evt.get("yes_bid_cents")
-            no_ask_c = evt.get("no_ask") or evt.get("no_ask_cents")
-            no_bid_c = evt.get("no_bid") or evt.get("no_bid_cents")
+            contracts = evt.get("contracts", [])
+            if not isinstance(contracts, list) or not contracts:
+                continue
 
-            dollar_str = f"{(yes_ask_c / 100.0):.4f}" if isinstance(yes_ask_c, (int, float)) else evt.get("yes_ask_dollars")
+            for c in contracts:
+                if not isinstance(c, dict):
+                    continue
 
-            normalized_markets.append({
-                "ticker": str(ticker),
-                "series_ticker": str(series),
-                "yes_ask": yes_ask_c,
-                "yes_bid": yes_bid_c,
-                "no_ask": no_ask_c,
-                "no_bid": no_bid_c,
-                "yes_ask_dollars": dollar_str,
-                "floor_strike": evt.get("floor_strike") or evt.get("strike_price"),
-                "close_time": evt.get("close_time") or evt.get("expiration_time"),
-                "expected_expiration_time": evt.get("expected_expiration_time") or evt.get("close_time"),
-                "volume_fp": evt.get("volume_fp") or evt.get("volume", 0),
-                "result": evt.get("result"),
-                "exchange": "gemini",
-            })
+                inst = str(c.get("instrumentSymbol") or c.get("ticker") or event_ticker)
+
+                # Extract Strike Price
+                strike_val = None
+                if strike_dict := c.get("strike"):
+                    if isinstance(strike_dict, dict) and "value" in strike_dict:
+                        try:
+                            strike_val = float(strike_dict["value"])
+                        except (ValueError, TypeError):
+                            pass
+                if strike_val is None and evt.get("floor_strike"):
+                    try:
+                        strike_val = float(evt["floor_strike"])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Extract top-of-book prices from contract payload
+                prices = c.get("prices") or {}
+                buy_p = prices.get("buy") or {}
+                sell_p = prices.get("sell") or {}
+
+                yes_ask_str = buy_p.get("yes") or prices.get("bestAsk")
+                yes_bid_str = sell_p.get("yes") or prices.get("bestBid")
+                no_ask_str = buy_p.get("no")
+                no_bid_str = sell_p.get("no")
+
+                yes_ask = parse_cents(yes_ask_str)
+                yes_bid = parse_cents(yes_bid_str)
+                no_ask = parse_cents(no_ask_str)
+                no_bid = parse_cents(no_bid_str)
+
+                # Fallback: Query Gemini public orderbook if quotes are missing
+                if yes_ask is None and yes_bid is None and inst:
+                    try:
+                        br = self.session.get(f"{self.base_url}/v1/book/{inst}", timeout=3.0)
+                        if br.status_code == 200:
+                            bd = br.json()
+                            bids = bd.get("bids", [])
+                            asks = bd.get("asks", [])
+                            if asks and isinstance(asks, list) and asks[0].get("price"):
+                                yes_ask = parse_cents(asks[0]["price"])
+                            if bids and isinstance(bids, list) and bids[0].get("price"):
+                                yes_bid = parse_cents(bids[0]["price"])
+                    except Exception as err:
+                        log.debug(f"Book fallback error for {inst}: {err}")
+
+                # Impute NO side prices if YES side is present and NO side is missing
+                if no_ask is None and yes_bid is not None:
+                    no_ask = 100 - yes_bid
+                if no_bid is None and yes_ask is not None:
+                    no_bid = 100 - yes_ask
+
+                dollar_str = f"{(yes_ask / 100.0):.4f}" if yes_ask is not None else None
+
+                normalized_markets.append({
+                    "ticker": inst,
+                    "event_ticker": event_ticker,
+                    "series_ticker": series or "CRYPTO15M",
+                    "yes_ask": yes_ask,
+                    "yes_bid": yes_bid,
+                    "no_ask": no_ask,
+                    "no_bid": no_bid,
+                    "yes_ask_dollars": dollar_str,
+                    "floor_strike": strike_val,
+                    "close_time": expiry,
+                    "expected_expiration_time": expiry,
+                    "volume_fp": evt.get("volume_fp") or evt.get("volume", 0),
+                    "result": evt.get("result"),
+                    "exchange": "gemini",
+                })
+
         return normalized_markets
 
     def get_market(self, ticker: str) -> dict:
-        """Fetches detailed market metadata for a specific ticker."""
+        """Fetches detailed market metadata / book for a specific ticker."""
         try:
-            url = f"{self.base_url}/v1/prediction-markets/markets/{ticker}"
-            resp = self.session.get(url, timeout=10)
+            url = f"{self.base_url}/v1/book/{ticker}"
+            resp = self.session.get(url, timeout=5)
             if resp.status_code == 200:
-                return resp.json()
+                bd = resp.json()
+                asks = bd.get("asks", [])
+                bids = bd.get("bids", [])
+                yes_ask = asks[0]["price"] if asks and isinstance(asks, list) and asks[0].get("price") else None
+                yes_bid = bids[0]["price"] if bids and isinstance(bids, list) and bids[0].get("price") else None
+                return {
+                    "market": {
+                        "ticker": ticker,
+                        "yes_ask_dollars": yes_ask,
+                        "yes_bid_dollars": yes_bid,
+                    }
+                }
         except Exception as e:
-            log.debug(f"Error fetching Gemini market {ticker}: {e}")
+            log.debug(f"Error fetching Gemini market book for {ticker}: {e}")
         return {"market": {"ticker": ticker}}
 
 
