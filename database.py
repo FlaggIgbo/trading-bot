@@ -49,20 +49,13 @@ def get_mongo_collection():
     try:
         import pymongo
 
-        # Try connecting with certifi CA certificates first
+        # Native MongoClient initialization using MongoDB SRV connection string
         try:
-            import certifi
-
-            client = pymongo.MongoClient(
-                mongo_uri,
-                serverSelectionTimeoutMS=5000,
-                tlsCAFile=certifi.where(),
-            )
-            # Test connection with a quick ping command
+            client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
             client.admin.command("ping")
-        except Exception as ssl_err:
-            log.debug(f"Certifi TLS connection attempt failed, trying fallback: {ssl_err}")
-            # Fallback for Linux containers / Render.com SSL handshake compatibility
+        except Exception as err:
+            log.debug(f"Standard SRV connection attempt failed, trying fallback: {err}")
+            # Fallback for container SSL handshake compatibility
             client = pymongo.MongoClient(
                 mongo_uri,
                 serverSelectionTimeoutMS=5000,
