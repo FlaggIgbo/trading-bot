@@ -304,9 +304,14 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         n_cents = snapshot["n"]
         log.info(f"  • Market [{sym} | {ticker}] -> YES: {y_cents}¢ | NO: {n_cents}¢")
 
-    # Save collected snapshot documents to MongoDB Atlas
-    log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
-    save_market_snapshots(snapshots_to_save)
+    # Filter out incomplete snapshots (where both YES and NO prices are None)
+    valid_snapshots = [s for s in snapshots_to_save if s.get("y") is not None or s.get("n") is not None]
+
+    if valid_snapshots:
+        log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
+        save_market_snapshots(valid_snapshots)
+    else:
+        log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")
 
 
