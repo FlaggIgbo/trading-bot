@@ -1,7 +1,9 @@
+# Environment & Secret Credentials (NEVER COMMIT)
 .env
-.DS_Store
-kalshi-key.key
 *.key
+kalshi-key.key
+
+# Python Bytecode & Environment Caches
 __pycache__/
 *.py[cod]
 *$py.class
@@ -13,9 +15,20 @@ venv/
 .eggs/
 dist/
 build/
+.pytest_cache/
+.coverage
 
-# Local historical storage (never commit)
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating System & Log Junk
+.DS_Store
+Thumbs.db
+*.log
+
+# Local Data & Database Caches
 *.db
 .trading-bot-data/
-# Ignore data layer __pycache__ but track the code
-data/__pycache__/
