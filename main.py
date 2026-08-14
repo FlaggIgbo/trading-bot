@@ -23,7 +23,13 @@ This bot runs automatically every 5 minutes (triggered by a host like Render.com
        1. Buy 1 share of NO.
        2. Place a resting Sell limit order at 75¢ (Take Profit auto-sell).
 
-3. Dry-Run Mode (--dry-run):
+3. MongoDB Storage Optimization (512MB Free Tier Cap):
+   - Snapshots are stored in an ultra-compact schema (~50 bytes per document):
+     `ts`: Unix timestamp integer, `m`: Minute int, `sym`: Asset string, `tick`: Market ticker,
+     `y`: YES cents int, `n`: NO cents int, `trd`: Optional trade dict.
+   - Consumes only ~3 MB per month, keeping your MongoDB Atlas database well within the free tier!
+
+4. Dry-Run Mode (--dry-run):
    - Run `python main.py --dry-run` to preview strategy evaluation without placing any real orders.
 """
 
@@ -43,6 +49,15 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+
+def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
+    """Extracts short crypto asset symbol (e.g. 'BTC', 'ETH', 'SOL')."""
+    combined = f"{series_ticker} {ticker}".upper()
+    for symbol in ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE"]:
+        if symbol in combined:
+            return symbol
+    return series_ticker or "CRYPTO"
 
 
 def extract_price_cents(market: dict, side: str) -> int | None:
@@ -82,7 +97,7 @@ def process_single_market(
     market: dict,
     is_trading_interval: bool,
     kalshi_client: KalshiClient,
-    timestamp_iso: str,
+    now_utc: datetime,
     minute_past_hour: int,
     dry_run: bool = False,
 ) -> dict:
@@ -90,11 +105,11 @@ def process_single_market(
     Processes a single 15-minute crypto market:
     1. Reads YES and NO prices.
     2. Evaluates 25¢-45¢ buy condition if it is a 15-minute trading mark (:00, :15, :30, :45).
-    3. Returns a clean snapshot dictionary to be saved in MongoDB.
+    3. Returns an ultra-compact snapshot dictionary to save into MongoDB.
     """
     ticker = market.get("ticker", "UNKNOWN")
-    title = market.get("title", "15-Minute Crypto Market")
     series_ticker = market.get("series_ticker", "UNKNOWN")
+    asset_symbol = extract_asset_symbol(series_ticker, ticker)
 
     # Extract prices in cents
     yes_price_cents = extract_price_cents(market, "yes")
@@ -112,12 +127,12 @@ def process_single_market(
                     f"🎯 [DRY-RUN MATCH] {ticker} -> YES price is {yes_price_cents}¢ "
                     f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
                 )
+                trade_executed = True
                 trade_details = {
                     "dry_run": True,
-                    "action": "would_buy",
                     "side": "yes",
-                    "buy_price_cents": yes_price_cents,
-                    "take_profit_cents": 75,
+                    "buy": yes_price_cents,
+                    "tp": 75,
                 }
             else:
                 log.info(
@@ -133,7 +148,11 @@ def process_single_market(
                         count=1,
                     )
                     trade_executed = True
-                    trade_details = result
+                    trade_details = {
+                        "side": "yes",
+                        "buy": yes_price_cents,
+                        "tp": 75,
+                    }
                 except Exception as error:
                     log.error(f"Failed to execute YES trade on {ticker}: {error}")
 
@@ -144,12 +163,12 @@ def process_single_market(
                     f"🎯 [DRY-RUN MATCH] {ticker} -> NO price is {no_price_cents}¢ "
                     f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
                 )
+                trade_executed = True
                 trade_details = {
                     "dry_run": True,
-                    "action": "would_buy",
                     "side": "no",
-                    "buy_price_cents": no_price_cents,
-                    "take_profit_cents": 75,
+                    "buy": no_price_cents,
+                    "tp": 75,
                 }
             else:
                 log.info(
@@ -165,31 +184,29 @@ def process_single_market(
                         count=1,
                     )
                     trade_executed = True
-                    trade_details = result
+                    trade_details = {
+                        "side": "no",
+                        "buy": no_price_cents,
+                        "tp": 75,
+                    }
                 except Exception as error:
                     log.error(f"Failed to execute NO trade on {ticker}: {error}")
 
-    # Step 3: Build structured MongoDB snapshot document
-    snapshot_document = {
-        "timestamp": timestamp_iso,
-        "minute_past_hour": minute_past_hour,
-        "ticker": ticker,
-        "title": title,
-        "series_ticker": series_ticker,
-        "yes_bid_dollars": market.get("yes_bid_dollars"),
-        "yes_ask_dollars": market.get("yes_ask_dollars"),
-        "no_bid_dollars": market.get("no_bid_dollars"),
-        "no_ask_dollars": market.get("no_ask_dollars"),
-        "yes_price_cents": yes_price_cents,
-        "no_price_cents": no_price_cents,
-        "volume": market.get("volume"),
-        "open_interest": market.get("open_interest"),
-        "is_trading_mark": is_trading_interval,
-        "trade_executed": trade_executed,
-        "trade_details": trade_details,
+    # Step 3: Build ultra-compact MongoDB snapshot document (~50 bytes)
+    compact_document = {
+        "ts": int(now_utc.timestamp()),   # Unix epoch timestamp (int)
+        "m": minute_past_hour,            # Minute int (e.g. 0, 5, 15)
+        "sym": asset_symbol,              # Asset symbol ("BTC", "ETH", "SOL", etc.)
+        "tick": ticker,                   # Full market ticker
+        "y": yes_price_cents,             # YES price in cents
+        "n": no_price_cents,              # NO price in cents
     }
 
-    return snapshot_document
+    # Only include 'trd' field if a trade took place to keep document size tiny
+    if trade_executed and trade_details:
+        compact_document["trd"] = trade_details
+
+    return compact_document
 
 
 def main():
@@ -210,10 +227,10 @@ def main():
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {timestamp_iso}")
     log.info(f"Current Minute Past Hour: :{current_minute:02d}")
-    
+
     if dry_run:
         log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
-    
+
     if is_trading_interval:
         log.info("--> INTERVAL: 15-MINUTE TRADING & DATA COLLECTION MARK (:00, :15, :30, :45)")
     else:
@@ -243,19 +260,20 @@ def main():
             market=market,
             is_trading_interval=is_trading_interval,
             kalshi_client=client,
-            timestamp_iso=timestamp_iso,
+            now_utc=now_utc,
             minute_past_hour=current_minute,
             dry_run=dry_run,
         )
         snapshots_to_save.append(snapshot)
-        
-        ticker = snapshot["ticker"]
-        y_cents = snapshot["yes_price_cents"]
-        n_cents = snapshot["no_price_cents"]
-        log.info(f"  • Market [{ticker}] -> YES: {y_cents}¢ | NO: {n_cents}¢")
+
+        ticker = snapshot["tick"]
+        sym = snapshot["sym"]
+        y_cents = snapshot["y"]
+        n_cents = snapshot["n"]
+        log.info(f"  • Market [{sym} | {ticker}] -> YES: {y_cents}¢ | NO: {n_cents}¢")
 
     # Step 4: Save all collected snapshot documents to MongoDB Atlas
-    log.info("\nSaving market snapshot data to MongoDB Atlas...")
+    log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
     save_market_snapshots(snapshots_to_save)
 
     log.info("Execution complete.")

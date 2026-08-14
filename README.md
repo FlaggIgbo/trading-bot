@@ -7,92 +7,104 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 ## Strategy & Workflow Overview
 
 ### 1. The 5-Minute Schedule
-The bot is designed to be triggered every 5 minutes (e.g. via Render.com Cron Job `*/5 * * * *`):
-- **On 15-minute marks (:00, :15, :30, :45)**:
+The bot runs every 5 minutes (triggered by Render.com Cron Job `*/5 * * * *`):
+- **On 15-Minute Marks (:00, :15, :30, :45)**:
   - **TRADING + DATA LOGGING**: Checks active 15-minute crypto markets (`KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`).
   - If YES or NO is priced **between 25¢ and 45¢**, buys 1 contract (share).
   - Immediately places a resting limit SELL order at **75¢** for auto-selling (take profit).
-  - Records market snapshot document into MongoDB.
-- **On other 5-minute marks (:05, :10, :20, :25, :35, :40, :50, :55)**:
+  - Records ultra-compact market snapshot documents into MongoDB Atlas.
+- **On Intermediate Marks (:05, :10, :20, :25, :35, :40, :50, :55)**:
   - **DATA LOGGING ONLY**: Records current market prices into MongoDB for time-series graphing, but places NO trades.
+
+### 2. Storage Optimization (MongoDB Atlas Free Tier - 512MB Cap)
+To ensure database storage stays small and never hits limits, snapshots are saved as ultra-compact JSON documents (~50 bytes per document):
+```json
+{
+  "ts": 1786675912,
+  "m": 45,
+  "sym": "BTC",
+  "tick": "KXBTC15M-26AUG132300-00",
+  "y": 68,
+  "n": 33
+}
+```
+*Total consumption: ~100 KB per day (~3 MB per month). The 512MB free tier cluster can store years of data.*
 
 ---
 
-## Setting Up Render.com & MongoDB Atlas (100% Free)
+## Account Status & Next Setup Steps
 
-### Step 1: Create a Free MongoDB Database (MongoDB Atlas)
-1. Sign up for a free account at [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).
-2. Create a **Free Shared Cluster (M0)**.
-3. Under **Database Access**, create a database user and password.
-4. Under **Network Access**, add IP `0.0.0.0/0` (allows cloud servers like Render to connect).
-5. Click **Connect** -> **Drivers**, and copy your connection string:
-   ```
-   mongodb+srv://<username>:<password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority
-   ```
+> **Status Check**: 
+> - ✅ **MongoDB Atlas Cluster**: Created & configured (`cluster0.kygmg3k.mongodb.net`).
+> - ✅ **Render.com Account**: Created & ready for deployment.
 
-### Step 2: Set Up Local Environment
-1. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-2. Fill in your Kalshi credentials and MongoDB connection string in `.env`:
-   ```env
-   KALSHI_API_KEY_ID=your_kalshi_api_key_id
-   KALSHI_PRIVATE_KEY_PATH=/path/to/your/trading-bot.key
-   KALSHI_USE_DEMO=true
-   MONGODB_URI=mongodb+srv://username:password@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority
-   ```
+### What To Do Next:
 
-### Step 3: Deploy on Render.com
-1. Push this repository to GitHub.
-2. Sign in to [Render.com](https://render.com).
-3. Click **New +** -> **Cron Job**.
-4. Connect your GitHub repository.
-5. Set:
+#### Step 1: Set Environment Variables on Render.com
+In your [Render.com Dashboard](https://dashboard.render.com), navigate to your service and add the following **Environment Variables**:
+
+1. `MONGODB_URI`:
+   ```text
+   mongodb+srv://theotherogeflagg_db_user:FAwQEHMXrqwSyPas@cluster0.kygmg3k.mongodb.net/?retryWrites=true&w=majority
+   ```
+2. `KALSHI_API_KEY_ID`:
+   ```text
+   82787744-e854-4524-9a93-dc5a516b75c6
+   ```
+3. `KALSHI_PRIVATE_KEY`:
+   *(Paste the contents of your RSA `.key` file)*
+4. `KALSHI_USE_DEMO`:
+   `false` (or `true` for paper trading)
+
+#### Step 2: Deploy the Cron Job on Render.com
+1. Click **New +** -> **Cron Job**.
+2. Connect your GitHub repository (`FlaggIgbo/trading-bot`).
+3. Set the following parameters:
    - **Environment**: `Python 3`
    - **Schedule**: `*/5 * * * *` (runs every 5 minutes)
    - **Command**: `python main.py`
-6. Under **Environment Variables**, add:
-   - `KALSHI_API_KEY_ID`
-   - `KALSHI_PRIVATE_KEY` (paste RSA PEM contents)
-   - `KALSHI_USE_DEMO` (`true` or `false`)
-   - `MONGODB_URI` (your MongoDB Atlas connection string)
+4. Click **Create Cron Job**.
+
+#### Step 3: Test Locally with Dry-Run Mode
+You can preview live strategy decisions and test MongoDB storage locally without placing real trades:
+```bash
+# Preview what the bot would trade right now:
+python main.py --dry-run --force-trade
+```
 
 ---
 
 ## Data Engineering: Plotting Volatility Graphs
 
-Every snapshot saved to MongoDB contains:
-- `timestamp`: ISO UTC time string (X-axis)
-- `ticker`: Market symbol (e.g. `KXBTC15M-26AUG132245-45`)
-- `yes_price_cents`: Price of YES in cents (Y-axis)
-- `no_price_cents`: Price of NO in cents (Y-axis)
+Each document saved to MongoDB Atlas contains:
+- `ts`: Unix timestamp integer (X-axis)
+- `sym`: Crypto asset symbol (`BTC`, `ETH`, `SOL`, etc.)
+- `y`: Price of YES in cents (Y-axis)
+- `n`: Price of NO in cents (Y-axis)
 
-### Example Python Script to Query & Plot:
+### Example Python Script to Query MongoDB Atlas & Plot Volatility:
 ```python
 import pymongo
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# 1. Connect to MongoDB
-client = pymongo.MongoClient("YOUR_MONGODB_URI")
-db = client["trading_bot_db"]
-collection = db["market_snapshots"]
+# 1. Connect to your MongoDB Atlas Cluster
+uri = "mongodb+srv://theotherogeflagg_db_user:FAwQEHMXrqwSyPas@cluster0.kygmg3k.mongodb.net/?retryWrites=true&w=majority"
+client = pymongo.MongoClient(uri)
+collection = client["trading_bot_db"]["market_snapshots"]
 
-# 2. Load data into Pandas DataFrame
-data = list(collection.find({}, {"_id": 0}))
-df = pd.DataFrame(data)
+# 2. Fetch data and load into Pandas
+df = pd.DataFrame(list(collection.find({}, {"_id": 0})))
+df['datetime'] = pd.to_datetime(df['ts'], unit='s')
 
-# 3. Plot Price over Time
-df['timestamp'] = pd.to_datetime(df['timestamp'])
+# 3. Plot Time-Series Graph
 plt.figure(figsize=(12, 6))
+for sym, group in df.groupby('sym'):
+    plt.plot(group['datetime'], group['y'], label=f"{sym} (YES)")
 
-for ticker, group in df.groupby('ticker'):
-    plt.plot(group['timestamp'], group['yes_price_cents'], label=f"{ticker} (YES)")
-
-plt.title("Kalshi 15-Minute Crypto Market Volatility Over Time")
+plt.title("Kalshi 15-Minute Crypto Volatility & Probability Tracking")
 plt.xlabel("Time")
-plt.ylabel("Price / Win Chance (Cents)")
+plt.ylabel("Price / Chance (Cents)")
 plt.legend()
 plt.grid(True)
 plt.show()
@@ -105,7 +117,7 @@ plt.show()
 ```
 trading-bot/
 ├── main.py              # Main 5-min execution script & trading logic
-├── database.py          # MongoDB Atlas logger module
+├── database.py          # MongoDB Atlas logger module (ultra-compact schema)
 ├── kalshi_client.py     # Root shim re-exporting KalshiClient
 ├── gemini_client.py     # Root shim (commented-out Gemini API)
 ├── requirements.txt     # Dependencies (requests, cryptography, pymongo)
