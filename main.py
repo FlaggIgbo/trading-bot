@@ -225,7 +225,7 @@ def _execute_buy_flow(
         f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
     )
     try:
-        kalshi_client.buy_and_set_take_profit(
+        buy_res = kalshi_client.buy_and_set_take_profit(
             ticker=ticker,
             side=side.lower(),
             buy_price_cents=price_cents,
@@ -233,10 +233,11 @@ def _execute_buy_flow(
             count=1,
             maker_bid_cents=maker_bid,
         )
+        effective_buy = buy_res.get("buy_price_cents", price_cents)
         return True, {
             "action": "buy_opened",
             "side": side.lower(),
-            "buy": price_cents,
+            "buy": effective_buy,
             "tp": take_profit_cents,
             "sl": 10,
             "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market_result),
@@ -343,8 +344,22 @@ def process_single_market(
         if not dry_run:
             kalshi_client.cancel_unfilled_buy_orders(ticker)
 
-        if kalshi_client.has_existing_position_or_order(ticker):
-            log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or order for {ticker}. Skipping buy.")
+        pos = kalshi_client.get_market_position(ticker)
+        if pos is not None:
+            log.info(
+                f"🛡️ [OPEN POSITION GATE] Already hold an active {pos['side'].upper()} "
+                f"position of {pos['count']} contract(s) for {ticker}. Skipping buy."
+            )
+            # Ensure resting Take-Profit order is set for this confirmed active position
+            if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
+                kalshi_client.place_take_profit_order(
+                    ticker=ticker,
+                    side=pos["side"],
+                    count=pos["count"],
+                    take_profit_cents=take_profit_cents,
+                )
+        elif kalshi_client.has_existing_position_or_order(ticker):
+            log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
             # Cheapest Entry Tiebreaker: Check eligibility for both YES and NO
             yes_eligible = (

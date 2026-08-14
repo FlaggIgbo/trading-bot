@@ -63,6 +63,7 @@ class LogTag(str, Enum):
     DRY_RUN_STOP_LOSS = "🛑 [DRY-RUN STOP-LOSS]"        # Preview stop-loss liquidation in dry-run mode
     LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Canceling 82¢ TP at 10m for strong winners (>= 70¢) to get 100¢
     TRADE_EXECUTION = "🎯 [TRADE EXECUTION]"          # Submitting Maker buy order to Kalshi V2 API
+    MAKER_BUY_RESTING = "⏳ [MAKER BUY RESTING]"       # Maker buy order submitted and resting on book
     AUTO_SELL_SET = "💰 [AUTO-SELL SET]"              # Placing resting 82¢ limit sell order for take-profit
     POSITION_EXISTS = "🛡️ [POSITION EXISTS]"          # Active market position found in Kalshi portfolio
     ORDER_EXISTS = "🛡️ [ORDER EXISTS]"                # Resting order found in Kalshi portfolio
@@ -411,6 +412,100 @@ class KalshiClient:
         order_payload.update(kwargs)
         return self.post("/portfolio/orders", payload=order_payload)
 
+    def get_market_position(self, ticker: str) -> dict | None:
+        """
+        Retrieves active position details for `ticker`.
+        Returns None if position is 0 or does not exist.
+        
+        Returns:
+            dict: {
+                "ticker": str,
+                "side": "yes" | "no",
+                "count": int,
+                "position_fp": float,
+                "entry_price_cents": int | None,
+                "exposure_dollars": float,
+            }
+        """
+        try:
+            pos_resp = self.get_positions(ticker=ticker)
+            positions = pos_resp.get("market_positions") or []
+            for p in positions:
+                if p.get("ticker") == ticker:
+                    fp = float(p.get("position_fp") or p.get("position") or 0)
+                    if abs(fp) > 0:
+                        side = "yes" if fp > 0 else "no"
+                        count = int(round(abs(fp)))
+                        exposure = float(p.get("market_exposure_dollars") or 0)
+                        entry_price = int(round((exposure / count) * 100)) if (count > 0 and exposure > 0) else None
+                        return {
+                            "ticker": ticker,
+                            "side": side,
+                            "count": count,
+                            "position_fp": fp,
+                            "entry_price_cents": entry_price,
+                            "exposure_dollars": exposure,
+                        }
+        except Exception as error:
+            log.warning(f"Could not fetch market position for {ticker}: {error}")
+        return None
+
+    def has_resting_take_profit_order(self, ticker: str) -> bool:
+        """Checks if a resting take-profit order already exists for this ticker."""
+        try:
+            orders_resp = self.get_orders(ticker=ticker, status="resting")
+            orders = orders_resp.get("orders") or []
+            for o in orders:
+                client_order_id = o.get("client_order_id") or ""
+                if "sell_tp_" in client_order_id:
+                    return True
+        except Exception as error:
+            log.warning(f"Could not check resting TP orders for {ticker}: {error}")
+        return False
+
+    def place_take_profit_order(
+        self,
+        ticker: str,
+        side: str,
+        count: int = 1,
+        take_profit_cents: int = 82,
+    ) -> dict | None:
+        """
+        Places a resting take-profit limit order for an existing position:
+        - If holding YES: Sell YES by placing Ask at `take_profit_cents` (e.g. 82¢).
+        - If holding NO: Sell NO by placing Bid at (100 - `take_profit_cents`) (e.g. 18¢).
+        """
+        side_clean = side.lower()
+        now_ms = int(time.time() * 1000)
+
+        if side_clean == "yes":
+            sell_side = "ask"
+            sell_price_str = f"0.{take_profit_cents:02d}00"
+        else:
+            sell_side = "bid"
+            sell_price_str = f"0.{(100 - take_profit_cents):02d}00"
+
+        sell_payload = {
+            "ticker": ticker,
+            "client_order_id": f"sell_tp_{side_clean}_{ticker}_{now_ms}",
+            "side": sell_side,
+            "count": str(count),
+            "price": sell_price_str,
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+
+        try:
+            res = self.post("/portfolio/events/orders", payload=sell_payload)
+            log.info(
+                f"{LogTag.AUTO_SELL_SET.value} Placed resting Take-Profit order for {side_clean.upper()} "
+                f"(exit at {take_profit_cents}¢) on {ticker}"
+            )
+            return res
+        except Exception as error:
+            log.warning(f"⚠️ Could not place resting auto-sell limit order on {ticker}: {error}")
+            return None
+
     def buy_and_set_take_profit(
         self,
         ticker: str,
@@ -421,10 +516,9 @@ class KalshiClient:
         maker_bid_cents: int | None = None,
     ) -> dict:
         """
-        Executes a 2-step trade strategy for auto-selling using Kalshi V2 endpoints:
-        1. Submits a Maker limit Buy order at (Bid + 1¢) to save 1¢-3¢ entry cost.
-        2. Immediately places a resting Sell limit order at `take_profit_cents` (82¢)
-           so Kalshi automatically takes profit on price spikes.
+        Submits a Maker limit Buy order at (Bid + 1¢) to save 1¢-3¢ entry cost.
+        If filled immediately, places the Take-Profit order right away.
+        If resting as an unfilled Maker order, Take-Profit is placed upon fill confirmation.
         """
         side_clean = side.lower()
 
@@ -445,20 +539,12 @@ class KalshiClient:
             # Buying YES at effective_buy_cents
             buy_side = "bid"
             buy_price_str = f"0.{effective_buy_cents:02d}00"
-
-            # Auto-selling YES at take_profit_cents (82¢/76¢)
-            sell_side = "ask"
-            sell_price_str = f"0.{take_profit_cents:02d}00"
         else:
             # Buying NO at effective_buy_cents (asking YES at 100 - effective_buy_cents)
             buy_side = "ask"
             buy_price_str = f"0.{(100 - effective_buy_cents):02d}00"
 
-            # Auto-selling NO at take_profit_cents (bidding YES at 100 - take_profit_cents)
-            sell_side = "bid"
-            sell_price_str = f"0.{(100 - take_profit_cents):02d}00"
-
-        # Step 1: Submit Buy Order via Kalshi V2 Endpoint (/portfolio/events/orders)
+        # Submit Buy Order via Kalshi V2 Endpoint (/portfolio/events/orders)
         buy_payload = {
             "ticker": ticker,
             "client_order_id": f"buy_{side_clean}_{ticker}_{now_ms}",
@@ -470,25 +556,27 @@ class KalshiClient:
         }
         buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
 
-        # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 82¢/76¢)
-        sell_payload = {
-            "ticker": ticker,
-            "client_order_id": f"sell_tp_{side_clean}_{ticker}_{now_ms}",
-            "side": sell_side,
-            "count": str(count),
-            "price": sell_price_str,
-            "time_in_force": "good_till_canceled",
-            "self_trade_prevention_type": "taker_at_cross",
-        }
-
+        # Check if filled immediately
+        fill_count = float(
+            buy_order_res.get("fill_count")
+            or buy_order_res.get("order", {}).get("fill_count_fp")
+            or 0
+        )
         sell_order_res = None
-        try:
-            sell_order_res = self.post("/portfolio/events/orders", payload=sell_payload)
-            log.info(
-                f"{LogTag.AUTO_SELL_SET.value} Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
+
+        if fill_count > 0:
+            log.info(f"✅ Maker Buy filled immediately for {ticker} ({fill_count} contracts). Placing Take-Profit...")
+            sell_order_res = self.place_take_profit_order(
+                ticker=ticker,
+                side=side_clean,
+                count=int(round(fill_count)),
+                take_profit_cents=take_profit_cents,
             )
-        except Exception as error:
-            log.warning(f"⚠️ Could not place resting auto-sell limit order: {error}")
+        else:
+            log.info(
+                f"{LogTag.MAKER_BUY_RESTING.value} Buy order resting at {effective_buy_cents}¢ for {ticker}. "
+                f"Take-Profit ({take_profit_cents}¢) will be placed once filled."
+            )
 
         return {
             "buy_order": buy_order_res,
@@ -531,8 +619,11 @@ class KalshiClient:
                 action = (o.get("action") or "").lower()
                 order_id = o.get("order_id")
 
-                # Identify buy orders (client_order_id starts with 'buy_' or action is 'buy')
-                is_buy_order = client_order_id.startswith("buy_") or action == "buy"
+                # Identify buy orders (client_order_id starts with 'buy_' or action is 'buy' without 'sell_tp_')
+                is_buy_order = (
+                    client_order_id.startswith("buy_")
+                    or (action == "buy" and not client_order_id.startswith("sell_tp_"))
+                )
                 if is_buy_order and order_id:
                     if self.cancel_order_safe(order_id):
                         canceled_count += 1
@@ -548,17 +639,13 @@ class KalshiClient:
         Returns True if an open contract or resting order exists, False otherwise.
         """
         # Step 1: Check active market positions
-        try:
-            pos_resp = self.get_positions(ticker=ticker)
-            positions = pos_resp.get("market_positions") or []
-            for p in positions:
-                if p.get("ticker") == ticker:
-                    count_fp = float(p.get("position_fp") or p.get("position") or 0)
-                    if abs(count_fp) > 0:
-                        log.info(f"{LogTag.POSITION_EXISTS.value} Found active position of {count_fp} contracts in {ticker}")
-                        return True
-        except Exception as error:
-            log.warning(f"Could not check market positions for {ticker}: {error}")
+        pos = self.get_market_position(ticker)
+        if pos is not None:
+            log.info(
+                f"{LogTag.POSITION_EXISTS.value} Found active {pos['side'].upper()} "
+                f"position of {pos['count']} contract(s) in {ticker}"
+            )
+            return True
 
         # Step 2: Check resting orders
         try:
@@ -582,10 +669,11 @@ class KalshiClient:
     ) -> dict:
         """
         Evaluates active positions for `ticker` at the 10-minute mark (:10, :25, :40, :55):
-        1. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
-        2. Let Winners Run: If position price >= 70¢, cancels resting TP limit order for 100¢ settlement.
+        1. Checks actual position from Kalshi portfolio (YES if position_fp > 0, NO if position_fp < 0).
+        2. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
+        3. Let Winners Run: If position price >= 70¢, cancels resting TP limit order for 100¢ settlement.
         """
-        # Check resting orders and position status
+        # Check resting orders
         try:
             orders_resp = self.get_orders(ticker=ticker, status="resting")
             resting_orders = orders_resp.get("orders") or []
@@ -593,36 +681,20 @@ class KalshiClient:
             log.warning(f"⚠️ Could not fetch resting orders for stop-loss check on {ticker}: {error}")
             resting_orders = []
 
-        try:
-            pos_resp = self.get_positions(ticker=ticker)
-            positions = pos_resp.get("market_positions") or []
-        except Exception as error:
-            log.warning(f"⚠️ Could not fetch market positions for stop-loss check on {ticker}: {error}")
-            positions = []
-
-        # Find active position for this ticker
-        active_pos = None
-        for p in positions:
-            if p.get("ticker") == ticker:
-                count_fp = float(p.get("position_fp") or p.get("position") or 0)
-                if abs(count_fp) > 0:
-                    active_pos = p
-                    break
-
-        # If no active position and no resting orders, nothing to evaluate
-        if not active_pos and not resting_orders:
+        # Check real active position
+        pos = self.get_market_position(ticker)
+        if pos is None:
+            # If no active position held, prune any stale resting orders
+            if resting_orders and not dry_run:
+                for o in resting_orders:
+                    order_id = o.get("order_id")
+                    if order_id:
+                        self.cancel_order_safe(order_id)
             return {"triggered": False}
 
-        # Determine side and benchmark entry price
-        side = "yes"
-        entry_price = 38  # Estimated benchmark maker entry buy price (cents)
-
-        for o in resting_orders:
-            order_side = (o.get("side") or "").lower()
-            if order_side == "ask":
-                side = "yes"
-            elif order_side == "bid":
-                side = "no"
+        side = pos["side"]  # 'yes' or 'no'
+        position_count = pos["count"]
+        entry_price = pos["entry_price_cents"] or 40  # Fallback to ~40¢ if exposure is 0
 
         current_price = current_yes_price if side == "yes" else current_no_price
 
@@ -636,7 +708,7 @@ class KalshiClient:
 
         log.info(
             f"{LogTag.STOP_LOSS_EVALUATION.value} Market: {ticker} | Side: {side.upper()} | "
-            f"Est. Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
+            f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
         )
 
         # Optimization Rule 3B: Let Winners Run to 100¢ if price >= 70¢ at minute 10
@@ -689,7 +761,7 @@ class KalshiClient:
                     "ticker": ticker,
                     "client_order_id": f"stoploss_yes_{ticker}_{now_ms}",
                     "side": "ask",
-                    "count": "1",
+                    "count": str(position_count),
                     "price": f"0.{max(1, current_price):02d}00",
                     "time_in_force": "good_till_canceled",
                     "self_trade_prevention_type": "taker_at_cross",
@@ -699,7 +771,7 @@ class KalshiClient:
                     "ticker": ticker,
                     "client_order_id": f"stoploss_no_{ticker}_{now_ms}",
                     "side": "bid",
-                    "count": "1",
+                    "count": str(position_count),
                     "price": f"0.{(100 - max(1, current_price)):02d}00",
                     "time_in_force": "good_till_canceled",
                     "self_trade_prevention_type": "taker_at_cross",
