@@ -1,7 +1,7 @@
 [project]
 name = "trading-bot"
 version = "0.1.0"
-description = "Kalshi & Gemini prediction market trading bot (Clean Slate)"
+description = "Kalshi & Gemini prediction market trading bot"
 requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31.0",
