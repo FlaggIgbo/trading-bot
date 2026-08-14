@@ -38,7 +38,6 @@ import requests
 from database import save_market_snapshots, save_portfolio_pnl, save_settlements
 from signals.kalshi_client import KalshiClient, LogTag, SERIES_15M_CRYPTO
 
-
 # Set up logging format
 logging.basicConfig(
     level=logging.INFO,
@@ -47,50 +46,34 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-SUPPORTED_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC"]
+SUPPORTED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC")
+http_session = requests.Session()
 
 
 def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> float:
     """Calculates seconds to sleep until 30s past the next 5-minute mark (:00:30, :05:30, etc.)."""
     now = datetime.now(timezone.utc)
-    # Calculate total seconds elapsed in the current 5-minute block
     seconds_past_5min = (now.minute % 5) * 60 + now.second + (now.microsecond / 1_000_000.0)
-    
-    # Wait time = 300s (5 mins) - elapsed seconds + offset
-    wait_seconds = 300.0 - seconds_past_5min + offset_seconds
-    if wait_seconds >= 300.0:
-        wait_seconds -= 300.0
-
+    wait_seconds = (300.0 - seconds_past_5min + offset_seconds) % 300.0
     return max(0.5, wait_seconds)
 
 
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
     """Extracts short crypto asset symbol (e.g., 'BTC', 'ETH')."""
     combined = f"{series_ticker} {ticker}".upper()
-    for symbol in SUPPORTED_SYMBOLS:
-        if symbol in combined:
-            return symbol
-    return series_ticker or "CRYPTO"
+    return next((sym for sym in SUPPORTED_SYMBOLS if sym in combined), series_ticker or "CRYPTO")
 
 
 def parse_cents(val_dollars: str | float | None, val_cents: int | str | None) -> int | None:
     """Safely converts string dollars (e.g. '0.3500') or cent integers to an integer cent value (1-99)."""
-    if val_dollars is not None:
-        try:
-            res = int(round(float(val_dollars) * 100))
-            if 1 <= res <= 99:
-                return res
-        except (ValueError, TypeError):
-            pass
-
-    if val_cents is not None:
-        try:
-            res = int(val_cents)
-            if 1 <= res <= 99:
-                return res
-        except (ValueError, TypeError):
-            pass
-
+    for val, multiplier in ((val_dollars, 100), (val_cents, 1)):
+        if val is not None:
+            try:
+                res = int(round(float(val) * multiplier))
+                if 1 <= res <= 99:
+                    return res
+            except (ValueError, TypeError):
+                continue
     return None
 
 
@@ -102,45 +85,23 @@ def is_spot_momentum_aligned(
 ) -> bool:
     """
     Relative Distance Gate / Out-Of-The-Money Spot Filter:
-    
-    1. Dead-Heat Zone (|pct_dist| <= 0.05%):
-       If spot price is within 0.05% of target strike (~$0.94 on ETH, ~$31 on BTC),
-       the market is in a dead heat. Buying YES or NO in the 35¢-49¢ range is allowed!
-       
-    2. Out-Of-The-Money Zone (|pct_dist| > 0.05%):
-       If spot price is significantly far from strike, enforce momentum direction:
-       - YES is allowed ONLY IF spot_price >= target_price.
-       - NO is allowed ONLY IF spot_price < target_price.
+    - Near ATM (|pct_dist| <= 0.05%): Dead-heat zone; allow both YES and NO.
+    - OTM (|pct_dist| > 0.05%): Enforce direction (YES if spot >= target, NO if spot < target).
     """
     if spot_price is None or target_price is None or target_price <= 0:
         return True
 
-    diff = spot_price - target_price
-    pct_dist = (diff / target_price) * 100.0
-
-    # Near At-The-Money Zone (<= 0.05% distance): Allow both YES and NO
+    pct_dist = ((spot_price - target_price) / target_price) * 100.0
     if abs(pct_dist) <= otm_pct_threshold:
         return True
 
-    # Significantly Out-Of-The-Money (> 0.05% distance): Enforce momentum direction
-    if side.lower() == "yes":
-        return pct_dist >= 0
-    else:
-        return pct_dist < 0
-
+    return (pct_dist >= 0) if side.lower() == "yes" else (pct_dist < 0)
 
 
 def extract_price_cents(market: dict, side: str, kalshi_client: KalshiClient | None = None) -> int | None:
-    """
-    Extracts the Ask price in cents (1-99) for either 'yes' or 'no'.
-    Never falls back to Bid or last_price to ensure entry decisions and
-    maker/taker pricing strictly reflect live seller ask liquidity.
-    """
-    is_yes = side.lower() == "yes"
-    prefix = "yes" if is_yes else "no"
-
-    dollar_str = market.get(f"{prefix}_ask_dollars")
-    cent_val = market.get(f"{prefix}_ask")
+    """Extracts the Ask price in cents (1-99) for either 'yes' or 'no'."""
+    prefix = side.lower()
+    dollar_str, cent_val = market.get(f"{prefix}_ask_dollars"), market.get(f"{prefix}_ask")
 
     # Fallback API detail call if ask fields are missing in market payload
     if dollar_str is None and cent_val is None and kalshi_client and market.get("ticker"):
@@ -154,12 +115,10 @@ def extract_price_cents(market: dict, side: str, kalshi_client: KalshiClient | N
     return parse_cents(dollar_str, cent_val)
 
 
-
 def get_crypto_spot_price(symbol: str) -> float | None:
-    """Fetches real-time underlying spot price via Coinbase public API."""
+    """Fetches real-time underlying spot price via Coinbase public API using a reusable session."""
     try:
-        url = f"https://api.coinbase.com/v2/prices/{symbol.upper()}-USD/spot"
-        resp = requests.get(url, timeout=3.0)
+        resp = http_session.get(f"https://api.coinbase.com/v2/prices/{symbol.upper()}-USD/spot", timeout=3.0)
         if resp.status_code == 200:
             return round(float(resp.json()["data"]["amount"]), 4)
     except Exception as error:
@@ -175,21 +134,18 @@ def determine_counterfactual_outcome(
     market_result: str | None = None,
 ) -> str:
     """Evaluates counterfactual post-mortem trade outcomes for data logging."""
-    winning_side = None
     if market_result in ("yes", "no"):
         winning_side = market_result.lower()
     elif spot_price is not None and target_price is not None:
         winning_side = "yes" if spot_price >= target_price else "no"
-
-    if not winning_side:
+    else:
         return "pending_settlement"
 
-    trade_would_have_won = (trade_side.lower() == winning_side)
-
+    won = (trade_side.lower() == winning_side)
     if action_type in ("stop_loss_sold", "early_loss_cut"):
-        return "sold_early_would_have_won" if trade_would_have_won else "sl_cap_saved"
-    elif action_type == "take_profit_sold":
-        return "tp_full_win" if trade_would_have_won else "sold_early_saved_from_loss"
+        return "sold_early_would_have_won" if won else "sl_cap_saved"
+    if action_type == "take_profit_sold":
+        return "tp_full_win" if won else "sold_early_saved_from_loss"
 
     return "open_position"
 
@@ -208,51 +164,41 @@ def _execute_buy_flow(
     kalshi_client: KalshiClient,
     dry_run: bool,
 ) -> tuple[bool, dict | None]:
-    """Helper to eliminate code duplication across YES and NO buying logic."""
+    """Helper to execute trade and construct trade snapshot payload."""
+    side_lower = side.lower()
     side_upper = side.upper()
-    momentum_label = "Bullish" if side.lower() == "yes" else "Bearish"
+    momentum_label = "Bullish" if side_lower == "yes" else "Bearish"
 
-    if dry_run:
-        log.info(
-            f"🎯 [DRY-RUN MATCH] {ticker} -> {side_upper} price is {price_cents}¢ "
-            f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). "
-            f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL."
-        )
-        return True, {
-            "dry_run": True,
-            "action": "buy_opened",
-            "side": side.lower(),
-            "buy": price_cents,
-            "tp": take_profit_cents,
-            "sl": 10,
-            "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market_result),
-        }
+    log_prefix = "🎯 [DRY-RUN MATCH]" if dry_run else "⚡ [STRATEGY MATCH]"
+    log_action = f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL." if dry_run else f"Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
+    log.info(f"{log_prefix} {ticker} -> {side_upper} price is {price_cents}¢ (between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). {log_action}")
 
-    log.info(
-        f"⚡ [STRATEGY MATCH] {ticker} {side_upper} price is {price_cents}¢ "
-        f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
-    )
-    try:
-        buy_res = kalshi_client.buy_and_set_take_profit(
-            ticker=ticker,
-            side=side.lower(),
-            buy_price_cents=price_cents,
-            take_profit_cents=take_profit_cents,
-            count=1,
-            maker_bid_cents=maker_bid,
-        )
-        effective_buy = buy_res.get("buy_price_cents", price_cents)
-        return True, {
-            "action": "buy_opened",
-            "side": side.lower(),
-            "buy": effective_buy,
-            "tp": take_profit_cents,
-            "sl": 10,
-            "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market_result),
-        }
-    except Exception as error:
-        log.error(f"❌ Failed to execute {side_upper} trade on {ticker}: {error}")
-        return False, None
+    effective_buy = price_cents
+    if not dry_run:
+        try:
+            buy_res = kalshi_client.buy_and_set_take_profit(
+                ticker=ticker,
+                side=side_lower,
+                buy_price_cents=price_cents,
+                take_profit_cents=take_profit_cents,
+                count=1,
+                maker_bid_cents=maker_bid,
+            )
+            effective_buy = buy_res.get("buy_price_cents", price_cents)
+        except Exception as error:
+            log.error(f"❌ Failed to execute {side_upper} trade on {ticker}: {error}")
+            return False, None
+
+    trade_details = {
+        **({"dry_run": True} if dry_run else {}),
+        "action": "buy_opened",
+        "side": side_lower,
+        "buy": effective_buy,
+        "tp": take_profit_cents,
+        "sl": 10,
+        "outcome": determine_counterfactual_outcome(side_lower, "buy_opened", spot_price, target_price, market_result),
+    }
+    return True, trade_details
 
 
 def process_single_market(
@@ -271,13 +217,12 @@ def process_single_market(
     # 1. Parse top-of-book prices and spreads
     yes_price_cents = extract_price_cents(market, "yes", kalshi_client=kalshi_client)
     no_price_cents = extract_price_cents(market, "no", kalshi_client=kalshi_client)
-
-    y_ask = parse_cents(market.get("yes_ask_dollars"), market.get("yes_ask"))
-    y_bid = parse_cents(market.get("yes_bid_dollars"), market.get("yes_bid"))
-    n_ask = parse_cents(market.get("no_ask_dollars"), market.get("no_ask"))
-    n_bid = parse_cents(market.get("no_bid_dollars"), market.get("no_bid"))
-
-    sprd = (y_ask - y_bid) if (y_ask is not None and y_bid is not None) else None
+    
+    quotes = {
+        k: parse_cents(market.get(f"{k}_dollars"), market.get(k))
+        for k in ("yes_ask", "yes_bid", "no_ask", "no_bid")
+    }
+    sprd = (quotes["yes_ask"] - quotes["yes_bid"]) if (quotes["yes_ask"] is not None and quotes["yes_bid"] is not None) else None
 
     # 2. Extract spot & strike target metrics
     spot_price = get_crypto_spot_price(asset_symbol)
@@ -289,14 +234,13 @@ def process_single_market(
             p_float, tgt_float = float(spot_price), float(target_price)
             price_diff = round(p_float - tgt_float, 4)
             if tgt_float > 0:
-                pct_dist = round(((p_float - tgt_float) / tgt_float) * 100.0, 4)
+                pct_dist = round((price_diff / tgt_float) * 100.0, 4)
         except (ValueError, TypeError):
             pass
 
     # 3. Time decay and market volume
     rem_mins = None
-    close_iso = market.get("close_time") or market.get("expected_expiration_time")
-    if close_iso:
+    if close_iso := (market.get("close_time") or market.get("expected_expiration_time")):
         try:
             close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
             rem_mins = round(max(0.0, (close_dt - now_utc).total_seconds() / 60.0), 1)
@@ -304,30 +248,24 @@ def process_single_market(
             pass
 
     vol_count = None
-    vol_str = market.get("volume_fp") or market.get("volume_24h_fp")
-    if vol_str is not None:
+    if (vol_raw := (market.get("volume_fp") or market.get("volume_24h_fp"))) is not None:
         try:
-            vol_count = int(round(float(vol_str)))
+            vol_count = int(round(float(vol_raw)))
         except (ValueError, TypeError):
             pass
 
-    # 4. Strategy Rules & Interval Evaluation: Relative Distance Gate)
-    spot_bullish = is_spot_momentum_aligned("yes", spot_price, target_price)
-    spot_bearish = is_spot_momentum_aligned("no", spot_price, target_price)
-
+    # 4. Strategy Rules & Interval Evaluation
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
     is_5min_mark = (minute_into_market == 5)
     min_buy_price = 40 if is_5min_mark else 35
     max_buy_price = 49
-    
-    # Dynamic Take-Profit Target based on market age
     take_profit_cents = 76 if is_5min_mark else 82
 
     trade_executed = False
     trade_details = None
 
-    # Step 4A: Stop-Loss Evaluation (10m past start: :10, :25, :40, :55)
+    # Step 4A: Stop-Loss Evaluation (:10, :25, :40, :55)
     if is_stop_loss_interval:
         sl_res = kalshi_client.evaluate_and_execute_stop_loss(
             ticker=ticker,
@@ -349,14 +287,11 @@ def process_single_market(
 
     # Step 4B: Buy Strategy Decision & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
     if is_trading_interval:
-        # Step 4B-1: Prune stale unfilled BUY orders from prior passes (keeps Take-Profit SELL orders intact)
         if not dry_run:
             kalshi_client.cancel_unfilled_buy_orders(ticker)
 
         pos = kalshi_client.get_market_position(ticker)
         if pos is not None:
-            # 5-Minute Early Cut-Loss Check:
-            # If asset was bought at the :00 mark and is below the 40¢-49¢ range (< 40¢) at the :05 mark, sell immediately to cut losses.
             if is_5min_mark:
                 side = pos["side"]
                 pos_price = yes_price_cents if side == "yes" else no_price_cents
@@ -377,14 +312,10 @@ def process_single_market(
                             "loss_cents": cut_res.get("loss_cents"),
                             "outcome": determine_counterfactual_outcome(side, "early_loss_cut", spot_price, target_price, market.get("result")),
                         }
-                        pos = None  # Position liquidated; prevent setting take-profit order
+                        pos = None
 
             if pos is not None:
-                log.info(
-                    f"🛡️ [OPEN POSITION GATE] Already hold an active {pos['side'].upper()} "
-                    f"position of {pos['count']} contract(s) for {ticker}. Skipping buy."
-                )
-                # Ensure resting Take-Profit order is set for this confirmed active position
+                log.info(f"🛡️ [OPEN POSITION GATE] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
                 if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
                     kalshi_client.place_take_profit_order(
                         ticker=ticker,
@@ -395,39 +326,20 @@ def process_single_market(
         elif kalshi_client.has_existing_position_or_order(ticker):
             log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
-            # Cheapest Entry Tiebreaker: Check eligibility for both YES and NO
-            yes_eligible = (
-                yes_price_cents is not None 
-                and min_buy_price <= yes_price_cents <= max_buy_price 
-                and spot_bullish
-            )
-            no_eligible = (
-                no_price_cents is not None 
-                and min_buy_price <= no_price_cents <= max_buy_price 
-                and spot_bearish
-            )
+            # Evaluate eligible sides & select cheapest entry
+            candidate_sides = []
+            for side, p_cents, aligned in [
+                ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
+                ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
+            ]:
+                if p_cents is not None and min_buy_price <= p_cents <= max_buy_price and aligned:
+                    candidate_sides.append((side, p_cents))
 
-            chosen_side = None
-            if yes_eligible and no_eligible:
-                # Both qualify! Pick whichever side offers the cheaper entry (e.g., 40¢ vs 43¢) to maximize EV!
-                if no_price_cents < yes_price_cents:
-                    chosen_side = "no"
-                else:
-                    chosen_side = "yes"
-            elif yes_eligible:
-                chosen_side = "yes"
-            elif no_eligible:
-                chosen_side = "no"
-
-            # Execute trade for the chosen side
-            if chosen_side == "yes":
+            if candidate_sides:
+                chosen_side, chosen_price = min(candidate_sides, key=lambda x: x[1])
+                chosen_bid = quotes["yes_bid"] if chosen_side == "yes" else quotes["no_bid"]
                 trade_executed, trade_details = _execute_buy_flow(
-                    ticker, "yes", yes_price_cents, y_bid, min_buy_price, max_buy_price,
-                    take_profit_cents, spot_price, target_price, market.get("result"), kalshi_client, dry_run
-                )
-            elif chosen_side == "no":
-                trade_executed, trade_details = _execute_buy_flow(
-                    ticker, "no", no_price_cents, n_bid, min_buy_price, max_buy_price,
+                    ticker, chosen_side, chosen_price, chosen_bid, min_buy_price, max_buy_price,
                     take_profit_cents, spot_price, target_price, market.get("result"), kalshi_client, dry_run
                 )
 
@@ -439,10 +351,10 @@ def process_single_market(
         "tick": ticker,
         "y": yes_price_cents,
         "n": no_price_cents,
-        "y_bid": y_bid,
-        "y_ask": y_ask,
-        "n_bid": n_bid,
-        "n_ask": n_ask,
+        "y_bid": quotes["yes_bid"],
+        "y_ask": quotes["yes_ask"],
+        "n_bid": quotes["no_bid"],
+        "n_ask": quotes["no_ask"],
         "sprd": sprd,
         "p": spot_price,
         "tgt": target_price,
@@ -468,18 +380,15 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
     is_stop_loss_interval = (minute_into_market == 10)
 
     log.info("=================================================================")
-    log.info(f"RUNNING BOT AT UTC TIME: {now_utc.isoformat()}")
-    log.info(f"Current Minute Past Hour: :{current_minute:02d}:{now_utc.second:02d}")
-
+    log.info(f"RUNNING BOT AT UTC TIME: {now_utc.isoformat()} (Minute :{current_minute:02d}:{now_utc.second:02d})")
     if dry_run:
         log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
-
-    if is_trading_interval:
-        log.info("--> INTERVAL: BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)")
-    elif is_stop_loss_interval:
-        log.info("--> INTERVAL: STOP-LOSS EVALUATION & DATA COLLECTION MARK (:10, :25...)")
-    else:
-        log.info("--> INTERVAL: DATA COLLECTION ONLY MARK")
+    log.info(
+        "--> INTERVAL: "
+        + ("BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)" if is_trading_interval
+           else "STOP-LOSS EVALUATION & DATA COLLECTION MARK (:10, :25...)" if is_stop_loss_interval
+           else "DATA COLLECTION ONLY MARK")
+    )
     log.info("=================================================================")
 
     try:
@@ -488,29 +397,27 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         log.error(f"Could not initialize KalshiClient: {error}")
         return
 
-    # Fetch real-time Portfolio PnL & Balance from Kalshi REST API
+    # Fetch real-time Portfolio PnL & Balance
     try:
-        pnl_summary = client.get_portfolio_pnl_summary()
-        pnl_summary["ts"] = int(now_utc.timestamp())
-        pnl_sign = "+" if pnl_summary["total_realized_pnl_dollars"] >= 0 else ""
+        pnl = client.get_portfolio_pnl_summary()
+        pnl["ts"] = int(now_utc.timestamp())
+        sign = "+" if pnl["total_realized_pnl_dollars"] >= 0 else ""
 
         log.info(
-            f"{LogTag.PORTFOLIO_PNL.value} Cash: ${pnl_summary['balance_dollars']:.2f} | "
-            f"Port Value: ${pnl_summary['portfolio_value_dollars']:.2f} | "
-            f"Settled PnL: {pnl_sign}${pnl_summary['total_realized_pnl_dollars']:.2f} "
-            f"({pnl_sign}{pnl_summary['total_realized_pnl_cents']}¢ across {pnl_summary['settlements_count']} mkts) | "
-            f"Active: {pnl_summary['open_positions_count']} pos (${pnl_summary['open_exposure_dollars']:.2f})"
+            f"{LogTag.PORTFOLIO_PNL.value} Cash: ${pnl['balance_dollars']:.2f} | "
+            f"Port Value: ${pnl['portfolio_value_dollars']:.2f} | "
+            f"Settled PnL: {sign}${pnl['total_realized_pnl_dollars']:.2f} ({sign}{pnl['total_realized_pnl_cents']}¢ across {pnl['settlements_count']} mkts) | "
+            f"Active: {pnl['open_positions_count']} pos (${pnl['open_exposure_dollars']:.2f})"
         )
 
         if not dry_run:
-            save_portfolio_pnl(pnl_summary)
-            if pnl_summary.get("settlements"):
-                save_settlements(pnl_summary["settlements"])
+            save_portfolio_pnl(pnl)
+            if pnl.get("settlements"):
+                save_settlements(pnl["settlements"])
     except Exception as err:
         log.warning(f"Could not retrieve portfolio PnL summary from Kalshi: {err}")
 
     log.info("Fetching active 15-minute crypto markets from Kalshi...")
-
     try:
         markets = client.get_15m_crypto_markets(status="open")
         log.info(f"Retrieved {len(markets)} active 15-minute crypto markets.")
@@ -520,19 +427,11 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
 
     snapshots_to_save = []
     for market in markets:
-        snapshot = process_single_market(
-            market=market,
-            is_trading_interval=is_trading_interval,
-            kalshi_client=client,
-            now_utc=now_utc,
-            minute_past_hour=current_minute,
-            dry_run=dry_run,
-        )
+        snapshot = process_single_market(market, is_trading_interval, client, now_utc, current_minute, dry_run=dry_run)
         snapshots_to_save.append(snapshot)
 
         diff_val = snapshot.get("diff")
         diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
-
         log.info(
             f"  • Market [{snapshot['sym']} | {snapshot['tick']}] -> YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
             f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
@@ -540,7 +439,6 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
 
     # Save non-empty price snapshots to MongoDB Atlas
     valid_snapshots = [s for s in snapshots_to_save if s.get("y") is not None or s.get("n") is not None]
-
     if valid_snapshots:
         log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
         save_market_snapshots(valid_snapshots)
@@ -558,18 +456,19 @@ def main():
 
     if run_once or dry_run:
         run_pipeline_pass(dry_run=dry_run, force_trade_mark=force_trade_mark)
-    else:
-        log.info("Starting Trading Bot in Continuous Render Background Worker Mode...")
-        while True:
-            try:
-                run_pipeline_pass(dry_run=dry_run, force_trade_mark=force_trade_mark)
-            except Exception as error:
-                log.error(f"Unexpected error in loop pass: {error}")
+        return
 
-            sleep_seconds = calculate_seconds_until_next_5min_mark(offset_seconds=30.0)
-            next_mark_min = (datetime.now(timezone.utc).minute // 5 * 5 + 5) % 60
-            log.info(f"\n{LogTag.CLOCK_ALIGNMENT.value} Sleeping {sleep_seconds:.1f}s until 30s past next 5-minute mark (:{next_mark_min:02d}:30)...\n")
-            time.sleep(sleep_seconds)
+    log.info("Starting Trading Bot in Continuous Render Background Worker Mode...")
+    while True:
+        try:
+            run_pipeline_pass(dry_run=dry_run, force_trade_mark=force_trade_mark)
+        except Exception as error:
+            log.error(f"Unexpected error in loop pass: {error}")
+
+        sleep_seconds = calculate_seconds_until_next_5min_mark(offset_seconds=30.0)
+        next_mark_min = (datetime.now(timezone.utc).minute // 5 * 5 + 5) % 60
+        log.info(f"\n{LogTag.CLOCK_ALIGNMENT.value} Sleeping {sleep_seconds:.1f}s until 30s past next 5-minute mark (:{next_mark_min:02d}:30)...\n")
+        time.sleep(sleep_seconds)
 
 
 if __name__ == "__main__":
