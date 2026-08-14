@@ -517,3 +517,129 @@ class KalshiClient:
             log.warning(f"Could not check resting orders for {ticker}: {error}")
 
         return False
+
+    def evaluate_and_execute_stop_loss(
+        self,
+        ticker: str,
+        current_yes_price: int | None,
+        current_no_price: int | None,
+        dry_run: bool = False,
+        stop_loss_threshold_cents: int = 15,
+    ) -> bool:
+        """
+        Evaluates active positions for `ticker` at the 10-minute mark.
+        If we hold a position and the loss exceeds `stop_loss_threshold_cents` (15¢),
+        cancels resting take-profit orders and sells the position immediately to cap losses.
+
+        Returns:
+            bool: True if stop-loss was triggered and executed, False otherwise.
+        """
+        # Check resting orders and position status
+        try:
+            orders_resp = self.get_orders(ticker=ticker, status="resting")
+            resting_orders = orders_resp.get("orders") or []
+        except Exception as error:
+            log.warning(f"Could not fetch resting orders for stop-loss check on {ticker}: {error}")
+            resting_orders = []
+
+        try:
+            pos_resp = self.get_positions(ticker=ticker)
+            positions = pos_resp.get("market_positions") or []
+        except Exception as error:
+            log.warning(f"Could not fetch market positions for stop-loss check on {ticker}: {error}")
+            positions = []
+
+        # Find active position for this ticker
+        active_pos = None
+        for p in positions:
+            if p.get("ticker") == ticker:
+                count_fp = float(p.get("position_fp") or p.get("position") or 0)
+                if abs(count_fp) > 0:
+                    active_pos = p
+                    break
+
+        # If no active position and no resting orders, nothing to evaluate
+        if not active_pos and not resting_orders:
+            return False
+
+        # Determine side and estimated entry price
+        side = "yes"
+        entry_price = 40  # Estimated benchmark entry buy price (cents)
+
+        for o in resting_orders:
+            order_side = (o.get("side") or "").lower()
+            if order_side == "ask":
+                side = "yes"
+            elif order_side == "bid":
+                side = "no"
+
+        current_price = current_yes_price if side == "yes" else current_no_price
+
+        if current_price is None:
+            log.warning(f"Cannot evaluate stop-loss for {ticker}: current {side.upper()} price is unavailable.")
+            return False
+
+        # Calculate current loss in cents
+        loss_cents = entry_price - current_price
+
+        log.info(
+            f"[STOP-LOSS CHECK] Market: {ticker} | Side: {side.upper()} | "
+            f"Est. Entry: ~{entry_price}¢ | Current: {current_price}¢ | Loss: {loss_cents}¢"
+        )
+
+        # Trigger Stop-Loss if loss meets or exceeds threshold (15¢)
+        if loss_cents >= stop_loss_threshold_cents:
+            if dry_run:
+                log.info(
+                    f"🛑 [DRY-RUN STOP-LOSS] {ticker} ({side.upper()}) loss is {loss_cents}¢ "
+                    f"(>= {stop_loss_threshold_cents}¢ limit). WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY."
+                )
+                return {
+                    "triggered": True,
+                    "side": side,
+                    "loss_cents": loss_cents,
+                    "exit_price": current_price,
+                    "dry_run": True,
+                }
+
+            log.info(
+                f"🛑 [STOP-LOSS TRIGGERED] {ticker} ({side.upper()}) loss is {loss_cents}¢ "
+                f"(>= {stop_loss_threshold_cents}¢ limit). Canceling resting orders and closing position!"
+            )
+
+            # Step 1: Cancel any resting take-profit limit orders for this ticker
+            for o in resting_orders:
+                order_id = o.get("order_id")
+                if order_id:
+                    self.cancel_order_safe(order_id)
+
+            # Step 2: Submit Sell order to close position immediately at market/bid price
+            now_ms = int(time.time() * 1000)
+            exit_side = "ask" if side == "yes" else "bid"
+            exit_price_str = f"0.{max(1, current_price):02d}00" if side == "yes" else f"0.{(100 - max(1, current_price)):02d}00"
+
+            sell_payload = {
+                "ticker": ticker,
+                "client_order_id": f"stoploss_{side}_{ticker}_{now_ms}",
+                "side": exit_side,
+                "count": "1",
+                "price": exit_price_str,
+                "time_in_force": "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
+            }
+
+            try:
+                res = self.post("/portfolio/events/orders", payload=sell_payload)
+                log.info(f"Successfully executed stop-loss exit order for {ticker}: {res}")
+                return {
+                    "triggered": True,
+                    "side": side,
+                    "loss_cents": loss_cents,
+                    "exit_price": current_price,
+                    "order": res,
+                }
+            except Exception as error:
+                log.error(f"Failed to execute stop-loss exit order for {ticker}: {error}")
+                return {"triggered": False, "error": str(error)}
+
+        return {"triggered": False}

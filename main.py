@@ -171,6 +171,46 @@ def parse_cents(val_dollars, val_cents) -> int | None:
     return None
 
 
+def determine_counterfactual_outcome(
+    trade_side: str,
+    action_type: str,
+    spot_price: float | None,
+    target_price: float | None,
+    market_result: str | None = None,
+) -> str:
+    """
+    Evaluates counterfactual post-mortem trade outcomes:
+    1. 'sold_early_would_have_won': Sold early on Stop-Loss, but market ultimately won (False Alarm).
+    2. 'sold_early_saved_from_loss': Exited early at 75¢ Take-Profit, but market ultimately lost (Saved from reversal).
+    3. 'sl_cap_saved': Sold early on Stop-Loss, and market rightfully lost (Stop-loss capped loss).
+    4. 'tp_full_win': Exited early at 75¢ Take-Profit, and market expired a winner.
+    """
+    winning_side = None
+    if market_result in ("yes", "no"):
+        winning_side = market_result.lower()
+    elif spot_price is not None and target_price is not None:
+        winning_side = "yes" if spot_price >= target_price else "no"
+
+    if winning_side is None:
+        return "pending_settlement"
+
+    trade_would_have_won = (trade_side.lower() == winning_side)
+
+    if action_type == "stop_loss_sold":
+        if trade_would_have_won:
+            return "sold_early_would_have_won"      # Scenario 1: Stop-loss sold, but would have won
+        else:
+            return "sl_cap_saved"                    # Rightful stop-loss saved full loss
+
+    elif action_type == "take_profit_sold":
+        if not trade_would_have_won:
+            return "sold_early_saved_from_loss"     # Scenario 2: Take-profit sold, saved from loss
+        else:
+            return "tp_full_win"                     # Take-profit sold, and market won
+
+    return "open_position"
+
+
 def process_single_market(
     market: dict,
     is_trading_interval: bool,
@@ -184,8 +224,9 @@ def process_single_market(
     1. Reads YES/NO prices, orderbook depth (bids/asks), and bid-ask spread.
     2. Reads underlying spot price, target strike price to beat, price diff, and % distance.
     3. Calculates minutes remaining until contract expiration and market volume.
-    4. Evaluates 25¢-45¢ buy condition if it is a trading mark (:00, :05, :15, :20, :30, :35...).
-    5. Returns an expanded ultra-compact snapshot dictionary to save into MongoDB.
+    4. Evaluates Stop-Loss (15¢ threshold) at 10m past start (:10, :25, :40, :55).
+    5. Evaluates Buy strategy at 0m (25¢-45¢) and 5m (40¢-45¢).
+    6. Logs counterfactual trade outcomes to MongoDB Atlas.
     """
     ticker = market.get("ticker", "UNKNOWN")
     series_ticker = market.get("series_ticker", "UNKNOWN")
@@ -242,7 +283,9 @@ def process_single_market(
     # Dynamic Buy Range Selection based on Market Age & Volatility:
     # - At 0m past market start (:00, :15, :30, :45): High Volatility -> Buy Range: 25¢ - 45¢
     # - At 5m past market start (:05, :20, :35, :50): Lower Volatility -> Tighter Buy Range: 40¢ - 45¢
+    # - At 10m past market start (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 15¢)
     minute_into_market = minute_past_hour % 15
+    is_stop_loss_interval = (minute_into_market == 10)
 
     if minute_into_market == 5:
         min_buy_price = 40
@@ -254,7 +297,34 @@ def process_single_market(
     trade_executed = False
     trade_details = None
 
-    # Step 2: Trading Decision (Allowed at 0m and 5m past market start: :00, :05, :15, :20, :30, :35, :45, :50)
+    # Step 2A: Stop-Loss Evaluation (Executed at 10m past market start: :10, :25, :40, :55)
+    if is_stop_loss_interval:
+        sl_res = kalshi_client.evaluate_and_execute_stop_loss(
+            ticker=ticker,
+            current_yes_price=yes_price_cents,
+            current_no_price=no_price_cents,
+            dry_run=dry_run,
+            stop_loss_threshold_cents=15,
+        )
+        if isinstance(sl_res, dict) and sl_res.get("triggered"):
+            trade_executed = True
+            sl_side = sl_res.get("side", "yes")
+            cf_outcome = determine_counterfactual_outcome(
+                trade_side=sl_side,
+                action_type="stop_loss_sold",
+                spot_price=spot_price,
+                target_price=target_price,
+                market_result=market.get("result"),
+            )
+            trade_details = {
+                "action": "stop_loss_sold",
+                "side": sl_side,
+                "exit_price": sl_res.get("exit_price"),
+                "loss_cents": sl_res.get("loss_cents"),
+                "outcome": cf_outcome,
+            }
+
+    # Step 2B: Buy Trading Decision (Allowed at 0m and 5m past market start: :00, :05, :15, :20, :30, :35, :45, :50)
     if is_trading_interval:
         # Open Position Gate: Check if we ALREADY hold an active position or resting order for this market
         has_existing_position = kalshi_client.has_existing_position_or_order(ticker)
@@ -275,9 +345,18 @@ def process_single_market(
                     trade_executed = True
                     trade_details = {
                         "dry_run": True,
+                        "action": "buy_opened",
                         "side": "yes",
                         "buy": yes_price_cents,
                         "tp": 75,
+                        "sl": 15,
+                        "outcome": determine_counterfactual_outcome(
+                            trade_side="yes",
+                            action_type="buy_opened",
+                            spot_price=spot_price,
+                            target_price=target_price,
+                            market_result=market.get("result"),
+                        ),
                     }
                 else:
                     log.info(
@@ -294,9 +373,18 @@ def process_single_market(
                         )
                         trade_executed = True
                         trade_details = {
+                            "action": "buy_opened",
                             "side": "yes",
                             "buy": yes_price_cents,
                             "tp": 75,
+                            "sl": 15,
+                            "outcome": determine_counterfactual_outcome(
+                                trade_side="yes",
+                                action_type="buy_opened",
+                                spot_price=spot_price,
+                                target_price=target_price,
+                                market_result=market.get("result"),
+                            ),
                         }
                     except Exception as error:
                         log.error(f"Failed to execute YES trade on {ticker}: {error}")
@@ -311,9 +399,18 @@ def process_single_market(
                     trade_executed = True
                     trade_details = {
                         "dry_run": True,
+                        "action": "buy_opened",
                         "side": "no",
                         "buy": no_price_cents,
                         "tp": 75,
+                        "sl": 15,
+                        "outcome": determine_counterfactual_outcome(
+                            trade_side="no",
+                            action_type="buy_opened",
+                            spot_price=spot_price,
+                            target_price=target_price,
+                            market_result=market.get("result"),
+                        ),
                     }
                 else:
                     log.info(
@@ -330,9 +427,18 @@ def process_single_market(
                         )
                         trade_executed = True
                         trade_details = {
+                            "action": "buy_opened",
                             "side": "no",
                             "buy": no_price_cents,
                             "tp": 75,
+                            "sl": 15,
+                            "outcome": determine_counterfactual_outcome(
+                                trade_side="no",
+                                action_type="buy_opened",
+                                spot_price=spot_price,
+                                target_price=target_price,
+                                market_result=market.get("result"),
+                            ),
                         }
                     except Exception as error:
                         log.error(f"Failed to execute NO trade on {ticker}: {error}")
@@ -372,9 +478,12 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
     current_minute = now_utc.minute
     timestamp_iso = now_utc.isoformat()
 
-    # Trading is allowed at 0m and 5m past 15m market start (:00, :05, :15, :20, :30, :35, :45, :50)
+    # Schedule breakdown:
+    # 1. Trading marks (0m & 5m past market start): :00, :05, :15, :20, :30, :35, :45, :50
+    # 2. Stop-loss evaluation mark (10m past market start): :10, :25, :40, :55
     minute_into_market = current_minute % 15
     is_trading_interval = (minute_into_market in (0, 5)) or force_trade_mark
+    is_stop_loss_interval = (minute_into_market == 10)
 
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {timestamp_iso}")
@@ -384,9 +493,11 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
 
     if is_trading_interval:
-        log.info("--> INTERVAL: TRADING & DATA COLLECTION MARK (:00, :05, :15, :20, :30, :35, :45, :50)")
+        log.info("--> INTERVAL: BUY TRADING & DATA COLLECTION MARK (:00, :05, :15, :20, :30, :35, :45, :50)")
+    elif is_stop_loss_interval:
+        log.info("--> INTERVAL: STOP-LOSS EVALUATION & DATA COLLECTION MARK (:10, :25, :40, :55)")
     else:
-        log.info("--> INTERVAL: DATA COLLECTION ONLY MARK (:10, :25, :40, :55)")
+        log.info("--> INTERVAL: DATA COLLECTION ONLY MARK")
     log.info("=================================================================")
 
     # Initialize Kalshi API Client
