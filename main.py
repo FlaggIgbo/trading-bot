@@ -7,15 +7,15 @@ Overview & Architecture:
 This bot runs continuously 24/7 as a Render Background Worker.
 
 1. Why We Execute 30 Seconds Past the 5-Minute Mark (:00:30, :05:30, :10:30...):
-   - At exactly :00.000, :15.000, etc., Kalshi's exchange engine is actively expiring 
+   - At exactly :00.000, :15.000, etc., Kalshi's exchange engine is actively expiring
      the old 15-minute contracts and initializing the new ones.
-   - Quicker API requests right at :00.000 can catch the orderbook in a brief reset state 
+   - Quicker API requests right at :00.000 can catch the orderbook in a brief reset state
      (returning `None` for bid/ask prices).
    - By adding a 30-second buffer, we give Kalshi's API 30 seconds to populate live bids and asks.
 
 2. Dynamic Trading Strategy & Risk Management:
    - Market Start Mark (:00, :15, :30, :45): Buy YES/NO if price is between 35¢ and 49¢.
-   - 5-Min Past Mark (:05, :20, :35, :50): 
+   - 5-Min Past Mark (:05, :20, :35, :50):
      * Early Cut-Loss: If position bought at :00 is below 40¢ (< 40¢-49¢ range), sell immediately to cut losses.
      * Tighter Buy Entry: If no position held, buy YES/NO if price is between 40¢ and 49¢.
    - Spot Momentum Filter: Buy YES only if spot >= target; Buy NO only if spot < target.
@@ -33,10 +33,11 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
+
 import requests
 
 from database import save_market_snapshots, save_portfolio_pnl, save_settlements
-from signals.kalshi_client import KalshiClient, LogTag, SERIES_15M_CRYPTO
+from signals.kalshi_client import KalshiClient, LogTag
 
 # Set up logging format
 logging.basicConfig(
@@ -217,7 +218,7 @@ def process_single_market(
     # 1. Parse top-of-book prices and spreads
     yes_price_cents = extract_price_cents(market, "yes", kalshi_client=kalshi_client)
     no_price_cents = extract_price_cents(market, "no", kalshi_client=kalshi_client)
-    
+
     quotes = {
         k: parse_cents(market.get(f"{k}_dollars"), market.get(k))
         for k in ("yes_ask", "yes_bid", "no_ask", "no_bid")

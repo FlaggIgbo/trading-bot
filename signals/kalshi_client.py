@@ -4,7 +4,7 @@ Kalshi API Client & 15-Minute Crypto Market Data Retriever
 
 What is Kalshi?
 ---------------
-Kalshi is a regulated prediction market exchange where users buy and sell contracts 
+Kalshi is a regulated prediction market exchange where users buy and sell contracts
 based on the outcome of future events (e.g., "Will Bitcoin price increase in the next 15 minutes?").
 Contracts settle at either $1.00 (100 cents) if YES occurs, or $0.00 if NO occurs.
 
@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import time
+from enum import Enum
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -38,8 +39,6 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
-
-from enum import Enum
 
 # Load configuration from the project's .env file if available
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -116,7 +115,7 @@ KALSHI_ERROR_DUPLICATE_ORDER = "duplicate_order"
 def parse_kalshi_error(response: requests.Response | dict) -> tuple[str | None, str]:
     """
     Extracts the error code and error message from a Kalshi HTTP error response.
-    
+
     Returns:
         tuple of (error_code, error_message)
     """
@@ -181,7 +180,7 @@ def _load_private_key():
 def _sign_request(private_key, timestamp_ms: str, http_method: str, request_path: str) -> str:
     """
     Generates an RSA-PSS SHA-256 digital signature for API request authentication.
-    
+
     The message signed is: `timestamp_ms + HTTP_METHOD + path_without_query_params`
     """
     # Strip any query parameters (e.g., '?limit=100') before signing
@@ -220,7 +219,7 @@ class KalshiClient:
     ):
         """
         Initializes the Kalshi API client.
-        
+
         Args:
             api_key_id: Your Kalshi API key ID (UUID format).
             private_key: Loaded RSA private key object (optional; loaded automatically if None).
@@ -468,7 +467,7 @@ class KalshiClient:
         """
         Retrieves active 15-minute crypto prediction markets across all 7 crypto series:
         BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE.
-        
+
         Returns:
             list[dict]: A list of market dictionaries matching active 15m crypto contracts.
         """
@@ -515,7 +514,7 @@ class KalshiClient:
     ) -> dict:
         """
         Submits an order to Kalshi.
-        
+
         Args:
             ticker: Market identifier (e.g. 'KXBTC15M-26AUG132245-45')
             side: 'yes' or 'no'
@@ -549,7 +548,7 @@ class KalshiClient:
         """
         Retrieves active position details for `ticker`.
         Returns None if position is 0 or does not exist.
-        
+
         Returns:
             dict: {
                 "ticker": str,
@@ -725,7 +724,7 @@ class KalshiClient:
 
     def cancel_order_safe(self, order_id: str) -> bool:
         """
-        Safely attempts to cancel an order. Returns True if canceled, 
+        Safely attempts to cancel an order. Returns True if canceled,
         or False if order is already filled/closed (without throwing an error).
         """
         try:

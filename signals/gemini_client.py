@@ -9,7 +9,7 @@ This file contains the client implementations for querying Gemini prediction mar
 
 Note:
 -----
-Per project instructions, all Gemini API code is currently COMMENTED OUT. 
+Per project instructions, all Gemini API code is currently COMMENTED OUT.
 To enable Gemini calls in the future, uncomment the code blocks below.
 
 Key Concepts if uncommented:
