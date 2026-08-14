@@ -1,50 +1,45 @@
 # Kalshi 15-Minute Crypto Trading & Data Pipeline Bot 🚀
 
-A clean, human-readable Python trading bot designed to trade 15-minute crypto prediction markets on Kalshi and record time-series market snapshots into MongoDB Atlas for quantitative Expected Value ($EV$) optimization and volatility analysis.
+A high-performance Python trading bot for 15-minute crypto prediction markets on Kalshi, recording microstructure snapshots to MongoDB Atlas for Expected Value ($EV$) optimization and volatility analysis.
 
-### 🛠️ Stack & Architecture
-- **Exchange API**: Kalshi Trade API V2 (RSA-PSS signature authentication)
+### 🛠️ Architecture & Stack
+- **Exchange API**: Kalshi Trade API V2 (`POST /portfolio/events/orders` with RSA-PSS authentication)
 - **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`)
-- **Hosting**: Render.com Background Worker (runs continuous 24/7 self-scheduling loop)
-- **Covered Crypto Assets (12 Series)**: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `HYPE`, `ADA`, `TON`, `BCH`, `NEAR`, `ZEC`
+- **Hosting**: 24/7 Render.com Background Worker (30s past 5-min clock alignment)
+- **Tracked Assets (12 Series)**: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `HYPE`, `ADA`, `TON`, `BCH`, `NEAR`, `ZEC`
 
 ---
 
-## 📈 Expected Value ($EV$) Optimization Strategy & Rules
+## 📈 EV Optimization & Strategy Rules
 
-### 1. Maker Limit Entry Pricing (Save 1¢–3¢ per Entry) 💰
-- Instead of crossing the spread as a Taker at Ask price, buy orders target Maker limit pricing at `Bid + 1¢` (or current Bid), saving **1¢–3¢** per entry and boosting profit margins on every winning trade.
+### 1. Maker Limit Entry (Save 1¢–3¢) 💰
+- Submits Maker limit Buy orders at `Bid + 1¢` (or current Bid) instead of crossing the spread as a Taker, maximizing profit margins on every entry.
 
-### 2. Relative Distance Gate / Spot Momentum Filter (Option 2) 🎯
-- **Dead-Heat / Near-Strike Zone ($|\text{pct\_dist}| \le 0.05\%$)**: If spot price is within 0.05% of the strike target (~$0.94 on ETH, ~$31 on BTC), buying YES or NO in the 35¢–45¢ range is allowed.
-- **Out-of-The-Money Zone ($|\text{pct\_dist}| > 0.05\%$)**: Enforces directional momentum:
-  - **Buy YES Only If**: `spot_price >= target_price` (`pct_dist >= 0.0`).
-  - **Buy NO Only If**: `spot_price < target_price` (`pct_dist < 0.0`).
+### 2. Relative Distance Gate / Spot Momentum Filter 🎯
+- **Dead-Heat Zone ($|\text{pct\_dist}| \le 0.05\%$)**: Within 0.05% of the strike target, buying YES or NO between 35¢–45¢ is allowed.
+- **Directional Zone ($|\text{pct\_dist}| > 0.05\%$)**:
+  - **Buy YES Only If**: `spot_price >= target_price`.
+  - **Buy NO Only If**: `spot_price < target_price`.
 
-### 3. Dynamic Take-Profit Targets Based on Market Age 🚀
-- **Minute 00 Entry (15 Mins Remaining)**: Sets resting Take-Profit limit order at **82¢** (plenty of time for full swing).
-- **Minute 05 Entry (10 Mins Remaining)**: Sets resting Take-Profit limit order at **76¢** (shorter runway; securing a profit at 76¢ is statistically safer).
-- **Run to 100¢ Settlement**: At $t = 10\text{m}$, if the position is performing strongly ($\ge 70\text{¢}$), the bot cancels the resting Take-Profit order and lets the contract settle for full **100¢**.
+### 3. Dynamic Take-Profit & Fill-Gated Auto-Sell 🚀
+- **Minute 00 Entry**: Targets **82¢** Take-Profit (15 mins remaining).
+- **Minute 05 Entry**: Targets **76¢** Take-Profit (10 mins remaining).
+- **Fill-Gated Execution**: Take-Profit orders are placed only after buy fill confirmation, avoiding phantom resting orders.
+- **Run to 100¢ Settlement**: If position price reaches $\ge 70\text{¢}$ at $t = 10\text{m}$, the resting Take-Profit order is canceled to capture the full 100¢ payout.
 
-### 4. Tightened 10-Minute Stop-Loss (10¢ Loss Limit / 30¢ Price Floor) 🛑
-- At 10 minutes past market start (`:10`, `:25`, `:40`, `:55`), active positions are evaluated:
-- Liquidates immediately if **loss $\ge 10\text{¢}$** relative to entry OR if position price drops **$\le 30\text{¢}$**.
+### 4. 10-Minute Stop-Loss (10¢ Loss Limit / 30¢ Price Floor) 🛑
+- Evaluated at `:10`, `:25`, `:40`, `:55` past the hour.
+- Directly inspects portfolio contracts (`position_fp > 0` for YES, `position_fp < 0` for NO) and dynamic cost basis.
+- Liquidates immediately if **loss $\ge 10\text{¢}$** or if position price drops **$\le 30\text{¢}$**.
 
-### 5. Open Position Gate 🛡️
-- Checks active positions and resting orders before placing a buy, preventing over-accumulating contracts on the same market.
-
-### 6. Standardized `LogTag` Enum Logging 📋
-- All info log brackets use the `LogTag` Enum class with clear code comments and emojis (`🎯`, `🚀`, `🛑`, `📊`, `⚡`, `🛡️`, `💰`, `⏱️`).
-
-### 7. Cheapest Entry Tiebreaker ⚖️
-- When both YES and NO qualify during a dead heat (e.g. YES is 43¢ and NO is 40¢), the bot dynamically selects $\min(\text{yes\_price}, \text{no\_price})$ to buy the cheaper side (NO at 40¢), injecting +3¢ of EV into the trade instead of favoring YES by default.
-
-### 8. Stale Buy Order Pruning 🧹
-- Before evaluating new trading decisions at each 5-minute interval, the bot automatically cancels any resting, unfilled **BUY** orders from prior passes. This eliminates adverse selection (getting filled late on an outdated price) while leaving resting Take-Profit SELL orders untouched.
+### 5. Risk Controls & Hygiene 🛡️
+- **Open Position Gate**: Skips markets with existing open positions or active orders.
+- **Stale Buy Pruning**: Cancels unfilled resting buy orders at the start of each interval while preserving Take-Profit sell orders.
+- **Cheapest Entry Tiebreaker**: In dead-heat conditions where both sides qualify, buys the lower-priced side for maximum EV.
 
 ---
 
-## 📊 Data Engineering & Microstructure Logging
+## 📊 Microstructure & Outcome Logging
 
 Every 5 minutes, an ultra-compact snapshot (~100 bytes) is saved to MongoDB Atlas:
 
@@ -70,50 +65,24 @@ Every 5 minutes, an ultra-compact snapshot (~100 bytes) is saved to MongoDB Atla
 }
 ```
 
-### Counterfactual Trade Outcomes Tracked
-- `sold_early_would_have_won`: Sold early on Stop-Loss, but market ultimately expired a winner (False Alarm).
-- `sold_early_saved_from_loss`: Exited early on Take-Profit, and market subsequently reversed into a loss (Saved from reversal).
-- `sl_cap_saved`: Sold early on Stop-Loss, and market rightfully expired a loss (Rightful stop-loss).
-- `tp_full_win`: Exited early on Take-Profit, and market expired a winner.
+### Counterfactual Trade Outcomes
+- `sold_early_would_have_won`: Stop-Loss exit where contract would have recovered to win (False Alarm).
+- `sold_early_saved_from_loss`: Take-Profit exit that saved capital before market reversal.
+- `sl_cap_saved`: Stop-Loss exit that capped loss before a 0¢ settlement (Rightful Stop-Loss).
+- `tp_full_win`: Take-Profit exit where contract expired a winner.
 
 ---
 
-## ❓ Quantitative Questions Solved By Our Dataset
-
-Our MongoDB Atlas logging pipeline is designed to answer key quantitative trading questions:
-
-1. **Asset Volatility Profiling 📈**:
-   - *Question*: How volatile is each crypto asset across 15-minute market cycles?
-   - *Data*: Computes standard deviation and range of `diff` (spot - strike) and `pct` distance across `sym`.
-
-2. **Complete Trade Outcome Matrix 🎯**:
-   - **Bought & Won**: Entries that hit Take-Profit (82¢/76¢) or settled at 100¢.
-   - **Bought & Lost**: Entries that expired OTM at 0¢.
-   - **Sold & Won**: Positions exited early on Take-Profit that saved us from subsequent reversals (`sold_early_saved_from_loss`).
-   - **Sold & Lost**: Positions exited early on Stop-Loss capping loss at 10¢ before full 0¢ crash (`sl_cap_saved`).
-
-3. **Price vs. Win Ratio (Empirical Calibration Curve) ⚖️**:
-   - *Question*: Statistically, if you enter at price $X\text{¢}$ (e.g. 35¢ vs 40¢ vs 45¢), what is your exact empirical $Y\%$ chance of winning?
-   - *Data*: Groups entry prices `y`/`n` against final market resolution (`yes_won`).
-
-4. **Time Decay & Runway Efficiency ⏱️**:
-   - *Question*: How does win probability and $EV$ differ between entries at Minute 00 (15 mins remaining) vs Minute 05 (10 mins remaining)?
-
-5. **Counterfactual Opportunity Analysis 🔮**:
-   - *Question*: How much revenue did we gain or forfeit by exiting early on 82¢/76¢ Take-Profit vs holding every position to 100¢ settlement?
-
----
-
-## 💻 Local Commands
+## 💻 CLI Commands
 
 ```bash
-# Preview trading decisions right now (dry-run mode):
+# Preview trading decisions (dry-run mode):
 python3 main.py --dry-run --force-trade
 
-# Run 1 single-pass pass and exit:
+# Single-pass execution:
 python3 main.py --once
 
-# Continuous 24/7 background worker mode (30s clock-aligned loop):
+# Continuous 24/7 background worker mode:
 python3 main.py
 ```
 
@@ -123,13 +92,13 @@ python3 main.py
 
 ```
 trading-bot/
-├── main.py              # 24/7 Render Worker script with clock-alignment loop & strategy logic
-├── database.py          # MongoDB Atlas logger module (microstructure & outcome schema)
-├── requirements.txt     # Python dependencies (requests, cryptography, pymongo, pandas, matplotlib)
-├── README.md            # Strategy & data pipeline documentation
-├── .env.example         # Environment configuration template
-├── .gitignore           # Git exclusion rules
+├── main.py              # 24/7 background worker loop, strategy rules & MongoDB pipeline
+├── database.py          # MongoDB Atlas connector & compact snapshot logger
+├── requirements.txt     # Python dependencies
+├── README.md            # Architecture & strategy documentation
+├── .env.example         # Environment template
 └── signals/
     ├── __init__.py      # Module exports
-    └── kalshi_client.py # Kalshi V2 API client, order execution, LogTag enum, & stop-loss logic
+    ├── kalshi_client.py # Kalshi V2 API client, order execution & stop-loss logic
+    └── gemini_client.py # Gemini exchange client (reference / commented out)
 ```
