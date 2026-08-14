@@ -239,6 +239,18 @@ def process_single_market(
         except (ValueError, TypeError):
             pass
 
+    # Dynamic Buy Range Selection based on Market Age & Volatility:
+    # - At 0m past market start (:00, :15, :30, :45): High Volatility -> Buy Range: 25¢ - 45¢
+    # - At 5m past market start (:05, :20, :35, :50): Lower Volatility -> Tighter Buy Range: 40¢ - 45¢
+    minute_into_market = minute_past_hour % 15
+
+    if minute_into_market == 5:
+        min_buy_price = 40
+        max_buy_price = 45
+    else:
+        min_buy_price = 25
+        max_buy_price = 45
+
     trade_executed = False
     trade_details = None
 
@@ -253,12 +265,12 @@ def process_single_market(
                 f"Skipping new buy order."
             )
         else:
-            # Check YES price condition: between 25¢ and 45¢ (inclusive)
-            if yes_price_cents is not None and 25 <= yes_price_cents <= 45:
+            # Check YES price condition against dynamic buy range (25¢-45¢ at 0m vs 40¢-45¢ at 5m)
+            if yes_price_cents is not None and min_buy_price <= yes_price_cents <= max_buy_price:
                 if dry_run:
                     log.info(
                         f"🎯 [DRY-RUN MATCH] {ticker} -> YES price is {yes_price_cents}¢ "
-                        f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
                     )
                     trade_executed = True
                     trade_details = {
@@ -270,7 +282,7 @@ def process_single_market(
                 else:
                     log.info(
                         f"[STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
-                        f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢). Executing Buy + 75¢ Auto-Sell!"
                     )
                     try:
                         result = kalshi_client.buy_and_set_take_profit(
@@ -289,12 +301,12 @@ def process_single_market(
                     except Exception as error:
                         log.error(f"Failed to execute YES trade on {ticker}: {error}")
 
-            # Check NO price condition: between 25¢ and 45¢ (inclusive)
-            elif no_price_cents is not None and 25 <= no_price_cents <= 45:
+            # Check NO price condition against dynamic buy range (25¢-45¢ at 0m vs 40¢-45¢ at 5m)
+            elif no_price_cents is not None and min_buy_price <= no_price_cents <= max_buy_price:
                 if dry_run:
                     log.info(
                         f"🎯 [DRY-RUN MATCH] {ticker} -> NO price is {no_price_cents}¢ "
-                        f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
                     )
                     trade_executed = True
                     trade_details = {
@@ -306,7 +318,7 @@ def process_single_market(
                 else:
                     log.info(
                         f"[STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
-                        f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢). Executing Buy + 75¢ Auto-Sell!"
                     )
                     try:
                         result = kalshi_client.buy_and_set_take_profit(
