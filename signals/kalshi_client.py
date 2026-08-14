@@ -39,10 +39,33 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
 
+from enum import Enum
+
 # Load configuration from the project's .env file if available
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Log Tag Enum Definitions (Human-Readable Info Brackets)
+# ---------------------------------------------------------------------------
+class LogTag(str, Enum):
+    """
+    Log Tag Enums representing info log event categories with code comments:
+    """
+    CLOCK_ALIGNMENT = "[CLOCK ALIGNMENT] ⏱️"          # Sleep timer waiting for 30s past next 5-min mark
+    BUY_MATCH = "⚡ [STRATEGY MATCH]"                 # Dynamic buy strategy criteria met (price range + spot momentum)
+    DRY_RUN_MATCH = "🎯 [DRY-RUN MATCH]"              # Preview buy match in dry-run mode
+    OPEN_POSITION_GATE = "🛡️ [OPEN POSITION GATE]"     # Skipping buy order because open position or order exists
+    STOP_LOSS_EVALUATION = "📊 [STOP-LOSS EVALUATION]"    # Evaluating 10m stop-loss condition
+    STOP_LOSS_TRIGGERED = "🛑 [STOP-LOSS TRIGGERED]"      # Liquidating position immediately (loss >= 10¢ or price <= 30¢)
+    DRY_RUN_STOP_LOSS = "🛑 [DRY-RUN STOP-LOSS]"        # Preview stop-loss liquidation in dry-run mode
+    LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Canceling 82¢ TP at 10m for strong winners (>= 70¢) to get 100¢
+    TRADE_EXECUTION = "🎯 [TRADE EXECUTION]"          # Submitting Maker buy order to Kalshi V2 API
+    AUTO_SELL_SET = "💰 [AUTO-SELL SET]"              # Placing resting 82¢ limit sell order for take-profit
+    POSITION_EXISTS = "🛡️ [POSITION EXISTS]"          # Active market position found in Kalshi portfolio
+    ORDER_EXISTS = "🛡️ [ORDER EXISTS]"                # Resting order found in Kalshi portfolio
 
 # ---------------------------------------------------------------------------
 # API Base Endpoints
@@ -411,7 +434,7 @@ class KalshiClient:
             effective_buy_cents = buy_price_cents
 
         log.info(
-            f"🎯 [TRADE EXECUTION] Market: {ticker} | Side: {side_clean.upper()} | "
+            f"{LogTag.TRADE_EXECUTION.value} Market: {ticker} | Side: {side_clean.upper()} | "
             f"Maker Buy Price: {effective_buy_cents}¢ (Saved vs Ask!) | Target TP: {take_profit_cents}¢"
         )
 
@@ -461,7 +484,7 @@ class KalshiClient:
         try:
             sell_order_res = self.post("/portfolio/events/orders", payload=sell_payload)
             log.info(
-                f"💰 [AUTO-SELL SET] Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
+                f"{LogTag.AUTO_SELL_SET.value} Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
             )
         except Exception as error:
             log.warning(f"⚠️ Could not place resting auto-sell limit order: {error}")
@@ -506,7 +529,7 @@ class KalshiClient:
                 if p.get("ticker") == ticker:
                     count_fp = float(p.get("position_fp") or p.get("position") or 0)
                     if abs(count_fp) > 0:
-                        log.info(f"[POSITION EXISTS] Found active position of {count_fp} contracts in {ticker}")
+                        log.info(f"{LogTag.POSITION_EXISTS.value} Found active position of {count_fp} contracts in {ticker}")
                         return True
         except Exception as error:
             log.warning(f"Could not check market positions for {ticker}: {error}")
@@ -516,7 +539,7 @@ class KalshiClient:
             orders_resp = self.get_orders(ticker=ticker, status="resting")
             orders = orders_resp.get("orders") or []
             if len(orders) > 0:
-                log.info(f"[ORDER EXISTS] Found {len(orders)} resting order(s) for {ticker}")
+                log.info(f"{LogTag.ORDER_EXISTS.value} Found {len(orders)} resting order(s) for {ticker}")
                 return True
         except Exception as error:
             log.warning(f"Could not check resting orders for {ticker}: {error}")
@@ -585,14 +608,14 @@ class KalshiClient:
         loss_cents = entry_price - current_price
 
         log.info(
-            f"📊 [STOP-LOSS EVALUATION] Market: {ticker} | Side: {side.upper()} | "
+            f"{LogTag.STOP_LOSS_EVALUATION.value} Market: {ticker} | Side: {side.upper()} | "
             f"Est. Entry: ~{entry_price}¢ | Current: {current_price}¢ | Loss: {loss_cents}¢"
         )
 
         # Optimization Rule 3B: Let Winners Run to 100¢ if price >= 70¢ at minute 10
         if current_price >= 70 and resting_orders:
             log.info(
-                f"🚀 [LET IT RUN TO 100¢] {ticker} ({side.upper()}) is performing strongly at {current_price}¢ (>= 70¢)! "
+                f"{LogTag.LET_IT_RUN.value} {ticker} ({side.upper()}) is performing strongly at {current_price}¢ (>= 70¢)! "
                 f"Canceling resting TP order to capture 100¢ settlement."
             )
             for o in resting_orders:
@@ -610,7 +633,7 @@ class KalshiClient:
 
             if dry_run:
                 log.info(
-                    f"🛑 [DRY-RUN STOP-LOSS] {ticker} ({side.upper()}) {reason}. "
+                    f"{LogTag.DRY_RUN_STOP_LOSS.value} {ticker} ({side.upper()}) {reason}. "
                     f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY."
                 )
                 return {
@@ -622,7 +645,7 @@ class KalshiClient:
                 }
 
             log.info(
-                f"🛑 [STOP-LOSS TRIGGERED] {ticker} ({side.upper()}) {reason}. "
+                f"{LogTag.STOP_LOSS_TRIGGERED.value} {ticker} ({side.upper()}) {reason}. "
                 f"Canceling resting orders and closing position at market!"
             )
 

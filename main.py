@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 import requests
 
 from database import save_market_snapshots
-from signals.kalshi_client import KalshiClient, SERIES_15M_CRYPTO
+from signals.kalshi_client import KalshiClient, LogTag, SERIES_15M_CRYPTO
 
 # Set up logging format
 logging.basicConfig(
@@ -427,7 +427,7 @@ def main():
 
             sleep_seconds = calculate_seconds_until_next_5min_mark(offset_seconds=30.0)
             next_mark_min = (datetime.now(timezone.utc).minute // 5 * 5 + 5) % 60
-            log.info(f"\n[CLOCK ALIGNMENT] Sleeping {sleep_seconds:.1f}s until 30s past next 5-minute mark (:{next_mark_min:02d}:30)...\n")
+            log.info(f"\n{LogTag.CLOCK_ALIGNMENT.value} Sleeping {sleep_seconds:.1f}s until 30s past next 5-minute mark (:{next_mark_min:02d}:30)...\n")
             time.sleep(sleep_seconds)
 
 
