@@ -18,7 +18,10 @@ This bot runs continuously 24/7 as a Render Background Worker.
    - 5-Min Past Mark (:05, :20, :35, :50):
      * Early Cut-Loss: If position bought at :00 is below 40¢ (< 40¢-49¢ range), sell immediately to cut losses.
      * Tighter Buy Entry: If no position held, buy YES/NO if price is between 40¢ and 49¢.
-   - Spot Momentum Filter: Buy YES only if spot >= target; Buy NO only if spot < target.
+   - Spot Momentum Filter (Coinbase Ground Truth):
+     * Kalshi prices represent prediction odds; Coinbase spot represents the live asset price.
+     * Prevents 'cheap trap' entries: Buy YES only if spot >= target; Buy NO only if spot < target.
+     * Dead-heat buffer (0.05%) allows flexibility when spot is actively straddling the strike.
    - 10-Min Past Mark (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 10¢ or price <= 30¢; let run if >= 70¢).
    - 82¢ / 76¢ Auto-Sell: Places a resting limit Sell order immediately upon buy execution.
    - Open Position Gate: Skips buying if an active position/order already exists for that market.
@@ -85,9 +88,13 @@ def is_spot_momentum_aligned(
     otm_pct_threshold: float = 0.05,
 ) -> bool:
     """
-    Relative Distance Gate / Out-Of-The-Money Spot Filter:
-    - Near ATM (|pct_dist| <= 0.05%): Dead-heat zone; allow both YES and NO.
-    - OTM (|pct_dist| > 0.05%): Enforce direction (YES if spot >= target, NO if spot < target).
+    Spot Momentum Reality Check (Coinbase Spot vs. Kalshi Strike):
+    --------------------------------------------------------------
+    Kalshi contract prices reflect market betting sentiment, not underlying spot reality.
+    We consult Coinbase's live spot price as the 'scoreboard' before taking a trade:
+      - Dead-Heat / ATM Zone (|pct_dist| <= 0.05%): Market is balanced; allow either YES or NO.
+      - Bullish Momentum (spot >= target): Only permit YES buys (prevents buying cheap YES on a losing asset).
+      - Bearish Momentum (spot < target): Only permit NO buys (prevents buying cheap NO on a rallying asset).
     """
     if spot_price is None or target_price is None or target_price <= 0:
         return True
@@ -291,7 +298,9 @@ def process_single_market(
         if not dry_run:
             kalshi_client.cancel_unfilled_buy_orders(ticker)
 
+        cut_loss_executed = False
         pos = kalshi_client.get_market_position(ticker)
+
         if pos is not None:
             if is_5min_mark:
                 side = pos["side"]
@@ -314,20 +323,26 @@ def process_single_market(
                             "outcome": determine_counterfactual_outcome(side, "early_loss_cut", spot_price, target_price, market.get("result")),
                         }
                         pos = None
+                        cut_loss_executed = True
 
-            if pos is not None:
-                log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
-                if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
-                    kalshi_client.place_take_profit_order(
-                        ticker=ticker,
-                        side=pos["side"],
-                        count=pos["count"],
-                        take_profit_cents=take_profit_cents,
-                    )
+        # Handle position gates and buy evaluation cleanly:
+        if cut_loss_executed:
+            # Prevent instant re-entry right after liquidating a position at the 5-minute mark
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} 5-Min Cut-Loss executed for {ticker}. Skipping buy evaluation in this pass.")
+        elif pos is not None:
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
+            if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
+                kalshi_client.place_take_profit_order(
+                    ticker=ticker,
+                    side=pos["side"],
+                    count=pos["count"],
+                    take_profit_cents=take_profit_cents,
+                )
         elif kalshi_client.has_existing_position_or_order(ticker):
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
-            # Evaluate eligible sides & select cheapest entry
+            # Evaluate eligible sides: verify price is in discount range (35¢-49¢ / 40¢-49¢)
+            # AND confirm real underlying asset momentum aligns via Coinbase spot price
             candidate_sides = []
             for side, p_cents, aligned in [
                 ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),

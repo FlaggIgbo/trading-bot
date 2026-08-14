@@ -467,8 +467,8 @@ class KalshiClient:
 
     def get_15m_crypto_markets(self, status: str = "open", limit: int = 100) -> list[dict]:
         """
-        Retrieves active 15-minute crypto prediction markets across all 7 crypto series:
-        BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE.
+        Retrieves active 15-minute crypto prediction markets across all 12 crypto series:
+        BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, and ZEC.
 
         Returns:
             list[dict]: A list of market dictionaries matching active 15m crypto contracts.
@@ -515,36 +515,62 @@ class KalshiClient:
         **kwargs,
     ) -> dict:
         """
-        Submits an order to Kalshi.
+        Submits an order to Kalshi using the standardized V2 event model (`/portfolio/events/orders`).
 
         Args:
             ticker: Market identifier (e.g. 'KXBTC15M-26AUG132245-45')
-            side: 'yes' or 'no'
+            side: 'yes' / 'no' or 'bid' / 'ask'
             action: 'buy' or 'sell'
             count: Number of contracts to buy/sell
             yes_price / no_price: Price in cents (1-99)
             yes_price_dollars / no_price_dollars: Price as float string (e.g. '0.50')
+            time_in_force: Order expiration rule (defaults to 'good_till_canceled')
+
+        Returns:
+            dict: API response payload from `/portfolio/events/orders`.
         """
+        # Clean inputs
+        side_clean = side.lower()
+        action_clean = action.lower()
+        now_ms = int(time.time() * 1000)
+
+        # Parse target cent price from passed arguments
+        price_cents = None
+        if yes_price is not None:
+            price_cents = yes_price
+        elif yes_price_dollars is not None:
+            price_cents = int(round(float(yes_price_dollars) * 100))
+        elif no_price is not None:
+            price_cents = no_price
+        elif no_price_dollars is not None:
+            price_cents = int(round(float(no_price_dollars) * 100))
+
+        # Map to V2 Event Order parameters (side: 'bid' / 'ask', price: '0.XX00')
+        if side_clean in ("bid", "ask"):
+            event_side = side_clean
+            price_val = price_cents if price_cents is not None else 50
+        elif side_clean == "yes":
+            event_side = "bid" if action_clean == "buy" else "ask"
+            price_val = price_cents if price_cents is not None else 50
+        else:  # side == "no"
+            event_side = "ask" if action_clean == "buy" else "bid"
+            price_val = (100 - price_cents) if price_cents is not None else 50
+
+        # Clamp price between 1c and 99c
+        clamped_cents = max(1, min(99, price_val))
+
         order_payload = {
             "ticker": ticker,
-            "side": side.lower(),
-            "action": action.lower(),
-            "count": count,
+            "client_order_id": f"{action_clean}_{side_clean}_{ticker}_{now_ms}",
+            "side": event_side,
+            "count": str(count),
+            "price": f"0.{clamped_cents:02d}00",
             "time_in_force": time_in_force,
+            "self_trade_prevention_type": "taker_at_cross",
         }
-
-        if yes_price is not None:
-            order_payload["yes_price"] = yes_price
-        elif yes_price_dollars is not None:
-            order_payload["yes_price_dollars"] = yes_price_dollars
-
-        if no_price is not None:
-            order_payload["no_price"] = no_price
-        elif no_price_dollars is not None:
-            order_payload["no_price_dollars"] = no_price_dollars
-
         order_payload.update(kwargs)
-        return self.post("/portfolio/orders", payload=order_payload)
+
+        return self.post("/portfolio/events/orders", payload=order_payload)
 
     def get_market_position(self, ticker: str) -> dict | None:
         """
@@ -739,6 +765,66 @@ class KalshiClient:
                 return False
             raise
 
+    def cancel_and_verify_resting_orders(
+        self,
+        ticker: str,
+        max_retries: int = 5,
+        poll_interval: float = 0.2,
+    ) -> bool:
+        """
+        Cancels ALL resting limit orders (including resting Take-Profit orders) for a given market ticker,
+        and polls the API to verify that all resting orders are confirmed cleared.
+
+        Why this is critical:
+        On Kalshi, active resting limit orders (such as Take-Profit orders) lock contract positions.
+        Attempting to liquidate a position while a resting order is still active causes Kalshi
+        to reject the sell order with an `insufficient_position` / `position_locked` error.
+
+        Args:
+            ticker: Market identifier
+            max_retries: Number of verification polling attempts
+            poll_interval: Delay in seconds between polling attempts
+
+        Returns:
+            bool: True if all resting orders were successfully canceled and confirmed cleared,
+                  False if resting orders remain after retries.
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                orders_resp = self.get_orders(ticker=ticker, status="resting")
+                resting_orders = orders_resp.get("orders") or []
+            except Exception as error:
+                log.warning(f"⚠️ Attempt {attempt}/{max_retries}: Failed to fetch resting orders for {ticker}: {error}")
+                resting_orders = []
+
+            if not resting_orders:
+                log.info(f"✅ Confirmed 0 resting orders for {ticker}.")
+                return True
+
+            log.info(
+                f"🧹 Attempt {attempt}/{max_retries}: Canceling {len(resting_orders)} resting order(s) for {ticker}..."
+            )
+            for order in resting_orders:
+                order_id = order.get("order_id")
+                if order_id:
+                    self.cancel_order_safe(order_id)
+
+            # Pause briefly to allow Kalshi orderbook state engine to process cancellations
+            time.sleep(poll_interval)
+
+        # Final check after retry loop
+        try:
+            final_check = self.get_orders(ticker=ticker, status="resting")
+            remaining = final_check.get("orders") or []
+            if not remaining:
+                log.info(f"✅ Confirmed 0 resting orders for {ticker} after final check.")
+                return True
+            log.error(f"❌ Could not clear all resting orders for {ticker}; {len(remaining)} order(s) still resting.")
+            return False
+        except Exception as error:
+            log.warning(f"⚠️ Final resting order verification failed for {ticker}: {error}")
+            return False
+
     def cancel_unfilled_buy_orders(self, ticker: str) -> int:
         """
         Cancels any resting unfilled BUY orders for `ticker` from prior intervals.
@@ -807,23 +893,12 @@ class KalshiClient:
         2. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
         3. Let Winners Run: If position price >= 70¢, cancels resting TP limit order for 100¢ settlement.
         """
-        # Check resting orders
-        try:
-            orders_resp = self.get_orders(ticker=ticker, status="resting")
-            resting_orders = orders_resp.get("orders") or []
-        except Exception as error:
-            log.warning(f"⚠️ Could not fetch resting orders for stop-loss check on {ticker}: {error}")
-            resting_orders = []
-
-        # Check real active position
+        # Step 1: Query current position
         pos = self.get_market_position(ticker)
         if pos is None:
-            # If no active position held, prune any stale resting orders
-            if resting_orders and not dry_run:
-                for o in resting_orders:
-                    order_id = o.get("order_id")
-                    if order_id:
-                        self.cancel_order_safe(order_id)
+            # If no active position is held, prune any lingering resting orders
+            if not dry_run:
+                self.cancel_and_verify_resting_orders(ticker)
             return {"triggered": False}
 
         side = pos["side"]  # 'yes' or 'no'
@@ -846,15 +921,13 @@ class KalshiClient:
         )
 
         # Optimization Rule 3B: Let Winners Run to 100¢ if price >= 70¢ at minute 10
-        if current_price >= 70 and resting_orders:
+        if current_price >= 70:
             log.info(
                 f"{LogTag.LET_IT_RUN.value} {ticker} ({side.upper()}) is performing strongly at {current_price}¢ (>= 70¢)! "
                 f"Canceling resting TP order to capture 100¢ settlement."
             )
-            for o in resting_orders:
-                order_id = o.get("order_id")
-                if order_id:
-                    self.cancel_order_safe(order_id)
+            if not dry_run:
+                self.cancel_and_verify_resting_orders(ticker)
             return {"triggered": False, "action": "canceled_tp_let_run"}
 
         # Optimization Rule 4: Trigger Stop-Loss if loss >= 10¢ OR price <= 30¢
@@ -882,11 +955,11 @@ class KalshiClient:
                 f"Canceling resting orders and closing position at market!"
             )
 
-            # Step 1: Cancel resting limit orders
-            for o in resting_orders:
-                order_id = o.get("order_id")
-                if order_id:
-                    self.cancel_order_safe(order_id)
+            # Step 1: Cancel resting limit orders and wait until confirmed cleared
+            # This prevents Kalshi from rejecting the exit order due to locked contract positions.
+            cancellation_ok = self.cancel_and_verify_resting_orders(ticker)
+            if not cancellation_ok:
+                log.warning(f"⚠️ Proceeding with stop-loss exit for {ticker} despite pending order cancellation check.")
 
             # Step 2: Submit Sell order to close position immediately
             now_ms = int(time.time() * 1000)
@@ -940,15 +1013,7 @@ class KalshiClient:
         If an asset bought at the 00-minute mark drops below the 40¢-49¢ range (< 40¢),
         cancels resting take-profit limit orders and immediately liquidates the position to cut losses early.
         """
-        # Check resting orders
-        try:
-            orders_resp = self.get_orders(ticker=ticker, status="resting")
-            resting_orders = orders_resp.get("orders") or []
-        except Exception as error:
-            log.warning(f"⚠️ Could not fetch resting orders for 5-min cut-loss check on {ticker}: {error}")
-            resting_orders = []
-
-        # Check real active position
+        # Step 1: Check real active position
         pos = self.get_market_position(ticker)
         if pos is None:
             return {"triggered": False}
@@ -994,11 +1059,11 @@ class KalshiClient:
                 f"Canceling resting orders and closing position at market to cut losses!"
             )
 
-            # Step 1: Cancel resting limit orders (e.g. resting TP order)
-            for o in resting_orders:
-                order_id = o.get("order_id")
-                if order_id:
-                    self.cancel_order_safe(order_id)
+            # Step 1: Cancel resting limit orders (e.g. resting TP order) and wait until confirmed cleared
+            # This prevents Kalshi from rejecting the exit order due to locked contract positions.
+            cancellation_ok = self.cancel_and_verify_resting_orders(ticker)
+            if not cancellation_ok:
+                log.warning(f"⚠️ Proceeding with 5-min cut-loss exit for {ticker} despite pending order cancellation check.")
 
             # Step 2: Submit Sell order to close position immediately
             now_ms = int(time.time() * 1000)
