@@ -459,9 +459,12 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         )
         snapshots_to_save.append(snapshot)
 
+        diff_val = snapshot.get("diff")
+        diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
+
         log.info(
             f"  • Market [{snapshot['sym']} | {snapshot['tick']}] -> YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
-            f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {snapshot.get('diff')}"
+            f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
         )
 
     # Save non-empty price snapshots to MongoDB Atlas

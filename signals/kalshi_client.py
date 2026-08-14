@@ -446,7 +446,7 @@ class KalshiClient:
             buy_side = "bid"
             buy_price_str = f"0.{effective_buy_cents:02d}00"
 
-            # Auto-selling YES at 82¢
+            # Auto-selling YES at take_profit_cents (82¢/76¢)
             sell_side = "ask"
             sell_price_str = f"0.{take_profit_cents:02d}00"
         else:
@@ -454,7 +454,7 @@ class KalshiClient:
             buy_side = "ask"
             buy_price_str = f"0.{(100 - effective_buy_cents):02d}00"
 
-            # Auto-selling NO at 82¢ (bidding YES at 100 - 82 = 18¢)
+            # Auto-selling NO at take_profit_cents (bidding YES at 100 - take_profit_cents)
             sell_side = "bid"
             sell_price_str = f"0.{(100 - take_profit_cents):02d}00"
 
@@ -470,7 +470,7 @@ class KalshiClient:
         }
         buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
 
-        # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 82¢)
+        # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 82¢/76¢)
         sell_payload = {
             "ticker": ticker,
             "client_order_id": f"sell_tp_{side_clean}_{ticker}_{now_ms}",
@@ -630,12 +630,13 @@ class KalshiClient:
             log.warning(f"⚠️ Cannot evaluate stop-loss for {ticker}: current {side.upper()} price is unavailable.")
             return {"triggered": False}
 
-        # Calculate current loss in cents
+        # Calculate current PnL in cents (loss is positive, gain is negative)
         loss_cents = entry_price - current_price
+        pnl_label = f"Gain: +{abs(loss_cents)}¢ (Profit)" if loss_cents < 0 else f"Loss: -{loss_cents}¢"
 
         log.info(
             f"{LogTag.STOP_LOSS_EVALUATION.value} Market: {ticker} | Side: {side.upper()} | "
-            f"Est. Entry: ~{entry_price}¢ | Current: {current_price}¢ | Loss: {loss_cents}¢"
+            f"Est. Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
         )
 
         # Optimization Rule 3B: Let Winners Run to 100¢ if price >= 70¢ at minute 10
