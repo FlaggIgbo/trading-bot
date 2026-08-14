@@ -64,3 +64,19 @@ Every 5 minutes, an ultra‑compact snapshot (~100 bytes) is saved to MongoDB At
   "vol": 189046
 }
 ```
+
+---
+
+## 💰 Portfolio Balance & Realized PnL Tracking
+
+The bot queries native Kalshi REST API endpoints (`/portfolio/balance`, `/portfolio/positions`, `/portfolio/settlements`) on each pass to log and store account financial metrics:
+
+- **Collections**:
+  - `trading_bot_db.market_snapshots`: 5-minute pricing and trade execution snapshots.
+  - `trading_bot_db.portfolio_pnl`: Time-series balance, portfolio value, open exposure, and realized PnL totals.
+  - `trading_bot_db.settlements`: Individual market settlement records with cost, revenue, and net profit/loss.
+- **Console Log Output**:
+  ```text
+  💰 [PORTFOLIO PNL] Cash: $500.00 | Port Value: $520.00 | Settled PnL: +$14.20 (+1420¢ across 8 mkts) | Active: 2 pos ($0.80)
+  ```
+

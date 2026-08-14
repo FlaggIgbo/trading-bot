@@ -68,6 +68,8 @@ class LogTag(str, Enum):
     POSITION_EXISTS = "🛡️ [POSITION EXISTS]"          # Active market position found in Kalshi portfolio
     ORDER_EXISTS = "🛡️ [ORDER EXISTS]"                # Resting order found in Kalshi portfolio
     PRUNE_STALE_BUY = "🧹 [PRUNED STALE BUY]"         # Canceled unfilled resting buy order from prior pass
+    PORTFOLIO_PNL = "💰 [PORTFOLIO PNL]"              # Real-time portfolio balance and realized PnL summary
+
 
 # ---------------------------------------------------------------------------
 # API Base Endpoints
@@ -322,6 +324,135 @@ class KalshiClient:
     def get_fills(self, **params) -> dict:
         """Fetches recent order execution fills."""
         return self.get("/portfolio/fills", params)
+
+    def get_settlements(self, **params) -> dict:
+        """Fetches settled market positions and historical payouts."""
+        return self.get("/portfolio/settlements", params)
+
+    def get_portfolio_pnl_summary(self) -> dict:
+        """
+        Queries native Kalshi REST endpoints (/portfolio/balance, /portfolio/positions, /portfolio/settlements)
+        to compute a real-time portfolio balance, active open exposure, and realized PnL summary.
+        """
+        # 1. Fetch Account Balance & Total Portfolio Value
+        balance_resp = self.get_balance()
+        bal_dollars = balance_resp.get("balance_dollars")
+        bal_cents = balance_resp.get("balance")
+        val_dollars = balance_resp.get("portfolio_value_dollars")
+        val_cents = balance_resp.get("portfolio_value")
+
+        balance = (
+            float(bal_dollars)
+            if bal_dollars is not None
+            else ((bal_cents / 100.0) if bal_cents is not None else 0.0)
+        )
+        portfolio_value = (
+            float(val_dollars)
+            if val_dollars is not None
+            else ((val_cents / 100.0) if val_cents is not None else balance)
+        )
+
+        # 2. Fetch Open Positions & Active Exposure
+        try:
+            positions_resp = self.get_positions()
+            raw_positions = positions_resp.get("market_positions") or []
+        except Exception as err:
+            log.debug(f"Could not fetch open positions for PnL summary: {err}")
+            raw_positions = []
+
+        active_positions = []
+        total_open_cost = 0.0
+        for p in raw_positions:
+            fp = float(p.get("position_fp") or p.get("position") or 0)
+            if abs(fp) > 0:
+                side = "yes" if fp > 0 else "no"
+                count = int(round(abs(fp)))
+                exp = float(p.get("market_exposure_dollars") or 0.0)
+                total_open_cost += exp
+                active_positions.append({
+                    "ticker": p.get("ticker"),
+                    "side": side,
+                    "count": count,
+                    "exposure_dollars": exp,
+                })
+
+        # 3. Fetch Settlements & Calculate Realized PnL
+        try:
+            settlements_resp = self.get_settlements(limit=100)
+            raw_settlements = settlements_resp.get("settlements") or []
+        except Exception as err:
+            log.debug(f"Could not fetch settlements for PnL summary: {err}")
+            raw_settlements = []
+
+        settlement_records = []
+        total_realized_pnl = 0.0
+        total_settled_revenue = 0.0
+        total_settled_cost = 0.0
+
+        for s in raw_settlements:
+            ticker = s.get("ticker", "UNKNOWN")
+            result = s.get("market_result")
+            settled_time = s.get("settled_time")
+
+            # Revenue / payout
+            rev_dollars = s.get("revenue_dollars")
+            rev_cents = s.get("revenue")
+            revenue = (
+                float(rev_dollars)
+                if rev_dollars is not None
+                else ((rev_cents / 100.0) if rev_cents is not None else 0.0)
+            )
+
+            # Costs
+            y_cost_d = s.get("yes_total_cost_dollars")
+            y_cost_c = s.get("yes_total_cost")
+            y_cost = (
+                float(y_cost_d)
+                if y_cost_d is not None
+                else ((y_cost_c / 100.0) if y_cost_c is not None else 0.0)
+            )
+
+            n_cost_d = s.get("no_total_cost_dollars")
+            n_cost_c = s.get("no_total_cost")
+            n_cost = (
+                float(n_cost_d)
+                if n_cost_d is not None
+                else ((n_cost_c / 100.0) if n_cost_c is not None else 0.0)
+            )
+
+            total_cost = round(y_cost + n_cost, 4)
+            pnl = round(revenue - total_cost, 4)
+
+            total_settled_revenue += revenue
+            total_settled_cost += total_cost
+            total_realized_pnl += pnl
+
+            settlement_records.append({
+                "ticker": ticker,
+                "market_result": result,
+                "yes_count": s.get("yes_count", 0),
+                "no_count": s.get("no_count", 0),
+                "revenue_dollars": round(revenue, 2),
+                "cost_dollars": round(total_cost, 2),
+                "pnl_dollars": round(pnl, 2),
+                "pnl_cents": int(round(pnl * 100)),
+                "settled_time": settled_time,
+            })
+
+        return {
+            "balance_dollars": round(balance, 2),
+            "portfolio_value_dollars": round(portfolio_value, 2),
+            "open_positions_count": len(active_positions),
+            "open_exposure_dollars": round(total_open_cost, 2),
+            "active_positions": active_positions,
+            "settlements_count": len(settlement_records),
+            "total_settled_cost_dollars": round(total_settled_cost, 2),
+            "total_settled_revenue_dollars": round(total_settled_revenue, 2),
+            "total_realized_pnl_dollars": round(total_realized_pnl, 2),
+            "total_realized_pnl_cents": int(round(total_realized_pnl * 100)),
+            "settlements": settlement_records,
+        }
+
 
     # -----------------------------------------------------------------------
     # Market Data & 15-Minute Crypto Retrieval

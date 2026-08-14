@@ -33,8 +33,9 @@ import time
 from datetime import datetime, timezone
 import requests
 
-from database import save_market_snapshots
+from database import save_market_snapshots, save_portfolio_pnl, save_settlements
 from signals.kalshi_client import KalshiClient, LogTag, SERIES_15M_CRYPTO
+
 
 # Set up logging format
 logging.basicConfig(
@@ -459,7 +460,29 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         log.error(f"Could not initialize KalshiClient: {error}")
         return
 
+    # Fetch real-time Portfolio PnL & Balance from Kalshi REST API
+    try:
+        pnl_summary = client.get_portfolio_pnl_summary()
+        pnl_summary["ts"] = int(now_utc.timestamp())
+        pnl_sign = "+" if pnl_summary["total_realized_pnl_dollars"] >= 0 else ""
+
+        log.info(
+            f"{LogTag.PORTFOLIO_PNL.value} Cash: ${pnl_summary['balance_dollars']:.2f} | "
+            f"Port Value: ${pnl_summary['portfolio_value_dollars']:.2f} | "
+            f"Settled PnL: {pnl_sign}${pnl_summary['total_realized_pnl_dollars']:.2f} "
+            f"({pnl_sign}{pnl_summary['total_realized_pnl_cents']}¢ across {pnl_summary['settlements_count']} mkts) | "
+            f"Active: {pnl_summary['open_positions_count']} pos (${pnl_summary['open_exposure_dollars']:.2f})"
+        )
+
+        if not dry_run:
+            save_portfolio_pnl(pnl_summary)
+            if pnl_summary.get("settlements"):
+                save_settlements(pnl_summary["settlements"])
+    except Exception as err:
+        log.warning(f"Could not retrieve portfolio PnL summary from Kalshi: {err}")
+
     log.info("Fetching active 15-minute crypto markets from Kalshi...")
+
     try:
         markets = client.get_15m_crypto_markets(status="open")
         log.info(f"Retrieved {len(markets)} active 15-minute crypto markets.")

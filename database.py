@@ -60,10 +60,13 @@ import os
 log = logging.getLogger(__name__)
 
 
-def get_mongo_collection():
+def get_mongo_collection(collection_name: str = "market_snapshots"):
     """
     Establishes a connection to MongoDB Atlas using the MONGODB_URI environment variable.
     Handles TLS/SSL certificate verification safely across Linux containers (e.g. Render.com).
+
+    Args:
+        collection_name: Target MongoDB collection name ('market_snapshots', 'portfolio_pnl', 'settlements').
 
     Returns:
         pymongo.collection.Collection object if connected, or None if URI is missing/fails.
@@ -94,10 +97,9 @@ def get_mongo_collection():
                 tlsAllowInvalidCertificates=True,
             )
 
-        # Access database 'trading_bot_db' and collection 'market_snapshots'
+        # Access database 'trading_bot_db' and requested collection
         db = client.get_database("trading_bot_db")
-        collection = db.get_collection("market_snapshots")
-        return collection
+        return db.get_collection(collection_name)
     except Exception as error:
         log.error(f"Could not connect to MongoDB Atlas: {error}")
         return None
@@ -117,7 +119,7 @@ def save_market_snapshots(snapshots: list[dict]) -> bool:
         log.info("No snapshots to save.")
         return False
 
-    collection = get_mongo_collection()
+    collection = get_mongo_collection("market_snapshots")
     if collection is None:
         return False
 
@@ -131,3 +133,87 @@ def save_market_snapshots(snapshots: list[dict]) -> bool:
     except Exception as error:
         log.error(f"Failed to insert snapshots into MongoDB: {error}")
         return False
+
+
+def save_portfolio_pnl(pnl_summary: dict) -> bool:
+    """
+    Saves a portfolio balance & PnL snapshot document into MongoDB 'portfolio_pnl' collection.
+
+    Args:
+        pnl_summary: Dictionary containing real-time balance, open positions, and realized PnL totals.
+
+    Returns:
+        bool: True if inserted successfully, False otherwise.
+    """
+    if not pnl_summary:
+        return False
+
+    collection = get_mongo_collection("portfolio_pnl")
+    if collection is None:
+        return False
+
+    try:
+        doc = {
+            "ts": int(pnl_summary.get("ts") or 0),
+            "balance_dollars": pnl_summary.get("balance_dollars"),
+            "portfolio_value_dollars": pnl_summary.get("portfolio_value_dollars"),
+            "open_positions_count": pnl_summary.get("open_positions_count"),
+            "open_exposure_dollars": pnl_summary.get("open_exposure_dollars"),
+            "total_realized_pnl_dollars": pnl_summary.get("total_realized_pnl_dollars"),
+            "total_realized_pnl_cents": pnl_summary.get("total_realized_pnl_cents"),
+            "settlements_count": pnl_summary.get("settlements_count"),
+            "total_settled_revenue_dollars": pnl_summary.get("total_settled_revenue_dollars"),
+            "total_settled_cost_dollars": pnl_summary.get("total_settled_cost_dollars"),
+        }
+        collection.insert_one(doc)
+        log.info("💰 Successfully recorded Portfolio PnL snapshot to MongoDB Atlas!")
+        return True
+    except Exception as error:
+        log.error(f"Failed to insert portfolio PnL snapshot to MongoDB: {error}")
+        return False
+
+
+def save_settlements(settlements: list[dict]) -> int:
+    """
+    Upserts settled market trade records into the MongoDB 'settlements' collection.
+    Prevents duplicate entries by keying on (ticker, settled_time).
+
+    Args:
+        settlements: List of settlement records with payout, cost, and pnl.
+
+    Returns:
+        int: Number of new/updated settlement documents saved.
+    """
+    if not settlements:
+        return 0
+
+    collection = get_mongo_collection("settlements")
+    if collection is None:
+        return 0
+
+    saved_count = 0
+    try:
+        for s in settlements:
+            ticker = s.get("ticker")
+            settled_time = s.get("settled_time")
+            if not ticker:
+                continue
+
+            filter_query = {"ticker": ticker}
+            if settled_time:
+                filter_query["settled_time"] = settled_time
+
+            collection.update_one(
+                filter_query,
+                {"$set": s},
+                upsert=True,
+            )
+            saved_count += 1
+
+        if saved_count > 0:
+            log.info(f"📊 Saved/updated {saved_count} settlement PnL record(s) in MongoDB Atlas!")
+        return saved_count
+    except Exception as error:
+        log.error(f"Failed to upsert settlements to MongoDB: {error}")
+        return 0
+
