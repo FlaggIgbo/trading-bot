@@ -170,7 +170,7 @@ def _execute_buy_flow(
     side_upper = side.upper()
     momentum_label = "Bullish" if side_lower == "yes" else "Bearish"
 
-    log_prefix = "🎯 [DRY-RUN MATCH]" if dry_run else "⚡ [STRATEGY MATCH]"
+    log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
     log_action = f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL." if dry_run else f"Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
     log.info(f"{log_prefix} {ticker} -> {side_upper} price is {price_cents}¢ (between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). {log_action}")
 
@@ -316,7 +316,7 @@ def process_single_market(
                         pos = None
 
             if pos is not None:
-                log.info(f"🛡️ [OPEN POSITION GATE] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
+                log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
                 if not is_stop_loss_interval and not kalshi_client.has_resting_take_profit_order(ticker) and not dry_run:
                     kalshi_client.place_take_profit_order(
                         ticker=ticker,
@@ -325,7 +325,7 @@ def process_single_market(
                         take_profit_cents=take_profit_cents,
                     )
         elif kalshi_client.has_existing_position_or_order(ticker):
-            log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or resting order for {ticker}. Skipping buy.")
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
             # Evaluate eligible sides & select cheapest entry
             candidate_sides = []
@@ -383,7 +383,7 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {now_utc.isoformat()} (Minute :{current_minute:02d}:{now_utc.second:02d})")
     if dry_run:
-        log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
+        log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     log.info(
         "--> INTERVAL: "
         + ("BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)" if is_trading_interval
