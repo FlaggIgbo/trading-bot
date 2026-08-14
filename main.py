@@ -281,8 +281,8 @@ def process_single_market(
             pass
 
     # Dynamic Buy Range Selection based on Market Age & Volatility:
-    # - At 0m past market start (:00, :15, :30, :45): High Volatility -> Buy Range: 25¢ - 45¢
-    # - At 5m past market start (:05, :20, :35, :50): Lower Volatility -> Tighter Buy Range: 40¢ - 45¢
+    # - At 0m past market start (:00, :15, :30, :45): Buy Range: 35¢ - 45¢
+    # - At 5m past market start (:05, :20, :35, :50): Tighter Buy Range: 40¢ - 45¢
     # - At 10m past market start (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 15¢)
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
@@ -291,7 +291,7 @@ def process_single_market(
         min_buy_price = 40
         max_buy_price = 45
     else:
-        min_buy_price = 25
+        min_buy_price = 35
         max_buy_price = 45
 
     trade_executed = False
