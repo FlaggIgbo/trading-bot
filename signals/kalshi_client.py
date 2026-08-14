@@ -465,3 +465,33 @@ class KalshiClient:
                 log.warning(f"Could not cancel order {order_id}: {code or msg}")
                 return False
             raise
+
+    def has_existing_position_or_order(self, ticker: str) -> bool:
+        """
+        Checks if we ALREADY hold an active position or resting order for the given market ticker.
+        Returns True if an open contract or resting order exists, False otherwise.
+        """
+        # Step 1: Check active market positions
+        try:
+            pos_resp = self.get_positions(ticker=ticker)
+            positions = pos_resp.get("market_positions") or []
+            for p in positions:
+                if p.get("ticker") == ticker:
+                    count_fp = float(p.get("position_fp") or p.get("position") or 0)
+                    if abs(count_fp) > 0:
+                        log.info(f"[POSITION EXISTS] Found active position of {count_fp} contracts in {ticker}")
+                        return True
+        except Exception as error:
+            log.warning(f"Could not check market positions for {ticker}: {error}")
+
+        # Step 2: Check resting orders
+        try:
+            orders_resp = self.get_orders(ticker=ticker, status="resting")
+            orders = orders_resp.get("orders") or []
+            if len(orders) > 0:
+                log.info(f"[ORDER EXISTS] Found {len(orders)} resting order(s) for {ticker}")
+                return True
+        except Exception as error:
+            log.warning(f"Could not check resting orders for {ticker}: {error}")
+
+        return False

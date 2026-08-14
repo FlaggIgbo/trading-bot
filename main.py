@@ -156,79 +156,88 @@ def process_single_market(
     trade_executed = False
     trade_details = None
 
-    # Step 2: Trading Decision (Only on 15-minute marks: :00, :15, :30, :45)
+    # Step 2: Trading Decision (Allowed at 0m and 5m past market start: :00, :05, :15, :20, :30, :35, :45, :50)
     if is_trading_interval:
-        # Check YES price condition: between 25¢ and 45¢ (inclusive)
-        if yes_price_cents is not None and 25 <= yes_price_cents <= 45:
-            if dry_run:
-                log.info(
-                    f"🎯 [DRY-RUN MATCH] {ticker} -> YES price is {yes_price_cents}¢ "
-                    f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
-                )
-                trade_executed = True
-                trade_details = {
-                    "dry_run": True,
-                    "side": "yes",
-                    "buy": yes_price_cents,
-                    "tp": 75,
-                }
-            else:
-                log.info(
-                    f"[STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
-                    f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
-                )
-                try:
-                    result = kalshi_client.buy_and_set_take_profit(
-                        ticker=ticker,
-                        side="yes",
-                        buy_price_cents=yes_price_cents,
-                        take_profit_cents=75,
-                        count=1,
+        # Open Position Gate: Check if we ALREADY hold an active position or resting order for this market
+        has_existing_position = kalshi_client.has_existing_position_or_order(ticker)
+
+        if has_existing_position:
+            log.info(
+                f"[OPEN POSITION GATE] Already hold an active position or order for {ticker}. "
+                f"Skipping new buy order."
+            )
+        else:
+            # Check YES price condition: between 25¢ and 45¢ (inclusive)
+            if yes_price_cents is not None and 25 <= yes_price_cents <= 45:
+                if dry_run:
+                    log.info(
+                        f"🎯 [DRY-RUN MATCH] {ticker} -> YES price is {yes_price_cents}¢ "
+                        f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
                     )
                     trade_executed = True
                     trade_details = {
+                        "dry_run": True,
                         "side": "yes",
                         "buy": yes_price_cents,
                         "tp": 75,
                     }
-                except Exception as error:
-                    log.error(f"Failed to execute YES trade on {ticker}: {error}")
+                else:
+                    log.info(
+                        f"[STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
+                        f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
+                    )
+                    try:
+                        result = kalshi_client.buy_and_set_take_profit(
+                            ticker=ticker,
+                            side="yes",
+                            buy_price_cents=yes_price_cents,
+                            take_profit_cents=75,
+                            count=1,
+                        )
+                        trade_executed = True
+                        trade_details = {
+                            "side": "yes",
+                            "buy": yes_price_cents,
+                            "tp": 75,
+                        }
+                    except Exception as error:
+                        log.error(f"Failed to execute YES trade on {ticker}: {error}")
 
-        # Check NO price condition: between 25¢ and 45¢ (inclusive)
-        elif no_price_cents is not None and 25 <= no_price_cents <= 45:
-            if dry_run:
-                log.info(
-                    f"🎯 [DRY-RUN MATCH] {ticker} -> NO price is {no_price_cents}¢ "
-                    f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
-                )
-                trade_executed = True
-                trade_details = {
-                    "dry_run": True,
-                    "side": "no",
-                    "buy": no_price_cents,
-                    "tp": 75,
-                }
-            else:
-                log.info(
-                    f"[STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
-                    f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
-                )
-                try:
-                    result = kalshi_client.buy_and_set_take_profit(
-                        ticker=ticker,
-                        side="no",
-                        buy_price_cents=no_price_cents,
-                        take_profit_cents=75,
-                        count=1,
+            # Check NO price condition: between 25¢ and 45¢ (inclusive)
+            elif no_price_cents is not None and 25 <= no_price_cents <= 45:
+                if dry_run:
+                    log.info(
+                        f"🎯 [DRY-RUN MATCH] {ticker} -> NO price is {no_price_cents}¢ "
+                        f"(between 25¢ and 45¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
                     )
                     trade_executed = True
                     trade_details = {
+                        "dry_run": True,
                         "side": "no",
                         "buy": no_price_cents,
                         "tp": 75,
                     }
-                except Exception as error:
-                    log.error(f"Failed to execute NO trade on {ticker}: {error}")
+                else:
+                    log.info(
+                        f"[STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
+                        f"(between 25¢ and 45¢). Executing Buy + 75¢ Auto-Sell!"
+                    )
+                    try:
+                        result = kalshi_client.buy_and_set_take_profit(
+                            ticker=ticker,
+                            side="no",
+                            buy_price_cents=no_price_cents,
+                            take_profit_cents=75,
+                            count=1,
+                        )
+                        trade_executed = True
+                        trade_details = {
+                            "side": "no",
+                            "buy": no_price_cents,
+                            "tp": 75,
+                        }
+                    except Exception as error:
+                        log.error(f"Failed to execute NO trade on {ticker}: {error}")
 
     # Step 3: Build ultra-compact MongoDB snapshot document (~50 bytes)
     compact_document = {
@@ -254,7 +263,9 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
     current_minute = now_utc.minute
     timestamp_iso = now_utc.isoformat()
 
-    is_trading_interval = (current_minute % 15 == 0) or force_trade_mark
+    # Trading is allowed at 0m and 5m past 15m market start (:00, :05, :15, :20, :30, :35, :45, :50)
+    minute_into_market = current_minute % 15
+    is_trading_interval = (minute_into_market in (0, 5)) or force_trade_mark
 
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {timestamp_iso}")
@@ -264,9 +275,9 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         log.info("--> MODE: [DRY-RUN PREVIEW] (No real orders will be placed)")
 
     if is_trading_interval:
-        log.info("--> INTERVAL: 15-MINUTE TRADING & DATA COLLECTION MARK (:00, :15, :30, :45)")
+        log.info("--> INTERVAL: TRADING & DATA COLLECTION MARK (:00, :05, :15, :20, :30, :35, :45, :50)")
     else:
-        log.info("--> INTERVAL: DATA COLLECTION ONLY MARK (:05, :10, :20, :25, :35, :40, :50, :55)")
+        log.info("--> INTERVAL: DATA COLLECTION ONLY MARK (:10, :25, :40, :55)")
     log.info("=================================================================")
 
     # Initialize Kalshi API Client
