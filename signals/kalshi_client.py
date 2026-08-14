@@ -66,6 +66,7 @@ class LogTag(str, Enum):
     AUTO_SELL_SET = "💰 [AUTO-SELL SET]"              # Placing resting 82¢ limit sell order for take-profit
     POSITION_EXISTS = "🛡️ [POSITION EXISTS]"          # Active market position found in Kalshi portfolio
     ORDER_EXISTS = "🛡️ [ORDER EXISTS]"                # Resting order found in Kalshi portfolio
+    PRUNE_STALE_BUY = "🧹 [PRUNED STALE BUY]"         # Canceled unfilled resting buy order from prior pass
 
 # ---------------------------------------------------------------------------
 # API Base Endpoints
@@ -515,6 +516,31 @@ class KalshiClient:
                 log.warning(f"Could not cancel order {order_id}: {code or msg}")
                 return False
             raise
+
+    def cancel_unfilled_buy_orders(self, ticker: str) -> int:
+        """
+        Cancels any resting unfilled BUY orders for `ticker` from prior intervals.
+        Keeps resting Take-Profit SELL orders untouched!
+        """
+        canceled_count = 0
+        try:
+            orders_resp = self.get_orders(ticker=ticker, status="resting")
+            orders = orders_resp.get("orders") or []
+            for o in orders:
+                client_order_id = o.get("client_order_id") or ""
+                action = (o.get("action") or "").lower()
+                order_id = o.get("order_id")
+
+                # Identify buy orders (client_order_id starts with 'buy_' or action is 'buy')
+                is_buy_order = client_order_id.startswith("buy_") or action == "buy"
+                if is_buy_order and order_id:
+                    if self.cancel_order_safe(order_id):
+                        canceled_count += 1
+                        log.info(f"{LogTag.PRUNE_STALE_BUY.value} Canceled stale unfilled buy order {order_id} for {ticker}")
+        except Exception as error:
+            log.warning(f"⚠️ Could not check/prune resting buy orders for {ticker}: {error}")
+
+        return canceled_count
 
     def has_existing_position_or_order(self, ticker: str) -> bool:
         """

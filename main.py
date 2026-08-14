@@ -339,6 +339,10 @@ def process_single_market(
 
     # Step 4B: Buy Strategy Decision (0m and 5m past start: :00, :05, :15, :20...)
     if is_trading_interval:
+        # Step 4B-1: Prune stale unfilled BUY orders from prior passes (keeps Take-Profit SELL orders intact)
+        if not dry_run:
+            kalshi_client.cancel_unfilled_buy_orders(ticker)
+
         if kalshi_client.has_existing_position_or_order(ticker):
             log.info(f"🛡️ [OPEN POSITION GATE] Already hold an active position or order for {ticker}. Skipping buy.")
         else:

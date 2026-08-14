@@ -39,6 +39,9 @@ A clean, human-readable Python trading bot designed to trade 15-minute crypto pr
 ### 7. Cheapest Entry Tiebreaker ⚖️
 - When both YES and NO qualify during a dead heat (e.g. YES is 43¢ and NO is 40¢), the bot dynamically selects $\min(\text{yes\_price}, \text{no\_price})$ to buy the cheaper side (NO at 40¢), injecting +3¢ of EV into the trade instead of favoring YES by default.
 
+### 8. Stale Buy Order Pruning 🧹
+- Before evaluating new trading decisions at each 5-minute interval, the bot automatically cancels any resting, unfilled **BUY** orders from prior passes. This eliminates adverse selection (getting filled late on an outdated price) while leaving resting Take-Profit SELL orders untouched.
+
 ---
 
 ## 📊 Data Engineering & Microstructure Logging
