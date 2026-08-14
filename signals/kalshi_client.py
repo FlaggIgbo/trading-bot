@@ -391,7 +391,7 @@ class KalshiClient:
         count: int = 1,
     ) -> dict:
         """
-        Executes a 2-step trade strategy for auto-selling:
+        Executes a 2-step trade strategy for auto-selling using Kalshi V2 endpoints:
         1. Submits a Buy order for `count` contracts of `side` ('yes' or 'no') at `buy_price_cents`.
         2. Immediately places a resting Sell limit order at `take_profit_cents` (75¢)
            so that Kalshi automatically takes profit when the price reaches 75¢.
@@ -405,34 +405,51 @@ class KalshiClient:
             f"Buy Price: {buy_price_cents}¢ | Target Take Profit: {take_profit_cents}¢"
         )
 
-        # Step 1: Submit Buy Order (1 contract)
+        now_ms = int(time.time() * 1000)
+
+        if side_clean == "yes":
+            # Buying YES at buy_price_cents
+            buy_side = "bid"
+            buy_price_str = f"0.{buy_price_cents:02d}00"
+
+            # Auto-selling YES at 75¢
+            sell_side = "ask"
+            sell_price_str = f"0.{take_profit_cents:02d}00"
+        else:
+            # Buying NO at buy_price_cents (equivalent to asking YES at 100 - buy_price_cents)
+            buy_side = "ask"
+            buy_price_str = f"0.{(100 - buy_price_cents):02d}00"
+
+            # Auto-selling NO at 75¢ (equivalent to bidding YES at 100 - 75 = 25¢)
+            sell_side = "bid"
+            sell_price_str = f"0.{(100 - take_profit_cents):02d}00"
+
+        # Step 1: Submit Buy Order via Kalshi V2 Endpoint (/portfolio/events/orders)
         buy_payload = {
             "ticker": ticker,
-            "side": side_clean,
-            "action": "buy",
-            "count": count,
-            "yes_price": buy_price_cents if side_clean == "yes" else None,
-            "no_price": buy_price_cents if side_clean == "no" else None,
+            "client_order_id": f"buy_{side_clean}_{ticker}_{now_ms}",
+            "side": buy_side,
+            "count": str(count),
+            "price": buy_price_str,
             "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        filtered_buy = {k: v for k, v in buy_payload.items() if v is not None}
-        buy_order_res = self.post("/portfolio/orders", payload=filtered_buy)
+        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
 
         # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 75¢)
         sell_payload = {
             "ticker": ticker,
-            "side": side_clean,
-            "action": "sell",
-            "count": count,
-            "yes_price": take_profit_cents if side_clean == "yes" else None,
-            "no_price": take_profit_cents if side_clean == "no" else None,
+            "client_order_id": f"sell_tp_{side_clean}_{ticker}_{now_ms}",
+            "side": sell_side,
+            "count": str(count),
+            "price": sell_price_str,
             "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        filtered_sell = {k: v for k, v in sell_payload.items() if v is not None}
 
         sell_order_res = None
         try:
-            sell_order_res = self.post("/portfolio/orders", payload=filtered_sell)
+            sell_order_res = self.post("/portfolio/events/orders", payload=sell_payload)
             log.info(
                 f"[AUTO-SELL SET] Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
             )
@@ -448,8 +465,8 @@ class KalshiClient:
         }
 
     def cancel_order(self, order_id: str) -> dict:
-        """Cancels an existing order by its unique order ID."""
-        return self.delete(f"/portfolio/orders/{order_id}")
+        """Cancels an existing order by its unique order ID using Kalshi V2 endpoint."""
+        return self.delete(f"/portfolio/events/orders/{order_id}")
 
     def cancel_order_safe(self, order_id: str) -> bool:
         """
