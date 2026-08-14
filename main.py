@@ -279,10 +279,16 @@ def process_single_market(
         except (ValueError, TypeError):
             pass
 
+    # EV Optimization Rule 2: Spot Momentum Gate Filter
+    # - Buy YES only if spot price is ABOVE or EQUAL to strike target (spot_price >= target_price)
+    # - Buy NO only if spot price is BELOW strike target (spot_price < target_price)
+    spot_bullish = (spot_price is not None and target_price is not None and spot_price >= target_price)
+    spot_bearish = (spot_price is not None and target_price is not None and spot_price < target_price)
+
     # Dynamic Buy Range Selection based on Market Age & Volatility:
     # - At 0m past market start (:00, :15, :30, :45): Buy Range: 35¢ - 45¢
     # - At 5m past market start (:05, :20, :35, :50): Tighter Buy Range: 40¢ - 45¢
-    # - At 10m past market start (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 15¢)
+    # - At 10m past market start (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 10¢)
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
 
@@ -303,7 +309,7 @@ def process_single_market(
             current_yes_price=yes_price_cents,
             current_no_price=no_price_cents,
             dry_run=dry_run,
-            stop_loss_threshold_cents=15,
+            stop_loss_threshold_cents=10,
         )
         if isinstance(sl_res, dict) and sl_res.get("triggered"):
             trade_executed = True
@@ -330,16 +336,16 @@ def process_single_market(
 
         if has_existing_position:
             log.info(
-                f"[OPEN POSITION GATE] Already hold an active position or order for {ticker}. "
+                f"🛡️ [OPEN POSITION GATE] Already hold an active position or order for {ticker}. "
                 f"Skipping new buy order."
             )
         else:
-            # Check YES price condition against dynamic buy range (25¢-45¢ at 0m vs 40¢-45¢ at 5m)
-            if yes_price_cents is not None and min_buy_price <= yes_price_cents <= max_buy_price:
+            # Check YES price condition AND Spot Momentum Filter (spot >= target)
+            if yes_price_cents is not None and min_buy_price <= yes_price_cents <= max_buy_price and spot_bullish:
                 if dry_run:
                     log.info(
                         f"🎯 [DRY-RUN MATCH] {ticker} -> YES price is {yes_price_cents}¢ "
-                        f"(between {min_buy_price}¢ and {max_buy_price}¢). WOULD BUY 1 SHARE OF [YES] + SET 75¢ AUTO-SELL."
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢ & Bullish Spot Momentum!). WOULD BUY 1 SHARE OF [YES] + SET 82¢ AUTO-SELL."
                     )
                     trade_executed = True
                     trade_details = {
@@ -347,8 +353,8 @@ def process_single_market(
                         "action": "buy_opened",
                         "side": "yes",
                         "buy": yes_price_cents,
-                        "tp": 75,
-                        "sl": 15,
+                        "tp": 82,
+                        "sl": 10,
                         "outcome": determine_counterfactual_outcome(
                             trade_side="yes",
                             action_type="buy_opened",
@@ -359,24 +365,25 @@ def process_single_market(
                     }
                 else:
                     log.info(
-                        f"[STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
-                        f"(between {min_buy_price}¢ and {max_buy_price}¢). Executing Buy + 75¢ Auto-Sell!"
+                        f"⚡ [STRATEGY MATCH] {ticker} YES price is {yes_price_cents}¢ "
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢ & Bullish Spot Momentum!). Executing Maker Buy + 82¢ Auto-Sell!"
                     )
                     try:
                         result = kalshi_client.buy_and_set_take_profit(
                             ticker=ticker,
                             side="yes",
                             buy_price_cents=yes_price_cents,
-                            take_profit_cents=75,
+                            take_profit_cents=82,
                             count=1,
+                            maker_bid_cents=y_bid,
                         )
                         trade_executed = True
                         trade_details = {
                             "action": "buy_opened",
                             "side": "yes",
                             "buy": yes_price_cents,
-                            "tp": 75,
-                            "sl": 15,
+                            "tp": 82,
+                            "sl": 10,
                             "outcome": determine_counterfactual_outcome(
                                 trade_side="yes",
                                 action_type="buy_opened",
@@ -386,14 +393,14 @@ def process_single_market(
                             ),
                         }
                     except Exception as error:
-                        log.error(f"Failed to execute YES trade on {ticker}: {error}")
+                        log.error(f"❌ Failed to execute YES trade on {ticker}: {error}")
 
-            # Check NO price condition against dynamic buy range (25¢-45¢ at 0m vs 40¢-45¢ at 5m)
-            elif no_price_cents is not None and min_buy_price <= no_price_cents <= max_buy_price:
+            # Check NO price condition AND Spot Momentum Filter (spot < target)
+            elif no_price_cents is not None and min_buy_price <= no_price_cents <= max_buy_price and spot_bearish:
                 if dry_run:
                     log.info(
                         f"🎯 [DRY-RUN MATCH] {ticker} -> NO price is {no_price_cents}¢ "
-                        f"(between {min_buy_price}¢ and {max_buy_price}¢). WOULD BUY 1 SHARE OF [NO] + SET 75¢ AUTO-SELL."
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢ & Bearish Spot Momentum!). WOULD BUY 1 SHARE OF [NO] + SET 82¢ AUTO-SELL."
                     )
                     trade_executed = True
                     trade_details = {
@@ -401,8 +408,8 @@ def process_single_market(
                         "action": "buy_opened",
                         "side": "no",
                         "buy": no_price_cents,
-                        "tp": 75,
-                        "sl": 15,
+                        "tp": 82,
+                        "sl": 10,
                         "outcome": determine_counterfactual_outcome(
                             trade_side="no",
                             action_type="buy_opened",
@@ -413,24 +420,25 @@ def process_single_market(
                     }
                 else:
                     log.info(
-                        f"[STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
-                        f"(between {min_buy_price}¢ and {max_buy_price}¢). Executing Buy + 75¢ Auto-Sell!"
+                        f"⚡ [STRATEGY MATCH] {ticker} NO price is {no_price_cents}¢ "
+                        f"(between {min_buy_price}¢ and {max_buy_price}¢ & Bearish Spot Momentum!). Executing Maker Buy + 82¢ Auto-Sell!"
                     )
                     try:
                         result = kalshi_client.buy_and_set_take_profit(
                             ticker=ticker,
                             side="no",
                             buy_price_cents=no_price_cents,
-                            take_profit_cents=75,
+                            take_profit_cents=82,
                             count=1,
+                            maker_bid_cents=n_bid,
                         )
                         trade_executed = True
                         trade_details = {
                             "action": "buy_opened",
                             "side": "no",
                             "buy": no_price_cents,
-                            "tp": 75,
-                            "sl": 15,
+                            "tp": 82,
+                            "sl": 10,
                             "outcome": determine_counterfactual_outcome(
                                 trade_side="no",
                                 action_type="buy_opened",
@@ -440,7 +448,7 @@ def process_single_market(
                             ),
                         }
                     except Exception as error:
-                        log.error(f"Failed to execute NO trade on {ticker}: {error}")
+                        log.error(f"❌ Failed to execute NO trade on {ticker}: {error}")
 
     # Step 3: Build expanded ultra-compact MongoDB snapshot document (~100 bytes)
     compact_document = {

@@ -392,40 +392,45 @@ class KalshiClient:
         ticker: str,
         side: str,
         buy_price_cents: int,
-        take_profit_cents: int = 75,
+        take_profit_cents: int = 82,
         count: int = 1,
+        maker_bid_cents: int | None = None,
     ) -> dict:
         """
         Executes a 2-step trade strategy for auto-selling using Kalshi V2 endpoints:
-        1. Submits a Buy order for `count` contracts of `side` ('yes' or 'no') at `buy_price_cents`.
-        2. Immediately places a resting Sell limit order at `take_profit_cents` (75¢)
-           so that Kalshi automatically takes profit when the price reaches 75¢.
-
-        Returns:
-            dict containing details of both the buy order and the auto-sell limit order.
+        1. Submits a Maker limit Buy order at (Bid + 1¢) to save 1¢-3¢ entry cost.
+        2. Immediately places a resting Sell limit order at `take_profit_cents` (82¢)
+           so Kalshi automatically takes profit on price spikes.
         """
         side_clean = side.lower()
+
+        # EV Rule 1: Target Maker limit price at (Bid + 1c) to save 1c-3c on entry cost
+        if maker_bid_cents is not None:
+            effective_buy_cents = min(buy_price_cents, maker_bid_cents + 1)
+        else:
+            effective_buy_cents = buy_price_cents
+
         log.info(
-            f"[TRADE EXECUTION] Market: {ticker} | Side: {side_clean.upper()} | "
-            f"Buy Price: {buy_price_cents}¢ | Target Take Profit: {take_profit_cents}¢"
+            f"🎯 [TRADE EXECUTION] Market: {ticker} | Side: {side_clean.upper()} | "
+            f"Maker Buy Price: {effective_buy_cents}¢ (Saved vs Ask!) | Target TP: {take_profit_cents}¢"
         )
 
         now_ms = int(time.time() * 1000)
 
         if side_clean == "yes":
-            # Buying YES at buy_price_cents
+            # Buying YES at effective_buy_cents
             buy_side = "bid"
-            buy_price_str = f"0.{buy_price_cents:02d}00"
+            buy_price_str = f"0.{effective_buy_cents:02d}00"
 
-            # Auto-selling YES at 75¢
+            # Auto-selling YES at 82¢
             sell_side = "ask"
             sell_price_str = f"0.{take_profit_cents:02d}00"
         else:
-            # Buying NO at buy_price_cents (equivalent to asking YES at 100 - buy_price_cents)
+            # Buying NO at effective_buy_cents (asking YES at 100 - effective_buy_cents)
             buy_side = "ask"
-            buy_price_str = f"0.{(100 - buy_price_cents):02d}00"
+            buy_price_str = f"0.{(100 - effective_buy_cents):02d}00"
 
-            # Auto-selling NO at 75¢ (equivalent to bidding YES at 100 - 75 = 25¢)
+            # Auto-selling NO at 82¢ (bidding YES at 100 - 82 = 18¢)
             sell_side = "bid"
             sell_price_str = f"0.{(100 - take_profit_cents):02d}00"
 
@@ -441,7 +446,7 @@ class KalshiClient:
         }
         buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
 
-        # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 75¢)
+        # Step 2: Submit Auto-Sell Limit Order (Take Profit target at 82¢)
         sell_payload = {
             "ticker": ticker,
             "client_order_id": f"sell_tp_{side_clean}_{ticker}_{now_ms}",
@@ -456,16 +461,16 @@ class KalshiClient:
         try:
             sell_order_res = self.post("/portfolio/events/orders", payload=sell_payload)
             log.info(
-                f"[AUTO-SELL SET] Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
+                f"💰 [AUTO-SELL SET] Placed resting Sell limit order for {side_clean.upper()} at {take_profit_cents}¢"
             )
         except Exception as error:
-            log.warning(f"Could not place resting auto-sell limit order: {error}")
+            log.warning(f"⚠️ Could not place resting auto-sell limit order: {error}")
 
         return {
             "buy_order": buy_order_res,
             "sell_auto_take_profit_order": sell_order_res,
             "side": side_clean,
-            "buy_price_cents": buy_price_cents,
+            "buy_price_cents": effective_buy_cents,
             "take_profit_cents": take_profit_cents,
         }
 
@@ -524,29 +529,26 @@ class KalshiClient:
         current_yes_price: int | None,
         current_no_price: int | None,
         dry_run: bool = False,
-        stop_loss_threshold_cents: int = 15,
-    ) -> bool:
+        stop_loss_threshold_cents: int = 10,
+    ) -> dict:
         """
-        Evaluates active positions for `ticker` at the 10-minute mark.
-        If we hold a position and the loss exceeds `stop_loss_threshold_cents` (15¢),
-        cancels resting take-profit orders and sells the position immediately to cap losses.
-
-        Returns:
-            bool: True if stop-loss was triggered and executed, False otherwise.
+        Evaluates active positions for `ticker` at the 10-minute mark (:10, :25, :40, :55):
+        1. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
+        2. Let Winners Run: If position price >= 70¢, cancels resting TP limit order for 100¢ settlement.
         """
         # Check resting orders and position status
         try:
             orders_resp = self.get_orders(ticker=ticker, status="resting")
             resting_orders = orders_resp.get("orders") or []
         except Exception as error:
-            log.warning(f"Could not fetch resting orders for stop-loss check on {ticker}: {error}")
+            log.warning(f"⚠️ Could not fetch resting orders for stop-loss check on {ticker}: {error}")
             resting_orders = []
 
         try:
             pos_resp = self.get_positions(ticker=ticker)
             positions = pos_resp.get("market_positions") or []
         except Exception as error:
-            log.warning(f"Could not fetch market positions for stop-loss check on {ticker}: {error}")
+            log.warning(f"⚠️ Could not fetch market positions for stop-loss check on {ticker}: {error}")
             positions = []
 
         # Find active position for this ticker
@@ -560,11 +562,11 @@ class KalshiClient:
 
         # If no active position and no resting orders, nothing to evaluate
         if not active_pos and not resting_orders:
-            return False
+            return {"triggered": False}
 
-        # Determine side and estimated entry price
+        # Determine side and benchmark entry price
         side = "yes"
-        entry_price = 40  # Estimated benchmark entry buy price (cents)
+        entry_price = 38  # Estimated benchmark maker entry buy price (cents)
 
         for o in resting_orders:
             order_side = (o.get("side") or "").lower()
@@ -576,23 +578,40 @@ class KalshiClient:
         current_price = current_yes_price if side == "yes" else current_no_price
 
         if current_price is None:
-            log.warning(f"Cannot evaluate stop-loss for {ticker}: current {side.upper()} price is unavailable.")
-            return False
+            log.warning(f"⚠️ Cannot evaluate stop-loss for {ticker}: current {side.upper()} price is unavailable.")
+            return {"triggered": False}
 
         # Calculate current loss in cents
         loss_cents = entry_price - current_price
 
         log.info(
-            f"[STOP-LOSS CHECK] Market: {ticker} | Side: {side.upper()} | "
+            f"📊 [STOP-LOSS EVALUATION] Market: {ticker} | Side: {side.upper()} | "
             f"Est. Entry: ~{entry_price}¢ | Current: {current_price}¢ | Loss: {loss_cents}¢"
         )
 
-        # Trigger Stop-Loss if loss meets or exceeds threshold (15¢)
-        if loss_cents >= stop_loss_threshold_cents:
+        # Optimization Rule 3B: Let Winners Run to 100¢ if price >= 70¢ at minute 10
+        if current_price >= 70 and resting_orders:
+            log.info(
+                f"🚀 [LET IT RUN TO 100¢] {ticker} ({side.upper()}) is performing strongly at {current_price}¢ (>= 70¢)! "
+                f"Canceling resting TP order to capture 100¢ settlement."
+            )
+            for o in resting_orders:
+                order_id = o.get("order_id")
+                if order_id:
+                    self.cancel_order_safe(order_id)
+            return {"triggered": False, "action": "canceled_tp_let_run"}
+
+        # Optimization Rule 4: Trigger Stop-Loss if loss >= 10¢ OR price <= 30¢
+        is_loss_exceeded = loss_cents >= stop_loss_threshold_cents
+        is_below_floor = current_price <= 30
+
+        if is_loss_exceeded or is_below_floor:
+            reason = f"loss is {loss_cents}¢ (>= {stop_loss_threshold_cents}¢ limit)" if is_loss_exceeded else f"price is {current_price}¢ (<= 30¢ floor)"
+
             if dry_run:
                 log.info(
-                    f"🛑 [DRY-RUN STOP-LOSS] {ticker} ({side.upper()}) loss is {loss_cents}¢ "
-                    f"(>= {stop_loss_threshold_cents}¢ limit). WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY."
+                    f"🛑 [DRY-RUN STOP-LOSS] {ticker} ({side.upper()}) {reason}. "
+                    f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY."
                 )
                 return {
                     "triggered": True,
@@ -603,17 +622,17 @@ class KalshiClient:
                 }
 
             log.info(
-                f"🛑 [STOP-LOSS TRIGGERED] {ticker} ({side.upper()}) loss is {loss_cents}¢ "
-                f"(>= {stop_loss_threshold_cents}¢ limit). Canceling resting orders and closing position!"
+                f"🛑 [STOP-LOSS TRIGGERED] {ticker} ({side.upper()}) {reason}. "
+                f"Canceling resting orders and closing position at market!"
             )
 
-            # Step 1: Cancel any resting take-profit limit orders for this ticker
+            # Step 1: Cancel resting limit orders
             for o in resting_orders:
                 order_id = o.get("order_id")
                 if order_id:
                     self.cancel_order_safe(order_id)
 
-            # Step 2: Submit Sell order to close position immediately at market/bid price
+            # Step 2: Submit Sell order to close position immediately
             now_ms = int(time.time() * 1000)
             exit_side = "ask" if side == "yes" else "bid"
             exit_price_str = f"0.{max(1, current_price):02d}00" if side == "yes" else f"0.{(100 - max(1, current_price)):02d}00"
@@ -630,7 +649,7 @@ class KalshiClient:
 
             try:
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
-                log.info(f"Successfully executed stop-loss exit order for {ticker}: {res}")
+                log.info(f"✅ Successfully executed stop-loss exit order for {ticker}: {res}")
                 return {
                     "triggered": True,
                     "side": side,
@@ -639,7 +658,7 @@ class KalshiClient:
                     "order": res,
                 }
             except Exception as error:
-                log.error(f"Failed to execute stop-loss exit order for {ticker}: {error}")
+                log.error(f"❌ Failed to execute stop-loss exit order for {ticker}: {error}")
                 return {"triggered": False, "error": str(error)}
 
         return {"triggered": False}
