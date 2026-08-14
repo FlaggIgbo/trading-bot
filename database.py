@@ -14,10 +14,13 @@ Compact Field Schema:
   `tick` : Market ticker (e.g. "KXBTC15M-26AUG132300-00") -> 22 bytes
   `y`    : YES price in cents integer (1-99) -> 1 byte
   `n`    : NO price in cents integer (1-99) -> 1 byte
+  `p`    : Live underlying asset spot price (e.g. 63270.94) -> 8 bytes
+  `tgt`  : Target strike price to beat for YES to win (e.g. 63318.74) -> 8 bytes
+  `diff` : Difference float (current_price - price_to_beat) -> 8 bytes
   `trd`  : Optional trade object (only present if a trade triggered) -> ~20 bytes
 
 With 7 crypto markets checked every 5 minutes (2,016 docs/day):
-- Storage consumption is only ~100 KB per day (~3 MB per month).
+- Storage consumption is only ~150 KB per day (~4.5 MB per month).
 - A 512MB free tier database can easily store years of market data!
 """
 

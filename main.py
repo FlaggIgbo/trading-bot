@@ -131,6 +131,25 @@ def extract_price_cents(market: dict, side: str, kalshi_client: KalshiClient | N
     return None
 
 
+def get_crypto_spot_price(symbol: str) -> float | None:
+    """
+    Fetches the current real-time underlying spot price for a crypto asset (e.g., BTC, ETH, SOL).
+    Uses public API endpoints (Coinbase / Binance) with fast timeout handling.
+    """
+    import requests
+    symbol_upper = symbol.upper()
+
+    try:
+        url = f"https://api.coinbase.com/v2/prices/{symbol_upper}-USD/spot"
+        resp = requests.get(url, timeout=3.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            return round(float(data["data"]["amount"]), 4)
+    except Exception as error:
+        log.debug(f"Could not fetch spot price for {symbol_upper}: {error}")
+    return None
+
+
 def process_single_market(
     market: dict,
     is_trading_interval: bool,
@@ -142,8 +161,9 @@ def process_single_market(
     """
     Processes a single 15-minute crypto market:
     1. Reads YES and NO prices (with fallback to fresh detail if needed).
-    2. Evaluates 25¢-45¢ buy condition if it is a 15-minute trading mark (:00, :15, :30, :45).
-    3. Returns an ultra-compact snapshot dictionary to save into MongoDB.
+    2. Reads current underlying spot price, target strike price to beat, and price difference.
+    3. Evaluates 25¢-45¢ buy condition if it is a trading mark (:00, :05, :15, :20, :30, :35...).
+    4. Returns an ultra-compact snapshot dictionary to save into MongoDB.
     """
     ticker = market.get("ticker", "UNKNOWN")
     series_ticker = market.get("series_ticker", "UNKNOWN")
@@ -152,6 +172,17 @@ def process_single_market(
     # Extract prices in cents (with Kalshi client fallback for live prices)
     yes_price_cents = extract_price_cents(market, "yes", kalshi_client=kalshi_client)
     no_price_cents = extract_price_cents(market, "no", kalshi_client=kalshi_client)
+
+    # Extract underlying asset spot price and target strike to beat
+    spot_price = get_crypto_spot_price(asset_symbol)
+    target_price = market.get("floor_strike")
+
+    price_diff = None
+    if spot_price is not None and target_price is not None:
+        try:
+            price_diff = round(float(spot_price) - float(target_price), 4)
+        except (ValueError, TypeError):
+            pass
 
     trade_executed = False
     trade_details = None
@@ -239,7 +270,7 @@ def process_single_market(
                     except Exception as error:
                         log.error(f"Failed to execute NO trade on {ticker}: {error}")
 
-    # Step 3: Build ultra-compact MongoDB snapshot document (~50 bytes)
+    # Step 3: Build ultra-compact MongoDB snapshot document (~70 bytes)
     compact_document = {
         "ts": int(now_utc.timestamp()),   # Unix epoch timestamp (int)
         "m": minute_past_hour,            # Minute int (e.g. 0, 5, 15)
@@ -247,6 +278,9 @@ def process_single_market(
         "tick": ticker,                   # Full market ticker
         "y": yes_price_cents,             # YES price in cents
         "n": no_price_cents,              # NO price in cents
+        "p": spot_price,                  # Live underlying asset spot price (e.g. 63267.69)
+        "tgt": target_price,              # Strike price to beat for YES to win (e.g. 63318.74)
+        "diff": price_diff,               # Price difference (current_price - price_to_beat)
     }
 
     if trade_executed and trade_details:
@@ -313,7 +347,13 @@ def run_pipeline_pass(dry_run: bool = False, force_trade_mark: bool = False):
         sym = snapshot["sym"]
         y_cents = snapshot["y"]
         n_cents = snapshot["n"]
-        log.info(f"  • Market [{sym} | {ticker}] -> YES: {y_cents}¢ | NO: {n_cents}¢")
+        p_val = snapshot.get("p")
+        tgt_val = snapshot.get("tgt")
+        diff_val = snapshot.get("diff")
+        log.info(
+            f"  • Market [{sym} | {ticker}] -> YES: {y_cents}¢ | NO: {n_cents}¢ | "
+            f"Price: ${p_val} | Target: ${tgt_val} | Diff: {diff_val}"
+        )
 
     # Filter out incomplete snapshots (where both YES and NO prices are None)
     valid_snapshots = [s for s in snapshots_to_save if s.get("y") is not None or s.get("n") is not None]
