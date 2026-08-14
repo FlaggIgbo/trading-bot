@@ -14,8 +14,8 @@ This bot runs continuously 24/7 as a Render Background Worker.
    - By adding a 30-second buffer, we give Kalshi's API 30 seconds to populate live bids and asks.
 
 2. Dynamic Trading Strategy & Risk Management:
-   - Market Start Mark (:00, :15, :30, :45): Buy YES/NO if price is between 35¢ and 45¢.
-   - 5-Min Past Mark (:05, :20, :35, :50): Tighter Buy YES/NO if price is between 40¢ and 45¢.
+   - Market Start Mark (:00, :15, :30, :45): Buy YES/NO if price is between 35¢ and 49¢.
+   - 5-Min Past Mark (:05, :20, :35, :50): Tighter Buy YES/NO if price is between 40¢ and 49¢.
    - Spot Momentum Filter: Buy YES only if spot >= target; Buy NO only if spot < target.
    - 10-Min Past Mark (:10, :25, :40, :55): Evaluate Stop-Loss (Sell if loss >= 10¢).
    - 82¢ Auto-Sell: Places a resting limit Sell order at 82¢ immediately upon buy execution.
@@ -103,7 +103,7 @@ def is_spot_momentum_aligned(
     
     1. Dead-Heat Zone (|pct_dist| <= 0.05%):
        If spot price is within 0.05% of target strike (~$0.94 on ETH, ~$31 on BTC),
-       the market is in a dead heat. Buying YES or NO in the 35¢-45¢ range is allowed!
+       the market is in a dead heat. Buying YES or NO in the 35¢-49¢ range is allowed!
        
     2. Out-Of-The-Money Zone (|pct_dist| > 0.05%):
        If spot price is significantly far from strike, enforce momentum direction:
@@ -316,7 +316,7 @@ def process_single_market(
     minute_into_market = minute_past_hour % 15
     is_stop_loss_interval = (minute_into_market == 10)
     min_buy_price = 40 if minute_into_market == 5 else 35
-    max_buy_price = 45
+    max_buy_price = 49
     
     # Dynamic Take-Profit Target based on market age
     take_profit_cents = 76 if minute_into_market == 5 else 82
