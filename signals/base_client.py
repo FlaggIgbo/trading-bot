@@ -33,6 +33,7 @@ class LogTag(str, Enum):
     DRY_RUN_STOP_LOSS = "🛑 [DRY-RUN STOP-LOSS]"        # Preview stop-loss liquidation in dry-run mode
     EARLY_CUT_LOSS_TRIGGERED = "✂️ [5-MIN CUT-LOSS TRIGGERED]"  # Liquidating 00m entry below 40¢ at 5m mark
     DRY_RUN_EARLY_CUT_LOSS = "✂️ [DRY-RUN 5-MIN CUT-LOSS]"      # Preview 5m cut-loss liquidation in dry-run mode
+    HOLDING_POSITION = "🛡️ [HOLDING WINNING POSITION]"         # Holding healthy winning position above threshold
     POSITION_CHECK = "📊 [5-MIN POSITION CHECK]"      # Inspecting 5m open position status
     LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Canceling 82¢ TP at 10m for strong winners (>= 70¢) to get 100¢
     TRADE_EXECUTION = "🎯 [TRADE EXECUTION]"          # Submitting Maker buy order to exchange API
@@ -172,19 +173,24 @@ class BaseTradingClient(ABC):
             return {"triggered": False}
 
         loss_cents = entry_price - current_price
-        pnl_label = f"Gain: +{abs(loss_cents)}¢ (Profit)" if loss_cents < 0 else f"Loss: -{loss_cents}¢"
+        if loss_cents < 0:
+            pnl_label = f"Gain: +{abs(loss_cents)}¢ (In Profit 🟢)"
+        elif loss_cents > 0:
+            pnl_label = f"Loss: -{loss_cents}¢ (In Loss 🔴)"
+        else:
+            pnl_label = "Breakeven: 0¢ (Flat ⚪)"
 
         log.info(
             f"{LogTag.POSITION_CHECK.value} [{self.exchange_name}] Market: {ticker} | Side: {side.upper()} | "
-            f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
+            f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | PnL: {pnl_label}"
         )
 
         if current_price < min_price_threshold:
-            reason = f"price is {current_price}¢ (below {min_price_threshold}¢-49¢ target range)"
+            reason = f"Current price {current_price}¢ is below safety cut threshold ({min_price_threshold}¢)"
 
             if dry_run:
                 log.info(
-                    f"{LogTag.DRY_RUN_EARLY_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}) {reason}. "
+                    f"{LogTag.DRY_RUN_EARLY_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
                     f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY TO CUT LOSSES."
                 )
                 return {
@@ -196,12 +202,18 @@ class BaseTradingClient(ABC):
 
             self.cancel_and_verify_resting_orders(ticker)
             self.execute_liquidation(ticker, side, position_count, current_price)
-            log.info(f"{LogTag.EARLY_CUT_LOSS_TRIGGERED.value} [{self.exchange_name}] Liquidated {ticker} ({side.upper()}) position early at {current_price}¢.")
+            log.info(f"{LogTag.EARLY_CUT_LOSS_TRIGGERED.value} [{self.exchange_name}] Liquidated {ticker} ({side.upper()}) position early at {current_price}¢ ({reason}).")
             return {
                 "triggered": True,
                 "side": side,
                 "loss_cents": loss_cents,
                 "exit_price": current_price,
             }
+        else:
+            log.info(
+                f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
+                f"Current price is {current_price}¢ (>= {min_price_threshold}¢ threshold, {pnl_label}). "
+                f"Position is healthy and winning! Holding for Take-Profit auto-sell or $1.00 settlement."
+            )
 
         return {"triggered": False}

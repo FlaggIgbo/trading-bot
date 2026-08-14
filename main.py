@@ -416,33 +416,31 @@ def process_single_market(
         cut_loss_executed = False
         pos = client.get_market_position(ticker)
 
-        # 5-Minute Early Cut-Loss Check: If entry from :00 drops below 40¢ at :05, exit immediately
+        # 5-Minute Early Cut-Loss Check: Evaluate all active positions at the 5-minute mark
         if pos is not None and is_5min_mark:
             side = pos["side"]
-            pos_price = yes_price_cents if side == "yes" else no_price_cents
-            if pos_price is not None and pos_price < 40:
-                cut_res = client.evaluate_and_execute_5min_cut_loss(
-                    ticker=ticker,
-                    current_yes_price=yes_price_cents,
-                    current_no_price=no_price_cents,
-                    min_price_threshold=40,
-                    dry_run=dry_run,
-                )
-                if isinstance(cut_res, dict) and cut_res.get("triggered"):
-                    trade_executed = True
-                    ex_name = getattr(client, "exchange_name", "Exchange")
-                    trade_details = {
-                        "ex": ex_name.lower(),
-                        "action": "early_loss_cut",
-                        "side": side,
-                        "exit_price": cut_res.get("exit_price"),
-                        "loss_cents": cut_res.get("loss_cents"),
-                        "outcome": determine_counterfactual_outcome(
-                            side, "early_loss_cut", spot_price, target_price, market.get("result")
-                        ),
-                    }
-                    pos = None
-                    cut_loss_executed = True
+            cut_res = client.evaluate_and_execute_5min_cut_loss(
+                ticker=ticker,
+                current_yes_price=yes_price_cents,
+                current_no_price=no_price_cents,
+                min_price_threshold=40,
+                dry_run=dry_run,
+            )
+            if isinstance(cut_res, dict) and cut_res.get("triggered"):
+                trade_executed = True
+                ex_name = getattr(client, "exchange_name", "Exchange")
+                trade_details = {
+                    "ex": ex_name.lower(),
+                    "action": "early_loss_cut",
+                    "side": side,
+                    "exit_price": cut_res.get("exit_price"),
+                    "loss_cents": cut_res.get("loss_cents"),
+                    "outcome": determine_counterfactual_outcome(
+                        side, "early_loss_cut", spot_price, target_price, market.get("result")
+                    ),
+                }
+                pos = None
+                cut_loss_executed = True
 
         # Position Gates & Entry Evaluation
         ex_name = getattr(client, "exchange_name", "Exchange")
