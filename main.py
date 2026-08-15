@@ -785,6 +785,8 @@ def run_pipeline_pass(
         save_market_snapshots(valid_snapshots)
     elif dry_run:
         log.info(f"\n{LogTag.DRY_RUN_PREVIEW.value} Skipped saving snapshots to MongoDB Atlas in Dry-Run mode.")
+    elif not is_standard_save_mark:
+        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :05, :10, :12.5 marks).")
     else:
         log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")

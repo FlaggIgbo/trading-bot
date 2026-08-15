@@ -90,17 +90,23 @@ class BaseTradingClient(ABC):
         """Returns True if ticker has an active profit floor armed."""
         return ticker in self.profit_floors
 
+    @property
+    def entry_prices(self) -> dict[str, int]:
+        if not hasattr(self, "_entry_prices") or self._entry_prices is None:
+            self._entry_prices = {}
+        return self._entry_prices
+
     def get_entry_price(self, ticker: str) -> int | None:
         """Returns recorded buy entry price in cents for ticker, or None if unknown."""
-        return self._entry_prices.get(ticker)
+        return self.entry_prices.get(ticker)
 
     def set_entry_price(self, ticker: str, price_cents: int) -> None:
         """Records the exact entry price in cents when we buy a contract."""
-        self._entry_prices[ticker] = price_cents
+        self.entry_prices[ticker] = price_cents
 
     def clear_entry_price(self, ticker: str) -> None:
         """Clears recorded entry price for ticker once the position is closed."""
-        self._entry_prices.pop(ticker, None)
+        self.entry_prices.pop(ticker, None)
 
     @abstractmethod
     def get_market_position(self, ticker: str) -> dict | None:

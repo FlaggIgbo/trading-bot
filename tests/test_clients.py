@@ -329,6 +329,44 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
                 self.assertEqual(payload["price"], "0.9900")
                 self.assertEqual(payload["time_in_force"], "immediate_or_cancel")
 
+    def test_kalshi_client_init_and_entry_prices(self):
+        # Verify that KalshiClient initializes base state properly without manual mocking
+        with patch("signals.kalshi_client._load_private_key", return_value=MagicMock()):
+            client = KalshiClient(api_key_id="test-key-id")
+            self.assertTrue(hasattr(client, "_entry_prices"))
+            self.assertTrue(hasattr(client, "_profit_floors"))
+            self.assertIsNone(client.get_entry_price("TEST"))
+            client.set_entry_price("TEST", 45)
+            self.assertEqual(client.get_entry_price("TEST"), 45)
+            client.clear_entry_price("TEST")
+            self.assertIsNone(client.get_entry_price("TEST"))
+
+    def test_base_trading_client_uninitialized_entry_prices_safety(self):
+        # Even if a subclass somehow omitted super().__init__(), properties prevent AttributeError
+        class UninitializedClient(BaseTradingClient):
+            def __init__(self):
+                pass
+            def get_market_position(self, ticker): return None
+            def cancel_and_verify_resting_orders(self, ticker): return True
+            def execute_liquidation(self, ticker, side, count, price): return {}
+            def execute_buy(self, ticker, side, count, price): return {}
+            def cancel_unfilled_buy_orders(self, ticker): pass
+            def get_positions(self, **kwargs): return {}
+            def get_orders(self, **kwargs): return {}
+            def get_15m_crypto_markets(self, **kwargs): return []
+
+        client = UninitializedClient()
+        self.assertIsNone(client.get_entry_price("TEST"))
+        client.set_entry_price("TEST", 50)
+        self.assertEqual(client.get_entry_price("TEST"), 50)
+        client.clear_entry_price("TEST")
+        self.assertIsNone(client.get_entry_price("TEST"))
+        self.assertIsNone(client.get_profit_floor("TEST"))
+        client.set_profit_floor("TEST", 60)
+        self.assertEqual(client.get_profit_floor("TEST"), 60)
+        client.clear_profit_floor("TEST")
+        self.assertIsNone(client.get_profit_floor("TEST"))
+
     def test_calculate_seconds_until_next_checkpoint_schedule(self):
         # At 14:02:00 -> should sleep until 14:05:30 (210s)
         with patch("main.datetime") as mock_dt:

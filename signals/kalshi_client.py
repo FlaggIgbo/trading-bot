@@ -204,6 +204,7 @@ class KalshiClient(BaseTradingClient):
             private_key: Loaded RSA private key object (optional; loaded automatically if None).
             base_url: Overriding API base URL (optional; defaults to Demo or Production).
         """
+        super().__init__()
         self.api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID")
         self.private_key = private_key or _load_private_key()
 
