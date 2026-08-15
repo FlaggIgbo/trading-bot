@@ -195,5 +195,106 @@ class TestClientInterfaces(unittest.TestCase):
         self.assertEqual(inserted_doc["ex"], "gemini")
 
 
+class TestProfitFloorAndStopLoss(unittest.TestCase):
+    def setUp(self):
+        self.client = GeminiTradingClient()
+        self.ticker = "KXBTC15M-TEST"
+
+    def test_profit_floor_arming_at_70_cents(self):
+        # Mock active YES position bought at 40¢
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 40,
+        }
+
+        # Evaluate at current price 72¢ (>= 70¢)
+        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel:
+            res = self.client.evaluate_and_execute_stop_loss(
+                ticker=self.ticker,
+                current_yes_price=72,
+                current_no_price=28,
+                dry_run=False,
+            )
+            self.assertFalse(res["triggered"])
+            self.assertEqual(res["action"], "canceled_tp_let_run")
+            self.assertEqual(res["profit_floor_cents"], 62)  # 72 - 10 = 62¢
+            self.assertTrue(self.client.has_profit_floor(self.ticker))
+            self.assertEqual(self.client.get_profit_floor(self.ticker), 62)
+            mock_cancel.assert_called_once_with(self.ticker)
+
+    def test_profit_floor_ratchet_upwards(self):
+        # Position arms at 70¢ -> floor 60¢
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 40,
+        }
+        self.client.set_profit_floor(self.ticker, 60)
+
+        # Price rises to 85¢ -> floor should ratchet up to 75¢
+        with patch.object(self.client, "cancel_and_verify_resting_orders"):
+            res = self.client.evaluate_and_execute_stop_loss(
+                ticker=self.ticker,
+                current_yes_price=85,
+                current_no_price=15,
+                dry_run=False,
+            )
+            self.assertFalse(res["triggered"])
+            self.assertEqual(res["profit_floor_cents"], 75)  # 85 - 10 = 75¢
+            self.assertEqual(self.client.get_profit_floor(self.ticker), 75)
+
+    def test_profit_floor_liquidation_trigger(self):
+        # Position armed with floor at 65¢ (entry at 40¢)
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 40,
+        }
+        self.client.set_profit_floor(self.ticker, 65)
+
+        # Market drops to 64¢ (<= 65¢)
+        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
+             patch.object(self.client, "execute_liquidation") as mock_liquidate:
+            res = self.client.evaluate_and_execute_stop_loss(
+                ticker=self.ticker,
+                current_yes_price=64,
+                current_no_price=36,
+                dry_run=False,
+            )
+            self.assertTrue(res["triggered"])
+            self.assertEqual(res["action"], "profit_floor_sold")
+            self.assertEqual(res["profit_locked_cents"], 24)  # 64 - 40 = 24¢ profit
+            self.assertEqual(res["exit_price"], 64)
+            # Ensure profit floor is cleared after exit
+            self.assertFalse(self.client.has_profit_floor(self.ticker))
+            mock_cancel.assert_called_once_with(self.ticker)
+            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 64)
+
+    def test_standard_stop_loss_liquidation(self):
+        # Position bought at 42¢ with NO armed profit floor
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 42,
+        }
+
+        # Market drops to 30¢ (loss = 12¢ >= 10¢ limit and price <= 30¢)
+        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
+             patch.object(self.client, "execute_liquidation") as mock_liquidate:
+            res = self.client.evaluate_and_execute_stop_loss(
+                ticker=self.ticker,
+                current_yes_price=30,
+                current_no_price=70,
+                dry_run=False,
+            )
+            self.assertTrue(res["triggered"])
+            self.assertEqual(res["action"], "stop_loss_sold")
+            self.assertEqual(res["loss_cents"], 12)
+            self.assertEqual(res["exit_price"], 30)
+            mock_cancel.assert_called_once_with(self.ticker)
+            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 30)
+
+
 if __name__ == "__main__":
     unittest.main()

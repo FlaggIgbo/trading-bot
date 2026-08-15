@@ -27,16 +27,17 @@ A high-performance Python trading bot for 15-minute crypto prediction markets on
 - **Minute 00 Entry**: Targets **82¢** take‑profit (15 minutes remaining).
 - **Minute 05 Entry**: Targets **76¢** take‑profit (10 minutes remaining).
 - **Fill‑Gated Execution**: Take‑profit orders are placed only after buy fill confirmation to avoid phantom resting orders.
-- **Run to 100¢ Settlement**: If position price reaches ≥ 70¢ at t = 10m, the resting take‑profit order is canceled to capture the full 100¢ payout.
+- **Run to 100¢ Settlement with Trailing Profit Floor**: If position price reaches ≥ 70¢ at t = 10m, the resting take‑profit order is canceled to capture the full 100¢ payout while simultaneously arming a **Trailing Profit Floor at `current_price - 10¢` (e.g. 60¢)** to protect accumulated gains against late reversals.
 
 ### 4. 5-Minute Early Cut-Loss (Sub-40¢ Liquidation) ✂️
 - Evaluated at `:05`, `:20`, `:35`, `:50` past the hour.
 - If a contract bought at the `:00` mark has dropped below the **40¢–49¢ range (< 40¢)** at minute 05, the bot cancels any resting take-profit limit orders and liquidates the position immediately to minimize loss.
 
-### 5. 10‑Minute Stop‑Loss (10¢ Loss Limit / 30¢ Price Floor) 🛑
+### 5. 10‑Minute Stop‑Loss & Trailing Profit Floor Execution 🛑💰
 - Evaluated at `:10`, `:25`, `:40`, `:55` past the hour.
 - Directly inspects portfolio contracts (`position_fp > 0` for `YES`, `position_fp < 0` for `NO`) and dynamic cost basis.
-- Liquidates immediately if **loss ≥ 10¢** or if position price drops **≤ 30¢**.
+- **Trailing Profit Floor Trigger**: If an armed profit floor exists and market drops to/below it, liquidates immediately to lock in net profit.
+- **Stop-Loss Trigger**: For un-promoted positions, liquidates immediately if **loss ≥ 10¢** or if position price drops **≤ 30¢**.
 
 ### 6. Risk Controls & Hygiene 🛡️
 - **Open Position Gate**: Skips markets with existing open positions or active orders.

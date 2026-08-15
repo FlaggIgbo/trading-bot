@@ -265,28 +265,28 @@ def save_settlements(settlements: list[dict]) -> int:
 
 DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int]]] = {
     "BTC": {
-        "00": {"min_buy": 35, "max_buy": 47, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
     },
     "ETH": {
-        "00": {"min_buy": 35, "max_buy": 46, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
     },
     "SOL": {
-        "00": {"min_buy": 35, "max_buy": 46, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
     },
     "ZEC": {
-        "00": {"min_buy": 30, "max_buy": 42, "tp": 85},  # High volatility: wider discount, higher TP
+        "00": {"min_buy": 30, "max_buy": 50, "tp": 85},  # High volatility: wider discount, higher TP
         "05": {"min_buy": 37, "max_buy": 43, "tp": 78},
     },
     "NEAR": {
-        "00": {"min_buy": 30, "max_buy": 42, "tp": 85},  # High volatility: wider discount, higher TP
+        "00": {"min_buy": 30, "max_buy": 50, "tp": 85},  # High volatility: wider discount, higher TP
         "05": {"min_buy": 40, "max_buy": 45, "tp": 78},
     },
     "DEFAULT": {
-        "00": {"min_buy": 35, "max_buy": 45, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
+        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
     },
 }
 
@@ -345,9 +345,9 @@ def calibrate_dynamic_price_map_from_db(
     -------------------
     Step 1 (Volatility):
       - We measure how wildly each coin moves (standard deviation of % price swings).
-      - Wild coins (like ZEC/NEAR) get a cheaper buy ceiling (e.g. 42¢) so we don't buy during a drop,
+      - Wild coins (like ZEC/NEAR) get a cheaper buy ceiling so we don't buy during a drop,
         and a higher sell target (e.g. 85¢) to capture big upswings.
-      - Steady coins (like BTC/BNB) use balanced numbers (35¢-47¢, TP 82¢).
+      - Steady coins (like BTC/BNB) use balanced numbers (35¢-55¢ at :00, 40¢-45¢ at :05, TP 82¢).
 
     Step 2 (Winning Trade History):
       - We look at what prices actually won in past settlements.
@@ -356,7 +356,7 @@ def calibrate_dynamic_price_map_from_db(
 
     Step 3 (Safety Guardrails):
       - min_buy is always clamped between 25¢ and 42¢.
-      - max_buy is always clamped between 38¢ and 48¢.
+      - max_buy is always clamped between 38¢ and 56¢ (:00 mark) or 48¢ (:05 mark).
       - tp (take-profit sell price) is always clamped between 70¢ and 90¢.
     """
     # Start with a clean copy of default fallback map
@@ -444,17 +444,17 @@ def calibrate_dynamic_price_map_from_db(
                 if vol_std > 0.15:
                     # Ultra-high volatility (e.g. ZEC, NEAR)
                     base_min_buy = 30
-                    base_max_buy = 42
+                    base_max_buy = 50 if mark == "00" else 42
                     base_tp = 85 if mark == "00" else 78
                 elif vol_std > 0.08:
                     # Moderate volatility (e.g. SOL, DOGE, XRP, HYPE)
                     base_min_buy = 34
-                    base_max_buy = 45
+                    base_max_buy = 52 if mark == "00" else 45
                     base_tp = 82 if mark == "00" else 76
                 else:
                     # Low volatility / stable (e.g. BTC, BNB, ETH)
                     base_min_buy = 35 if mark == "00" else 40
-                    base_max_buy = 47
+                    base_max_buy = 55 if mark == "00" else 45
                     base_tp = 82 if mark == "00" else 76
 
                 # Step 2: Fine-tune using winning trade history if we have >= 5 samples
@@ -475,8 +475,9 @@ def calibrate_dynamic_price_map_from_db(
                         min_buy = base_min_buy
 
                 # Step 3: Safety Guardrails (Clamping)
+                max_clamp = 56 if mark == "00" else 48
                 min_buy = max(25, min(min_buy, 42))
-                max_buy = max(min_buy + 2, min(max_buy, 48))
+                max_buy = max(min_buy + 2, min(max_buy, max_clamp))
                 tp_price = max(max_buy + 15, min(tp_price, 90))
 
                 calibrated_map[sym][mark] = {

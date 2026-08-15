@@ -36,6 +36,8 @@ class LogTag(str, Enum):
     HOLDING_POSITION = "🛡️ [HOLDING WINNING POSITION]"         # Holding healthy winning position above threshold
     POSITION_CHECK = "📊 [5-MIN POSITION CHECK]"      # Inspecting 5m open position status
     LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Canceling 82¢ TP at 10m for strong winners (>= 70¢) to get 100¢
+    PROFIT_FLOOR_ARMED = "🛡️ [PROFIT FLOOR ARMED]"     # Armed trailing profit floor (current_price - 10¢) on let-it-run winner
+    PROFIT_FLOOR_TRIGGERED = "💰 [PROFIT FLOOR TRIGGERED]"  # Liquidating position when price hits trailing profit floor
     TRADE_EXECUTION = "🎯 [TRADE EXECUTION]"          # Submitting Maker buy order to exchange API
     MAKER_BUY_RESTING = "⏳ [MAKER BUY RESTING]"       # Maker buy order submitted and resting on book
     AUTO_SELL_SET = "💰 [AUTO-SELL SET]"              # Placing resting 82¢ limit sell order for take-profit
@@ -52,6 +54,32 @@ class BaseTradingClient(ABC):
     """
 
     exchange_name: str = "Exchange"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._profit_floors: dict[str, int] = {}
+
+    @property
+    def profit_floors(self) -> dict[str, int]:
+        if not hasattr(self, "_profit_floors") or self._profit_floors is None:
+            self._profit_floors = {}
+        return self._profit_floors
+
+    def get_profit_floor(self, ticker: str) -> int | None:
+        """Returns active profit floor in cents for ticker, or None if not set."""
+        return self.profit_floors.get(ticker)
+
+    def set_profit_floor(self, ticker: str, floor_cents: int) -> None:
+        """Sets or updates the trailing profit floor in cents for ticker."""
+        self.profit_floors[ticker] = floor_cents
+
+    def clear_profit_floor(self, ticker: str) -> None:
+        """Clears any active profit floor for ticker (e.g. after liquidation or position close)."""
+        self.profit_floors.pop(ticker, None)
+
+    def has_profit_floor(self, ticker: str) -> bool:
+        """Returns True if ticker has an active profit floor armed."""
+        return ticker in self.profit_floors
 
     @abstractmethod
     def get_market_position(self, ticker: str) -> dict | None:
@@ -79,13 +107,17 @@ class BaseTradingClient(ABC):
         """
         Evaluates active positions for ticker at the 10-minute mark (:10, :25, :40, :55):
         1. Checks actual position from exchange portfolio.
-        2. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
-        3. Let Winners Run: If position price >= 70¢, cancels resting TP limit order for 100¢ settlement.
+        2. Trailing Profit Floor Trigger: If an armed profit floor exists and price dropped to/below it,
+           immediately liquidates to lock in gains.
+        3. Let Winners Run with Trailing Profit Floor: If position price >= 70¢, cancels resting TP
+           order and arms/ratchets a trailing profit floor at (current_price - 10¢) to capture 100¢ settlement.
+        4. Tightened Stop-Loss: If loss >= 10¢ OR price <= 30¢, sells position immediately.
         """
         pos = self.get_market_position(ticker)
         if pos is None:
             if not dry_run:
                 self.cancel_and_verify_resting_orders(ticker)
+            self.clear_profit_floor(ticker)
             return {"triggered": False}
 
         side = pos["side"]
@@ -106,15 +138,64 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Status: {pnl_label}"
         )
 
+        existing_floor = self.get_profit_floor(ticker)
+
+        # 1. Trailing Profit Floor Trigger Check (if already armed on a winning position)
+        if existing_floor is not None and current_price <= existing_floor:
+            profit_locked = max(0, current_price - entry_price)
+            reason = f"price dropped to {current_price}¢ (<= {existing_floor}¢ trailing profit floor)"
+
+            if dry_run:
+                log.info(
+                    f"{LogTag.DRY_RUN_STOP_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}) {reason}. "
+                    f"WOULD CANCEL RESTING ORDERS & LIQUIDATE TO LOCK IN +{profit_locked}¢ PROFIT."
+                )
+                return {
+                    "triggered": True,
+                    "side": side,
+                    "action": "profit_floor_sold",
+                    "loss_cents": loss_cents,
+                    "exit_price": current_price,
+                    "profit_locked_cents": profit_locked,
+                    "profit_floor_cents": existing_floor,
+                }
+
+            self.cancel_and_verify_resting_orders(ticker)
+            self.execute_liquidation(ticker, side, position_count, current_price)
+            self.clear_profit_floor(ticker)
+            log.info(
+                f"{LogTag.PROFIT_FLOOR_TRIGGERED.value} [{self.exchange_name}] Executed profit-floor liquidation for {ticker} "
+                f"at {current_price}¢ (Floor: {existing_floor}¢ | Locked in +{profit_locked}¢ profit)."
+            )
+            return {
+                "triggered": True,
+                "side": side,
+                "action": "profit_floor_sold",
+                "loss_cents": loss_cents,
+                "exit_price": current_price,
+                "profit_locked_cents": profit_locked,
+                "profit_floor_cents": existing_floor,
+            }
+
+        # 2. Let Winners Run with Trailing Profit Floor (>= 70¢)
         if current_price >= 70:
+            candidate_floor = current_price - 10
+            new_floor = max(existing_floor, candidate_floor) if existing_floor is not None else candidate_floor
+            self.set_profit_floor(ticker, new_floor)
+
             log.info(
                 f"{LogTag.LET_IT_RUN.value} [{self.exchange_name}] {ticker} ({side.upper()}) performs strongly at {current_price}¢ (>= 70¢)! "
-                f"Canceling resting TP order to capture 100¢ settlement."
+                f"Canceling resting TP order to capture 100¢ settlement with armed trailing profit floor at {new_floor}¢."
             )
             if not dry_run:
                 self.cancel_and_verify_resting_orders(ticker)
-            return {"triggered": False, "action": "canceled_tp_let_run"}
+            return {
+                "triggered": False,
+                "action": "canceled_tp_let_run",
+                "profit_floor_cents": new_floor,
+            }
 
+        # 3. Standard Tightened Stop-Loss Check
         is_loss_exceeded = loss_cents >= stop_loss_threshold_cents
         is_below_floor = current_price <= 30
 
@@ -129,16 +210,19 @@ class BaseTradingClient(ABC):
                 return {
                     "triggered": True,
                     "side": side,
+                    "action": "stop_loss_sold",
                     "loss_cents": loss_cents,
                     "exit_price": current_price,
                 }
 
             self.cancel_and_verify_resting_orders(ticker)
             self.execute_liquidation(ticker, side, position_count, current_price)
+            self.clear_profit_floor(ticker)
             log.info(f"{LogTag.STOP_LOSS_TRIGGERED.value} [{self.exchange_name}] Executed stop-loss liquidation for {ticker} at {current_price}¢.")
             return {
                 "triggered": True,
                 "side": side,
+                "action": "stop_loss_sold",
                 "loss_cents": loss_cents,
                 "exit_price": current_price,
             }
@@ -160,6 +244,7 @@ class BaseTradingClient(ABC):
         """
         pos = self.get_market_position(ticker)
         if pos is None:
+            self.clear_profit_floor(ticker)
             return {"triggered": False}
 
         side = pos["side"]
@@ -196,16 +281,19 @@ class BaseTradingClient(ABC):
                 return {
                     "triggered": True,
                     "side": side,
+                    "action": "early_loss_cut",
                     "loss_cents": loss_cents,
                     "exit_price": current_price,
                 }
 
             self.cancel_and_verify_resting_orders(ticker)
             self.execute_liquidation(ticker, side, position_count, current_price)
+            self.clear_profit_floor(ticker)
             log.info(f"{LogTag.EARLY_CUT_LOSS_TRIGGERED.value} [{self.exchange_name}] Liquidated {ticker} ({side.upper()}) position early at {current_price}¢ ({reason}).")
             return {
                 "triggered": True,
                 "side": side,
+                "action": "early_loss_cut",
                 "loss_cents": loss_cents,
                 "exit_price": current_price,
             }

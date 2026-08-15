@@ -28,15 +28,21 @@ How this bot makes smart decisions:
      * If Bitcoin is currently BELOW the strike target, we only allow 'NO' buys.
      * If it's a dead heat (within ±0.05%), both sides are permitted.
 
-4. Smart Risk Management (Stop-Loss & Take-Profit):
+4. Dynamic Price Ranges & Empirical Calibration:
+   - Minute 00 Entry: Broad buy ceiling up to 55¢ (e.g. 35¢–55¢) to maximize trade volume and collect
+     rich historical PnL data for continuous MongoDB calibration.
+   - Minute 05 Entry: Tightened buy ceiling up to 45¢ (e.g. 40¢–45¢) to account for decay in remaining time.
+
+5. Smart Risk Management (Stop-Loss, Take-Profit & Trailing Profit Floor):
    - Automatic Profit Taking: Whenever we buy a contract, we immediately put in an Auto-Sell limit order
      at 82¢ (or 76¢ at the 5-min mark) to lock in profit before expiration.
    - Early Cut-Loss (:05 mark): If a position bought at :00 drops below 40¢, we sell early to cut losses.
    - Stop-Loss (:10 mark): If our position is losing 10¢ or drops to <= 30¢, we sell immediately to protect capital.
-   - Let Winners Run: If our position is winning big (>= 70¢ at the 10-min mark), we cancel the 82¢ auto-sell
-     and let it run to collect the full 100¢ ($1.00) payout at expiration!
+   - Let Winners Run with Trailing Profit Floor (:10 mark): If our position is winning big (>= 70¢), we cancel
+     the 82¢ auto-sell and arm a trailing profit floor at (current_price - 10¢, e.g. 60¢) that ratchets upward,
+     letting winners run to collect the full 100¢ ($1.00) payout while locking in guaranteed profit if price reverses!
 
-5. Persistent Connections & Resource Protection:
+6. Persistent Connections & Resource Protection:
    - Exchange clients and HTTP sessions are initialized ONCE and kept alive across 24/7 background operation.
    - This prevents socket/connection leaks, rate-limit throttling, and unnecessary authentication overhead.
 """
@@ -233,7 +239,7 @@ def determine_counterfactual_outcome(
         return "pending_settlement"
 
     won = (trade_side.lower() == winning_side)
-    if action_type in ("stop_loss_sold", "early_loss_cut"):
+    if action_type in ("stop_loss_sold", "early_loss_cut", "profit_floor_sold"):
         return "sold_early_would_have_won" if won else "sl_cap_saved"
     if action_type == "take_profit_sold":
         return "tp_full_win" if won else "sold_early_saved_from_loss"
@@ -378,9 +384,10 @@ def process_single_market(
     trade_details = None
 
     # -----------------------------------------------------------------------
-    # Step 4A: Stop-Loss Evaluation (:10, :25, :40, :55)
-    # At minute 10 of the 15-minute contract, check if active positions are losing.
+    # Step 4A: Stop-Loss & Profit-Floor Evaluation (:10, :25, :40, :55)
+    # At minute 10 of the 15-minute contract, check if active positions are losing or hit profit floor.
     # If a position has lost >= 10¢ or dropped to <= 30¢, sell immediately to cut loss.
+    # If an armed profit floor was hit, sell immediately to lock in profit.
     # -----------------------------------------------------------------------
     if is_stop_loss_interval:
         sl_res = client.evaluate_and_execute_stop_loss(
@@ -394,16 +401,21 @@ def process_single_market(
             trade_executed = True
             sl_side = sl_res.get("side", "yes")
             ex_name = getattr(client, "exchange_name", "Exchange")
+            action_name = sl_res.get("action", "stop_loss_sold")
             trade_details = {
                 "ex": ex_name.lower(),
-                "action": "stop_loss_sold",
+                "action": action_name,
                 "side": sl_side,
                 "exit_price": sl_res.get("exit_price"),
                 "loss_cents": sl_res.get("loss_cents"),
                 "outcome": determine_counterfactual_outcome(
-                    sl_side, "stop_loss_sold", spot_price, target_price, market.get("result")
+                    sl_side, action_name, spot_price, target_price, market.get("result")
                 ),
             }
+            if "profit_locked_cents" in sl_res:
+                trade_details["profit_locked_cents"] = sl_res["profit_locked_cents"]
+            if "profit_floor_cents" in sl_res:
+                trade_details["profit_floor_cents"] = sl_res["profit_floor_cents"]
 
     # -----------------------------------------------------------------------
     # Step 4B: Buy Strategy & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
@@ -444,11 +456,12 @@ def process_single_market(
 
         # Position Gates & Entry Evaluation
         ex_name = getattr(client, "exchange_name", "Exchange")
+        has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
         if cut_loss_executed:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] 5-Min Cut-Loss executed for {ticker}. Skipping buy evaluation.")
         elif pos is not None:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
-            if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not dry_run:
+            if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
                 client.place_take_profit_order(
                     ticker=ticker,
                     side=pos["side"],
