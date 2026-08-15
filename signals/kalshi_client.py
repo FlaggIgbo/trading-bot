@@ -712,6 +712,8 @@ class KalshiClient(BaseTradingClient):
             "self_trade_prevention_type": "taker_at_cross",
         }
         buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        # Record the exact price we paid into our bot's memory
+        self.set_entry_price(ticker, effective_buy_cents)
 
         # Check if filled immediately
         fill_count = float(
@@ -877,35 +879,95 @@ class KalshiClient(BaseTradingClient):
         return False
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
-        """Executes a market liquidation sell order on Kalshi for position."""
+        """
+        Executes an immediate True Taker market liquidation sell order on Kalshi.
+
+        High School Explanation:
+        -------------------------
+        When our stop-loss or profit-floor triggers, we want to SELL RIGHT NOW so we don't
+        risk losing 100% of our money when the 15-minute contract ends.
+
+        If we placed a regular limit order, it might sit waiting on the order book if buyers
+        are offering less than our asking price.
+
+        To guarantee an immediate fill against the best available buyer (taker execution):
+        1. When selling YES contracts:
+           - We offer to sell at 1¢ ($0.01).
+           - Kalshi automatically matches our order with the highest existing buyer (e.g. 35¢ or 25¢).
+           - This is called 'price improvement' and gives us an instant fill at the best bid!
+        2. When selling NO contracts:
+           - In Kalshi's event order model, selling NO is done by placing a bid on YES up to 99¢ ($0.99).
+           - Kalshi matches this against the best available NO buyer immediately!
+        """
         now_ms = int(time.time() * 1000)
-        exit_buffer_cents = 2
-        aggressive_sell_cents = max(1, current_price - exit_buffer_cents)
-        if side == "yes":
+        side_clean = side.lower()
+
+        if side_clean == "yes":
+            # Sell YES immediately: ask at 1¢ to match the highest existing bid
             sell_payload = {
                 "ticker": ticker,
                 "client_order_id": f"liq_yes_{ticker}_{now_ms}",
                 "side": "ask",
                 "count": str(count),
-                "price": f"0.{aggressive_sell_cents:02d}00",
-                "time_in_force": "good_till_canceled",
+                "price": "0.0100",
+                "time_in_force": "immediate_or_cancel",
                 "self_trade_prevention_type": "taker_at_cross",
             }
         else:
+            # Sell NO immediately: bid on YES at 99¢ to match the highest existing NO buyer
             sell_payload = {
                 "ticker": ticker,
                 "client_order_id": f"liq_no_{ticker}_{now_ms}",
                 "side": "bid",
                 "count": str(count),
-                "price": f"0.{(100 - aggressive_sell_cents):02d}00",
-                "time_in_force": "good_till_canceled",
+                "price": "0.9900",
+                "time_in_force": "immediate_or_cancel",
                 "self_trade_prevention_type": "taker_at_cross",
             }
+
         try:
             res = self.post("/portfolio/events/orders", payload=sell_payload)
-            log.info(f"✅ Executed liquidation exit order for {ticker}: {res}")
+            log.info(f"✅ Executed immediate taker liquidation for {ticker} ({side_clean.upper()} x{count}): {res}")
             return res
         except Exception as error:
-            log.error(f"❌ Failed to execute liquidation exit order for {ticker}: {error}")
-            return {}
+            # Fallback: if exchange prefers good_till_canceled for price-improved taker orders
+            log.warning(f"Immediate IOC taker liquidation attempt for {ticker} had response/error: {error}. Retrying with GTC...")
+            sell_payload["time_in_force"] = "good_till_canceled"
+            try:
+                res = self.post("/portfolio/events/orders", payload=sell_payload)
+                log.info(f"✅ Executed fallback taker liquidation for {ticker}: {res}")
+                return res
+            except Exception as err2:
+                log.error(f"❌ Failed to execute liquidation exit order for {ticker}: {err2}")
+                return {}
+
+    def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
+        """
+        Submits an immediate limit/taker buy order to Kalshi:
+        - When buying YES: Places a bid on YES at `price_cents` (e.g. 73¢)
+        - When buying NO: Places an ask on YES at `100 - price_cents` (e.g. 27¢)
+        """
+        side_clean = side.lower()
+        now_ms = int(time.time() * 1000)
+        clamped_cents = max(1, min(99, price_cents))
+
+        if side_clean == "yes":
+            event_side = "bid"
+            price_str = f"0.{clamped_cents:02d}00"
+        else:
+            event_side = "ask"
+            price_str = f"0.{(100 - clamped_cents):02d}00"
+
+        buy_payload = {
+            "ticker": ticker,
+            "client_order_id": f"rebuy_{side_clean}_{ticker}_{now_ms}",
+            "side": event_side,
+            "count": str(count),
+            "price": price_str,
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+        res = self.post("/portfolio/events/orders", payload=buy_payload)
+        self.set_entry_price(ticker, clamped_cents)
+        return res
 

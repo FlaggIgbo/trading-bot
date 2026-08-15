@@ -28,19 +28,27 @@ How this bot makes smart decisions:
      * If Bitcoin is currently BELOW the strike target, we only allow 'NO' buys.
      * If it's a dead heat (within ±0.05%), both sides are permitted.
 
-4. Dynamic Price Ranges & Empirical Calibration:
-   - Minute 00 Entry: Broad buy ceiling up to 55¢ (e.g. 35¢–55¢) to maximize trade volume and collect
-     rich historical PnL data for continuous MongoDB calibration.
-   - Minute 05 Entry: Tightened buy ceiling up to 45¢ (e.g. 40¢–45¢) to account for decay in remaining time.
+4. Dynamic Price Ranges & Empirical Calibration (MongoDB Data-Driven):
+   - Rather than using static hardcoded prices for all coins, our buy/bid price ranges (min_buy, max_buy)
+     and take-profit sell targets (e.g. 76¢–85¢) are dynamically picked and calibrated directly from
+     historical trade performance and volatility data stored in MongoDB Atlas (auto-refreshed every 6 hours).
+   - Minute 00 Entry: Broad buy ceiling up to 55¢ (e.g. 35¢–55¢) to capture early high-EV entries.
+   - Minute 05 Entry: Tightened buy ceiling up to 45¢ (e.g. 40¢–45¢) to account for time decay.
+   - High-volatility assets (like ZEC and NEAR) automatically receive deeper buy discounts and higher
+     take-profit sell targets tailored from MongoDB analytics.
 
-5. Smart Risk Management (Stop-Loss, Take-Profit & Trailing Profit Floor):
-   - Automatic Profit Taking: Whenever we buy a contract, we immediately put in an Auto-Sell limit order
-     at 82¢ (or 76¢ at the 5-min mark) to lock in profit before expiration.
-   - Early Cut-Loss (:05 mark): If a position bought at :00 drops below 40¢, we sell early to cut losses.
-   - Stop-Loss (:10 mark): If our position is losing 10¢ or drops to <= 30¢, we sell immediately to protect capital.
-   - Let Winners Run with Trailing Profit Floor (:10 mark): If our position is winning big (>= 70¢), we cancel
-     the 82¢ auto-sell and arm a trailing profit floor at (current_price - 10¢, e.g. 60¢) that ratchets upward,
-     letting winners run to collect the full 100¢ ($1.00) payout while locking in guaranteed profit if price reverses!
+5. Smart Risk Management (Stop-Loss, Auto-Sell Take-Profit & 12.5-Min Endgame Check):
+   - Automatic Profit Taking: Whenever we buy a contract (or hold an active position without a resting TP),
+     we immediately put in a resting Auto-Sell limit order at the dynamic take-profit target (e.g. 82¢, or 76¢ at the 5-min mark)
+     so the exchange automatically locks in profit when reached.
+   - 10-Minute Winner Roll & Stop-Loss (:10 mark):
+      * If winning big (>= 70¢ / in profit): We sell immediately at the Bid price to bank realized profit in cash,
+        and immediately re-buy 1 contract at current Ask price to reset cost basis and let THAT run to 100¢ ($1.00 payout)!
+      * If losing >= 10¢ or dropping to <= 30¢, we execute an immediate taker sell to cut losses.
+    - 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration):
+      We inspect all active holdings (including positions re-bought at :10). If we are losing (current_price < entry_price
+      or price < dynamic MongoDB endgame floor, e.g. < 25¢), we liquidate immediately via taker sell to salvage capital
+      and prevent losing accumulated capital gains or expiring at 0¢!
 
 6. Persistent Connections & Resource Protection:
    - Exchange clients and HTTP sessions are initialized ONCE and kept alive across 24/7 background operation.
@@ -114,6 +122,45 @@ def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> floa
         wait_seconds += 300.0
 
     return max(15.0, wait_seconds)
+
+
+def calculate_seconds_until_next_checkpoint(offset_seconds: float = 30.0) -> float:
+    """
+    Calculates exact seconds to sleep until the NEXT scheduled checkpoint in the 15-minute cycle:
+    - Minute :00:30 (Maker Buy Entry & Auto-Sell TP setup)
+    - Minute :05:30 (Maker Buy Entry & 5-Min Cut-Loss)
+    - Minute :10:30 (10-Min Stop-Loss & Let-Winners-Run TP cancellation)
+    - Minute :12:30 (12.5-Min Endgame Check: 2.5m before expiration, sell if losing to salvage capital)
+    """
+    now = datetime.now(timezone.utc)
+    current_minute = now.minute
+
+    # Checkpoint minutes within each 15-minute block
+    block_checkpoints = (0, 5, 10, 12)
+    block_start_minute = (current_minute // 15) * 15
+
+    candidates = []
+    # Generate candidate timestamps across current and next 15m blocks
+    for block_offset in (0, 15):
+        for cp in block_checkpoints:
+            target_min = block_start_minute + block_offset + cp
+            target_hour_inc = target_min // 60
+            normalized_min = target_min % 60
+            dt = now.replace(minute=normalized_min, second=int(offset_seconds), microsecond=0)
+            if target_hour_inc > 0:
+                dt = dt + timedelta(hours=target_hour_inc)
+            candidates.append(dt)
+
+    # Pick the earliest candidate that is at least 15 seconds in the future
+    future_candidates = [c for c in candidates if (c - now).total_seconds() >= 15.0]
+    next_dt = min(future_candidates) if future_candidates else candidates[-1]
+
+    wait_seconds = (next_dt - now).total_seconds()
+    return max(15.0, wait_seconds)
+
+
+# Alias for backward compatibility
+calculate_seconds_until_next_check = calculate_seconds_until_next_checkpoint
 
 
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
@@ -239,8 +286,10 @@ def determine_counterfactual_outcome(
         return "pending_settlement"
 
     won = (trade_side.lower() == winning_side)
-    if action_type in ("stop_loss_sold", "early_loss_cut", "profit_floor_sold"):
+    if action_type in ("stop_loss_sold", "early_loss_cut", "profit_floor_sold", "endgame_loss_cut"):
         return "sold_early_would_have_won" if won else "sl_cap_saved"
+    if action_type == "winner_rolled_rebuy":
+        return "winner_roll_won" if won else "winner_roll_cut_loss"
     if action_type == "take_profit_sold":
         return "tp_full_win" if won else "sold_early_saved_from_loss"
 
@@ -372,6 +421,7 @@ def process_single_market(
     # Strategy Concept: Instead of hardcoded one-size-fits-all numbers, we ask
     # our in-memory engine for the optimal buy & sell targets for THIS specific coin and timing mark!
     minute_into_market = minute_past_hour % 15
+    is_12_5min_mark = (minute_into_market == 12)
     is_stop_loss_interval = (minute_into_market == 10)
     is_5min_mark = (minute_into_market == 5)
 
@@ -384,18 +434,64 @@ def process_single_market(
     trade_details = None
 
     # -----------------------------------------------------------------------
-    # Step 4A: Stop-Loss & Profit-Floor Evaluation (:10, :25, :40, :55)
-    # At minute 10 of the 15-minute contract, check if active positions are losing or hit profit floor.
-    # If a position has lost >= 10¢ or dropped to <= 30¢, sell immediately to cut loss.
-    # If an armed profit floor was hit, sell immediately to lock in profit.
+    # Step 4A: 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration)
+    # At minute 12.5: If we are losing (loss > 0 or price < dynamic endgame floor e.g. < 25¢),
+    # liquidate immediately so we don't lose all capital gains or suffer a 0¢ expiration loss!
+    # If winning, let it run to 100¢ ($1.00 settlement).
     # -----------------------------------------------------------------------
-    if is_stop_loss_interval:
-        sl_res = client.evaluate_and_execute_stop_loss(
+    if is_12_5min_mark:
+        sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
+        sellable_no_price = quotes["no_bid"] if quotes["no_bid"] is not None else no_price_cents
+        endgame_floor = dynamic_filters.get("endgame_12_5_floor", 25)
+
+        eg_res = client.evaluate_and_execute_12_5min_endgame_check(
             ticker=ticker,
-            current_yes_price=yes_price_cents,
-            current_no_price=no_price_cents,
+            current_yes_price=sellable_yes_price,
+            current_no_price=sellable_no_price,
             dry_run=dry_run,
-            stop_loss_threshold_cents=10,
+            endgame_floor=endgame_floor,
+        )
+        if isinstance(eg_res, dict) and eg_res.get("triggered"):
+            trade_executed = True
+            eg_side = eg_res.get("side", "yes")
+            ex_name = getattr(client, "exchange_name", "Exchange")
+            action_name = eg_res.get("action", "endgame_loss_cut")
+            trade_details = {
+                "ex": ex_name.lower(),
+                "action": action_name,
+                "side": eg_side,
+                "exit_price": eg_res.get("exit_price"),
+                "loss_cents": eg_res.get("loss_cents"),
+                "outcome": determine_counterfactual_outcome(
+                    eg_side, action_name, spot_price, target_price, market.get("result")
+                ),
+            }
+            if "profit_locked_cents" in eg_res:
+                trade_details["profit_locked_cents"] = eg_res["profit_locked_cents"]
+
+    # -----------------------------------------------------------------------
+    # Step 4B: 10-Minute Winner-Roll & Stop-Loss Evaluation (:10 mark)
+    # At minute 10:
+    # 1. Winning positions (>= 70¢ / in profit): SELL at Bid to bank realized profit,
+    #    and immediately RE-BUY at Ask price to let that new position run to 100¢ ($1.00)!
+    # 2. Losing positions: Execute immediate stop-loss liquidation.
+    # -----------------------------------------------------------------------
+    elif is_stop_loss_interval:
+        sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
+        sellable_no_price = quotes["no_bid"] if quotes["no_bid"] is not None else no_price_cents
+
+        sl_threshold = dynamic_filters.get("sl_threshold", 10)
+        sl_floor = dynamic_filters.get("sl_floor", 30)
+
+        sl_res = client.evaluate_and_execute_10min_strategy(
+            ticker=ticker,
+            current_yes_bid=sellable_yes_price,
+            current_no_bid=sellable_no_price,
+            current_yes_ask=quotes.get("yes_ask"),
+            current_no_ask=quotes.get("no_ask"),
+            dry_run=dry_run,
+            stop_loss_threshold_cents=sl_threshold,
+            price_floor=sl_floor,
         )
         if isinstance(sl_res, dict) and sl_res.get("triggered"):
             trade_executed = True
@@ -407,18 +503,19 @@ def process_single_market(
                 "action": action_name,
                 "side": sl_side,
                 "exit_price": sl_res.get("exit_price"),
-                "loss_cents": sl_res.get("loss_cents"),
                 "outcome": determine_counterfactual_outcome(
                     sl_side, action_name, spot_price, target_price, market.get("result")
                 ),
             }
+            if "loss_cents" in sl_res:
+                trade_details["loss_cents"] = sl_res["loss_cents"]
             if "profit_locked_cents" in sl_res:
                 trade_details["profit_locked_cents"] = sl_res["profit_locked_cents"]
-            if "profit_floor_cents" in sl_res:
-                trade_details["profit_floor_cents"] = sl_res["profit_floor_cents"]
+            if "rebuy_price_cents" in sl_res:
+                trade_details["rebuy_price_cents"] = sl_res["rebuy_price_cents"]
 
     # -----------------------------------------------------------------------
-    # Step 4B: Buy Strategy & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
+    # Step 4C: Buy Strategy & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
     # Exclusively gated: We do NOT evaluate new buys if Stop-Loss just liquidated this market.
     # -----------------------------------------------------------------------
     elif is_trading_interval:
@@ -431,11 +528,12 @@ def process_single_market(
         # 5-Minute Early Cut-Loss Check: Evaluate all active positions at the 5-minute mark
         if pos is not None and is_5min_mark:
             side = pos["side"]
+            cut_threshold = dynamic_filters.get("cut_5min", 40)
             cut_res = client.evaluate_and_execute_5min_cut_loss(
                 ticker=ticker,
                 current_yes_price=yes_price_cents,
                 current_no_price=no_price_cents,
-                min_price_threshold=40,
+                min_price_threshold=cut_threshold,
                 dry_run=dry_run,
             )
             if isinstance(cut_res, dict) and cut_res.get("triggered"):
@@ -471,13 +569,33 @@ def process_single_market(
         elif client.has_existing_position_or_order(ticker):
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
-            # Screen for candidates within target buy price and aligned with Spot Momentum
+            # Screen for candidates within target buy price, avoiding low-EV middle dead zone, and aligned with Spot Momentum
+            avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
+            mid_min = dynamic_filters.get("mid_zone_min", 37)
+            mid_max = dynamic_filters.get("mid_zone_max", 43)
+
             candidate_sides = []
             for side, p_cents, aligned in [
                 ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
                 ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
             ]:
                 if p_cents is not None and min_buy_price <= p_cents <= max_buy_price and aligned:
+                    # Recommendation 3: Avoid 37¢-43¢ middle zone unless spot momentum is strong
+                    in_mid_zone = (mid_min <= p_cents <= mid_max)
+                    if avoid_mid_zone and in_mid_zone:
+                        # Check if spot is strongly in the money (> 0.08% dist)
+                        pct_dist_val = 0.0
+                        if spot_price and target_price and target_price > 0:
+                            pct_dist_val = ((spot_price - target_price) / target_price) * 100.0
+
+                        is_strong_momentum = (pct_dist_val >= 0.08) if side == "yes" else (pct_dist_val <= -0.08)
+                        if not is_strong_momentum:
+                            log.info(
+                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
+                                f"falls in low-EV middle band ({mid_min}¢-{mid_max}¢) without strong spot edge. Skipping."
+                            )
+                            continue
+
                     candidate_sides.append((side, p_cents))
 
             if candidate_sides:
@@ -540,7 +658,8 @@ def run_pipeline_pass(
 
     minute_into_market = current_minute % 15
     is_trading_interval = (minute_into_market in (0, 5)) or force_trade_mark
-    is_stop_loss_interval = (minute_into_market == 10) and not force_trade_mark
+    is_10min_interval = (minute_into_market == 10) and not force_trade_mark
+    is_12_5min_interval = (minute_into_market == 12) and not force_trade_mark
 
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {now_utc.isoformat()} (Minute :{current_minute:02d}:{now_utc.second:02d})")
@@ -549,7 +668,8 @@ def run_pipeline_pass(
     log.info(
         "--> INTERVAL: "
         + ("BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)" if is_trading_interval
-           else "STOP-LOSS EVALUATION & DATA COLLECTION MARK (:10, :25...)" if is_stop_loss_interval
+           else "10-MIN STOP-LOSS & LET-RUN EVALUATION MARK (:10, :25, :40, :55)" if is_10min_interval
+           else "12.5-MIN ENDGAME SAFETY CHECK MARK (:12.5, :27.5, :42.5, :57.5)" if is_12_5min_interval
            else "DATA COLLECTION ONLY MARK")
     )
     log.info("=================================================================")
@@ -635,7 +755,12 @@ def run_pipeline_pass(
             )
 
     # Save valid market snapshots to MongoDB Atlas
-    valid_snapshots = [s for s in snapshots_to_save if s.get("y") is not None or s.get("n") is not None]
+    # We save snapshots on regular checkpoints (:00, :05, :10, :12.5) OR whenever a trade occurs to keep database tiny
+    is_standard_save_mark = (minute_into_market in (0, 5, 10, 12))
+    valid_snapshots = [
+        s for s in snapshots_to_save
+        if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
+    ]
     if valid_snapshots and not dry_run:
         log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
         save_market_snapshots(valid_snapshots)
@@ -670,27 +795,17 @@ def main():
         return
 
     log.info("Starting Trading Bot in Continuous Render Background Worker Mode...")
-    last_executed_bucket: tuple[int, int, int, int, int] | None = None
 
     while True:
         try:
-            now = datetime.now(timezone.utc)
-            current_bucket = (now.year, now.month, now.day, now.hour, now.minute // 5)
-
-            # Guard against double-executing within the same 5-minute bucket
-            if current_bucket != last_executed_bucket or force_trade_mark:
-                last_executed_bucket = current_bucket
-                run_pipeline_pass(clients=persistent_clients, dry_run=dry_run, force_trade_mark=force_trade_mark)
-            else:
-                log.warning("Already executed pass for this 5-minute bucket. Waiting for next mark...")
-
+            run_pipeline_pass(clients=persistent_clients, dry_run=dry_run, force_trade_mark=force_trade_mark)
         except Exception as error:
             log.error(f"Unexpected error in loop pass: {error}")
 
-        sleep_seconds = calculate_seconds_until_next_5min_mark(offset_seconds=30.0)
-        next_mark_min = (datetime.now(timezone.utc).minute // 5 * 5 + 5) % 60
+        sleep_seconds = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+        target_utc = datetime.now(timezone.utc) + timedelta(seconds=sleep_seconds)
         log.info(
-            f"\n{LogTag.CLOCK_ALIGNMENT.value} Sleeping {sleep_seconds:.1f}s until 30s past next 5-minute mark (:{next_mark_min:02d}:30)...\n"
+            f"\n{LogTag.CLOCK_ALIGNMENT.value} Sleeping {sleep_seconds:.1f}s until next checkpoint at UTC {target_utc.strftime('%H:%M:%S')}...\n"
         )
         time.sleep(sleep_seconds)
 

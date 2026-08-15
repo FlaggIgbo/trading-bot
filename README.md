@@ -27,19 +27,23 @@ A high-performance Python trading bot for 15-minute crypto prediction markets on
 - **Minute 00 Entry**: Targets **82¢** take‑profit (15 minutes remaining).
 - **Minute 05 Entry**: Targets **76¢** take‑profit (10 minutes remaining).
 - **Fill‑Gated Execution**: Take‑profit orders are placed only after buy fill confirmation to avoid phantom resting orders.
-- **Run to 100¢ Settlement with Trailing Profit Floor**: If position price reaches ≥ 70¢ at t = 10m, the resting take‑profit order is canceled to capture the full 100¢ payout while simultaneously arming a **Trailing Profit Floor at `current_price - 10¢` (e.g. 60¢)** to protect accumulated gains against late reversals.
 
 ### 4. 5-Minute Early Cut-Loss (Sub-40¢ Liquidation) ✂️
 - Evaluated at `:05`, `:20`, `:35`, `:50` past the hour.
 - If a contract bought at the `:00` mark has dropped below the **40¢–49¢ range (< 40¢)** at minute 05, the bot cancels any resting take-profit limit orders and liquidates the position immediately to minimize loss.
 
-### 5. 10‑Minute Stop‑Loss & Trailing Profit Floor Execution 🛑💰
+### 5. 10‑Minute Winner Roll & Stop‑Loss Execution 🔄🛑
 - Evaluated at `:10`, `:25`, `:40`, `:55` past the hour.
-- Directly inspects portfolio contracts (`position_fp > 0` for `YES`, `position_fp < 0` for `NO`) and dynamic cost basis.
-- **Trailing Profit Floor Trigger**: If an armed profit floor exists and market drops to/below it, liquidates immediately to lock in net profit.
-- **Stop-Loss Trigger**: For un-promoted positions, liquidates immediately if **loss ≥ 10¢** or if position price drops **≤ 30¢**.
+- **Winner Roll & Re-Buy (≥ 70¢)**: Cancels resting take-profit orders and **sells the winning position immediately at Bid price** to **bank/lock in realized profit** in cash! Simultaneously **re-buys 1 contract at current Ask price** to reset cost basis and **lets THAT newly re-bought position run toward 100¢ ($1.00 settlement)**.
+- **Stop-Loss Trigger**: For losing positions, liquidates immediately if **loss ≥ 10¢** or if position price drops **≤ 30¢**.
 
-### 6. Risk Controls & Hygiene 🛡️
+### 6. 12.5-Minute Endgame Safety Check (Dynamic Sub-Settlement Liquidation) ⏳🛑
+- Evaluated at `:12:30`, `:27:30`, `:42:30`, `:57:30` (exactly 2.5 minutes before contract expiration).
+- Checks ALL current holdings (including positions re-bought at :10):
+  - **Losing Positions**: If the market is losing (`current_price < entry_price` or `current_price < endgame_12_5_floor` [dynamically calibrated from MongoDB, default 25¢]), liquidates immediately via taker execution to salvage capital and prevent losing all capital gains or settling at 0¢.
+  - **Winning Positions**: If in profit (`current_price ≥ entry_price` and `≥ 25¢`), holds position through the final 2.5 minutes to collect the **full 100¢ ($1.00 payout)** at expiration!
+
+### 7. Risk Controls & Hygiene 🛡️
 - **Open Position Gate**: Skips markets with existing open positions or active orders.
 - **Stale Buy Pruning**: Cancels unfilled resting buy orders at the start of each interval while preserving take‑profit sell orders.
 - **Cheapest Entry Tiebreaker**: In dead‑heat conditions where both sides qualify, buy the lower‑priced side for maximum EV.
@@ -88,3 +92,12 @@ The bot queries native exchange REST API endpoints on each pass to log and store
   💰 [PORTFOLIO PNL] [Kalshi] Cash: $500.00 | Port Value: $520.00 | Settled PnL: +$14.20 (+1420¢ across 8 mkts) | Active: 2 pos ($0.80)
   💰 [PORTFOLIO PNL] [Gemini] Cash: $350.00 | Port Value: $350.00 | Settled PnL: $0.00 (0¢ across 0 mkts) | Active: 0 pos ($0.00)
   ```
+
+---
+
+## 📝 Roadmap & TODO
+
+- [ ] **Multi-Contract Position Sizing**: Add support for buying and managing more than 1 contract per opportunity (e.g. dynamic position sizing based on account equity, confidence score, or fixed quantity parameters).
+- [ ] **Expansion to Additional Asset Classes & Market Timeframes**:
+  - **Stock Indices**: Add support for index prediction markets on Kalshi (e.g. S&P 500 / `INX` / `SPY`, Nasdaq 100 / `NDX`).
+  - **Extended Time horizons**: Expand beyond 15-minute intervals to support hourly crypto contracts (`1H`), daily closes, and macro event markets.

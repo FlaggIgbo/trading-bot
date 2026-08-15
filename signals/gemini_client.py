@@ -390,6 +390,8 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             "type": "exchange limit",
         })
         self._positions_cache.pop(ticker, None)
+        self.clear_profit_floor(ticker)
+        self.clear_entry_price(ticker)
         return res
 
     def buy_and_set_take_profit(
@@ -416,6 +418,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             "count": count,
             "entry_price_cents": buy_price_cents,
         }
+        self.set_entry_price(ticker, buy_price_cents)
         self._orders_cache.setdefault(ticker, []).append({
             "type": "take_profit",
             "side": "sell",
@@ -442,5 +445,25 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         return {"take_profit_cents": take_profit_cents}
 
 
+    def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
+        """Executes a buy order on Gemini."""
+        payload = {
+            "symbol": ticker,
+            "amount": str(count),
+            "price": f"{(price_cents / 100.0):.2f}",
+            "side": "buy",
+            "type": "exchange limit",
+        }
+        res = self._post("/v1/order/new", payload)
+        self._positions_cache[ticker] = {
+            "side": side.lower(),
+            "count": count,
+            "entry_price_cents": price_cents,
+        }
+        self.set_entry_price(ticker, price_cents)
+        return res
+
+
 # Primary Gemini client alias
 GeminiClient = GeminiTradingClient
+

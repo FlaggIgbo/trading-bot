@@ -12,6 +12,7 @@ from database import save_portfolio_pnl, save_settlements
 from main import (
     batch_fetch_crypto_spot_prices,
     calculate_seconds_until_next_5min_mark,
+    calculate_seconds_until_next_checkpoint,
     extract_asset_symbol,
     extract_price_cents,
     is_spot_momentum_aligned,
@@ -132,11 +133,12 @@ class TestClientInterfaces(unittest.TestCase):
     def test_stop_loss_exclusive_gating(self):
         client = MagicMock()
         client.exchange_name = "Gemini"
-        client.evaluate_and_execute_stop_loss.return_value = {
+        client.evaluate_and_execute_10min_strategy.return_value = {
             "triggered": True,
             "side": "yes",
             "loss_cents": 12,
             "exit_price": 28,
+            "action": "stop_loss_sold",
         }
 
         market = {
@@ -200,7 +202,7 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
         self.client = GeminiTradingClient()
         self.ticker = "KXBTC15M-TEST"
 
-    def test_profit_floor_arming_at_70_cents(self):
+    def test_10min_strategy_rolls_winner_and_rebuys_at_ask(self):
         # Mock active YES position bought at 40¢
         self.client._positions_cache[self.ticker] = {
             "side": "yes",
@@ -208,71 +210,31 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
             "entry_price_cents": 40,
         }
 
-        # Evaluate at current price 72¢ (>= 70¢)
-        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel:
-            res = self.client.evaluate_and_execute_stop_loss(
-                ticker=self.ticker,
-                current_yes_price=72,
-                current_no_price=28,
-                dry_run=False,
-            )
-            self.assertFalse(res["triggered"])
-            self.assertEqual(res["action"], "canceled_tp_let_run")
-            self.assertEqual(res["profit_floor_cents"], 62)  # 72 - 10 = 62¢
-            self.assertTrue(self.client.has_profit_floor(self.ticker))
-            self.assertEqual(self.client.get_profit_floor(self.ticker), 62)
-            mock_cancel.assert_called_once_with(self.ticker)
-
-    def test_profit_floor_ratchet_upwards(self):
-        # Position arms at 70¢ -> floor 60¢
-        self.client._positions_cache[self.ticker] = {
-            "side": "yes",
-            "count": 1,
-            "entry_price_cents": 40,
-        }
-        self.client.set_profit_floor(self.ticker, 60)
-
-        # Price rises to 85¢ -> floor should ratchet up to 75¢
-        with patch.object(self.client, "cancel_and_verify_resting_orders"):
-            res = self.client.evaluate_and_execute_stop_loss(
-                ticker=self.ticker,
-                current_yes_price=85,
-                current_no_price=15,
-                dry_run=False,
-            )
-            self.assertFalse(res["triggered"])
-            self.assertEqual(res["profit_floor_cents"], 75)  # 85 - 10 = 75¢
-            self.assertEqual(self.client.get_profit_floor(self.ticker), 75)
-
-    def test_profit_floor_liquidation_trigger(self):
-        # Position armed with floor at 65¢ (entry at 40¢)
-        self.client._positions_cache[self.ticker] = {
-            "side": "yes",
-            "count": 1,
-            "entry_price_cents": 40,
-        }
-        self.client.set_profit_floor(self.ticker, 65)
-
-        # Market drops to 64¢ (<= 65¢)
+        # Evaluate at current bid 72¢, ask 74¢ (>= 70¢)
         with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
-             patch.object(self.client, "execute_liquidation") as mock_liquidate:
-            res = self.client.evaluate_and_execute_stop_loss(
+             patch.object(self.client, "execute_liquidation") as mock_liquidate, \
+             patch.object(self.client, "execute_buy") as mock_buy:
+            res = self.client.evaluate_and_execute_10min_strategy(
                 ticker=self.ticker,
-                current_yes_price=64,
-                current_no_price=36,
+                current_yes_bid=72,
+                current_no_bid=26,
+                current_yes_ask=74,
+                current_no_ask=28,
                 dry_run=False,
             )
             self.assertTrue(res["triggered"])
-            self.assertEqual(res["action"], "profit_floor_sold")
-            self.assertEqual(res["profit_locked_cents"], 24)  # 64 - 40 = 24¢ profit
-            self.assertEqual(res["exit_price"], 64)
-            # Ensure profit floor is cleared after exit
-            self.assertFalse(self.client.has_profit_floor(self.ticker))
+            self.assertEqual(res["action"], "winner_rolled_rebuy")
+            self.assertEqual(res["exit_price"], 72)
+            self.assertEqual(res["profit_locked_cents"], 32)  # 72 - 40 = 32¢ profit banked!
+            self.assertEqual(res["rebuy_price_cents"], 74)   # Re-bought at ask price (74¢)
             mock_cancel.assert_called_once_with(self.ticker)
-            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 64)
+            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 72)
+            mock_buy.assert_called_once_with(self.ticker, "yes", 1, 74)
+            # Entry price should now be updated to the re-buy price (74¢)
+            self.assertEqual(self.client.get_entry_price(self.ticker), 74)
 
     def test_standard_stop_loss_liquidation(self):
-        # Position bought at 42¢ with NO armed profit floor
+        # Position bought at 42¢
         self.client._positions_cache[self.ticker] = {
             "side": "yes",
             "count": 1,
@@ -282,10 +244,12 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
         # Market drops to 30¢ (loss = 12¢ >= 10¢ limit and price <= 30¢)
         with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
              patch.object(self.client, "execute_liquidation") as mock_liquidate:
-            res = self.client.evaluate_and_execute_stop_loss(
+            res = self.client.evaluate_and_execute_10min_strategy(
                 ticker=self.ticker,
-                current_yes_price=30,
-                current_no_price=70,
+                current_yes_bid=30,
+                current_no_bid=68,
+                current_yes_ask=32,
+                current_no_ask=70,
                 dry_run=False,
             )
             self.assertTrue(res["triggered"])
@@ -294,6 +258,207 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
             self.assertEqual(res["exit_price"], 30)
             mock_cancel.assert_called_once_with(self.ticker)
             mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 30)
+
+    def test_entry_price_tracking_and_cleanup(self):
+        # Test setting and clearing entry price
+        self.client.set_entry_price("TEST-TICKER", 54)
+        self.assertEqual(self.client.get_entry_price("TEST-TICKER"), 54)
+
+        self.client.clear_entry_price("TEST-TICKER")
+        self.assertIsNone(self.client.get_entry_price("TEST-TICKER"))
+
+    def test_kalshi_taker_liquidation_payloads(self):
+        with patch.object(KalshiClient, "__init__", return_value=None):
+            kalshi = KalshiClient()
+            kalshi.session = MagicMock()
+            kalshi._profit_floors = {}
+            kalshi._entry_prices = {}
+
+            with patch.object(kalshi, "post") as mock_post:
+                # Test YES liquidation produces immediate taker ask at 0.0100
+                kalshi.execute_liquidation("KXBTC15M-TEST", "yes", 2, 45)
+                mock_post.assert_called_once()
+                payload = mock_post.call_args[1]["payload"]
+                self.assertEqual(payload["ticker"], "KXBTC15M-TEST")
+                self.assertEqual(payload["side"], "ask")
+                self.assertEqual(payload["count"], "2")
+                self.assertEqual(payload["price"], "0.0100")
+                self.assertEqual(payload["time_in_force"], "immediate_or_cancel")
+
+            with patch.object(kalshi, "post") as mock_post:
+                # Test NO liquidation produces immediate taker bid on YES at 0.9900
+                kalshi.execute_liquidation("KXBTC15M-TEST", "no", 1, 30)
+                mock_post.assert_called_once()
+                payload = mock_post.call_args[1]["payload"]
+                self.assertEqual(payload["ticker"], "KXBTC15M-TEST")
+                self.assertEqual(payload["side"], "bid")
+                self.assertEqual(payload["count"], "1")
+                self.assertEqual(payload["price"], "0.9900")
+                self.assertEqual(payload["time_in_force"], "immediate_or_cancel")
+
+    def test_calculate_seconds_until_next_checkpoint_schedule(self):
+        # At 14:02:00 -> should sleep until 14:05:30 (210s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 2, 0, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+            self.assertEqual(sec, 210.0)
+
+        # At 14:05:35 -> should sleep until 14:10:30 (295s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 5, 35, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+            self.assertEqual(sec, 295.0)
+
+        # At 14:10:35 -> should sleep until 14:12:30 (115s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 10, 35, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+            self.assertEqual(sec, 115.0)
+
+        # At 14:12:35 -> should sleep until 14:15:30 (175s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 12, 35, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+            self.assertEqual(sec, 175.0)
+
+    def test_endgame_12_5min_losing_position_liquidates_below_floor(self):
+        # Re-bought at 74¢ at minute 10, now trading at 22¢ (< 25¢ dynamic floor) at 12.5m mark
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 74,
+        }
+
+        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
+             patch.object(self.client, "execute_liquidation") as mock_liquidate:
+            res = self.client.evaluate_and_execute_12_5min_endgame_check(
+                ticker=self.ticker,
+                current_yes_price=22,
+                current_no_price=78,
+                dry_run=False,
+                endgame_floor=25,
+            )
+            self.assertTrue(res["triggered"])
+            self.assertEqual(res["action"], "endgame_loss_cut")
+            self.assertEqual(res["loss_cents"], 52)
+            self.assertEqual(res["exit_price"], 22)
+            mock_cancel.assert_called_once_with(self.ticker)
+            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 22)
+
+    def test_endgame_12_5min_winning_position_holds_to_settlement(self):
+        # Re-bought at 74¢ at minute 10, now trading at 88¢ (profit = 14¢, > 25¢ floor) at 12.5m mark
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 74,
+        }
+
+        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
+             patch.object(self.client, "execute_liquidation") as mock_liquidate:
+            res = self.client.evaluate_and_execute_12_5min_endgame_check(
+                ticker=self.ticker,
+                current_yes_price=88,
+                current_no_price=12,
+                dry_run=False,
+                endgame_floor=25,
+            )
+            self.assertFalse(res["triggered"])
+            self.assertEqual(res["action"], "holding_winner")
+            mock_liquidate.assert_not_called()
+
+    def test_minute_12_process_single_market_evaluates_endgame(self):
+        client = MagicMock()
+        client.exchange_name = "Kalshi"
+        client.evaluate_and_execute_12_5min_endgame_check.return_value = {
+            "triggered": True,
+            "side": "yes",
+            "loss_cents": 12,
+            "exit_price": 20,
+            "action": "endgame_loss_cut",
+        }
+
+        market = {
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
+            "yes_ask": 22,
+            "yes_bid": 20,
+            "no_ask": 80,
+            "no_bid": 78,
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        now = datetime.now(timezone.utc)
+
+        # Minute 12 (% 15 == 12) -> is_12_5min_mark is True
+        snapshot = process_single_market(
+            market=market,
+            is_trading_interval=False,
+            client=client,
+            now_utc=now,
+            minute_past_hour=12,
+            spot_cache={"BTC": 59900.0},
+            dry_run=False,
+        )
+
+        client.evaluate_and_execute_12_5min_endgame_check.assert_called_once_with(
+            ticker="KXBTC15M-TEST",
+            current_yes_price=20,  # uses yes_bid (20¢)
+            current_no_price=78,   # uses no_bid (78¢)
+            dry_run=False,
+            endgame_floor=25,
+        )
+        self.assertIn("trd", snapshot)
+        self.assertEqual(snapshot["trd"]["action"], "endgame_loss_cut")
+
+    def test_minute_10_process_single_market_evaluates_10min_strategy(self):
+        client = MagicMock()
+        client.exchange_name = "Kalshi"
+        client.evaluate_and_execute_10min_strategy.return_value = {
+            "triggered": True,
+            "side": "yes",
+            "exit_price": 72,
+            "profit_locked_cents": 32,
+            "rebuy_price_cents": 74,
+            "action": "winner_rolled_rebuy",
+        }
+
+        market = {
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
+            "yes_ask": 74,
+            "yes_bid": 72,
+            "no_ask": 28,
+            "no_bid": 26,
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        now = datetime.now(timezone.utc)
+
+        # Minute 10 (% 15 == 10) -> is_stop_loss_interval is True
+        snapshot = process_single_market(
+            market=market,
+            is_trading_interval=False,
+            client=client,
+            now_utc=now,
+            minute_past_hour=10,
+            spot_cache={"BTC": 60100.0},
+            dry_run=False,
+        )
+
+        client.evaluate_and_execute_10min_strategy.assert_called_once_with(
+            ticker="KXBTC15M-TEST",
+            current_yes_bid=72,  # uses yes_bid (72¢)
+            current_no_bid=26,   # uses no_bid (26¢)
+            current_yes_ask=74,
+            current_no_ask=28,
+            dry_run=False,
+            stop_loss_threshold_cents=10,
+            price_floor=30,
+        )
+        self.assertIn("trd", snapshot)
+        self.assertEqual(snapshot["trd"]["action"], "winner_rolled_rebuy")
+        self.assertEqual(snapshot["trd"]["profit_locked_cents"], 32)
+        self.assertEqual(snapshot["trd"]["rebuy_price_cents"], 74)
 
 
 if __name__ == "__main__":

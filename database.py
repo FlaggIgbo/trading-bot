@@ -263,35 +263,51 @@ def save_settlements(settlements: list[dict]) -> int:
 # (at 00:00, 06:00, 12:00, 18:00 UTC) and automatically tunes the best buy & sell prices!
 # ===========================================================================
 
-DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int]]] = {
+DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | bool]]] = {
     "BTC": {
-        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
+        "00": {"min_buy": 32, "max_buy": 52, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "ETH": {
-        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
+        "00": {"min_buy": 32, "max_buy": 52, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "SOL": {
-        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
+        "00": {"min_buy": 32, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
+    "XRP": {
+        "00": {"min_buy": 30, "max_buy": 48, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
+    "DOGE": {
+        # High win-rate & mean-reverting: widen stop-loss & cut thresholds to prevent false alarm shakeouts
+        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
+    "BNB": {
+        # High win-rate & mean-reverting: widen stop-loss & cut thresholds to prevent false alarm shakeouts
+        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "ZEC": {
-        "00": {"min_buy": 30, "max_buy": 50, "tp": 85},  # High volatility: wider discount, higher TP
-        "05": {"min_buy": 37, "max_buy": 43, "tp": 78},
+        # High volatility: deeper discount floor, higher TP, adaptive stop loss
+        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "NEAR": {
-        "00": {"min_buy": 30, "max_buy": 50, "tp": 85},  # High volatility: wider discount, higher TP
-        "05": {"min_buy": 40, "max_buy": 45, "tp": 78},
+        # High volatility: deeper discount floor, higher TP, adaptive stop loss
+        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "DEFAULT": {
-        "00": {"min_buy": 35, "max_buy": 55, "tp": 82},
-        "05": {"min_buy": 40, "max_buy": 45, "tp": 76},
+        "00": {"min_buy": 32, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
 }
 
 # In-memory global cache variables (so the bot doesn't slow down by querying Mongo every 5 seconds)
-_DYNAMIC_PRICE_MAP_CACHE: dict[str, dict[str, dict[str, int]]] | None = None
+_DYNAMIC_PRICE_MAP_CACHE: dict[str, dict[str, dict[str, int | bool]]] | None = None
 _LAST_MAP_REFRESH_TIME: float = 0.0
 _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 
@@ -337,30 +353,36 @@ def should_refresh_dynamic_map(
 
 def calibrate_dynamic_price_map_from_db(
     max_history_hours: int = 48,
-) -> dict[str, dict[str, dict[str, int]]]:
+) -> dict[str, dict[str, dict[str, int | bool]]]:
     """
-    Reads recent trade data from MongoDB and calculates the smartest buy and sell prices.
+    Reads recent trade data from MongoDB and calculates the smartest buy, sell, and stop-loss parameters.
 
-    How the math works:
-    -------------------
-    Step 1 (Volatility):
-      - We measure how wildly each coin moves (standard deviation of % price swings).
-      - Wild coins (like ZEC/NEAR) get a cheaper buy ceiling so we don't buy during a drop,
-        and a higher sell target (e.g. 85¢) to capture big upswings.
-      - Steady coins (like BTC/BNB) use balanced numbers (35¢-55¢ at :00, 40¢-45¢ at :05, TP 82¢).
+    Quantitative Calibration Pipeline:
+    -----------------------------------
+    Step 1 (Volatility & Spread Profiling):
+      - Standard deviation of % moves from strike determines baseline pricing bands and TP targets.
+      - Wild coins (NEAR, ZEC, HYPE) enforce deeper buy discounts (min_buy 28¢) and wider TP (85¢).
+      - Stable coins (BTC, BNB, ETH) use standard balanced corridors.
 
-    Step 2 (Winning Trade History):
-      - We look at what prices actually won in past settlements.
-      - We set max_buy near the median winning price + 3¢.
-      - If an asset has 0 wins at high prices, we lower max_buy to 38¢ to stop overpaying.
+    Step 2 (Runway Timing & Theta Optimization - Recommendation 1):
+      - Minute :00 (15m runway) receives full allocation corridor (max_buy up to 52¢).
+      - Minute :05 (10m runway) has severe theta compression; strict max_buy ceiling clamped to <= 38¢
+        to eliminate negative-EV late entries.
 
-    Step 3 (Safety Guardrails):
-      - min_buy is always clamped between 25¢ and 42¢.
-      - max_buy is always clamped between 38¢ and 56¢ (:00 mark) or 48¢ (:05 mark).
-      - tp (take-profit sell price) is always clamped between 70¢ and 90¢.
+    Step 3 (Asset-Specific Stop-Loss Calibration - Recommendation 2):
+      - Analyzes historical Stop-Loss accuracy per asset (Rightful Saves vs. False Alarms).
+      - Mean-reverting/high win-rate assets (DOGE, BNB) widen SL loss threshold (15¢), floor (25¢),
+        and 5-min cut threshold (34¢) to prevent premature shakeouts before profitable settlement.
+      - Trending assets (BTC, SOL, XRP) maintain tight, decisive SL (10¢ threshold, 30¢ floor, 40¢ 5-min cut)
+        to aggressively preserve capital.
+
+    Step 4 (Middle Zone Avoidance - Recommendation 3):
+      - Evaluates empirical EV in the 37¢-43¢ band. If win rate < 40% or EV is negative,
+        configures avoid_mid_zone=True so non-momentum orders only enter at deep discounts (<= 36¢)
+        or high-confidence momentum (>= 44¢).
     """
     # Start with a clean copy of default fallback map
-    calibrated_map: dict[str, dict[str, dict[str, int]]] = {
+    calibrated_map: dict[str, dict[str, dict[str, int | bool]]] = {
         k: {m: dict(v) for m, v in marks.items()}
         for k, marks in DEFAULT_DYNAMIC_PRICE_MAP.items()
     }
@@ -377,7 +399,6 @@ def calibrate_dynamic_price_map_from_db(
         now_ts = int(datetime.now(timezone.utc).timestamp())
         cutoff_ts = now_ts - (max_history_hours * 3600)
 
-        # Pull snapshots (either from cutoff_ts or fallback to latest 3,000 documents)
         recent_snapshots = list(snap_col.find({"ts": {"$gte": cutoff_ts}}))
         if not recent_snapshots:
             recent_snapshots = list(snap_col.find().sort("ts", -1).limit(3000))
@@ -389,75 +410,126 @@ def calibrate_dynamic_price_map_from_db(
             log.info("No snapshots found in MongoDB. Using default price filter map.")
             return calibrated_map
 
-        # 2. Group historical trades and volatility by asset and timing mark
+        # 2. Group historical trades, SL events, and volatility by asset
         volatility_by_sym: dict[str, list[float]] = defaultdict(list)
         trades_by_sym_mark: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+        sl_events_by_sym: dict[str, list[dict]] = defaultdict(list)
+        mid_zone_trades_by_sym: dict[str, list[dict]] = defaultdict(list)
 
         for s in recent_snapshots:
             sym = s.get("sym")
             if not sym:
                 continue
 
-            # Record percentage distance to measure coin volatility
             pct = s.get("pct")
             if pct is not None:
                 volatility_by_sym[sym].append(pct)
 
-            # Record trade entry if snapshot had an executed buy order
             trd = s.get("trd")
             m = s.get("m")
             tick = s.get("tick")
-            if trd and m is not None and tick and "buy" in trd:
+            if trd and m is not None and tick:
+                action = trd.get("action")
+                side = str(trd.get("side", "")).lower()
                 buy_p = trd.get("buy")
-                side = trd.get("side", "").lower()
                 settle = settlement_map.get(tick)
-                
-                # Check if this trade was a winner
+
                 won = False
                 if settle:
-                    mkt_res = (settle.get("market_result") or "").lower()
+                    mkt_res = str(settle.get("market_result") or "").lower()
                     if mkt_res and side:
                         won = (side == mkt_res)
                     elif (settle.get("pnl_cents") or 0) > 0:
                         won = True
 
                 timing_mark = "05" if (m % 15 >= 5) else "00"
-                if buy_p:
-                    trades_by_sym_mark[sym][timing_mark].append({
+
+                if action == "buy_opened" and buy_p:
+                    trade_record = {
                         "buy": int(buy_p),
                         "won": won,
                         "side": side,
+                        "m": m,
+                    }
+                    trades_by_sym_mark[sym][timing_mark].append(trade_record)
+                    if 37 <= int(buy_p) <= 43:
+                        mid_zone_trades_by_sym[sym].append(trade_record)
+
+                elif action in ("early_loss_cut", "stop_loss_sold", "stop_loss_exit"):
+                    sl_events_by_sym[sym].append({
+                        "action": action,
+                        "side": side,
+                        "won": won,  # If True -> False Alarm; If False -> Rightful Save
+                        "loss_cents": trd.get("loss_cents", 10),
                     })
 
         # 3. Calibrate parameters for each symbol
         all_symbols = set(volatility_by_sym.keys()).union(trades_by_sym_mark.keys())
         for sym in all_symbols:
-            # Measure asset volatility (standard deviation of % move)
             pct_samples = volatility_by_sym.get(sym, [])
             vol_std = statistics.stdev(pct_samples) if len(pct_samples) > 1 else 0.08
+
+            # Asset-level stop-loss analysis (Recommendation 2)
+            sl_list = sl_events_by_sym.get(sym, [])
+            total_sl = len(sl_list)
+            false_alarms = sum(1 for e in sl_list if e["won"])
+            false_alarm_rate = (false_alarms / total_sl) if total_sl > 0 else 0.0
+
+            all_sym_trades = (
+                trades_by_sym_mark.get(sym, {}).get("00", []) +
+                trades_by_sym_mark.get(sym, {}).get("05", [])
+            )
+            total_sym_n = len(all_sym_trades)
+            sym_wins = sum(1 for t in all_sym_trades if t["won"])
+            sym_win_rate = (sym_wins / total_sym_n) if total_sym_n > 0 else 0.38
+
+            # Purely Dynamic Asset Classification & Stop-Loss Calibration
+            # High win-rate / mean-reverting behavior: detected when false alarms >= 20% or overall win rate >= 45%
+            if false_alarm_rate >= 0.20 or sym_win_rate >= 0.45:
+                # Widen SL parameters to let positions breathe and avoid premature shakeouts
+                asset_sl_threshold = 15
+                asset_sl_floor = 25
+                asset_cut_5min = 34
+                asset_endgame_floor = 22
+            # High volatility behavior: detected when standard deviation of 15m price swings >= 10%
+            elif vol_std >= 0.10:
+                # Adaptive thresholds for high-beta assets
+                asset_sl_threshold = 12
+                asset_sl_floor = 26
+                asset_cut_5min = 36
+                asset_endgame_floor = 24
+            else:
+                # Trending / low-beta behavior: tight, decisive SL and standard endgame floor
+                asset_sl_threshold = 10
+                asset_sl_floor = 30
+                asset_cut_5min = 40
+                asset_endgame_floor = 25
+
+            # Middle Zone Analysis (Recommendation 3)
+            mid_trades = mid_zone_trades_by_sym.get(sym, [])
+            mid_wins = sum(1 for t in mid_trades if t["won"])
+            mid_win_rate = (mid_wins / len(mid_trades)) if len(mid_trades) >= 3 else 0.33
+            avoid_mid = (mid_win_rate < 0.40)  # Avoid middle band if win rate is under 40%
 
             calibrated_map[sym] = {}
             for mark in ("00", "05"):
                 trades = trades_by_sym_mark.get(sym, {}).get(mark, [])
 
-                # Step 1: Base parameters based on asset volatility
-                if vol_std > 0.15:
-                    # Ultra-high volatility (e.g. ZEC, NEAR)
-                    base_min_buy = 30
-                    base_max_buy = 50 if mark == "00" else 42
+                # Step 1: Base parameters based dynamically on measured asset volatility
+                if vol_std >= 0.10:
+                    base_min_buy = 28
+                    base_max_buy = 48 if mark == "00" else 36
                     base_tp = 85 if mark == "00" else 78
-                elif vol_std > 0.08:
-                    # Moderate volatility (e.g. SOL, DOGE, XRP, HYPE)
-                    base_min_buy = 34
-                    base_max_buy = 52 if mark == "00" else 45
+                elif vol_std >= 0.05:
+                    base_min_buy = 32
+                    base_max_buy = 50 if mark == "00" else 38
                     base_tp = 82 if mark == "00" else 76
                 else:
-                    # Low volatility / stable (e.g. BTC, BNB, ETH)
-                    base_min_buy = 35 if mark == "00" else 40
-                    base_max_buy = 55 if mark == "00" else 45
+                    base_min_buy = 32
+                    base_max_buy = 52 if mark == "00" else 38
                     base_tp = 82 if mark == "00" else 76
 
-                # Step 2: Fine-tune using winning trade history if we have >= 5 samples
+                # Step 2: Fine-tune using winning trade history
                 min_buy = base_min_buy
                 max_buy = base_max_buy
                 tp_price = base_tp
@@ -466,28 +538,38 @@ def calibrate_dynamic_price_map_from_db(
                     win_prices = [t["buy"] for t in trades if t["won"]]
                     if win_prices:
                         calibrated_max = int(statistics.median(win_prices) + 3)
-                        calibrated_min = max(28, min(win_prices) - 2)
+                        calibrated_min = max(26, min(win_prices) - 2)
                         max_buy = min(base_max_buy, calibrated_max)
                         min_buy = max(base_min_buy, calibrated_min)
                     else:
-                        # If 0 wins historically, lower max_buy ceiling to 38¢ to force deep discount
-                        max_buy = min(base_max_buy, 38)
+                        max_buy = min(base_max_buy, 36)
                         min_buy = base_min_buy
 
-                # Step 3: Safety Guardrails (Clamping)
-                max_clamp = 56 if mark == "00" else 48
-                min_buy = max(25, min(min_buy, 42))
-                max_buy = max(min_buy + 2, min(max_buy, max_clamp))
+                # Step 3: Runway Timing Enforcement (Recommendation 1)
+                # For Minute :05 (10m runway), strictly clamp max_buy <= 38 to eliminate theta drag
+                if mark == "05":
+                    min_buy = max(25, min(min_buy, 34))
+                    max_buy = max(min_buy + 2, min(max_buy, 38))
+                else:
+                    min_buy = max(25, min(min_buy, 40))
+                    max_buy = max(min_buy + 2, min(max_buy, 54))
                 tp_price = max(max_buy + 15, min(tp_price, 90))
 
                 calibrated_map[sym][mark] = {
                     "min_buy": min_buy,
                     "max_buy": max_buy,
                     "tp": tp_price,
+                    "sl_threshold": asset_sl_threshold,
+                    "sl_floor": asset_sl_floor,
+                    "cut_5min": asset_cut_5min,
+                    "endgame_12_5_floor": asset_endgame_floor,
+                    "avoid_mid_zone": avoid_mid,
+                    "mid_zone_min": 37,
+                    "mid_zone_max": 43,
                 }
 
         log.info(
-            f"🧠 [DYNAMIC CALIBRATION] Calibrated dynamic price filter map for {len(all_symbols)} assets from MongoDB!"
+            f"🧠 [DYNAMIC CALIBRATION] Calibrated dynamic price & SL filter map for {len(all_symbols)} assets from MongoDB!"
         )
         return calibrated_map
 
@@ -499,13 +581,13 @@ def calibrate_dynamic_price_map_from_db(
 def get_dynamic_price_filter_map(
     force_refresh: bool = False,
     now_utc: datetime | None = None,
-) -> dict[str, dict[str, dict[str, int]]]:
+) -> dict[str, dict[str, dict[str, int | bool]]]:
     """
     Retrieves the in-memory dynamic price filter map.
     If the cache is empty or 6 hours have passed, automatically queries MongoDB to refresh.
 
     Returns:
-        Dictionary map structured as: { Asset -> { "00": {min_buy, max_buy, tp}, "05": {...} } }
+        Dictionary map structured as: { Asset -> { "00": {...}, "05": {...} } }
     """
     global _DYNAMIC_PRICE_MAP_CACHE, _LAST_MAP_REFRESH_TIME
 
@@ -529,24 +611,49 @@ def get_dynamic_price_filter_map(
 def get_dynamic_filter_for_market(
     asset_symbol: str,
     is_5min_mark: bool,
-    dynamic_map: dict[str, dict[str, dict[str, int]]] | None = None,
-) -> dict[str, int]:
+    dynamic_map: dict[str, dict[str, dict[str, int | bool]]] | None = None,
+) -> dict[str, int | bool]:
     """
-    Convenience lookup to get exact (min_buy, max_buy, tp) numbers for a specific market.
+    Convenience lookup to get exact dynamic filter parameters for a specific market and timing mark.
 
     Args:
-        asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "ZEC").
+        asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "DOGE", "ZEC").
         is_5min_mark: True if running at the 5-minute mark (:05), False if at minute 00 (:00).
         dynamic_map: Optional preloaded map. If None, uses cached in-memory map.
 
     Returns:
-        Dictionary: {"min_buy": int, "max_buy": int, "tp": int}
+        Dictionary: {
+            "min_buy": int,
+            "max_buy": int,
+            "tp": int,
+            "sl_threshold": int,
+            "sl_floor": int,
+            "cut_5min": int,
+            "endgame_12_5_floor": int,
+            "avoid_mid_zone": bool,
+            "mid_zone_min": int,
+            "mid_zone_max": int
+        }
     """
     active_map = dynamic_map or get_dynamic_price_filter_map()
     mark = "05" if is_5min_mark else "00"
 
     sym_clean = (asset_symbol or "").upper()
     asset_filters = active_map.get(sym_clean) or active_map.get("DEFAULT") or DEFAULT_DYNAMIC_PRICE_MAP["DEFAULT"]
-    return asset_filters.get(mark) or asset_filters.get("00") or {"min_buy": 35, "max_buy": 45, "tp": 82}
+    mark_filter = asset_filters.get(mark) or asset_filters.get("00") or DEFAULT_DYNAMIC_PRICE_MAP["DEFAULT"]["00"]
+
+    return {
+        "min_buy": int(mark_filter.get("min_buy", 32)),
+        "max_buy": int(mark_filter.get("max_buy", 38 if is_5min_mark else 50)),
+        "tp": int(mark_filter.get("tp", 76 if is_5min_mark else 82)),
+        "sl_threshold": int(mark_filter.get("sl_threshold", 10)),
+        "sl_floor": int(mark_filter.get("sl_floor", 30)),
+        "cut_5min": int(mark_filter.get("cut_5min", 40)),
+        "endgame_12_5_floor": int(mark_filter.get("endgame_12_5_floor", 25)),
+        "avoid_mid_zone": bool(mark_filter.get("avoid_mid_zone", True)),
+        "mid_zone_min": int(mark_filter.get("mid_zone_min", 37)),
+        "mid_zone_max": int(mark_filter.get("mid_zone_max", 43)),
+    }
+
 
 
