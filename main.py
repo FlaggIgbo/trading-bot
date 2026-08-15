@@ -30,25 +30,26 @@ How this bot makes smart decisions:
 
 4. Dynamic Price Ranges & Empirical Calibration (MongoDB Data-Driven):
    - Rather than using static hardcoded prices for all coins, our buy/bid price ranges (min_buy, max_buy)
-     and take-profit sell targets (e.g. 76¢–85¢) are dynamically picked and calibrated directly from
-     historical trade performance and volatility data stored in MongoDB Atlas (auto-refreshed every 6 hours).
-   - Minute 00 Entry: Broad buy ceiling up to 55¢ (e.g. 35¢–55¢) to capture early high-EV entries.
-   - Minute 05 Entry: Tightened buy ceiling up to 45¢ (e.g. 40¢–45¢) to account for time decay.
-   - High-volatility assets (like ZEC and NEAR) automatically receive deeper buy discounts and higher
-     take-profit sell targets tailored from MongoDB analytics.
+     and take-profit sell targets (e.g. 76¢–85¢) are dynamically calculated directly from
+     historical trade performance, win rates, and volatility data stored in MongoDB Atlas (auto-refreshed every 6 hours).
+   - Runway Timing Gating (Recommendation 1):
+     * Minute 00 Entry (15m runway): Broad buy corridor up to 52¢ (e.g. 30¢–52¢) to capture high-EV entries.
+     * Minute 05 Entry (10m runway): Strictly clamped to <= 38¢ (e.g. 28¢–38¢) to prevent theta decay drag.
+   - Low-EV Middle Zone Avoidance (Recommendation 3):
+     * The 37¢–43¢ band is dynamically avoided unless Coinbase spot momentum strongly confirms the directional move (> 0.08% in the money).
+     * This focuses capital into deep discounts (<= 36¢) and high-conviction momentum entries (44¢–48¢).
 
-5. Smart Risk Management (Stop-Loss, Auto-Sell Take-Profit & 12.5-Min Endgame Check):
-   - Automatic Profit Taking: Whenever we buy a contract (or hold an active position without a resting TP),
-     we immediately put in a resting Auto-Sell limit order at the dynamic take-profit target (e.g. 82¢, or 76¢ at the 5-min mark)
-     so the exchange automatically locks in profit when reached.
+5. Asset-Specific Dynamic Risk Management (Stop-Loss, Auto-Sell Take-Profit & 12.5-Min Endgame Check):
+   - Dynamic Risk Calibration (Recommendation 2):
+     * Bouncy / High-Win Coins (e.g. DOGE, BNB): Given wider breathing room (15¢ SL threshold, 25¢ floor, 34¢ 5-min cut, 22¢ endgame floor) to prevent false-alarm exits on mean-reverting pullbacks.
+     * Trending Coins (e.g. BTC, SOL, XRP): Kept on tight, decisive risk controls (10¢ SL threshold, 30¢ floor, 40¢ 5-min cut, 25¢ endgame floor).
+     * High-Volatility Coins (e.g. ZEC, NEAR, HYPE): Dynamically given adaptive thresholds (12¢ SL, 26¢ floor, 36¢ 5-min cut, 24¢ endgame floor).
+   - Automatic Profit Taking: Resting limit sell orders are placed at dynamic take-profit targets (e.g. 82¢, or 76¢ at 5-min mark).
    - 10-Minute Winner Roll & Stop-Loss (:10 mark):
-      * If winning big (>= 70¢ / in profit): We sell immediately at the Bid price to bank realized profit in cash,
-        and immediately re-buy 1 contract at current Ask price to reset cost basis and let THAT run to 100¢ ($1.00 payout)!
-      * If losing >= 10¢ or dropping to <= 30¢, we execute an immediate taker sell to cut losses.
-    - 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration):
-      We inspect all active holdings (including positions re-bought at :10). If we are losing (current_price < entry_price
-      or price < dynamic MongoDB endgame floor, e.g. < 25¢), we liquidate immediately via taker sell to salvage capital
-      and prevent losing accumulated capital gains or expiring at 0¢!
+     * If winning big (>= 70¢ / in profit): Sells at Bid to bank realized cash profit, and immediately re-buys at Ask to reset cost basis and run that contract to 100¢ ($1.00 payout)!
+     * If losing, executes dynamic stop-loss liquidation according to the coin's empirical thresholds.
+   - 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration):
+     * Inspects all active holdings. If losing (price < entry_price or price < dynamic endgame floor), liquidates via taker execution to protect banked gains and salvage capital before expiration.
 
 6. Persistent Connections & Resource Protection:
    - Exchange clients and HTTP sessions are initialized ONCE and kept alive across 24/7 background operation.

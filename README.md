@@ -14,39 +14,45 @@ A high-performance Python trading bot for 15-minute crypto prediction markets on
 
 ## 📈 EV Optimization & Strategy Rules
 
-### 1. Maker Limit Entry (Save 1¢–3¢) 💰
+### 1. Dynamic 6-Hour MongoDB Calibration Engine 🧠
+- **100% Data-Driven Parameter Tuning**: Every 6 hours (and on cold start), the bot queries historical snapshots and settlements from MongoDB Atlas to compute:
+  - **Asset Volatility ($\sigma$)**: Standard deviation of 15-minute price percentage moves from the strike.
+  - **False-Alarm Rates**: Ratio of early stop-loss exits where the market ended up settling as a winner.
+  - **Empirical Win Rates**: Historical win percentages by entry price band.
+- **Dynamic Adaptation**: High-beta assets (e.g. `NEAR`, `ZEC`, `HYPE`) receive deeper discount buy requirements and elevated take-profit targets (85¢), while bouncy assets (e.g. `DOGE`, `BNB`) receive wider stop-loss bands.
+
+### 2. Runway Timing & Theta Optimization (Recommendation 1) ⏱️
+- **Minute 00 Entry (15m Runway)**: Broad buy corridor up to **52¢** (e.g. 30¢–52¢) with dynamic Take-Profit targets (82¢–85¢), capturing high-EV early entries.
+- **Minute 05 Entry (10m Runway)**: Strictly clamps the maximum buy price to **$\le 38¢$** (and `min_buy` to 28¢–34¢) to account for accelerated nonlinear theta decay and eliminate negative-EV late entries.
+
+### 3. Low-EV Middle Zone Avoidance ($37¢–43¢$) (Recommendation 3) 🎯
+- **Spread Friction Gate**: Empirical audit proved that entries in the 37¢–43¢ band suffer negative edge due to bid-ask spread friction.
+- **Dynamic Screening**: Contracts in the 37¢–43¢ range are automatically bypassed unless Coinbase spot price is strongly in the money ($> 0.08\%$ in favor of the trade), shifting volume to **deep bargains ($\le 36¢$)** and **high-confidence momentum plays ($44¢–48¢$)**.
+
+### 4. Maker Limit Entry (Save 1¢–3¢) 💰
 - Submits maker limit buy orders at `Bid + 1¢` (or the current Bid) instead of crossing the spread as a taker, maximizing profit margins on every entry.
 
-### 2. Relative Distance Gate / Spot Momentum Filter 🎯
-- **Dead‑Heat Zone** (`|pct_dist| ≤ 0.05%`): Within 0.05% of the strike target, buying `YES` or `NO` between 35¢–45¢ is allowed.
+### 5. Relative Distance Gate / Spot Momentum Filter 🎯
+- **Dead‑Heat Zone** (`|pct_dist| ≤ 0.05%`): Within 0.05% of the strike target, buying `YES` or `NO` is allowed.
 - **Directional Zone** (`|pct_dist| > 0.05%`):
   - **Buy `YES` only if**: `spot_price >= target_price`.
   - **Buy `NO` only if**: `spot_price < target_price`.
 
-### 3. Dynamic Take‑Profit & Fill‑Gated Auto‑Sell 🚀
-- **Minute 00 Entry**: Targets **82¢** take‑profit (15 minutes remaining).
-- **Minute 05 Entry**: Targets **76¢** take‑profit (10 minutes remaining).
-- **Fill‑Gated Execution**: Take‑profit orders are placed only after buy fill confirmation to avoid phantom resting orders.
+### 6. Dynamic Asset-Specific Risk Control & Stop-Loss Calibration (Recommendation 2) 🛡️
+- **Bouncy / High-Win Coins (e.g. `DOGE`, `BNB`)**: Widens stop-loss threshold (**15¢**), price floor (**25¢**), 5-min cut (**34¢**), and 12.5-min endgame floor (**22¢**) to let positions breathe and prevent premature shakeouts on mean-reverting pullbacks.
+- **Trending Coins (e.g. `BTC`, `SOL`, `XRP`)**: Tight, decisive risk controls (**10¢** SL, **30¢** floor, **40¢** 5-min cut, **25¢** endgame floor) to cut losses quickly on genuine reversals.
+- **High-Volatility Coins (e.g. `ZEC`, `NEAR`, `HYPE`)**: Adaptive parameters (**12¢** SL, **26¢** floor, **36¢** 5-min cut, **24¢** endgame floor).
 
-### 4. 5-Minute Early Cut-Loss (Sub-40¢ Liquidation) ✂️
-- Evaluated at `:05`, `:20`, `:35`, `:50` past the hour.
-- If a contract bought at the `:00` mark has dropped below the **40¢–49¢ range (< 40¢)** at minute 05, the bot cancels any resting take-profit limit orders and liquidates the position immediately to minimize loss.
-
-### 5. 10‑Minute Winner Roll & Stop‑Loss Execution 🔄🛑
+### 7. 10‑Minute Winner Roll & Stop‑Loss Execution 🔄🛑
 - Evaluated at `:10`, `:25`, `:40`, `:55` past the hour.
-- **Winner Roll & Re-Buy (≥ 70¢)**: Cancels resting take-profit orders and **sells the winning position immediately at Bid price** to **bank/lock in realized profit** in cash! Simultaneously **re-buys 1 contract at current Ask price** to reset cost basis and **lets THAT newly re-bought position run toward 100¢ ($1.00 settlement)**.
-- **Stop-Loss Trigger**: For losing positions, liquidates immediately if **loss ≥ 10¢** or if position price drops **≤ 30¢**.
+- **Winner Roll & Re-Buy (≥ 70¢)**: Sells the winning position immediately at Bid price to **bank/lock in realized cash profit**! Simultaneously **re-buys 1 contract at Ask price** to reset cost basis and **lets THAT newly re-bought position run toward 100¢ ($1.00 settlement)**.
+- **Stop-Loss Trigger**: For losing positions, liquidates immediately via taker execution according to the asset's dynamic threshold.
 
-### 6. 12.5-Minute Endgame Safety Check (Dynamic Sub-Settlement Liquidation) ⏳🛑
+### 8. 12.5-Minute Endgame Safety Check (Dynamic Sub-Settlement Liquidation) ⏳🛑
 - Evaluated at `:12:30`, `:27:30`, `:42:30`, `:57:30` (exactly 2.5 minutes before contract expiration).
 - Checks ALL current holdings (including positions re-bought at :10):
-  - **Losing Positions**: If the market is losing (`current_price < entry_price` or `current_price < endgame_12_5_floor` [dynamically calibrated from MongoDB, default 25¢]), liquidates immediately via taker execution to salvage capital and prevent losing all capital gains or settling at 0¢.
-  - **Winning Positions**: If in profit (`current_price ≥ entry_price` and `≥ 25¢`), holds position through the final 2.5 minutes to collect the **full 100¢ ($1.00 payout)** at expiration!
-
-### 7. Risk Controls & Hygiene 🛡️
-- **Open Position Gate**: Skips markets with existing open positions or active orders.
-- **Stale Buy Pruning**: Cancels unfilled resting buy orders at the start of each interval while preserving take‑profit sell orders.
-- **Cheapest Entry Tiebreaker**: In dead‑heat conditions where both sides qualify, buy the lower‑priced side for maximum EV.
+  - **Losing Positions**: If the market is losing (`current_price < entry_price` or `current_price < endgame_12_5_floor` [dynamically calibrated from MongoDB]), liquidates immediately via taker execution to salvage capital and prevent losing all capital gains or settling at 0¢.
+  - **Winning Positions**: If in profit (`current_price ≥ entry_price`), holds position through the final 2.5 minutes to collect the **full 100¢ ($1.00 payout)** at expiration!
 
 ---
 
