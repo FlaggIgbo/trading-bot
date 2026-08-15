@@ -1,11 +1,11 @@
-# Kalshi & Gemini 15-Minute Crypto Trading & Data Pipeline Bot 🚀
+# Kalshi 15-Minute Crypto Trading & Data Pipeline Bot 🚀
 
-A high-performance Python trading bot for 15-minute crypto prediction markets on **Kalshi** and **Gemini**, recording microstructure snapshots to MongoDB Atlas for Expected Value (EV) optimization and volatility analysis.
+A high-performance Python trading bot for 15-minute crypto prediction markets on **Kalshi**, recording microstructure snapshots to MongoDB Atlas for Expected Value (EV) optimization and volatility analysis.
 
 ## 🛠️ Architecture & Stack
 - **Exchange APIs**:
-  - **Kalshi Trade API V2** (`POST /portfolio/events/orders` with RSA-PSS authentication)
-  - **Gemini Prediction Markets API** (HMAC-SHA384 signature headers)
+  - **Kalshi Trade API V2** (`POST /portfolio/events/orders` with RSA-PSS digital signatures)
+  - *Gemini Trading Client*: Disabled / commented out.
 - **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`, `portfolio_pnl`, `settlements`)
 - **Hosting**: 24/7 Render.com Background Worker (30s past 5‑min clock alignment)
 - **Tracked Assets (12 Series)**: `BTC`, `ETH`, `SOL`, `XRP`, `DOGE`, `BNB`, `HYPE`, `ADA`, `TON`, `BCH`, `NEAR`, `ZEC`
@@ -96,7 +96,6 @@ The bot queries native exchange REST API endpoints on each pass to log and store
 - **Console Log Output**:
   ```text
   💰 [PORTFOLIO PNL] [Kalshi] Cash: $500.00 | Port Value: $520.00 | Settled PnL: +$14.20 (+1420¢ across 8 mkts) | Active: 2 pos ($0.80)
-  💰 [PORTFOLIO PNL] [Gemini] Cash: $350.00 | Port Value: $350.00 | Settled PnL: $0.00 (0¢ across 0 mkts) | Active: 0 pos ($0.00)
   ```
 
 ---

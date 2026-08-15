@@ -1,5 +1,5 @@
 """
-Unit tests for Kalshi and Gemini prediction market clients and main trading pipeline.
+Unit tests for Kalshi prediction market client and main trading pipeline.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from database import save_portfolio_pnl, save_settlements
+from database import save_portfolio_pnl
 from main import (
     batch_fetch_crypto_spot_prices,
     calculate_seconds_until_next_5min_mark,
@@ -16,63 +16,57 @@ from main import (
     extract_asset_symbol,
     extract_price_cents,
     is_spot_momentum_aligned,
+    parse_cents,
     process_single_market,
 )
-from signals.gemini_client import GeminiClient, GeminiPredictionClient, GeminiTradingClient
+from signals.base_client import BaseTradingClient
 from signals.kalshi_client import KalshiClient, round_price_to_tick
 
 
+class DummyTradingClient(BaseTradingClient):
+    exchange_name = "TestExchange"
+
+    def __init__(self):
+        super().__init__()
+        self._positions_cache: dict[str, dict] = {}
+        self._orders_cache: dict[str, list[dict]] = {}
+
+    def get_market_position(self, ticker: str) -> dict | None:
+        return self._positions_cache.get(ticker)
+
+    def cancel_and_verify_resting_orders(self, ticker: str) -> bool:
+        if ticker in self._orders_cache:
+            self._orders_cache.pop(ticker, None)
+            return True
+        return False
+
+    def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
+        self._positions_cache.pop(ticker, None)
+        self.clear_profit_floor(ticker)
+        self.clear_entry_price(ticker)
+        return {"status": "liquidated", "price": current_price}
+
+    def execute_buy(self, ticker: str, side: str, count: int, price_cents: int) -> dict:
+        self._positions_cache[ticker] = {
+            "side": side.lower(),
+            "count": count,
+            "entry_price_cents": price_cents,
+        }
+        self.set_entry_price(ticker, price_cents)
+        return {"status": "bought", "price": price_cents}
+
+
 class TestClientInterfaces(unittest.TestCase):
-    def test_gemini_client_instantiation(self):
-        client = GeminiClient()
-        self.assertIsNotNone(client)
-        self.assertIsInstance(client, GeminiPredictionClient)
-        self.assertIsInstance(client, GeminiTradingClient)
-
-    def test_gemini_auth_headers(self):
-        client = GeminiTradingClient()
-        client.api_key = "test_key"
-        client.api_secret = "test_secret"
-        client.account = "trading-bot"
-
-        headers = client._build_auth_headers("/v1/balances")
-        self.assertIn("X-GEMINI-APIKEY", headers)
-        self.assertEqual(headers["X-GEMINI-APIKEY"], "test_key")
-        self.assertIn("X-GEMINI-PAYLOAD", headers)
-        self.assertIn("X-GEMINI-SIGNATURE", headers)
-
-    def test_gemini_balance_multi_currency(self):
-        client = GeminiTradingClient()
-        # Mock _post response with USD, GUSD, and other tokens
-        mock_balances = [
-            {"currency": "USD", "amount": "10.50", "available": "10.50"},
-            {"currency": "GUSD", "amount": "25.00", "available": "25.00"},
-            {"currency": "BTC", "amount": "0.5", "available": "0.5"},
-        ]
-        with patch.object(client, "_post", return_value=mock_balances):
-            bal = client.get_balance()
-            self.assertEqual(bal["balance"], 35.50)
-            self.assertEqual(bal["available"], 35.50)
-
-    def test_gemini_instant_deposit_balance(self):
-        client = GeminiTradingClient()
-        # Mock pending ACH / instant deposit where available > amount
-        mock_balances = [
-            {"currency": "USD", "amount": "0.001", "available": "10.001", "availableForWithdrawal": "0.001"},
-        ]
-        with patch.object(client, "_post", return_value=mock_balances):
-            bal = client.get_balance()
-            self.assertAlmostEqual(bal["available"], 10.001)
-            pnl = client.get_portfolio_pnl_summary()
-            self.assertAlmostEqual(pnl["balance_dollars"], 10.001)
-
     def test_price_helper_functions(self):
         self.assertEqual(round_price_to_tick(0.423), "0.42")
         self.assertEqual(round_price_to_tick(0.001), "0.01")
         self.assertEqual(round_price_to_tick(1.05), "0.99")
+        self.assertEqual(parse_cents("0.4500"), 45)
+        self.assertEqual(parse_cents(None, 65), 65)
 
     def test_extract_asset_symbol(self):
         self.assertEqual(extract_asset_symbol("KXBTC15M", "KXBTC15M-26AUG140015-15"), "BTC")
+        self.assertEqual(extract_asset_symbol("KXETH15M", "KXETH15M-26AUG140015-15"), "ETH")
         self.assertEqual(extract_asset_symbol("ETH15M", "GEMINI-ETH15M-100"), "ETH")
         self.assertEqual(extract_asset_symbol("UNKNOWN", "XYZ123"), "UNKNOWN")
 
@@ -96,13 +90,13 @@ class TestClientInterfaces(unittest.TestCase):
 
     def test_process_single_market_snapshot(self):
         client = MagicMock()
-        client.exchange_name = "Gemini"
+        client.exchange_name = "Kalshi"
         client.get_market_position.return_value = None
         client.has_existing_position_or_order.return_value = False
 
         market = {
-            "ticker": "BTC15M-TEST",
-            "series_ticker": "BTC15M",
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
             "yes_ask_dollars": "0.4200",
             "no_ask_dollars": "0.5800",
             "yes_bid": 41,
@@ -110,7 +104,7 @@ class TestClientInterfaces(unittest.TestCase):
             "no_bid": 57,
             "no_ask": 58,
             "floor_strike": 60000.0,
-            "exchange": "gemini",
+            "exchange": "kalshi",
         }
         now = datetime.now(timezone.utc)
 
@@ -124,15 +118,15 @@ class TestClientInterfaces(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertEqual(snapshot["tick"], "BTC15M-TEST")
-        self.assertEqual(snapshot["ex"], "gemini")
+        self.assertEqual(snapshot["tick"], "KXBTC15M-TEST")
+        self.assertEqual(snapshot["ex"], "kalshi")
         self.assertEqual(snapshot["y"], 42)
         self.assertEqual(snapshot["n"], 58)
         self.assertEqual(snapshot["p"], 60100.0)
 
     def test_stop_loss_exclusive_gating(self):
         client = MagicMock()
-        client.exchange_name = "Gemini"
+        client.exchange_name = "Kalshi"
         client.evaluate_and_execute_10min_strategy.return_value = {
             "triggered": True,
             "side": "yes",
@@ -142,19 +136,19 @@ class TestClientInterfaces(unittest.TestCase):
         }
 
         market = {
-            "ticker": "BTC15M-TEST",
-            "series_ticker": "BTC15M",
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
             "yes_ask": 28,
             "no_ask": 72,
             "floor_strike": 60000.0,
-            "exchange": "gemini",
+            "exchange": "kalshi",
         }
         now = datetime.now(timezone.utc)
 
         # At minute 10 (% 15 == 10) -> is_stop_loss_interval is True
         snapshot = process_single_market(
             market=market,
-            is_trading_interval=True,  # Even if force_trade is set
+            is_trading_interval=True,
             client=client,
             now_utc=now,
             minute_past_hour=10,
@@ -164,7 +158,6 @@ class TestClientInterfaces(unittest.TestCase):
 
         self.assertIn("trd", snapshot)
         self.assertEqual(snapshot["trd"]["action"], "stop_loss_sold")
-        # Ensure buy was not evaluated after stop loss trigger
         client.buy_and_set_take_profit.assert_not_called()
 
     def test_batch_fetch_crypto_spot_prices(self):
@@ -186,7 +179,7 @@ class TestClientInterfaces(unittest.TestCase):
 
         pnl_data = {
             "ts": 1234567890,
-            "exchange": "gemini",
+            "exchange": "kalshi",
             "balance_dollars": 100.0,
             "portfolio_value_dollars": 100.0,
         }
@@ -194,12 +187,12 @@ class TestClientInterfaces(unittest.TestCase):
         self.assertTrue(res)
         mock_coll.insert_one.assert_called_once()
         inserted_doc = mock_coll.insert_one.call_args[0][0]
-        self.assertEqual(inserted_doc["ex"], "gemini")
+        self.assertEqual(inserted_doc["ex"], "kalshi")
 
 
-class TestProfitFloorAndStopLoss(unittest.TestCase):
+class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
     def setUp(self):
-        self.client = GeminiTradingClient()
+        self.client = DummyTradingClient()
         self.ticker = "KXBTC15M-TEST"
 
     def test_10min_strategy_rolls_winner_and_rebuys_at_ask(self):
@@ -225,12 +218,11 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
             self.assertTrue(res["triggered"])
             self.assertEqual(res["action"], "winner_rolled_rebuy")
             self.assertEqual(res["exit_price"], 72)
-            self.assertEqual(res["profit_locked_cents"], 32)  # 72 - 40 = 32¢ profit banked!
-            self.assertEqual(res["rebuy_price_cents"], 74)   # Re-bought at ask price (74¢)
+            self.assertEqual(res["profit_locked_cents"], 32)
+            self.assertEqual(res["rebuy_price_cents"], 74)
             mock_cancel.assert_called_once_with(self.ticker)
             mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 72)
             mock_buy.assert_called_once_with(self.ticker, "yes", 1, 74)
-            # Entry price should now be updated to the re-buy price (74¢)
             self.assertEqual(self.client.get_entry_price(self.ticker), 74)
 
     def test_standard_stop_loss_liquidation(self):
@@ -260,12 +252,53 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
             mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 30)
 
     def test_entry_price_tracking_and_cleanup(self):
-        # Test setting and clearing entry price
         self.client.set_entry_price("TEST-TICKER", 54)
         self.assertEqual(self.client.get_entry_price("TEST-TICKER"), 54)
-
         self.client.clear_entry_price("TEST-TICKER")
         self.assertIsNone(self.client.get_entry_price("TEST-TICKER"))
+
+    def test_endgame_12_5min_losing_position_liquidates_below_floor(self):
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 74,
+        }
+
+        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
+             patch.object(self.client, "execute_liquidation") as mock_liquidate:
+            res = self.client.evaluate_and_execute_12_5min_endgame_check(
+                ticker=self.ticker,
+                current_yes_price=22,
+                current_no_price=78,
+                dry_run=False,
+                endgame_floor=25,
+            )
+            self.assertTrue(res["triggered"])
+            self.assertEqual(res["action"], "endgame_loss_cut")
+            self.assertEqual(res["loss_cents"], 52)
+            self.assertEqual(res["exit_price"], 22)
+            mock_cancel.assert_called_once_with(self.ticker)
+            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 22)
+
+    def test_endgame_12_5min_winning_position_holds_to_settlement(self):
+        self.client._positions_cache[self.ticker] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 74,
+        }
+
+        with patch.object(self.client, "cancel_and_verify_resting_orders"), \
+             patch.object(self.client, "execute_liquidation") as mock_liquidate:
+            res = self.client.evaluate_and_execute_12_5min_endgame_check(
+                ticker=self.ticker,
+                current_yes_price=88,
+                current_no_price=12,
+                dry_run=False,
+                endgame_floor=25,
+            )
+            self.assertFalse(res["triggered"])
+            self.assertEqual(res["action"], "holding_winner")
+            mock_liquidate.assert_not_called()
 
     def test_kalshi_taker_liquidation_payloads(self):
         with patch.object(KalshiClient, "__init__", return_value=None):
@@ -321,51 +354,6 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
             sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
             self.assertEqual(sec, 175.0)
 
-    def test_endgame_12_5min_losing_position_liquidates_below_floor(self):
-        # Re-bought at 74¢ at minute 10, now trading at 22¢ (< 25¢ dynamic floor) at 12.5m mark
-        self.client._positions_cache[self.ticker] = {
-            "side": "yes",
-            "count": 1,
-            "entry_price_cents": 74,
-        }
-
-        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
-             patch.object(self.client, "execute_liquidation") as mock_liquidate:
-            res = self.client.evaluate_and_execute_12_5min_endgame_check(
-                ticker=self.ticker,
-                current_yes_price=22,
-                current_no_price=78,
-                dry_run=False,
-                endgame_floor=25,
-            )
-            self.assertTrue(res["triggered"])
-            self.assertEqual(res["action"], "endgame_loss_cut")
-            self.assertEqual(res["loss_cents"], 52)
-            self.assertEqual(res["exit_price"], 22)
-            mock_cancel.assert_called_once_with(self.ticker)
-            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 22)
-
-    def test_endgame_12_5min_winning_position_holds_to_settlement(self):
-        # Re-bought at 74¢ at minute 10, now trading at 88¢ (profit = 14¢, > 25¢ floor) at 12.5m mark
-        self.client._positions_cache[self.ticker] = {
-            "side": "yes",
-            "count": 1,
-            "entry_price_cents": 74,
-        }
-
-        with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
-             patch.object(self.client, "execute_liquidation") as mock_liquidate:
-            res = self.client.evaluate_and_execute_12_5min_endgame_check(
-                ticker=self.ticker,
-                current_yes_price=88,
-                current_no_price=12,
-                dry_run=False,
-                endgame_floor=25,
-            )
-            self.assertFalse(res["triggered"])
-            self.assertEqual(res["action"], "holding_winner")
-            mock_liquidate.assert_not_called()
-
     def test_minute_12_process_single_market_evaluates_endgame(self):
         client = MagicMock()
         client.exchange_name = "Kalshi"
@@ -402,8 +390,8 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
 
         client.evaluate_and_execute_12_5min_endgame_check.assert_called_once_with(
             ticker="KXBTC15M-TEST",
-            current_yes_price=20,  # uses yes_bid (20¢)
-            current_no_price=78,   # uses no_bid (78¢)
+            current_yes_price=20,
+            current_no_price=78,
             dry_run=False,
             endgame_floor=25,
         )
@@ -447,8 +435,8 @@ class TestProfitFloorAndStopLoss(unittest.TestCase):
 
         client.evaluate_and_execute_10min_strategy.assert_called_once_with(
             ticker="KXBTC15M-TEST",
-            current_yes_bid=72,  # uses yes_bid (72¢)
-            current_no_bid=26,   # uses no_bid (26¢)
+            current_yes_bid=72,
+            current_no_bid=26,
             current_yes_ask=74,
             current_no_ask=28,
             dry_run=False,

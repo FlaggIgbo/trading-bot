@@ -12,7 +12,7 @@ Compact Field Schema:
   `m`    : Minute past hour int (e.g. 0, 5, 15, 30) -> 1 byte
   `sym`  : Asset symbol (e.g. "BTC", "ETH", "SOL", "ADA", "TON", etc.) -> 3-4 bytes
   `tick` : Market ticker (e.g. "KXBTC15M-26AUG140015-15") -> 22 bytes
-  `ex`   : Exchange identifier string ("kalshi" or "gemini") -> 6 bytes
+  `ex`   : Exchange identifier string ("kalshi") -> 6 bytes
   `y`    : YES price in cents integer (1-99) -> 1 byte
   `n`    : NO price in cents integer (1-99) -> 1 byte
   `y_bid`: YES top bid in cents -> 1 byte
@@ -58,10 +58,10 @@ from __future__ import annotations
 import logging
 import os
 import statistics
-import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load configuration from .env file if available

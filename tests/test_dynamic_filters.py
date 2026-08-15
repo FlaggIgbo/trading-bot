@@ -5,14 +5,13 @@ Unit tests for the Dynamic Price Filters & 6-Hour In-Memory Calibration Engine.
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from database import (
     DEFAULT_DYNAMIC_PRICE_MAP,
     calibrate_dynamic_price_map_from_db,
     get_dynamic_filter_for_market,
-    get_dynamic_price_filter_map,
     should_refresh_dynamic_map,
 )
 

@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -74,7 +75,8 @@ from database import (
     save_settlements,
 )
 from signals.base_client import BaseTradingClient, LogTag
-from signals.gemini_client import GeminiClient
+
+# from signals.gemini_client import GeminiClient
 from signals.kalshi_client import KalshiClient
 
 # Set up clean, human-readable logging format
@@ -167,9 +169,24 @@ calculate_seconds_until_next_check = calculate_seconds_until_next_checkpoint
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
     """
     Extracts the short crypto symbol (e.g. 'BTC', 'ETH', 'SOL') from full ticker strings.
-    Example: 'KXBTC15M-26AUG141315-15' -> 'BTC'
+    Example: 'KXBTC15M-26AUG141315-15' -> 'BTC', 'btc-updown-15m-1786835700' -> 'BTC'
     """
+    # 1. Check ticker prefix if hyphen-separated (e.g. btc-updown-15m-...)
+    ticker_prefix = ticker.split("-")[0].upper() if "-" in ticker else ""
+    if ticker_prefix in SUPPORTED_SYMBOLS:
+        return ticker_prefix
+
+    # 2. Check series ticker directly (e.g. KXBTC15M -> BTC, BTC15M -> BTC)
+    series_clean = series_ticker.replace("15M", "").replace("KX", "").upper()
+    if series_clean in SUPPORTED_SYMBOLS:
+        return series_clean
+
+    # 3. Search with word boundary regex
     combined = f"{series_ticker} {ticker}".upper()
+    for sym in SUPPORTED_SYMBOLS:
+        if re.search(rf"\b{sym}\b", combined):
+            return sym
+
     return next((sym for sym in SUPPORTED_SYMBOLS if sym in combined), series_ticker or "CRYPTO")
 
 
@@ -686,10 +703,11 @@ def run_pipeline_pass(
         except Exception as error:
             log.error(f"Could not initialize KalshiClient: {error}")
 
-        try:
-            active_clients.append(("Gemini", GeminiClient()))
-        except Exception as error:
-            log.error(f"Could not initialize GeminiClient: {error}")
+        # Gemini trading disabled / commented out:
+        # try:
+        #     active_clients.append(("Gemini", GeminiClient()))
+        # except Exception as error:
+        #     log.error(f"Could not initialize GeminiClient: {error}")
     else:
         active_clients = clients
 
@@ -786,10 +804,11 @@ def main():
     except Exception as error:
         log.error(f"Could not initialize persistent KalshiClient: {error}")
 
-    try:
-        persistent_clients.append(("Gemini", GeminiClient()))
-    except Exception as error:
-        log.error(f"Could not initialize persistent GeminiClient: {error}")
+    # Gemini trading disabled / commented out:
+    # try:
+    #     persistent_clients.append(("Gemini", GeminiClient()))
+    # except Exception as error:
+    #     log.error(f"Could not initialize persistent GeminiClient: {error}")
 
     if run_once or dry_run:
         run_pipeline_pass(clients=persistent_clients, dry_run=dry_run, force_trade_mark=force_trade_mark)

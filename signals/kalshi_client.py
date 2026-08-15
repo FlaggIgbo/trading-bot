@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import time
-from enum import Enum
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
