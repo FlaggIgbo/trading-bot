@@ -278,6 +278,54 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
         self.assertEqual(len(client.executed_buys), 1)
         self.assertEqual(client.executed_buys[0]["side"], "yes")
 
+    def test_hourly_10min_second_chance_entry(self):
+        """
+        Tests Minute 10:
+        Hourly markets execute the broad multi-strike entry check (same corridor as :00)
+        giving a second chance to enter if :00 was price-rejected or missed.
+        """
+        client = DummyHourlyTradingClient()
+        now_utc = datetime(2026, 8, 15, 20, 10, 30, tzinfo=timezone.utc)
+        spot_cache = {"BTC": 71000.0}
+
+        markets = [
+            {
+                "ticker": "KXBTCD-STRIKE-A",
+                "series_ticker": "KXBTCD",
+                "floor_strike": 70000.0,
+                "yes_ask_dollars": "0.3400",
+                "yes_bid_dollars": "0.3200",
+                "no_ask_dollars": "0.6800",
+                "no_bid_dollars": "0.6600",
+            },
+            {
+                "ticker": "KXBTCD-STRIKE-B",
+                "series_ticker": "KXBTCD",
+                "floor_strike": 74000.0,
+                "yes_ask_dollars": "0.7200",
+                "yes_bid_dollars": "0.7000",
+                "no_ask_dollars": "0.3000",
+                "no_bid_dollars": "0.2800",
+            },
+        ]
+
+        snapshots = process_hourly_market_group(
+            symbol="BTC",
+            markets=markets,
+            client=client,
+            now_utc=now_utc,
+            minute_past_hour=10,  # 10m mark
+            spot_cache=spot_cache,
+            dry_run=False,
+        )
+
+        self.assertEqual(len(client.executed_buys), 2)
+        buys_by_ticker = {b["ticker"]: b for b in client.executed_buys}
+        self.assertIn("KXBTCD-STRIKE-A", buys_by_ticker)
+        self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-A"]["side"], "yes")
+        self.assertIn("KXBTCD-STRIKE-B", buys_by_ticker)
+        self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-B"]["side"], "no")
+
     def test_hourly_20min_cut_loss_and_second_entry(self):
         """
         Tests Minute 20:
@@ -330,6 +378,97 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
         self.assertEqual(client.executed_liquidations[0]["ticker"], "KXBTCD-STRIKE-A")
 
         # Verify Strike B was bought in 20m corridor
+        self.assertEqual(len(client.executed_buys), 1)
+        self.assertEqual(client.executed_buys[0]["ticker"], "KXBTCD-STRIKE-B")
+        self.assertEqual(client.executed_buys[0]["price"], 27)
+
+    def test_hourly_10min_disaster_cut_loss(self):
+        """
+        Tests Minute 10:
+        Losing position entered at 48¢ collapsing below 10¢ (< 10¢ disaster floor) triggers 10m loss cut.
+        """
+        client = DummyHourlyTradingClient()
+        client.execute_buy("KXBTCD-COLLAPSE", "yes", 1, 48)
+        client.executed_buys.clear()
+
+        now_utc = datetime(2026, 8, 15, 20, 10, 30, tzinfo=timezone.utc)
+        spot_cache = {"BTC": 71000.0}
+
+        markets = [
+            {
+                "ticker": "KXBTCD-COLLAPSE",
+                "series_ticker": "KXBTCD",
+                "floor_strike": 70000.0,
+                "yes_ask_dollars": "0.0800",
+                "yes_bid_dollars": "0.0600",
+                "no_ask_dollars": "0.9400",
+                "no_bid_dollars": "0.9200",
+            },
+        ]
+
+        snapshots = process_hourly_market_group(
+            symbol="BTC",
+            markets=markets,
+            client=client,
+            now_utc=now_utc,
+            minute_past_hour=10,
+            spot_cache=spot_cache,
+            dry_run=False,
+        )
+
+        self.assertEqual(len(client.executed_liquidations), 1)
+        self.assertEqual(client.executed_liquidations[0]["ticker"], "KXBTCD-COLLAPSE")
+        self.assertEqual(snapshots[0]["trd"]["action"], "10min_loss_cut")
+
+    def test_hourly_30min_cut_loss_and_entry(self):
+        """
+        Tests Minute 30 (Mid-Hour):
+        Duplicates Minute 20 logic: cuts losing position on Strike A (< 15¢) and buys tight corridor on Strike B (28¢).
+        """
+        client = DummyHourlyTradingClient()
+        client.execute_buy("KXBTCD-STRIKE-A", "yes", 1, 48)
+        client.executed_buys.clear()
+
+        now_utc = datetime(2026, 8, 15, 20, 30, 30, tzinfo=timezone.utc)
+        spot_cache = {"BTC": 71000.0}
+
+        markets = [
+            {
+                "ticker": "KXBTCD-STRIKE-A",
+                "series_ticker": "KXBTCD",
+                "floor_strike": 70000.0,
+                "yes_ask_dollars": "0.1400",
+                "yes_bid_dollars": "0.1200",
+                "no_ask_dollars": "0.8800",
+                "no_bid_dollars": "0.8600",
+            },
+            {
+                "ticker": "KXBTCD-STRIKE-B",
+                "series_ticker": "KXBTCD",
+                "floor_strike": 70500.0,
+                "yes_ask_dollars": "0.2800",
+                "yes_bid_dollars": "0.2600",
+                "no_ask_dollars": "0.7400",
+                "no_bid_dollars": "0.7200",
+            },
+        ]
+
+        snapshots = process_hourly_market_group(
+            symbol="BTC",
+            markets=markets,
+            client=client,
+            now_utc=now_utc,
+            minute_past_hour=30,  # 30m mark
+            spot_cache=spot_cache,
+            dry_run=False,
+        )
+
+        # Verify Strike A was liquidated by 30m cut-loss
+        self.assertEqual(len(client.executed_liquidations), 1)
+        self.assertEqual(client.executed_liquidations[0]["ticker"], "KXBTCD-STRIKE-A")
+        self.assertEqual(snapshots[0]["trd"]["action"], "30min_loss_cut")
+
+        # Verify Strike B was bought in 30m corridor
         self.assertEqual(len(client.executed_buys), 1)
         self.assertEqual(client.executed_buys[0]["ticker"], "KXBTCD-STRIKE-B")
         self.assertEqual(client.executed_buys[0]["price"], 27)

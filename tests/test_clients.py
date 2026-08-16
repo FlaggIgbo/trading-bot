@@ -457,28 +457,40 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
         self.assertIsNone(client.get_profit_floor("TEST"))
 
     def test_calculate_seconds_until_next_checkpoint_schedule(self):
-        # At 14:02:00 -> should sleep until 14:05:30 (210s)
+        # At 14:00:35 -> should sleep until 14:02:30 (115s)
         with patch("main.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 2, 0, tzinfo=timezone.utc)
-            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
-            self.assertEqual(sec, 210.0)
-
-        # At 14:05:35 -> should sleep until 14:10:30 (295s)
-        with patch("main.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 5, 35, tzinfo=timezone.utc)
-            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
-            self.assertEqual(sec, 295.0)
-
-        # At 14:10:35 -> should sleep until 14:12:30 (115s)
-        with patch("main.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 10, 35, tzinfo=timezone.utc)
-            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 0, 35, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint()
             self.assertEqual(sec, 115.0)
+
+        # At 14:02:35 -> should sleep until 14:05:00 (145s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 2, 35, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint()
+            self.assertEqual(sec, 145.0)
+
+        # At 14:05:05 -> should sleep until 14:07:30 (145s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 5, 5, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint()
+            self.assertEqual(sec, 145.0)
+
+        # At 14:07:35 -> should sleep until 14:10:00 (145s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 7, 35, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint()
+            self.assertEqual(sec, 145.0)
+
+        # At 14:10:05 -> should sleep until 14:12:30 (145s)
+        with patch("main.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 15, 14, 10, 5, tzinfo=timezone.utc)
+            sec = calculate_seconds_until_next_checkpoint()
+            self.assertEqual(sec, 145.0)
 
         # At 14:12:35 -> should sleep until 14:15:30 (175s)
         with patch("main.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 8, 15, 14, 12, 35, tzinfo=timezone.utc)
-            sec = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
+            sec = calculate_seconds_until_next_checkpoint()
             self.assertEqual(sec, 175.0)
 
     def test_minute_12_process_single_market_evaluates_endgame(self):
@@ -602,6 +614,169 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
         self.assertEqual(snapshot["trd"]["action"], "winner_rolled_rebuy")
         self.assertEqual(snapshot["trd"]["profit_locked_cents"], 32)
         self.assertEqual(snapshot["trd"]["rebuy_price_cents"], 74)
+
+    def test_minute_2_process_single_market_evaluates_broad_buy_entry(self):
+        """Verifies that minute 2 (:02.5 mark) evaluates the broad buy entry corridor when no position is held."""
+        client = MagicMock()
+        client.exchange_name = "Kalshi"
+        client.get_market_position.return_value = None
+        client.has_existing_position_or_order.return_value = False
+        client.buy_and_set_take_profit.return_value = {
+            "buy_price_cents": 34,
+            "take_profit_cents": 82,
+            "side": "yes",
+            "order_id": "ord-2min-1",
+        }
+
+        market = {
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
+            "yes_ask": 34,
+            "yes_bid": 32,
+            "no_ask": 68,
+            "no_bid": 66,
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        now = datetime.now(timezone.utc)
+        mock_filter = {
+            "min_buy": 30,
+            "max_buy": 52,
+            "tp": 82,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 37,
+            "mid_zone_max": 43,
+            "is_exploration": False,
+        }
+
+        with patch("main.get_dynamic_filter_for_market", return_value=mock_filter):
+            snapshot = process_single_market(
+                market=market,
+                is_trading_interval=True,
+                client=client,
+                now_utc=now,
+                minute_past_hour=2,  # :02.5 mark (minute 2 % 15 == 2)
+                spot_cache={"BTC": 60100.0},
+                dry_run=False,
+            )
+
+        client.buy_and_set_take_profit.assert_called_once()
+        self.assertIn("trd", snapshot)
+        self.assertEqual(snapshot["trd"]["action"], "buy_opened")
+        self.assertEqual(snapshot["trd"]["side"], "yes")
+
+    def test_minute_2_5_disaster_cut_loss(self):
+        """Verifies that minute 2 (:02.5 mark) triggers disaster cut-loss when price collapses below floor."""
+        client = MagicMock()
+        client.exchange_name = "Kalshi"
+        client.get_market_position.return_value = {"side": "yes", "count": 1, "entry_price_cents": 42}
+        client.evaluate_and_execute_5min_cut_loss.return_value = {
+            "triggered": True,
+            "side": "yes",
+            "loss_cents": 24,
+            "exit_price": 18,
+            "action": "2_5min_loss_cut",
+        }
+
+        market = {
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
+            "yes_ask": 18,
+            "yes_bid": 16,
+            "no_ask": 84,
+            "no_bid": 82,
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        now = datetime.now(timezone.utc)
+        mock_filter = {
+            "min_buy": 30,
+            "max_buy": 52,
+            "cut_5min": 35,
+            "tp": 82,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 37,
+            "mid_zone_max": 43,
+            "is_exploration": False,
+        }
+
+        with patch("main.get_dynamic_filter_for_market", return_value=mock_filter):
+            snapshot = process_single_market(
+                market=market,
+                is_trading_interval=True,
+                client=client,
+                now_utc=now,
+                minute_past_hour=2,  # :02.5 mark
+                spot_cache={"BTC": 59800.0},
+                dry_run=False,
+            )
+
+        client.evaluate_and_execute_5min_cut_loss.assert_called_once_with(
+            ticker="KXBTC15M-TEST",
+            current_yes_price=18,
+            current_no_price=84,
+            min_price_threshold=30,  # max(20, 35 - 5) = 30
+            dry_run=False,
+        )
+        self.assertIn("trd", snapshot)
+        self.assertEqual(snapshot["trd"]["action"], "2_5min_loss_cut")
+        self.assertEqual(snapshot["trd"]["loss_cents"], 24)
+
+    def test_minute_7_5_cut_loss_and_entry(self):
+        """Verifies that minute 7 (:07.5 mark) evaluates 5-min style cut-loss on losing positions."""
+        client = MagicMock()
+        client.exchange_name = "Kalshi"
+        client.get_market_position.return_value = {"side": "yes", "count": 1, "entry_price_cents": 40}
+        client.evaluate_and_execute_5min_cut_loss.return_value = {
+            "triggered": True,
+            "side": "yes",
+            "loss_cents": 16,
+            "exit_price": 24,
+            "action": "7_5min_loss_cut",
+        }
+
+        market = {
+            "ticker": "KXBTC15M-TEST",
+            "series_ticker": "KXBTC15M",
+            "yes_ask": 24,
+            "yes_bid": 22,
+            "no_ask": 78,
+            "no_bid": 76,
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        now = datetime.now(timezone.utc)
+        mock_filter = {
+            "min_buy": 28,
+            "max_buy": 38,
+            "cut_5min": 35,
+            "tp": 76,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 37,
+            "mid_zone_max": 43,
+            "is_exploration": False,
+        }
+
+        with patch("main.get_dynamic_filter_for_market", return_value=mock_filter):
+            snapshot = process_single_market(
+                market=market,
+                is_trading_interval=True,
+                client=client,
+                now_utc=now,
+                minute_past_hour=7,  # :07.5 mark
+                spot_cache={"BTC": 59900.0},
+                dry_run=False,
+            )
+
+        client.evaluate_and_execute_5min_cut_loss.assert_called_once_with(
+            ticker="KXBTC15M-TEST",
+            current_yes_price=24,
+            current_no_price=78,
+            min_price_threshold=35,
+            dry_run=False,
+        )
+        self.assertIn("trd", snapshot)
+        self.assertEqual(snapshot["trd"]["action"], "7_5min_loss_cut")
 
     def test_cancellation_failure_aborts_liquidation(self):
         """Verifies that failed order cancellations abort liquidations to avoid locked position errors."""

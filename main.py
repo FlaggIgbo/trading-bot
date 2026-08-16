@@ -106,39 +106,75 @@ def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> floa
     return max(15.0, wait_seconds)
 
 
-def calculate_seconds_until_next_checkpoint(offset_seconds: float = 30.0) -> float:
+def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, offset_seconds: float | None = None) -> float:
     """
-    Calculates exact seconds to sleep until the NEXT scheduled checkpoint in the 15-minute cycle:
-    - Minute :00:30 (Maker Buy Entry & Auto-Sell TP setup)
-    - Minute :05:30 (Maker Buy Entry & 5-Min Cut-Loss)
-    - Minute :10:30 (10-Min Stop-Loss & Let-Winners-Run TP cancellation)
-    - Minute :12:30 (12.5-Min Endgame Check: 2.5m before expiration, sell if losing to salvage capital)
-    """
-    now = datetime.now(timezone.utc)
-    current_minute = now.minute
+    Calculates exact seconds to sleep until the NEXT scheduled checkpoint:
+    
+    15-Minute Market Checkpoints (Every 15m block):
+    - Minute :00:30, :15:30, :30:30, :45:30 (Open Entry, +30s open delay to allow bets to settle)
+    - Minute :02:30, :17:30, :32:30, :47:30 (2.5m Disaster Cut-Loss & 2nd Chance Entry)
+    - Minute :05:00, :20:00, :35:00, :50:00 (5m Cut-Loss & Tight Entry, exact timestamp without buffer)
+    - Minute :07:30, :22:30, :37:30, :52:30 (7.5m Mid-Candle Cut-Loss & Tight Entry)
+    - Minute :10:00, :25:00, :40:00, :55:00 (10m Stop-Loss & Winner-Roll, exact timestamp without buffer)
+    - Minute :12:30, :27:30, :42:30, :57:30 (12.5m Endgame Check: 2.5m before expiration)
 
-    # Checkpoint minutes within each 15-minute block
-    block_checkpoints = (0, 5, 10, 12)
-    block_start_minute = (current_minute // 15) * 15
+    Hourly Multi-Strike Market Checkpoints (Every 10m past the hour):
+    - Minute :00:30 (Open Multi-Strike Entry, +30s open delay)
+    - Minute :10:00 (10m Disaster Cut-Loss & 2nd Chance Entry, exact timestamp)
+    - Minute :20:00 (20m Cut-Loss & Tighter Entry, exact timestamp)
+    - Minute :30:00 (30m Mid-Hour Cut-Loss & Tighter Entry, exact timestamp without delay)
+    - Minute :40:00 (40m Winner-Roll & Stop-Loss, exact timestamp)
+    - Minute :50:00 (50m Endgame Check, exact timestamp)
+    """
+    if offset_seconds is not None:
+        open_delay_seconds = offset_seconds
+
+    now = datetime.now(timezone.utc)
+
+    # Complete 60-minute scheduled checkpoints (minute, second)
+    open_delay = int(open_delay_seconds)
+    hourly_checkpoints = (
+        (0, open_delay),   # 15M :00 open (+30s), 1H :00 open (+30s)
+        (2, 30),           # 15M :02:30
+        (5, 0),            # 15M :05:00
+        (7, 30),           # 15M :07:30
+        (10, 0),           # 15M :10:00, 1H :10:00
+        (12, 30),          # 15M :12:30
+        (15, open_delay),  # 15M :15:30 open (+30s)
+        (17, 30),          # 15M :17:30
+        (20, 0),           # 15M :20:00, 1H :20:00
+        (22, 30),          # 15M :22:30
+        (25, 0),           # 15M :25:00
+        (27, 30),          # 15M :27:30
+        (30, 0),           # 1H :30:00 mid-hour check (exact timestamp, NO delay)
+        (30, open_delay),  # 15M :30:30 open (+30s)
+        (32, 30),          # 15M :32:30
+        (35, 0),           # 15M :35:00
+        (37, 30),          # 15M :37:30
+        (40, 0),           # 15M :40:00, 1H :40:00
+        (42, 30),          # 15M :42:30
+        (45, open_delay),  # 15M :45:30 open (+30s)
+        (47, 30),          # 15M :47:30
+        (50, 0),           # 15M :50:00, 1H :50:00
+        (52, 30),          # 15M :52:30
+        (55, 0),           # 15M :55:00
+        (57, 30),          # 15M :57:30
+    )
 
     candidates = []
-    # Generate candidate timestamps across current and next 15m blocks
-    for block_offset in (0, 15):
-        for cp in block_checkpoints:
-            target_min = block_start_minute + block_offset + cp
-            target_hour_inc = target_min // 60
-            normalized_min = target_min % 60
-            dt = now.replace(minute=normalized_min, second=int(offset_seconds), microsecond=0)
-            if target_hour_inc > 0:
-                dt = dt + timedelta(hours=target_hour_inc)
+    # Generate candidate timestamps across current hour and next hour
+    for hour_offset in (0, 1):
+        base_hour_dt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=hour_offset)
+        for cp_min, cp_sec in hourly_checkpoints:
+            dt = base_hour_dt.replace(minute=cp_min, second=cp_sec)
             candidates.append(dt)
 
-    # Pick the earliest candidate that is at least 15 seconds in the future
-    future_candidates = [c for c in candidates if (c - now).total_seconds() >= 15.0]
+    # Pick the earliest candidate that is at least 10 seconds in the future
+    future_candidates = [c for c in candidates if (c - now).total_seconds() >= 10.0]
     next_dt = min(future_candidates) if future_candidates else candidates[-1]
 
     wait_seconds = (next_dt - now).total_seconds()
-    return max(15.0, wait_seconds)
+    return max(10.0, wait_seconds)
 
 
 # Alias for backward compatibility
@@ -505,9 +541,14 @@ def process_single_market(
     minute_into_market = minute_past_hour % 15
     is_12_5min_mark = (minute_into_market == 12)
     is_stop_loss_interval = (minute_into_market == 10)
+    is_7_5min_mark = (minute_into_market == 7)
     is_5min_mark = (minute_into_market == 5)
+    is_2_5min_mark = (minute_into_market == 2)
+    is_00_mark = (minute_into_market == 0)
 
-    dynamic_filters = get_dynamic_filter_for_market(asset_symbol, is_5min_mark, now_utc=now_utc)
+    # :05 and :07.5 use tighter dynamic price filters (is_5min_mark=True); :00 and :02.5 use broad open filters
+    is_tight_corridor = (minute_into_market in (5, 7))
+    dynamic_filters = get_dynamic_filter_for_market(asset_symbol, is_5min_mark=is_tight_corridor, now_utc=now_utc)
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
     take_profit_cents = dynamic_filters["tp"]
@@ -598,7 +639,9 @@ def process_single_market(
                 trade_details["rebuy_price_cents"] = sl_res["rebuy_price_cents"]
 
     # -----------------------------------------------------------------------
-    # Step 4C: Buy Strategy & 5-Min Early Cut-Loss Check (:00, :05, :15, :20...)
+    # Step 4C: Buy Strategy & Early Cut-Loss Check (:00, :02.5, :05, :07.5...)
+    # - :00 & :02.5: Broad corridor buy entries + :02.5 disaster cut-loss (<25¢).
+    # - :05 & :07.5: Tighter corridor buy entries + early cut-loss checks (<34¢-40¢).
     # Exclusively gated: We do NOT evaluate new buys if Stop-Loss just liquidated this market.
     # -----------------------------------------------------------------------
     elif is_trading_interval:
@@ -608,10 +651,19 @@ def process_single_market(
         cut_loss_executed = False
         pos = client.get_market_position(ticker)
 
-        # 5-Minute Early Cut-Loss Check: Evaluate all active positions at the 5-minute mark
-        if pos is not None and is_5min_mark:
+        # Early Cut-Loss Check: Evaluate active positions at :02.5, :05, and :07.5 marks
+        if pos is not None and (is_2_5min_mark or is_5min_mark or is_7_5min_mark):
             side = pos["side"]
-            cut_threshold = dynamic_filters.get("cut_5min", 40)
+            if is_2_5min_mark:
+                cut_threshold = max(20, dynamic_filters.get("cut_5min", 40) - 5)
+                action_tag = "2_5min_loss_cut"
+            elif is_7_5min_mark:
+                cut_threshold = dynamic_filters.get("cut_5min", 40)
+                action_tag = "7_5min_loss_cut"
+            else:
+                cut_threshold = dynamic_filters.get("cut_5min", 40)
+                action_tag = "early_loss_cut"
+
             cut_res = client.evaluate_and_execute_5min_cut_loss(
                 ticker=ticker,
                 current_yes_price=yes_price_cents,
@@ -624,12 +676,12 @@ def process_single_market(
                 ex_name = getattr(client, "exchange_name", "Exchange")
                 trade_details = {
                     "ex": ex_name.lower(),
-                    "action": "early_loss_cut",
+                    "action": action_tag,
                     "side": side,
                     "exit_price": cut_res.get("exit_price"),
                     "loss_cents": cut_res.get("loss_cents"),
                     "outcome": determine_counterfactual_outcome(
-                        side, "early_loss_cut", spot_price, target_price, market.get("result")
+                        side, action_tag, spot_price, target_price, market.get("result")
                     ),
                 }
                 pos = None
@@ -639,7 +691,7 @@ def process_single_market(
         ex_name = getattr(client, "exchange_name", "Exchange")
         has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
         if cut_loss_executed:
-            log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] 5-Min Cut-Loss executed for {ticker}. Skipping buy evaluation.")
+            log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Early Cut-Loss executed for {ticker}. Skipping buy evaluation.")
         elif pos is not None:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
             if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
@@ -809,15 +861,15 @@ def process_hourly_market_group(
     spot_price = spot_cache.get(symbol) if spot_cache is not None else get_crypto_spot_price(symbol)
 
     # Checkpoint interval flags
-    is_hourly_00_entry = ((minute_past_hour == 0) or force_trade_mark) and not circuit_breaker_tripped
-    is_hourly_20_entry = ((minute_past_hour == 20) or force_trade_mark) and not circuit_breaker_tripped
-    is_hourly_trading_interval = is_hourly_00_entry or is_hourly_20_entry
-    is_hourly_20min_cut_loss = (minute_past_hour == 20) and not force_trade_mark
+    is_hourly_00_or_10_entry = ((minute_past_hour in (0, 10)) or force_trade_mark) and not circuit_breaker_tripped
+    is_hourly_20_or_30_entry = ((minute_past_hour in (20, 30)) or force_trade_mark) and not circuit_breaker_tripped
+    is_hourly_trading_interval = is_hourly_00_or_10_entry or is_hourly_20_or_30_entry
+    is_hourly_cut_loss = (minute_past_hour in (10, 20, 30)) and not force_trade_mark
     is_hourly_40min_stop_loss = (minute_past_hour == 40) and not force_trade_mark
     is_hourly_50min_endgame = (minute_past_hour == 50) and not force_trade_mark
 
-    # Dynamic filter parameters (20-min uses tighter 05m filter, 00-min uses 00m broad filter)
-    is_tight_corridor = (minute_past_hour == 20)
+    # Dynamic filter parameters (20-min and 30-min use tighter filter, 00-min and 10-min use broad open filter)
+    is_tight_corridor = (minute_past_hour in (20, 30))
     dynamic_filters = get_dynamic_filter_for_market(symbol, is_5min_mark=is_tight_corridor, now_utc=now_utc)
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
@@ -874,10 +926,10 @@ def process_hourly_market_group(
                 pass
 
         parsed_markets.append({
+            "market": market,
             "ticker": ticker,
             "series_ticker": series_ticker,
             "target_price": target_price,
-            "market": market,
             "yes_price_cents": yes_price_cents,
             "no_price_cents": no_price_cents,
             "quotes": quotes,
@@ -972,13 +1024,22 @@ def process_hourly_market_group(
                     trade_executed_by_ticker[ticker] = trade_details
 
     # -----------------------------------------------------------------------
-    # Step 3: Hourly Buy Entry & 20-Min Cut-Loss (:00, :20)
+    # Step 3: Hourly Buy Entry & Early Cut-Loss (:00, :10, :20, :30)
     # -----------------------------------------------------------------------
     elif is_hourly_trading_interval:
-        # Step 3A: 20-Minute Cut-Loss Check
+        # Step 3A: Hourly Early Cut-Loss Check (:10, :20, :30 marks)
         cut_loss_tickers = set()
-        if is_hourly_20min_cut_loss:
-            cut_threshold = dynamic_filters.get("cut_5min", 15)
+        if is_hourly_cut_loss:
+            if minute_past_hour == 10:
+                cut_threshold = max(15, dynamic_filters.get("cut_5min", 15) - 5)
+                action_tag = "10min_loss_cut"
+            elif minute_past_hour == 30:
+                cut_threshold = dynamic_filters.get("cut_5min", 15)
+                action_tag = "30min_loss_cut"
+            else:
+                cut_threshold = dynamic_filters.get("cut_5min", 15)
+                action_tag = "early_loss_cut"
+
             for item in parsed_markets:
                 ticker = item["ticker"]
                 pos = client.get_market_position(ticker)
@@ -995,12 +1056,12 @@ def process_hourly_market_group(
                         cut_loss_tickers.add(ticker)
                         trade_details = {
                             "ex": ex_name.lower(),
-                            "action": "early_loss_cut",
+                            "action": action_tag,
                             "side": side,
                             "exit_price": cut_res.get("exit_price"),
                             "loss_cents": cut_res.get("loss_cents"),
                             "outcome": determine_counterfactual_outcome(
-                                side, "early_loss_cut", spot_price, item["target_price"], item["market"].get("result")
+                                side, action_tag, spot_price, item["target_price"], item["market"].get("result")
                             ),
                         }
                         trade_executed_by_ticker[ticker] = trade_details
@@ -1306,31 +1367,43 @@ def run_pipeline_pass(
     current_minute = now_utc.minute
 
     minute_into_market_15m = current_minute % 15
-    is_15m_trading_interval = (minute_into_market_15m in (0, 5)) or force_trade_mark
+    is_15m_open_ready = (minute_into_market_15m == 0) and (now_utc.second >= 20 or force_trade_mark)
+    is_15m_trading_interval = is_15m_open_ready or (minute_into_market_15m in (2, 5, 7)) or force_trade_mark
     is_15m_10min_interval = (minute_into_market_15m == 10) and not force_trade_mark
     is_15m_12_5min_interval = (minute_into_market_15m == 12) and not force_trade_mark
 
-    is_hourly_00_entry = (current_minute == 0) or force_trade_mark
-    is_hourly_20_mark = (current_minute == 20) and not force_trade_mark
+    is_hourly_00_or_10_entry = (current_minute in (0, 10)) or force_trade_mark
+    is_hourly_20_or_30_mark = (current_minute in (20, 30)) and not force_trade_mark
     is_hourly_40_mark = (current_minute == 40) and not force_trade_mark
     is_hourly_50_mark = (current_minute == 50) and not force_trade_mark
 
     # Human-readable interval descriptions
     intervals_active = []
     if is_15m_trading_interval:
-        intervals_active.append("15M BUY ENTRY / 5M CUT")
+        if minute_into_market_15m == 2:
+            intervals_active.append("15M :02.5 2ND CHANCE BUY & DISASTER CUT")
+        elif minute_into_market_15m == 5:
+            intervals_active.append("15M :05 BUY ENTRY / 5M CUT")
+        elif minute_into_market_15m == 7:
+            intervals_active.append("15M :07.5 MID-CANDLE BUY ENTRY / CUT")
+        else:
+            intervals_active.append("15M :00 BUY ENTRY")
     elif is_15m_10min_interval:
         intervals_active.append("15M WINNER ROLL / SL")
     elif is_15m_12_5min_interval:
         intervals_active.append("15M ENDGAME SAFETY CHECK")
 
-    if is_hourly_00_entry:
+    if current_minute == 0 or force_trade_mark:
         intervals_active.append("HOURLY 00M MULTI-STRIKE ENTRY")
-    elif is_hourly_20_mark:
-        intervals_active.append("HOURLY 20M CUT-LOSS & 2ND ENTRY")
-    elif is_hourly_40_mark:
+    elif current_minute == 10:
+        intervals_active.append("HOURLY 10M 2ND CHANCE ENTRY & DISASTER CUT")
+    elif current_minute == 20:
+        intervals_active.append("HOURLY 20M CUT-LOSS & 3RD ENTRY")
+    elif current_minute == 30:
+        intervals_active.append("HOURLY 30M MID-HOUR CUT-LOSS & ENTRY")
+    elif current_minute == 40:
         intervals_active.append("HOURLY 40M WINNER ROLL & SL")
-    elif is_hourly_50_mark:
+    elif current_minute == 50:
         intervals_active.append("HOURLY 50M ENDGAME SAFETY CHECK")
 
     interval_summary = " + ".join(intervals_active) if intervals_active else "DATA COLLECTION ONLY MARK"
@@ -1510,8 +1583,8 @@ def run_pipeline_pass(
                     log.error(f"❌ [{exchange_name}] Unhandled error processing hourly group for {sym}: {sym_err}", exc_info=True)
 
     # Save valid market snapshots to MongoDB Atlas
-    # We save snapshots on regular checkpoints (:00, :05, :10, :12.5, :20, :40, :50) OR whenever a trade occurs
-    is_standard_save_mark = (minute_into_market_15m in (0, 5, 10, 12)) or (current_minute in (0, 20, 40, 50))
+    # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50) OR whenever a trade occurs
+    is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12)) or (current_minute in (0, 10, 20, 30, 40, 50))
     valid_snapshots = [
         s for s in snapshots_to_save
         if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
@@ -1522,7 +1595,7 @@ def run_pipeline_pass(
     elif dry_run:
         log.info(f"\n{LogTag.DRY_RUN_PREVIEW.value} Skipped saving snapshots to MongoDB Atlas in Dry-Run mode.")
     elif not is_standard_save_mark:
-        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :05, :10, :12.5, :20, :40, :50 marks).")
+        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50 marks).")
     else:
         log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")

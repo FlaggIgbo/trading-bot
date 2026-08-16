@@ -45,20 +45,27 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
   - **Same Contract Ticker**: If cheapest YES and cheapest NO are on the exact same contract, the bot picks the strictly cheaper side (e.g. 48¢ NO vs 52¢ YES -> buys NO). If tied in price, picks the side favored by spot momentum.
   - **Different Contract Tickers**: Buys **BOTH** contracts independently (e.g. Strike A YES + Strike B NO) with resting Take-Profit limit orders on each.
 
-### 3. Synchronized Checkpoint Lifecycle Matrix ⏱️
-| Minute Past Hour | 15-Minute Market Action | Hourly Market Action |
-| :--- | :--- | :--- |
-| **`:00`** (`0m`) | **Entry**: Broad buy corridor (`30¢–52¢`), TP `82¢` | **Entry**: Multi-strike scan, pick cheapest YES & NO (`30¢–52¢`), TP `82¢` |
-| **`:05`** (`5m`) | **5m Cut-Loss** (`<40¢`) + **2nd Entry** (`28¢–38¢`) | *Holding active hourly positions* |
-| **`:10`** (`10m`) | **Winner Roll** (`≥70¢` bank profit & re-buy) + **Stop-Loss** | *Holding active hourly positions* |
-| **`:12:30`** (`12.5m`) | **Endgame Check** (2.5m before expiry, cut if losing) | *Holding active hourly positions* |
-| **`:15`** (`15m`) | Next 15m cycle Minute 00 Entry | *Holding active hourly positions* |
-| **`:20`** (`20m`) | 15m 5-Min Cut-Loss + 2nd Entry | **20m Checkpoint**: Hourly cut-loss check + 2nd Entry corridor (`28¢–38¢`, TP `76¢`) |
-| **`:25`, `:27:30`, `:30`, `:35`** | 15m checkpoints operate normally | *Holding active hourly positions* |
-| **`:40`** (`40m`) | 15m 10-Min Winner Roll / Stop-Loss | **40m Checkpoint**: Hourly Winner Roll (`≥70¢` sell at Bid & re-buy at Ask) + Stop-Loss |
-| **`:42:30`, `:45`** | 15m checkpoints operate normally | *Holding active hourly positions* |
-| **`:50`** (`50m`) | 15m 5-Min Cut-Loss + 2nd Entry | **50m Endgame Check** (10m before hourly close): Liquidate losing positions, hold winners for `100¢` payout |
-| **`:55`, `:57:30`** | 15m checkpoints operate normally | *Holding active hourly positions* |
+### 3. Checkpoint Lifecycle Matrices ⏱️
+
+#### A. 15-Minute Crypto Markets (Repeats Every 15-Minute Block)
+| Block Minute | Target Time | Action Type | 15-Minute Market Strategy |
+| :--- | :--- | :--- | :--- |
+| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Entry** | Broad buy corridor (`30¢–52¢`), TP `82¢` limit order placed |
+| **`:02:30`** | **`:02:30`** | **2nd Chance + Disaster Cut** | **2.5m Disaster Cut-Loss** (`<25¢`) + Re-evaluates broad entry (`30¢–52¢`) |
+| **`:05:00`** | **`:05:00`** (*no delay*) | **Cut-Loss + 2nd Entry** | **5m Cut-Loss** (`<34¢–40¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
+| **`:07:30`** | **`:07:30`** | **Mid-Candle Cut + 3rd Entry** | **7.5m Cut-Loss** (`<34¢–40¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
+| **`:10:00`** | **`:10:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss |
+| **`:12:30`** | **`:12:30`** | **Endgame Safety Check** | Liquidate losing positions 2.5m before expiration; hold winners for `100¢` settlement |
+
+#### B. Hourly Multi-Strike Crypto Markets (Every 10 Minutes Past the Hour)
+| Hour Minute | Target Time | Action Type | Hourly Market Strategy |
+| :--- | :--- | :--- | :--- |
+| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Multi-Strike Entry** | Multi-strike scan, pick cheapest YES & NO (`30¢–52¢`), TP `82¢` |
+| **`:10`** | **`:10:00`** (*no delay*) | **2nd Chance + Disaster Cut** | **10m Disaster Cut-Loss** (`<15¢–20¢`) + 2nd Chance Multi-Strike Broad Entry (`30¢–52¢`) |
+| **`:20`** | **`:20:00`** (*no delay*) | **Cut-Loss + 3rd Entry** | **20m Cut-Loss** (`<15¢–20¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
+| **`:30`** | **`:30:00`** (*no delay*) | **Mid-Hour Cut + Entry** | **30m Mid-Hour Cut-Loss** (`<15¢–20¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
+| **`:40`** | **`:40:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **40m Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss |
+| **`:50`** | **`:50:00`** (*no delay*) | **Endgame Safety Check** | Liquidate losing positions 10m before expiration; hold winners for `100¢` settlement |
 
 ### 4. Low-EV Middle Zone Avoidance ($37¢–43¢$) 🎯
 - **Spread Friction Gate**: Contracts in the 37¢–43¢ range are automatically bypassed unless Coinbase spot price is strongly in the money ($> 0.08\%$ in favor of the trade), shifting volume to **deep bargains ($\le 36¢$)** and **high-confidence momentum plays ($44¢–48¢$)**.
