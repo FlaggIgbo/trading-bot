@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -61,6 +62,9 @@ log = logging.getLogger(__name__)
 
 # Supported 15-minute crypto symbols across exchanges
 SUPPORTED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC")
+
+# Default expiration in seconds for Maker limit buy orders to protect against adverse price drops
+BUY_ORDER_EXPIRATION_SECONDS = int(os.getenv("BUY_ORDER_EXPIRATION_SECONDS", "45"))
 
 # Persistent HTTP session with connection pooling sized for parallel thread queries
 http_session = requests.Session()
@@ -401,6 +405,7 @@ def _execute_buy_flow(
                 take_profit_cents=take_profit_cents,
                 count=1,
                 maker_bid_cents=maker_bid,
+                buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
             )
             effective_buy = buy_res.get("buy_price_cents", price_cents)
         except Exception as error:

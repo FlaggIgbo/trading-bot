@@ -52,6 +52,11 @@ log = logging.getLogger(__name__)
 
 
 
+# Default resting order timeout in seconds for Maker buy orders (mitigates adverse selection)
+DEFAULT_BUY_ORDER_TIMEOUT_SECONDS = int(
+    os.getenv("KALSHI_BUY_ORDER_EXPIRATION_SECONDS", os.getenv("BUY_ORDER_EXPIRATION_SECONDS", "45"))
+)
+
 # ---------------------------------------------------------------------------
 # API Base Endpoints
 # ---------------------------------------------------------------------------
@@ -636,6 +641,7 @@ class KalshiClient(BaseTradingClient):
         no_price: int | None = None,
         no_price_dollars: str | None = None,
         time_in_force: str = "good_till_canceled",
+        expiration_ts: int | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -649,6 +655,7 @@ class KalshiClient(BaseTradingClient):
             yes_price / no_price: Price in cents (1-99)
             yes_price_dollars / no_price_dollars: Price as float string (e.g. '0.50')
             time_in_force: Order expiration rule (defaults to 'good_till_canceled')
+            expiration_ts: Unix timestamp (in seconds) when resting order automatically expires on exchange.
 
         Returns:
             dict: API response payload from `/portfolio/events/orders`.
@@ -692,6 +699,9 @@ class KalshiClient(BaseTradingClient):
             "time_in_force": time_in_force,
             "self_trade_prevention_type": "taker_at_cross",
         }
+        if expiration_ts is not None and time_in_force != "immediate_or_cancel":
+            order_payload["expiration_ts"] = int(expiration_ts)
+
         order_payload.update(kwargs)
 
         return self.post("/portfolio/events/orders", payload=order_payload)
@@ -832,11 +842,13 @@ class KalshiClient(BaseTradingClient):
         take_profit_cents: int = 62,
         count: int = 1,
         maker_bid_cents: int | None = None,
+        buy_order_timeout_seconds: int = DEFAULT_BUY_ORDER_TIMEOUT_SECONDS,
     ) -> dict:
         """
-        Submits a Maker limit Buy order at (Bid + 1¢) to save 1¢-3¢ entry cost.
-        If filled immediately, places the Take-Profit order right away.
-        If resting as an unfilled Maker order, Take-Profit is placed upon fill confirmation.
+        Submits a Maker limit Buy order at (Bid + 1¢) with an automatic exchange-side expiration (e.g. 45s).
+        If filled immediately, places the resting Take-Profit order right away.
+        If resting as an unfilled Maker order, Kalshi automatically cancels the buy order upon timeout.
+        Take-Profit is placed upon fill confirmation.
         """
         side_clean = side.lower()
 
@@ -847,11 +859,13 @@ class KalshiClient(BaseTradingClient):
         else:
             effective_buy_cents = min(99, buy_price_cents + 1)
 
+        timeout_tag = f" | Timeout: {buy_order_timeout_seconds}s" if buy_order_timeout_seconds > 0 else ""
         log.info(
             f"{LogTag.TRADE_EXECUTION.value} Market: {ticker} | Side: {side_clean.upper()} | "
-            f"Ask: {buy_price_cents}¢ | Order Limit (Ask + 1¢): {effective_buy_cents}¢ | Target TP: {take_profit_cents}¢"
+            f"Ask: {buy_price_cents}¢ | Order Limit (Ask + 1¢): {effective_buy_cents}¢{timeout_tag} | Target TP: {take_profit_cents}¢"
         )
 
+        now_sec = int(time.time())
         now_ms = int(time.time() * 1000)
 
         if side_clean == "yes":
@@ -873,6 +887,9 @@ class KalshiClient(BaseTradingClient):
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
+        if buy_order_timeout_seconds > 0:
+            buy_payload["expiration_ts"] = now_sec + buy_order_timeout_seconds
+
         buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
         self.invalidate_portfolio_caches()
 

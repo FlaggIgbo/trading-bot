@@ -74,6 +74,7 @@ class DummyHourlyTradingClient(BaseTradingClient):
         take_profit_cents: int = 82,
         count: int = 1,
         maker_bid_cents: int | None = None,
+        **kwargs,
     ) -> dict:
         effective_buy = min(buy_price_cents, (maker_bid_cents + 1) if maker_bid_cents is not None else buy_price_cents)
         self.execute_buy(ticker, side, count, effective_buy)
