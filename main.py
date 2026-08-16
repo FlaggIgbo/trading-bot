@@ -1163,10 +1163,12 @@ def process_hourly_market_group(
                                     f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
                                 )
                 else:
-                    log.info(
-                        f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                        f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
-                    )
+                    max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
+                    if min_buy_price <= yes_p <= max_eval_price:
+                        log.info(
+                            f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                            f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
+                        )
 
             # Evaluate NO
             no_p = item["no_price_cents"]
@@ -1231,10 +1233,12 @@ def process_hourly_market_group(
                                     f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
                                 )
                 else:
-                    log.info(
-                        f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                        f"Spot ${spot_price} >= Target ${target_price} (Diff: {item['price_diff']}). Bullish spot momentum."
-                    )
+                    max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
+                    if min_buy_price <= no_p <= max_eval_price:
+                        log.info(
+                            f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                            f"Spot ${spot_price} >= Target ${target_price} (Diff: {item['price_diff']}). Bullish spot momentum."
+                        )
 
         # Step 3D: Multi-Strike Selection & Tiebreaker Execution
         best_yes = min(valid_yes_candidates, key=lambda c: c["price"]) if valid_yes_candidates else None
