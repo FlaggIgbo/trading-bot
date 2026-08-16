@@ -837,12 +837,44 @@ class KalshiClient(BaseTradingClient):
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
-        order_id = buy_order_res.get("order", {}).get("order_id") or buy_order_res.get("order_id")
+        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        self.invalidate_portfolio_caches()
+
+        order_id = (
+            buy_order_res.get("order", {}).get("order_id")
+            or buy_order_res.get("order_id")
+            if isinstance(buy_order_res, dict)
+            else None
+        )
         client_order_id = buy_payload["client_order_id"]
+
+        # Check if filled immediately
+        fill_count = float(
+            (buy_order_res.get("fill_count") if isinstance(buy_order_res, dict) else 0)
+            or (buy_order_res.get("order", {}).get("fill_count_fp") if isinstance(buy_order_res, dict) else 0)
+            or (buy_order_res.get("order", {}).get("fill_count") if isinstance(buy_order_res, dict) else 0)
+            or 0
+        )
+        sell_order_res = None
+
+        if fill_count > 0:
+            log.info(f"✅ Maker Buy filled immediately for {ticker} ({fill_count} contracts). Placing Take-Profit...")
+            sell_order_res = self.place_take_profit_order(
+                ticker=ticker,
+                side=side_clean,
+                count=int(round(fill_count)),
+                take_profit_cents=take_profit_cents,
+            )
+        else:
+            log.info(
+                f"{LogTag.MAKER_BUY_RESTING.value} Buy order resting at {effective_buy_cents}¢ for {ticker}. "
+                f"Take-Profit ({take_profit_cents}¢) will be placed once filled."
+            )
+
         tp_order_id = (
             sell_order_res.get("order", {}).get("order_id")
             or sell_order_res.get("order_id")
-            if (isinstance(sell_order_res, dict))
+            if isinstance(sell_order_res, dict)
             else None
         )
 

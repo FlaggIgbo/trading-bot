@@ -325,6 +325,61 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
                 self.assertEqual(payload["price"], "0.9900")
                 self.assertEqual(payload["time_in_force"], "immediate_or_cancel")
 
+    def test_kalshi_client_buy_and_set_take_profit(self):
+        with patch.object(KalshiClient, "__init__", return_value=None):
+            kalshi = KalshiClient()
+            kalshi.session = MagicMock()
+            kalshi._profit_floors = {}
+            kalshi._entry_prices = {}
+            kalshi._cached_positions_ts = 0.0
+            kalshi._cached_resting_orders_ts = 0.0
+
+            # 1. Immediate fill YES test
+            with patch.object(kalshi, "post") as mock_post:
+                mock_post.side_effect = [
+                    {"order": {"order_id": "order-123", "fill_count": 1}},
+                    {"order": {"order_id": "tp-456"}},
+                ]
+                res = kalshi.buy_and_set_take_profit(
+                    ticker="KXBTC15M-TEST",
+                    side="yes",
+                    buy_price_cents=45,
+                    take_profit_cents=62,
+                    count=1,
+                    maker_bid_cents=44,
+                )
+                self.assertEqual(mock_post.call_count, 2)
+                buy_call_payload = mock_post.call_args_list[0][1]["payload"]
+                tp_call_payload = mock_post.call_args_list[1][1]["payload"]
+                self.assertEqual(buy_call_payload["ticker"], "KXBTC15M-TEST")
+                self.assertEqual(buy_call_payload["side"], "bid")
+                self.assertEqual(buy_call_payload["price"], "0.4500")
+                self.assertEqual(tp_call_payload["side"], "ask")
+                self.assertEqual(tp_call_payload["price"], "0.6200")
+                self.assertEqual(res["order_id"], "order-123")
+                self.assertEqual(res["tp_order_id"], "tp-456")
+                self.assertEqual(res["buy_price_cents"], 45)
+
+            # 2. Resting buy NO test (not filled immediately)
+            with patch.object(kalshi, "post") as mock_post:
+                mock_post.return_value = {"order_id": "order-789", "fill_count": 0}
+                res = kalshi.buy_and_set_take_profit(
+                    ticker="KXSOL15M-TEST",
+                    side="no",
+                    buy_price_cents=23,
+                    take_profit_cents=58,
+                    count=1,
+                    maker_bid_cents=19,
+                )
+                self.assertEqual(mock_post.call_count, 1)
+                buy_call_payload = mock_post.call_args_list[0][1]["payload"]
+                self.assertEqual(buy_call_payload["ticker"], "KXSOL15M-TEST")
+                self.assertEqual(buy_call_payload["side"], "ask")
+                self.assertEqual(buy_call_payload["price"], "0.8000")  # 100 - (19+1) = 80¢
+                self.assertEqual(res["order_id"], "order-789")
+                self.assertIsNone(res["tp_order_id"])
+                self.assertEqual(res["buy_price_cents"], 20)
+
     def test_kalshi_client_init_and_entry_prices(self):
         # Verify that KalshiClient initializes base state properly without manual mocking
         with patch("signals.kalshi_client._load_private_key", return_value=MagicMock()):
