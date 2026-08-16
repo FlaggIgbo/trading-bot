@@ -312,6 +312,16 @@ _LAST_MAP_REFRESH_TIME: float = 0.0
 _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 
 
+def is_default_exploration_window(now_utc: datetime | None = None) -> bool:
+    """
+    Returns True if current UTC time is between 05:00 and 07:00 UTC (Midnight to 2:00 AM Eastern Time).
+    During this window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢)
+    for wide empirical signal harvesting across Asian market opens.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    return 5 <= now.hour < 7
+
+
 def should_refresh_dynamic_map(
     now_utc: datetime | None = None,
     last_refresh_time: float | None = None,
@@ -322,7 +332,9 @@ def should_refresh_dynamic_map(
 
     Rule 1 (Cold Start): If memory is empty (bot just booted up), refresh immediately!
     Rule 2 (6-Hour Expiry): If more than 6 hours passed since last refresh, refresh!
-    Rule 3 (Clock Markers): If current UTC time hits 00:00, 06:00, 12:00, or 18:00 UTC, refresh!
+    Rule 3 (07:00 UTC Recalibration Anchor): Immediately after exiting the 05:00-07:00 UTC default window,
+            force a fresh recalibration at 07:00 UTC to lock in calibrated parameters for the rest of the day.
+    Rule 4 (Clock Markers): If current UTC time hits 00:00, 06:00, 07:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
     """
     if cache_is_empty is None:
         cache_is_empty = (_DYNAMIC_PRICE_MAP_CACHE is None)
@@ -342,7 +354,13 @@ def should_refresh_dynamic_map(
     if elapsed >= _CACHE_TTL_SECONDS:
         return True
 
-    # 2. Check if we are at a 6-hour clock mark (00:00, 06:00, 12:00, 18:00 UTC) and haven't refreshed this hour
+    # 2. Check if we just entered 07:00 UTC (the recalibration anchor right after 05:00-07:00 UTC default window)
+    if now.hour == 7 and now.minute < 10:
+        hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
+        if last_refresh_time < hour_start_ts:
+            return True
+
+    # 3. Check standard clock marks (00:00, 06:00, 12:00, 18:00 UTC) and haven't refreshed this hour
     if now.hour in (0, 6, 12, 18) and now.minute < 10:
         hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
         if last_refresh_time < hour_start_ts:
@@ -612,14 +630,18 @@ def get_dynamic_filter_for_market(
     asset_symbol: str,
     is_5min_mark: bool,
     dynamic_map: dict[str, dict[str, dict[str, int | bool]]] | None = None,
+    now_utc: datetime | None = None,
 ) -> dict[str, int | bool]:
     """
     Convenience lookup to get exact dynamic filter parameters for a specific market and timing mark.
+    Between 05:00 and 07:00 UTC (Midnight - 2:00 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
+    broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢) for wide empirical signal harvesting.
 
     Args:
         asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "DOGE", "ZEC").
         is_5min_mark: True if running at the 5-minute mark (:05), False if at minute 00 (:00).
-        dynamic_map: Optional preloaded map. If None, uses cached in-memory map.
+        dynamic_map: Optional preloaded map. If None, uses defaults during 05:00-07:00 UTC or cached in-memory map.
+        now_utc: Optional current UTC datetime for timing/regime evaluation.
 
     Returns:
         Dictionary: {
@@ -632,10 +654,18 @@ def get_dynamic_filter_for_market(
             "endgame_12_5_floor": int,
             "avoid_mid_zone": bool,
             "mid_zone_min": int,
-            "mid_zone_max": int
+            "mid_zone_max": int,
+            "is_exploration": bool
         }
     """
-    active_map = dynamic_map or get_dynamic_price_filter_map()
+    now = now_utc or datetime.now(timezone.utc)
+    is_exploration = is_default_exploration_window(now)
+
+    if is_exploration and dynamic_map is None:
+        active_map = DEFAULT_DYNAMIC_PRICE_MAP
+    else:
+        active_map = dynamic_map or get_dynamic_price_filter_map(now_utc=now)
+
     mark = "05" if is_5min_mark else "00"
 
     sym_clean = (asset_symbol or "").upper()
@@ -653,6 +683,7 @@ def get_dynamic_filter_for_market(
         "avoid_mid_zone": bool(mark_filter.get("avoid_mid_zone", True)),
         "mid_zone_min": int(mark_filter.get("mid_zone_min", 37)),
         "mid_zone_max": int(mark_filter.get("mid_zone_max", 43)),
+        "is_exploration": is_exploration,
     }
 
 

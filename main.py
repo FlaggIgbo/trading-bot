@@ -70,6 +70,7 @@ import requests
 from database import (
     get_dynamic_filter_for_market,
     get_dynamic_price_filter_map,
+    is_default_exploration_window,
     save_market_snapshots,
     save_portfolio_pnl,
     save_settlements,
@@ -327,6 +328,7 @@ def _execute_buy_flow(
     market_result: str | None,
     client: BaseTradingClient,
     dry_run: bool,
+    is_exploration: bool = False,
 ) -> tuple[bool, dict | None]:
     """Helper function to execute Maker Buy order and setup resting Take-Profit Auto-Sell."""
     side_lower = side.lower()
@@ -335,13 +337,14 @@ def _execute_buy_flow(
     momentum_label = "Bullish" if side_lower == "yes" else "Bearish"
 
     log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
+    regime_tag = " [EXPLORATION REGIME]" if is_exploration else ""
     log_action = (
         f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL."
         if dry_run
         else f"Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
     )
     log.info(
-        f"{log_prefix} [{ex_name}] {ticker} -> {side_upper} price is {price_cents}¢ "
+        f"{log_prefix}{regime_tag} [{ex_name}] {ticker} -> {side_upper} price is {price_cents}¢ "
         f"(between {min_buy}¢ and {max_buy}¢ & {momentum_label} Spot Momentum!). {log_action}"
     )
 
@@ -365,6 +368,7 @@ def _execute_buy_flow(
         **({"dry_run": True} if dry_run else {}),
         "ex": ex_name.lower(),
         "action": "buy_opened",
+        "regime": "default_window" if is_exploration else "calibrated",
         "side": side_lower,
         "buy": effective_buy,
         "tp": take_profit_cents,
@@ -443,10 +447,11 @@ def process_single_market(
     is_stop_loss_interval = (minute_into_market == 10)
     is_5min_mark = (minute_into_market == 5)
 
-    dynamic_filters = get_dynamic_filter_for_market(asset_symbol, is_5min_mark)
+    dynamic_filters = get_dynamic_filter_for_market(asset_symbol, is_5min_mark, now_utc=now_utc)
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
     take_profit_cents = dynamic_filters["tp"]
+    is_exploration = dynamic_filters.get("is_exploration", False)
 
     trade_executed = False
     trade_details = None
@@ -632,6 +637,7 @@ def process_single_market(
                     market.get("result"),
                     client,
                     dry_run,
+                    is_exploration=is_exploration,
                 )
 
     # 5. Build Compact Snapshot Document (~100 bytes for storage efficiency)
@@ -683,6 +689,8 @@ def run_pipeline_pass(
     log.info(f"RUNNING BOT AT UTC TIME: {now_utc.isoformat()} (Minute :{current_minute:02d}:{now_utc.second:02d})")
     if dry_run:
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
+    if is_default_exploration_window(now_utc):
+        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (Midnight–2AM ET): Trading on default broad corridors (:00 -> 30¢–52¢, :05 -> 28¢–38¢) for empirical discovery.")
     log.info(
         "--> INTERVAL: "
         + ("BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)" if is_trading_interval
@@ -692,7 +700,7 @@ def run_pipeline_pass(
     )
     log.info("=================================================================")
 
-    # Ensure dynamic price filters are in memory (auto-refreshes every 6 hours or on cold start)
+    # Ensure dynamic price filters are in memory (auto-refreshes every 6 hours, at 07:00 UTC anchor, or on cold start)
     get_dynamic_price_filter_map(now_utc=now_utc)
 
     # Initialize fallback clients if persistent instances were not passed

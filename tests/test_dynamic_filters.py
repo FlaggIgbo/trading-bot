@@ -12,6 +12,7 @@ from database import (
     DEFAULT_DYNAMIC_PRICE_MAP,
     calibrate_dynamic_price_map_from_db,
     get_dynamic_filter_for_market,
+    is_default_exploration_window,
     should_refresh_dynamic_map,
 )
 
@@ -286,6 +287,52 @@ class TestDynamicPriceFilters(unittest.TestCase):
         )
         self.assertIn("trd", snap3)
         self.assertEqual(snap3["trd"]["action"], "buy_opened")
+
+    def test_is_default_exploration_window(self):
+        """Tests that 05:00 - 07:00 UTC is recognized as the exploration window."""
+        # 05:00 UTC -> True
+        dt_0500 = datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_default_exploration_window(dt_0500))
+
+        # 06:45 UTC -> True
+        dt_0645 = datetime(2026, 8, 15, 6, 45, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_default_exploration_window(dt_0645))
+
+        # 04:59 UTC -> False
+        dt_0459 = datetime(2026, 8, 15, 4, 59, 59, tzinfo=timezone.utc)
+        self.assertFalse(is_default_exploration_window(dt_0459))
+
+        # 07:00 UTC -> False
+        dt_0700 = datetime(2026, 8, 15, 7, 0, 0, tzinfo=timezone.utc)
+        self.assertFalse(is_default_exploration_window(dt_0700))
+
+        # 14:30 UTC -> False
+        dt_1430 = datetime(2026, 8, 15, 14, 30, 0, tzinfo=timezone.utc)
+        self.assertFalse(is_default_exploration_window(dt_1430))
+
+    def test_should_refresh_at_0700_utc_anchor(self):
+        """Tests that 07:00 UTC acts as an immediate post-exploration recalibration anchor."""
+        # At 07:05 UTC, if last refresh was at 03:00 UTC -> should trigger refresh
+        now_0705 = datetime(2026, 8, 15, 7, 5, 0, tzinfo=timezone.utc)
+        last_refresh_0300 = datetime(2026, 8, 15, 3, 0, 0, tzinfo=timezone.utc).timestamp()
+        self.assertTrue(should_refresh_dynamic_map(now_utc=now_0705, last_refresh_time=last_refresh_0300, cache_is_empty=False))
+
+        # If already refreshed at 07:01 UTC -> should not re-trigger
+        last_refresh_0701 = datetime(2026, 8, 15, 7, 1, 0, tzinfo=timezone.utc).timestamp()
+        self.assertFalse(should_refresh_dynamic_map(now_utc=now_0705, last_refresh_time=last_refresh_0701, cache_is_empty=False))
+
+    def test_get_dynamic_filter_exploration_window_fallback(self):
+        """Tests that get_dynamic_filter_for_market returns defaults during 05:00-07:00 UTC window."""
+        # 05:30 UTC -> Should use DEFAULT_DYNAMIC_PRICE_MAP and return is_exploration=True
+        now_0530 = datetime(2026, 8, 15, 5, 30, 0, tzinfo=timezone.utc)
+        filter_0530 = get_dynamic_filter_for_market("BTC", is_5min_mark=False, now_utc=now_0530)
+        self.assertTrue(filter_0530["is_exploration"])
+        self.assertEqual(filter_0530["max_buy"], DEFAULT_DYNAMIC_PRICE_MAP["BTC"]["00"]["max_buy"])
+
+        # 14:30 UTC -> Should return is_exploration=False
+        now_1430 = datetime(2026, 8, 15, 14, 30, 0, tzinfo=timezone.utc)
+        filter_1430 = get_dynamic_filter_for_market("BTC", is_5min_mark=False, now_utc=now_1430)
+        self.assertFalse(filter_1430["is_exploration"])
 
 
 if __name__ == "__main__":

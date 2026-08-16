@@ -54,38 +54,27 @@ A high-performance Python trading bot for 15-minute crypto prediction markets on
   - **Losing Positions**: If the market is losing (`current_price < entry_price` or `current_price < endgame_12_5_floor` [dynamically calibrated from MongoDB]), liquidates immediately via taker execution to salvage capital and prevent losing all capital gains or settling at 0¢.
   - **Winning Positions**: If in profit (`current_price ≥ entry_price`), holds position through the final 2.5 minutes to collect the **full 100¢ ($1.00 payout)** at expiration!
 
----
-
-## 📊 Microstructure & Outcome Logging
-
-Every 5 minutes, an ultra‑compact snapshot (~100 bytes) is saved to MongoDB Atlas:
-
-```json
-{
-  "ts": 1786680114,
-  "m": 1,
-  "sym": "BTC",
-  "tick": "KXBTC15M-26AUG140015-15",
-  "ex": "kalshi",
-  "y": 41,
-  "n": 60,
-  "y_bid": 40,
-  "y_ask": 41,
-  "n_bid": 59,
-  "n_ask": 60,
-  "sprd": 1,
-  "p": 63223.035,
-  "tgt": 63252.79,
-  "diff": -29.755,
-  "pct": -0.047,
-  "rem": 13.1,
-  "vol": 189046
-}
-```
+### 9. 05:00 – 07:00 UTC Signal Discovery Window (Midnight – 2:00 AM ET) 🌍
+- **Empirical Signal Harvesting**: Between 05:00 and 07:00 UTC (aligning with the Tokyo / Asian crypto trading open), the bot temporarily falls back to broad default corridors (`30¢–52¢` at `:00`, `28¢–38¢` at `:05`) to gather rich empirical signal and ground-truth execution data across wider price regimes.
+- **Recalibration Anchor at 07:00 UTC**: At 07:00 UTC, the cache is automatically invalidated and a fresh 48-hour calibration query runs against MongoDB Atlas to lock in tight dynamic filters for the next 22 hours.
+- **Continuous Safeguards**: Spot momentum filtering (`is_spot_momentum_aligned`) and all risk exits (5m cut-loss, 10m stop-loss/roll, 12.5m endgame safety) remain 100% active during the discovery window.
 
 ---
 
-## 💰 Portfolio Balance & Realized PnL Tracking
+## 💰 Portfolio Tracking & Position Sizing Framework
+
+### Current Production Sizing (Strict 1-Contract Fixed Sizing)
+- Every buy order submits **`count = 1`**, strictly capping total risk per opportunity to **$0.28 – $0.52**.
+- Exits (Take-Profit, Cut-Loss, Stop-Loss, Winner-Rolls) dynamically match and manage the active position quantity.
+
+### Dynamic Multi-Contract Position Sizing (Framework & Architecture)
+- **Capital-Proportional Sizing**: Dynamically scale contract quantity ($N = \lfloor \text{Available Equity} \times f^* / \text{Price} \rfloor$) using a fractional Kelly Criterion ($f^* = \frac{b \cdot p - q}{b}$).
+- **Conviction & Distance Scaling**: Increase contract size (e.g. 2–5 contracts) when spot momentum $z$-score is exceptionally strong ($> 2.0\sigma$) and historical price-tier win rate $> 65\%$.
+- **Max Portfolio Exposure Ceiling**: Enforce an aggregate portfolio exposure cap (e.g. max 5% of equity in any single asset, max 20% total open exposure across all active positions).
+
+---
+
+## 📊 Portfolio Balance & Realized PnL Tracking
 
 The bot queries native exchange REST API endpoints on each pass to log and store account financial metrics:
 
@@ -100,9 +89,9 @@ The bot queries native exchange REST API endpoints on each pass to log and store
 
 ---
 
-## 📝 Roadmap & TODO
+## 📝 Roadmap & Future Enhancements
 
-- [ ] **Multi-Contract Position Sizing**: Add support for buying and managing more than 1 contract per opportunity (e.g. dynamic position sizing based on account equity, confidence score, or fixed quantity parameters).
+- [ ] **Multi-Contract Sizing Implementation**: Wire account-equity fractional Kelly and conviction scoring directly into live order execution.
 - [ ] **Expansion to Additional Asset Classes & Market Timeframes**:
   - **Stock Indices**: Add support for index prediction markets on Kalshi (e.g. S&P 500 / `INX` / `SPY`, Nasdaq 100 / `NDX`).
   - **Extended Time horizons**: Expand beyond 15-minute intervals to support hourly crypto contracts (`1H`), daily closes, and macro event markets.
