@@ -98,3 +98,21 @@ def test_hourly_lifecycle_cut_losses(hourly_client, minute, init_pos, init_price
     assert len(hourly_client.liquidations) == 1
     assert hourly_client.liquidations[0]["ticker"] == expected_liq
     assert snaps[0]["trd"]["action"] == expected_action
+
+
+def test_hourly_mid_zone_allowed_during_exploration(hourly_client):
+    markets = [{
+        "ticker": "KXBTCD-MID", "series_ticker": "KXBTCD", "floor_strike": 70000.0,
+        "yes_ask_dollars": "0.50", "yes_bid_dollars": "0.48",
+        "no_ask_dollars": "0.52", "no_bid_dollars": "0.50",
+    }]
+    # 05:00 UTC -> Mid-zone (50¢) allowed
+    snaps_exp = process_hourly_market_group(
+        "BTC", markets, hourly_client,
+        datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc),
+        0, {"BTC": 71000.0}, False,
+    )
+    assert len(hourly_client.buys) == 1
+    assert hourly_client.buys[0]["price"] in (49, 50)
+    assert snaps_exp[0]["trd"]["corridor"] == "mid_zone"
+

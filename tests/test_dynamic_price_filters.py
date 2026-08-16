@@ -97,3 +97,58 @@ def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
         assert snap["trd"]["corridor"] == corridor
     else:
         assert "trd" not in snap
+
+
+@pytest.mark.parametrize("hour, minute, expected_avoid_mid", [
+    (5, 0, False),
+    (5, 30, False),
+    (6, 0, False),
+    (6, 59, False),
+    (7, 0, True),
+    (12, 0, True),
+    (0, 0, True),
+])
+def test_mid_zone_flag_during_exploration(hour, minute, expected_avoid_mid):
+    dt = datetime(2026, 8, 15, hour, minute, 0, tzinfo=timezone.utc)
+    filters = get_dynamic_filter_for_market("BTC", is_5min_mark=False, now_utc=dt)
+    assert filters["avoid_mid_zone"] is expected_avoid_mid
+    assert filters["is_exploration"] is (not expected_avoid_mid)
+
+
+def test_market_screening_mid_zone_allowed_during_exploration():
+    client = MagicMock(exchange_name="Kalshi")
+    client.get_market_position.return_value = None
+    client.has_existing_position_or_order.return_value = False
+
+    market = {
+        "ticker": "KXBTC15M-TEST", "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.50", "yes_bid_dollars": "0.48",
+        "floor_strike": 60000.0, "exchange": "kalshi",
+    }
+
+    # At 05:00 UTC (exploration window), 50¢ coin-flip mid-zone should be ALLOWED
+    snap_exp = process_single_market(
+        market=market,
+        is_trading_interval=True,
+        client=client,
+        now_utc=datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
+        spot_cache={"BTC": 60000.0 * 1.0001},
+        dry_run=True,
+    )
+    assert "trd" in snap_exp
+    assert snap_exp["trd"]["corridor"] == "mid_zone"
+    assert snap_exp["trd"]["buy"] == 50
+
+    # At 12:00 UTC (normal window), 50¢ coin-flip mid-zone should be REJECTED
+    snap_normal = process_single_market(
+        market=market,
+        is_trading_interval=True,
+        client=client,
+        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
+        spot_cache={"BTC": 60000.0 * 1.0001},
+        dry_run=True,
+    )
+    assert "trd" not in snap_normal
+

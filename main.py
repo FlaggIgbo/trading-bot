@@ -417,7 +417,11 @@ def _execute_buy_flow(
     side_upper = side.upper()
     ex_name = getattr(client, "exchange_name", "Exchange")
     momentum_label = "Bullish" if side_lower == "yes" else "Bearish"
-    corridor_tag = " [MOMENTUM BREAKOUT]" if corridor_mode == "momentum" else ""
+    corridor_tag = ""
+    if corridor_mode == "momentum":
+        corridor_tag = " [MOMENTUM BREAKOUT]"
+    elif corridor_mode == "mid_zone":
+        corridor_tag = " [MID-ZONE EXPLORATION]"
 
     log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
     regime_tag = " [EXPLORATION REGIME]" if is_exploration else ""
@@ -743,11 +747,25 @@ def process_single_market(
                     })
 
                 # Dead Coin-Flip Middle Zone (45¢ - 55¢)
-                elif avoid_mid_zone and (45 <= p_cents <= 55):
-                    log.info(
-                        f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
-                        f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
-                    )
+                elif 45 <= p_cents <= 55:
+                    if avoid_mid_zone:
+                        log.info(
+                            f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
+                            f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
+                        )
+                    else:
+                        log.info(
+                            f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                            f"Allowing coin-flip middle zone trade during exploration window (05:00-06:00 UTC) for empirical data collection."
+                        )
+                        candidate_sides.append({
+                            "side": side,
+                            "price": p_cents,
+                            "tp": take_profit_cents,
+                            "min_buy": 45,
+                            "max_buy": 55,
+                            "mode": "mid_zone",
+                        })
 
                 # Corridor 2: Momentum / Trend Breakout Corridor
                 elif dynamic_filters.get("enable_momentum_buys", False):
@@ -1126,11 +1144,30 @@ def process_hourly_market_group(
                                 "mode": "discount",
                             })
                     # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢)
-                    elif avoid_mid_zone and (45 <= yes_p <= 55):
-                        log.info(
-                            f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                            f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
-                        )
+                    elif 45 <= yes_p <= 55:
+                        if avoid_mid_zone:
+                            log.info(
+                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
+                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
+                            )
+                        else:
+                            log.info(
+                                f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                f"Allowing coin-flip middle zone trade during exploration window (05:00-06:00 UTC) for empirical data collection."
+                            )
+                            valid_yes_candidates.append({
+                                "item": item,
+                                "ticker": ticker,
+                                "side": "yes",
+                                "price": yes_p,
+                                "bid": quotes["yes_bid"],
+                                "target_price": target_price,
+                                "pct_dist": pct_dist,
+                                "tp": take_profit_cents,
+                                "min_buy": 45,
+                                "max_buy": 55,
+                                "mode": "mid_zone",
+                            })
                     # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
                     elif dynamic_filters.get("enable_momentum_buys", False):
                         mom_min = dynamic_filters.get("momentum_min_buy", 56)
@@ -1196,11 +1233,30 @@ def process_hourly_market_group(
                                 "mode": "discount",
                             })
                     # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢)
-                    elif avoid_mid_zone and (45 <= no_p <= 55):
-                        log.info(
-                            f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                            f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
-                        )
+                    elif 45 <= no_p <= 55:
+                        if avoid_mid_zone:
+                            log.info(
+                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
+                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
+                            )
+                        else:
+                            log.info(
+                                f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                f"Allowing coin-flip middle zone trade during exploration window (05:00-06:00 UTC) for empirical data collection."
+                            )
+                            valid_no_candidates.append({
+                                "item": item,
+                                "ticker": ticker,
+                                "side": "no",
+                                "price": no_p,
+                                "bid": quotes["no_bid"],
+                                "target_price": target_price,
+                                "pct_dist": pct_dist,
+                                "tp": take_profit_cents,
+                                "min_buy": 45,
+                                "max_buy": 55,
+                                "mode": "mid_zone",
+                            })
                     # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
                     elif dynamic_filters.get("enable_momentum_buys", False):
                         mom_min = dynamic_filters.get("momentum_min_buy", 56)
@@ -1420,7 +1476,7 @@ def run_pipeline_pass(
     if dry_run:
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     if is_default_exploration_window(now_utc):
-        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (1AM–3AM ET): Trading on default broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢) for empirical discovery.")
+        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (1AM–3AM ET): Trading on default broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢) and allowing coin-flip middle zone (45¢–55¢) for empirical data collection.")
     log.info(f"--> INTERVAL: {interval_summary}")
     log.info("=================================================================")
 
