@@ -6,11 +6,26 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
 - **Exchange APIs**:
   - **Kalshi Trade API V2** (`POST /portfolio/events/orders` with RSA-PSS digital signatures)
   - *Gemini Trading Client*: Disabled / commented out.
-- **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`, `portfolio_pnl`, `settlements`)
+- **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`, `portfolio_pnl`, `settlements`, `active_positions`)
 - **Hosting**: 24/7 Render.com Background Worker (synchronized across 15M and 1H checkpoints)
 - **Tracked Assets (12 Series)**:
   - **15-Minute Series**: `KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`, `KXADA15M`, `KXTON15M`, `KXBCH15M`, `KXNEAR15M`, `KXZEC15M`
   - **Hourly Multi-Strike Series**: `KXBTCD`, `KXETHD`, `KXSOLD`, `KXXRPD`, `KXDOGED`, `KXBNBD`, `KXHYPED`, `KXTOND`, `KXNEARD`, `KXZECD`
+
+---
+
+## 🛡️ Production Concurrency & Reliability Safeguards
+
+1. **Order Cancellation Verification**:
+   - Strictly verifies that 0 resting orders remain before firing taker liquidations or rolls, preventing `position_locked` errors from Kalshi.
+2. **Parallel Spot Ingestion**:
+   - `batch_fetch_crypto_spot_prices` runs parallel worker threads across all 12 coins simultaneously (<300ms total), preventing timing drift during Coinbase latency.
+3. **Crash-Proof Persistent State (`active_positions`)**:
+   - Records live entry prices into MongoDB Atlas upon fill. Restarts or redeployments on Render instantly reload true cost bases rather than falling back to static estimates.
+4. **Per-Market & Per-Symbol Error Boundaries**:
+   - Isolates each market snapshot and symbol group in localized `try/except` guards so that payload anomalies never halt remaining execution passes.
+5. **IOC-Only Liquidation & No Dangerous 99¢ GTC Bids**:
+   - Eliminates resting 99¢ GTC bids during NO liquidations. Employs dynamic book re-quoting and immediate-or-cancel execution to prevent catastrophic downside exposure.
 
 ---
 
@@ -90,6 +105,7 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
   - `trading_bot_db.market_snapshots`: Microstructure snapshots (tagged with `tf: "15m"` or `tf: "1h"`).
   - `trading_bot_db.portfolio_pnl`: Time-series balance, portfolio value, open exposure, and realized PnL totals.
   - `trading_bot_db.settlements`: Individual market settlement records with cost, revenue, and net profit/loss.
+  - `trading_bot_db.active_positions`: Persistent cost-basis records for open contracts across restarts.
 - **Console Log Output**:
   ```text
   💰 [PORTFOLIO PNL] [Kalshi] Cash: $500.00 | Port Value: $520.00 | Settled PnL: +$14.20 (+1420¢ across 8 mkts) | Active: 2 pos ($0.80)

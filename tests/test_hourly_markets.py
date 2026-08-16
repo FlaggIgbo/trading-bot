@@ -31,10 +31,8 @@ class DummyHourlyTradingClient(BaseTradingClient):
         return self._positions_cache.get(ticker)
 
     def cancel_and_verify_resting_orders(self, ticker: str) -> bool:
-        if ticker in self._orders_cache:
-            self._orders_cache.pop(ticker, None)
-            return True
-        return False
+        self._orders_cache.pop(ticker, None)
+        return True
 
     def has_existing_position_or_order(self, ticker: str) -> bool:
         return ticker in self._positions_cache or ticker in self._orders_cache
@@ -64,7 +62,7 @@ class DummyHourlyTradingClient(BaseTradingClient):
             "entry_price_cents": price_cents,
         }
         self.set_entry_price(ticker, price_cents)
-        res = {"status": "bought", "ticker": ticker, "side": side, "price": price_cents}
+        res = {"status": "bought", "ticker": ticker, "side": side, "price": price_cents, "fill_count": count}
         self.executed_buys.append(res)
         return res
 

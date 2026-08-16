@@ -1,26 +1,25 @@
 """
-Kalshi API Client & 15-Minute Crypto Market Data Retriever
-===========================================================
+Kalshi API Client & Multi-Timeframe Crypto Execution Engine
+============================================================
 
 What is Kalshi?
 ---------------
-Kalshi is a regulated prediction market exchange where users buy and sell contracts
-based on the outcome of future events (e.g., "Will Bitcoin price increase in the next 15 minutes?").
+Kalshi is a CFTC-regulated prediction market exchange offering binary event contracts
+across 15-Minute and Hourly directional crypto markets.
 Contracts settle at either $1.00 (100 cents) if YES occurs, or $0.00 if NO occurs.
 
 Authentication Explained:
 -------------------------
-Kalshi uses RSA-PSS digital signatures for API security rather than traditional password tokens:
+Kalshi uses RSA-PSS digital signatures for API security:
 1. Every request header includes a millisecond timestamp, API key ID, and an RSA signature.
-2. The signature is created by signing the concatenated string `timestamp + HTTP_METHOD + path`
-   using an RSA private key file (`.key`).
-3. Kalshi verifies this signature using your public key on file.
+2. The signature signs `timestamp + HTTP_METHOD + path` using an RSA private key file (`.key`).
+3. Kalshi verifies this signature using your registered public key.
 
-Price Structure:
-----------------
-- Kalshi prices are expressed as cents (1¢ to 99¢) or dollar floats ($0.01 to $0.99).
-- 1 contract cost = contract price (e.g., 50¢).
-- Max payout = $1.00 per contract.
+Execution Safety & Liquidation Rules:
+--------------------------------------
+- Maker Limit Buys (`Bid + 1¢`) to capture spread discounts and optimize edge.
+- IOC-Only Liquidation (Immediate-Or-Cancel) with dynamic re-pricing.
+- Zero Resting 99¢ GTC Bids: Prevents asymmetric downside risk during market shocks.
 """
 
 from __future__ import annotations
@@ -142,11 +141,25 @@ def round_price_to_tick(price_dollars: float | str) -> str:
     Prices must remain within the open interval ($0.01 to $0.99).
     """
     price_val = float(price_dollars)
-    # Clamp price between 1 cent ($0.01) and 99 cents ($0.99)
     clamped_price = max(0.01, min(0.99, price_val))
-    # Round to 2 decimal places (1 cent ticks)
     rounded_cents = round(clamped_price * 100) / 100
     return f"{rounded_cents:.2f}"
+
+
+def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = None) -> int | None:
+    """
+    Safely converts string dollars (e.g. '0.3500') or cent integers (e.g. 35) to an integer cent value (1-99).
+    Returns None if the price is missing, 0, or invalid.
+    """
+    for val, multiplier in ((val_dollars, 100), (val_cents, 1)):
+        if val is not None:
+            try:
+                res = int(round(float(val) * multiplier))
+                if 1 <= res <= 99:
+                    return res
+            except (ValueError, TypeError):
+                continue
+    return None
 
 
 def _load_private_key():
@@ -951,30 +964,30 @@ class KalshiClient(BaseTradingClient):
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
         """
-        Executes an immediate True Taker market liquidation sell order on Kalshi.
+        Executes an immediate True Taker market liquidation sell order on Kalshi using IOC (Immediate-or-Cancel).
 
         High School Explanation:
         -------------------------
         When our stop-loss or profit-floor triggers, we want to SELL RIGHT NOW so we don't
-        risk losing 100% of our money when the 15-minute contract ends.
-
-        If we placed a regular limit order, it might sit waiting on the order book if buyers
-        are offering less than our asking price.
+        risk losing 100% of our money when the 15-minute / hourly contract ends.
 
         To guarantee an immediate fill against the best available buyer (taker execution):
         1. When selling YES contracts:
-           - We offer to sell at 1¢ ($0.01).
-           - Kalshi automatically matches our order with the highest existing buyer (e.g. 35¢ or 25¢).
-           - This is called 'price improvement' and gives us an instant fill at the best bid!
+           - We offer to sell at 1¢ ($0.01) with immediate_or_cancel.
+           - Kalshi automatically matches our order with the highest existing buyer (price improvement).
         2. When selling NO contracts:
-           - In Kalshi's event order model, selling NO is done by placing a bid on YES up to 99¢ ($0.99).
+           - In Kalshi's event order model, selling NO is done by placing a bid on YES up to 99¢ ($0.99) IOC.
            - Kalshi matches this against the best available NO buyer immediately!
+
+        CRITICAL RISK CONTROL:
+        We NEVER fall back to 'good_till_canceled' (GTC) at 99¢/1¢. A resting 99¢ GTC bid to close NO
+        leaves the account exposed to buying YES at maximum price if liquidity vanishes.
+        Instead, any retry dynamically queries top-of-book and retries with fresh IOC orders.
         """
         now_ms = int(time.time() * 1000)
         side_clean = side.lower()
 
         if side_clean == "yes":
-            # Sell YES immediately: ask at 1¢ to match the highest existing bid
             sell_payload = {
                 "ticker": ticker,
                 "client_order_id": f"liq_yes_{ticker}_{now_ms}",
@@ -985,7 +998,6 @@ class KalshiClient(BaseTradingClient):
                 "self_trade_prevention_type": "taker_at_cross",
             }
         else:
-            # Sell NO immediately: bid on YES at 99¢ to match the highest existing NO buyer
             sell_payload = {
                 "ticker": ticker,
                 "client_order_id": f"liq_no_{ticker}_{now_ms}",
@@ -1001,15 +1013,28 @@ class KalshiClient(BaseTradingClient):
             log.info(f"✅ Executed immediate taker liquidation for {ticker} ({side_clean.upper()} x{count}): {res}")
             return res
         except Exception as error:
-            # Fallback: if exchange prefers good_till_canceled for price-improved taker orders
-            log.warning(f"Immediate IOC taker liquidation attempt for {ticker} had response/error: {error}. Retrying with GTC...")
-            sell_payload["time_in_force"] = "good_till_canceled"
+            log.warning(f"⚠️ Primary IOC taker liquidation attempt for {ticker} had response/error: {error}. Re-attempting with fresh top-of-book quote...")
             try:
+                mkt_resp = self.get_market(ticker)
+                mkt_detail = mkt_resp.get("market", {}) if isinstance(mkt_resp, dict) else {}
+                retry_ms = int(time.time() * 1000)
+
+                if side_clean == "yes":
+                    top_bid = parse_cents(mkt_detail.get("yes_bid_dollars"), mkt_detail.get("yes_bid")) or 1
+                    sell_payload["price"] = f"0.{max(1, top_bid):02d}00"
+                    sell_payload["client_order_id"] = f"liq_retry_yes_{ticker}_{retry_ms}"
+                else:
+                    top_no_bid = parse_cents(mkt_detail.get("no_bid_dollars"), mkt_detail.get("no_bid")) or 1
+                    yes_equiv = min(99, max(1, 100 - top_no_bid))
+                    sell_payload["price"] = f"0.{yes_equiv:02d}00"
+                    sell_payload["client_order_id"] = f"liq_retry_no_{ticker}_{retry_ms}"
+
+                sell_payload["time_in_force"] = "immediate_or_cancel"
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
-                log.info(f"✅ Executed fallback taker liquidation for {ticker}: {res}")
+                log.info(f"✅ Executed secondary IOC taker liquidation for {ticker}: {res}")
                 return res
             except Exception as err2:
-                log.error(f"❌ Failed to execute liquidation exit order for {ticker}: {err2}")
+                log.error(f"❌ Failed secondary IOC liquidation exit order for {ticker}: {err2}. Zero resting GTC orders posted.")
                 return {}
 
     def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:

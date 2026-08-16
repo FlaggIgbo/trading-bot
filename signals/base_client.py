@@ -1,10 +1,20 @@
 """
-Base Prediction Market Trading Client & Helper Utilities
-=========================================================
+Base Prediction Market Trading Client & Risk Architecture
+==========================================================
 
-Provides abstract base trading client functionality, log tag definitions, and shared
-risk management logic (stop-loss evaluation, early cut-loss evaluation, order state checking)
-shared between KalshiClient and GeminiClient.
+Provides abstract base trading client functionality, human-readable log tags, and
+defensive risk management engines shared across prediction market exchange clients:
+
+Key Robustness & Safety Engines:
+--------------------------------
+1. Order Cancellation Verification:
+   - Verifies 0 resting orders before executing liquidations to prevent locked position errors.
+2. Crash-Proof Persistent Cost Basis:
+   - Reads/writes entry prices from MongoDB Atlas `active_positions` to survive worker restarts.
+3. Verified Winner-Roll Re-Buys:
+   - Confirms fill status before recording entry cost on rolled contracts.
+4. Synchronized Checkpoint Lifecycle:
+   - Evaluates early cut-loss (5m/20m), winner rolls (10m/40m), stop-loss exits, and endgame checks (12.5m/50m).
 """
 
 from __future__ import annotations
@@ -101,16 +111,39 @@ class BaseTradingClient(ABC):
         return self._entry_prices
 
     def get_entry_price(self, ticker: str) -> int | None:
-        """Returns recorded buy entry price in cents for ticker, or None if unknown."""
-        return self.entry_prices.get(ticker)
+        """
+        Returns recorded buy entry price in cents for ticker.
+        Checks in-memory cache first, then MongoDB Atlas active_positions collection upon restart.
+        """
+        if ticker in self.entry_prices:
+            return self.entry_prices[ticker]
+        try:
+            from database import get_active_position_cost
+            db_price = get_active_position_cost(ticker, getattr(self, "exchange_name", "kalshi"))
+            if db_price is not None:
+                self._entry_prices[ticker] = db_price
+                return db_price
+        except Exception as err:
+            log.debug(f"Could not load entry price for {ticker} from DB: {err}")
+        return None
 
-    def set_entry_price(self, ticker: str, price_cents: int) -> None:
-        """Records the exact entry price in cents when we buy a contract."""
+    def set_entry_price(self, ticker: str, price_cents: int, side: str = "yes", count: int = 1) -> None:
+        """Records the exact entry price in cents in memory and MongoDB Atlas."""
         self.entry_prices[ticker] = price_cents
+        try:
+            from database import save_active_position_cost
+            save_active_position_cost(ticker, side, count, price_cents, getattr(self, "exchange_name", "kalshi"))
+        except Exception as err:
+            log.debug(f"Could not persist entry price for {ticker} to DB: {err}")
 
     def clear_entry_price(self, ticker: str) -> None:
-        """Clears recorded entry price for ticker once the position is closed."""
+        """Clears recorded entry price from memory and MongoDB Atlas."""
         self.entry_prices.pop(ticker, None)
+        try:
+            from database import remove_active_position_cost
+            remove_active_position_cost(ticker, getattr(self, "exchange_name", "kalshi"))
+        except Exception as err:
+            log.debug(f"Could not remove entry price for {ticker} from DB: {err}")
 
     @abstractmethod
     def get_market_position(self, ticker: str) -> dict | None:
@@ -119,7 +152,7 @@ class BaseTradingClient(ABC):
 
     @abstractmethod
     def cancel_and_verify_resting_orders(self, ticker: str) -> bool:
-        """Cancels resting orders for ticker."""
+        """Cancels resting orders for ticker and verifies that 0 resting orders remain."""
         pass
 
     @abstractmethod
@@ -145,13 +178,14 @@ class BaseTradingClient(ABC):
         win_threshold_cents: int = 70,
     ) -> dict:
         """
-        Evaluates active positions at the 10-minute mark (:10:30, :25:30, :40:30, :55:30):
+        Evaluates active positions at the 10-minute / 40-minute mark:
         1. Winning Positions (Bid >= 70¢ or profit >= 15¢):
-           - Sells the winning position at the current Bid to LOCK IN / BANK REALIZED PROFIT in cash!
-           - Immediately re-buys 1 contract at the current Ask price to reset cost basis and let THAT re-bought position run to 100¢ ($1.00)!
+           - Cancels resting TP orders with strict verification.
+           - Sells the winning position at current Bid to LOCK IN / BANK REALIZED PROFIT in cash!
+           - Immediately re-buys 1 contract at current Ask price, verifies fill, and lets it run to 100¢ ($1.00)!
         2. Losing Positions:
            - If loss >= stop_loss_threshold_cents OR price <= price_floor:
-             Executes immediate taker liquidation to cut losses.
+             Cancels resting orders with strict verification, then executes immediate taker liquidation.
         """
         pos = self.get_market_position(ticker)
         if pos is None:
@@ -163,12 +197,13 @@ class BaseTradingClient(ABC):
 
         side = pos["side"]
         position_count = pos.get("count", 1)
-        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or 40
-
         bid_price = current_yes_bid if side == "yes" else current_no_bid
         ask_price = current_yes_ask if side == "yes" else current_no_ask
         if ask_price is None and bid_price is not None:
             ask_price = min(99, bid_price + 1)
+
+        # Dynamic entry price resolution: 1) Native position exposure, 2) DB/Memory, 3) Dynamic bid fallback
+        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or bid_price or 50
 
         if bid_price is None:
             log.warning(f"⚠️ Cannot evaluate 10-min strategy for {ticker}: current {side.upper()} price is unavailable.")
@@ -203,20 +238,38 @@ class BaseTradingClient(ABC):
                     "rebuy_price_cents": rebuy_price,
                 }
 
-            # Step 1: Cancel any resting TP orders
-            self.cancel_and_verify_resting_orders(ticker)
+            # Step 1: Cancel resting TP orders with strict verification
+            cleared = self.cancel_and_verify_resting_orders(ticker)
+            if not cleared:
+                log.error(
+                    f"❌ [{self.exchange_name}] Cannot roll winner for {ticker}: "
+                    f"Failed to clear resting orders. Aborting roll to avoid locked position errors."
+                )
+                return {"triggered": False, "error": "resting_orders_not_cleared"}
+
             # Step 2: Liquidate current position to bank profit in cash
             self.execute_liquidation(ticker, side, position_count, bid_price)
             self.clear_profit_floor(ticker)
 
-            # Step 3: Re-buy at Ask to let new position run to 100¢
+            # Step 3: Re-buy at Ask and verify fill status before recording entry price
             try:
-                self.execute_buy(ticker, side, position_count, rebuy_price)
-                self.set_entry_price(ticker, rebuy_price)
-                log.info(
-                    f"{LogTag.WINNER_ROLLED.value} [{self.exchange_name}] Successfully rolled winner for {ticker} ({side.upper()}): "
-                    f"Sold at {bid_price}¢ (+{profit_cents}¢ profit banked!) and re-bought at {rebuy_price}¢ to run to 100¢ ($1.00 payout)!"
+                buy_res = self.execute_buy(ticker, side, position_count, rebuy_price)
+                fill_count = float(
+                    buy_res.get("fill_count")
+                    or buy_res.get("order", {}).get("fill_count_fp")
+                    or (1 if buy_res.get("status") == "bought" else 0)
                 )
+                if fill_count > 0:
+                    self.set_entry_price(ticker, rebuy_price, side=side, count=int(round(fill_count)))
+                    log.info(
+                        f"{LogTag.WINNER_ROLLED.value} [{self.exchange_name}] Successfully rolled winner for {ticker} ({side.upper()}): "
+                        f"Sold at {bid_price}¢ (+{profit_cents}¢ profit banked!) and confirmed re-buy fill of {int(round(fill_count))} contract(s) at {rebuy_price}¢ to run to 100¢ ($1.00 payout)!"
+                    )
+                else:
+                    log.warning(
+                        f"⏳ [{self.exchange_name}] Winner roll re-buy order for {ticker} is resting at {rebuy_price}¢ (unfilled). "
+                        f"Entry price will be recorded upon fill confirmation."
+                    )
             except Exception as buy_err:
                 log.error(f"❌ [{self.exchange_name}] Failed to re-buy {ticker} after banking profit: {buy_err}")
 
@@ -249,7 +302,15 @@ class BaseTradingClient(ABC):
                     "exit_price": bid_price,
                 }
 
-            self.cancel_and_verify_resting_orders(ticker)
+            # Step 1: Cancel resting TP orders with strict verification
+            cleared = self.cancel_and_verify_resting_orders(ticker)
+            if not cleared:
+                log.error(
+                    f"❌ [{self.exchange_name}] Cannot execute stop-loss liquidation for {ticker}: "
+                    f"Failed to clear resting orders. Aborting liquidation to avoid locked position errors."
+                )
+                return {"triggered": False, "error": "resting_orders_not_cleared"}
+
             self.execute_liquidation(ticker, side, position_count, bid_price)
             self.clear_profit_floor(ticker)
             self.clear_entry_price(ticker)
@@ -292,9 +353,9 @@ class BaseTradingClient(ABC):
         dry_run: bool = False,
     ) -> dict:
         """
-        Evaluates active positions for ticker at the 5-minute mark (:05, :20, :35, :50):
-        If an asset bought at the 00-minute mark drops below 40¢,
-        cancels resting take-profit limit orders and immediately liquidates the position to cut losses early.
+        Evaluates active positions for ticker at the 5-minute / 20-minute mark:
+        If an asset drops below the dynamic safety cut threshold,
+        verifies resting order cancellation and immediately liquidates the position to cut losses early.
         """
         pos = self.get_market_position(ticker)
         if pos is None:
@@ -304,9 +365,10 @@ class BaseTradingClient(ABC):
 
         side = pos["side"]
         position_count = pos.get("count", 1)
-        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or 40
-
         current_price = current_yes_price if side == "yes" else current_no_price
+
+        # Dynamic entry price resolution
+        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or current_price or 50
 
         if current_price is None:
             log.warning(f"⚠️ Cannot evaluate 5-min cut-loss for {ticker}: current {side.upper()} price is unavailable.")
@@ -341,7 +403,14 @@ class BaseTradingClient(ABC):
                     "exit_price": current_price,
                 }
 
-            self.cancel_and_verify_resting_orders(ticker)
+            cleared = self.cancel_and_verify_resting_orders(ticker)
+            if not cleared:
+                log.error(
+                    f"❌ [{self.exchange_name}] Cannot execute early cut-loss liquidation for {ticker}: "
+                    f"Failed to clear resting orders. Aborting liquidation to avoid locked position errors."
+                )
+                return {"triggered": False, "error": "resting_orders_not_cleared"}
+
             self.execute_liquidation(ticker, side, position_count, current_price)
             self.clear_profit_floor(ticker)
             self.clear_entry_price(ticker)
@@ -371,11 +440,10 @@ class BaseTradingClient(ABC):
         endgame_floor: int = 25,
     ) -> dict:
         """
-        Evaluates active positions at the 12.5-minute mark (:12:30, :27:30, :42:30, :57:30):
-        With only 2.5 minutes remaining before contract settlement:
+        Evaluates active positions at the endgame mark (2.5m before 15m expiry, or 10m before hourly expiry):
         - If we are losing (current price < entry price / loss > 0, or current price < endgame_floor e.g. < 25¢),
-          liquidates immediately so we don't lose all capital gains or suffer a 100% loss at 0¢ expiration.
-        - If winning (current price >= entry price and >= endgame_floor), holds position into the final 2.5m for 100¢ ($1.00) settlement payout!
+          verifies resting order cancellation and liquidates immediately to salvage capital before 0¢ expiration.
+        - If winning (current price >= entry price and >= endgame_floor), holds position for 100¢ ($1.00) settlement payout!
         """
         pos = self.get_market_position(ticker)
         if pos is None:
@@ -387,11 +455,13 @@ class BaseTradingClient(ABC):
 
         side = pos["side"]
         position_count = pos.get("count", 1)
-        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or 40
         current_price = current_yes_price if side == "yes" else current_no_price
 
+        # Dynamic entry price resolution
+        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or current_price or 50
+
         if current_price is None:
-            log.warning(f"⚠️ Cannot evaluate 12.5-min endgame check for {ticker}: current {side.upper()} price is unavailable.")
+            log.warning(f"⚠️ Cannot evaluate endgame check for {ticker}: current {side.upper()} price is unavailable.")
             return {"triggered": False}
 
         loss_cents = entry_price - current_price
@@ -405,7 +475,7 @@ class BaseTradingClient(ABC):
         # Endgame Loss Check: If price is below endgame floor (e.g. < 25¢) or losing on entry/rebuy (loss_cents > 0)
         is_losing = (loss_cents > 0) or (current_price < endgame_floor)
         if is_losing:
-            reason = f"losing at 12.5m mark (Entry: ~{entry_price}¢, Current: {current_price}¢, Floor: {endgame_floor}¢, Loss: -{loss_cents}¢)"
+            reason = f"losing at endgame mark (Entry: ~{entry_price}¢, Current: {current_price}¢, Floor: {endgame_floor}¢, Loss: -{loss_cents}¢)"
             if dry_run:
                 log.info(
                     f"{LogTag.DRY_RUN_ENDGAME_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
@@ -419,7 +489,14 @@ class BaseTradingClient(ABC):
                     "exit_price": current_price,
                 }
 
-            self.cancel_and_verify_resting_orders(ticker)
+            cleared = self.cancel_and_verify_resting_orders(ticker)
+            if not cleared:
+                log.error(
+                    f"❌ [{self.exchange_name}] Cannot execute endgame liquidation for {ticker}: "
+                    f"Failed to clear resting orders. Aborting liquidation to avoid locked position errors."
+                )
+                return {"triggered": False, "error": "resting_orders_not_cleared"}
+
             self.execute_liquidation(ticker, side, position_count, current_price)
             self.clear_profit_floor(ticker)
             self.clear_entry_price(ticker)
@@ -435,9 +512,9 @@ class BaseTradingClient(ABC):
                 "exit_price": current_price,
             }
 
-        # Holding Winning Position (in profit into final 2.5 minutes)
+        # Holding Winning Position (in profit into final minutes)
         log.info(
             f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
-            f"Position is winning at {current_price}¢ ({pnl_label})! Holding into final 2.5m for 100¢ ($1.00) settlement."
+            f"Position is winning at {current_price}¢ ({pnl_label})! Holding into expiration for 100¢ ($1.00) settlement."
         )
         return {"triggered": False, "action": "holding_winner"}

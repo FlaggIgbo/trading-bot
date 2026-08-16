@@ -35,10 +35,8 @@ class DummyTradingClient(BaseTradingClient):
         return self._positions_cache.get(ticker)
 
     def cancel_and_verify_resting_orders(self, ticker: str) -> bool:
-        if ticker in self._orders_cache:
-            self._orders_cache.pop(ticker, None)
-            return True
-        return False
+        self._orders_cache.pop(ticker, None)
+        return True
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
         self._positions_cache.pop(ticker, None)
@@ -53,7 +51,7 @@ class DummyTradingClient(BaseTradingClient):
             "entry_price_cents": price_cents,
         }
         self.set_entry_price(ticker, price_cents)
-        return {"status": "bought", "price": price_cents}
+        return {"status": "bought", "price": price_cents, "fill_count": count}
 
 
 class TestClientInterfaces(unittest.TestCase):
@@ -98,15 +96,13 @@ class TestClientInterfaces(unittest.TestCase):
             "ticker": "KXBTC15M-TEST",
             "series_ticker": "KXBTC15M",
             "yes_ask_dollars": "0.4200",
-            "no_ask_dollars": "0.5800",
-            "yes_bid": 41,
-            "yes_ask": 42,
-            "no_bid": 57,
-            "no_ask": 58,
+            "yes_bid_dollars": "0.4000",
+            "no_ask_dollars": "0.6000",
+            "no_bid_dollars": "0.5800",
             "floor_strike": 60000.0,
-            "exchange": "kalshi",
+            "volume_24h": 1500,
         }
-        now = datetime.now(timezone.utc)
+        now = datetime(2026, 8, 14, 0, 0, 30, tzinfo=timezone.utc)
 
         snapshot = process_single_market(
             market=market,
@@ -119,9 +115,9 @@ class TestClientInterfaces(unittest.TestCase):
         )
 
         self.assertEqual(snapshot["tick"], "KXBTC15M-TEST")
-        self.assertEqual(snapshot["ex"], "kalshi")
+        self.assertEqual(snapshot["sym"], "BTC")
         self.assertEqual(snapshot["y"], 42)
-        self.assertEqual(snapshot["n"], 58)
+        self.assertEqual(snapshot["n"], 60)
         self.assertEqual(snapshot["p"], 60100.0)
 
     def test_stop_loss_exclusive_gating(self):
@@ -415,16 +411,30 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
         }
         now = datetime.now(timezone.utc)
 
-        # Minute 12 (% 15 == 12) -> is_12_5min_mark is True
-        snapshot = process_single_market(
-            market=market,
-            is_trading_interval=False,
-            client=client,
-            now_utc=now,
-            minute_past_hour=12,
-            spot_cache={"BTC": 59900.0},
-            dry_run=False,
-        )
+        mock_filter = {
+            "sl_threshold": 10,
+            "sl_floor": 30,
+            "cut_5min": 40,
+            "endgame_12_5_floor": 25,
+            "min_buy": 32,
+            "max_buy": 50,
+            "tp": 82,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 37,
+            "mid_zone_max": 43,
+            "is_exploration": False,
+        }
+
+        with patch("main.get_dynamic_filter_for_market", return_value=mock_filter):
+            snapshot = process_single_market(
+                market=market,
+                is_trading_interval=False,
+                client=client,
+                now_utc=now,
+                minute_past_hour=12,
+                spot_cache={"BTC": 59900.0},
+                dry_run=False,
+            )
 
         client.evaluate_and_execute_12_5min_endgame_check.assert_called_once_with(
             ticker="KXBTC15M-TEST",
@@ -460,16 +470,30 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
         }
         now = datetime.now(timezone.utc)
 
-        # Minute 10 (% 15 == 10) -> is_stop_loss_interval is True
-        snapshot = process_single_market(
-            market=market,
-            is_trading_interval=False,
-            client=client,
-            now_utc=now,
-            minute_past_hour=10,
-            spot_cache={"BTC": 60100.0},
-            dry_run=False,
-        )
+        mock_filter = {
+            "sl_threshold": 10,
+            "sl_floor": 30,
+            "cut_5min": 40,
+            "endgame_12_5_floor": 25,
+            "min_buy": 32,
+            "max_buy": 50,
+            "tp": 82,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 37,
+            "mid_zone_max": 43,
+            "is_exploration": False,
+        }
+
+        with patch("main.get_dynamic_filter_for_market", return_value=mock_filter):
+            snapshot = process_single_market(
+                market=market,
+                is_trading_interval=False,
+                client=client,
+                now_utc=now,
+                minute_past_hour=10,
+                spot_cache={"BTC": 60100.0},
+                dry_run=False,
+            )
 
         client.evaluate_and_execute_10min_strategy.assert_called_once_with(
             ticker="KXBTC15M-TEST",
@@ -485,6 +509,61 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
         self.assertEqual(snapshot["trd"]["action"], "winner_rolled_rebuy")
         self.assertEqual(snapshot["trd"]["profit_locked_cents"], 32)
         self.assertEqual(snapshot["trd"]["rebuy_price_cents"], 74)
+
+    def test_cancellation_failure_aborts_liquidation(self):
+        """Verifies that failed order cancellations abort liquidations to avoid locked position errors."""
+        client = DummyTradingClient()
+        client._positions_cache["KXBTC15M-TEST"] = {
+            "side": "yes",
+            "count": 1,
+            "entry_price_cents": 40,
+        }
+
+        with patch.object(client, "cancel_and_verify_resting_orders", return_value=False):
+            with patch.object(client, "execute_liquidation") as mock_liq:
+                # 1. 10m stop loss
+                res_10m = client.evaluate_and_execute_10min_strategy(
+                    "KXBTC15M-TEST", current_yes_bid=25, current_no_bid=75, stop_loss_threshold_cents=10
+                )
+                self.assertFalse(res_10m["triggered"])
+                self.assertEqual(res_10m.get("error"), "resting_orders_not_cleared")
+                mock_liq.assert_not_called()
+
+                # 2. 5m cut loss
+                res_5m = client.evaluate_and_execute_5min_cut_loss(
+                    "KXBTC15M-TEST", current_yes_price=30, current_no_price=70, min_price_threshold=40
+                )
+                self.assertFalse(res_5m["triggered"])
+                self.assertEqual(res_5m.get("error"), "resting_orders_not_cleared")
+                mock_liq.assert_not_called()
+
+                # 3. 12.5m endgame check
+                res_12_5m = client.evaluate_and_execute_12_5min_endgame_check(
+                    "KXBTC15M-TEST", current_yes_price=20, current_no_price=80, endgame_floor=25
+                )
+                self.assertFalse(res_12_5m["triggered"])
+                self.assertEqual(res_12_5m.get("error"), "resting_orders_not_cleared")
+                mock_liq.assert_not_called()
+
+    def test_kalshi_client_ioc_only_liquidation_no_gtc(self):
+        """Verifies that KalshiClient execute_liquidation strictly uses IOC and never submits 99c GTC limit orders."""
+        client = KalshiClient(api_key_id="test_key", private_key=MagicMock())
+
+        # Test NO liquidation
+        posted_payloads = []
+        with patch.object(client, "post") as mock_post:
+            mock_post.side_effect = [Exception("Primary IOC fail"), {"status": "executed"}]
+            with patch.object(client, "get_market", return_value={"market": {"no_bid": 30}}):
+                client.execute_liquidation("KXBTC15M-TEST", "no", 1, 30)
+
+            self.assertEqual(mock_post.call_count, 2)
+            first_call_payload = mock_post.call_args_list[0][1]["payload"]
+            second_call_payload = mock_post.call_args_list[1][1]["payload"]
+
+            # Both attempts MUST be immediate_or_cancel
+            self.assertEqual(first_call_payload["time_in_force"], "immediate_or_cancel")
+            self.assertEqual(second_call_payload["time_in_force"], "immediate_or_cancel")
+            self.assertNotEqual(second_call_payload["time_in_force"], "good_till_canceled")
 
 
 if __name__ == "__main__":
