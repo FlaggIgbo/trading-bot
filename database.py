@@ -392,6 +392,26 @@ DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | bool]]] = {
         "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
         "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
+    "HYPE": {
+        # High volatility & fast-moving: deep discount entry, higher TP, protective stop loss
+        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
+    "TON": {
+        # High volatility: wider TP target, protective cut thresholds
+        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
+    "ADA": {
+        # Moderate volatility: standard baseline corridor
+        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
+    "BCH": {
+        # Moderate volatility: standard baseline corridor
+        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+    },
     "DEFAULT": {
         "00": {"min_buy": 32, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
         "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
