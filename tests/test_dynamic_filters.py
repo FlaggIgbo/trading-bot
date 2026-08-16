@@ -276,6 +276,66 @@ class TestDynamicPriceFilters(unittest.TestCase):
         )
         self.assertIn("trd", snap2)
         self.assertEqual(snap2["trd"]["action"], "buy_opened")
+        self.assertEqual(snap2["trd"]["corridor"], "discount")
+
+        # Case 3: Momentum breakout price (62¢) with strong spot lead (+0.15% >= 0.10%) -> Allowed!
+        momentum_mkt = {
+            "ticker": "KXBTC15M-MOM",
+            "series_ticker": "KXBTC15M",
+            "yes_ask_dollars": "0.6200",
+            "yes_bid_dollars": "0.6000",
+            "no_ask_dollars": "0.4000",
+            "no_bid_dollars": "0.3800",
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        snap3 = process_single_market(
+            market=momentum_mkt,
+            is_trading_interval=True,
+            client=client,
+            now_utc=now,
+            minute_past_hour=0,
+            spot_cache={"BTC": 60090.0},  # +0.15% lead
+            dry_run=True,
+        )
+        self.assertIn("trd", snap3)
+        self.assertEqual(snap3["trd"]["action"], "buy_opened")
+        self.assertEqual(snap3["trd"]["corridor"], "momentum")
+        self.assertEqual(snap3["trd"]["tp"], 88)
+
+        # Case 4: Momentum price (62¢) with weak spot lead (+0.03% < 0.10%) -> Rejected!
+        snap4 = process_single_market(
+            market=momentum_mkt,
+            is_trading_interval=True,
+            client=client,
+            now_utc=now,
+            minute_past_hour=0,
+            spot_cache={"BTC": 60018.0},  # only +0.03% lead
+            dry_run=True,
+        )
+        self.assertNotIn("trd", snap4)
+
+        # Case 5: Coin-flip middle band (50¢) -> Rejected!
+        mid_mkt = {
+            "ticker": "KXBTC15M-MID",
+            "series_ticker": "KXBTC15M",
+            "yes_ask_dollars": "0.5000",
+            "yes_bid_dollars": "0.4800",
+            "no_ask_dollars": "0.5200",
+            "no_bid_dollars": "0.5000",
+            "floor_strike": 60000.0,
+            "exchange": "kalshi",
+        }
+        snap5 = process_single_market(
+            market=mid_mkt,
+            is_trading_interval=True,
+            client=client,
+            now_utc=now,
+            minute_past_hour=0,
+            spot_cache={"BTC": 60020.0},
+            dry_run=True,
+        )
+        self.assertNotIn("trd", snap5)
 
     def test_is_default_exploration_window(self):
         """Tests that 05:00 - 07:00 UTC is recognized as the exploration window."""

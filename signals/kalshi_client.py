@@ -28,6 +28,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -320,7 +321,13 @@ class KalshiClient(BaseTradingClient):
         headers = self._build_auth_headers("POST", signing_path)
 
         response = self.session.post(full_url, headers=headers, json=payload or {}, timeout=30)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            err_details = f"{e} | Response body: {response.text}"
+            log.error(f"Kalshi POST {endpoint} failed with {err_details}")
+            raise requests.HTTPError(err_details, response=response) from e
+
         if response.text:
             try:
                 return response.json()
@@ -335,7 +342,13 @@ class KalshiClient(BaseTradingClient):
         headers = self._build_auth_headers("DELETE", signing_path)
 
         response = self.session.delete(full_url, headers=headers, timeout=30)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as e:
+            err_details = f"{e} | Response body: {response.text}"
+            log.error(f"Kalshi DELETE {endpoint} failed with {err_details}")
+            raise requests.HTTPError(err_details, response=response) from e
+
         if response.text:
             try:
                 return response.json()
@@ -558,17 +571,40 @@ class KalshiClient(BaseTradingClient):
                 markets = response.get("markets", [])
                 for m in markets:
                     if current_hour_only:
-                        # Ensure market expires within the current hourly window
-                        close_iso = m.get("close_time") or m.get("expected_expiration_time")
+                        # Ensure market expires within the active current hourly window (0 to 65 minutes ahead)
+                        close_iso = (
+                            m.get("close_time")
+                            or m.get("expiration_time")
+                            or m.get("expected_expiration_time")
+                            or m.get("latest_expiration_time")
+                        )
+                        close_dt = None
                         if close_iso:
                             try:
-                                close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
-                                remaining_minutes = (close_dt - ref_time).total_seconds() / 60.0
-                                # Current hour contract should be closing in -2 to 75 minutes
-                                if remaining_minutes < -2.0 or remaining_minutes > 75.0:
-                                    continue
+                                close_dt = datetime.fromisoformat(str(close_iso).replace("Z", "+00:00"))
                             except Exception:
                                 pass
+
+                        # Fallback: Parse expiration from ticker (e.g. KXBTCD-26AUG1616 -> 2026-08-16 16:00 UTC)
+                        if close_dt is None and (tick := m.get("ticker")):
+                            m_match = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(\d{2})", tick)
+                            if m_match:
+                                yy, mmm, dd, hh = m_match.groups()
+                                try:
+                                    dt_str = f"20{yy}-{mmm}-{dd} {hh}:00:00"
+                                    close_dt = datetime.strptime(dt_str, "%Y-%b-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    pass
+
+                        if close_dt is not None:
+                            remaining_minutes = (close_dt - ref_time).total_seconds() / 60.0
+                            # Current hour contract must be active and closing between 0 and 65 minutes in the future
+                            if remaining_minutes <= 0.0 or remaining_minutes > 65.0:
+                                continue
+                        else:
+                            # Skip if expiration is unverified
+                            continue
+
                     all_hourly_markets.append(m)
             except Exception as error:
                 log.warning(
