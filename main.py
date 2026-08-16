@@ -963,13 +963,13 @@ def process_hourly_market_group(
                 if isinstance(eg_res, dict) and eg_res.get("triggered"):
                     trade_executed_by_ticker[ticker] = {
                         "ex": ex_name.lower(),
-                        "action": eg_res.get("action", "endgame_loss_cut"),
+                        "action": "50min_loss_cut",
                         "side": eg_res.get("side", "yes"),
                         "exit_price": eg_res.get("exit_price"),
                         "loss_cents": eg_res.get("loss_cents"),
                         "outcome": determine_counterfactual_outcome(
                             eg_res.get("side", "yes"),
-                            eg_res.get("action", "endgame_loss_cut"),
+                            "50min_loss_cut",
                             spot_price,
                             item["target_price"],
                             item["market"].get("result"),
@@ -1033,6 +1033,9 @@ def process_hourly_market_group(
             if minute_past_hour == 10:
                 cut_threshold = max(15, dynamic_filters.get("cut_5min", 15) - 5)
                 action_tag = "10min_loss_cut"
+            elif minute_past_hour == 20:
+                cut_threshold = dynamic_filters.get("cut_5min", 15)
+                action_tag = "20min_loss_cut"
             elif minute_past_hour == 30:
                 cut_threshold = dynamic_filters.get("cut_5min", 15)
                 action_tag = "30min_loss_cut"
