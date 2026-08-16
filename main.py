@@ -413,9 +413,20 @@ def _execute_buy_flow(
         "side": side_lower,
         "buy": effective_buy,
         "tp": take_profit_cents,
-        "sl": 10,
+        "sl": 25,
         "outcome": determine_counterfactual_outcome(side_lower, "buy_opened", spot_price, target_price, market_result),
+        "entry_ts": int(time.time()),
+        "spot_at_entry": spot_price,
+        "target_at_entry": target_price,
     }
+    if not dry_run and isinstance(buy_res, dict):
+        if cid := buy_res.get("client_order_id"):
+            trade_details["client_order_id"] = cid
+        if oid := buy_res.get("order_id"):
+            trade_details["order_id"] = oid
+        if tp_oid := buy_res.get("tp_order_id"):
+            trade_details["tp_order_id"] = tp_oid
+
     return True, trade_details
 
 
@@ -681,7 +692,7 @@ def process_single_market(
                     is_exploration=is_exploration,
                 )
 
-    # 5. Build Compact Snapshot Document (~100 bytes for storage efficiency)
+    # 5. Build Compact Snapshot Document
     compact_document = {
         "ts": int(now_utc.timestamp()),
         "m": minute_past_hour,
@@ -695,6 +706,10 @@ def process_single_market(
         "y_ask": quotes["yes_ask"],
         "n_bid": quotes["no_bid"],
         "n_ask": quotes["no_ask"],
+        "y_bid_sz": parse_cents(None, market.get("yes_bid_size") or market.get("yes_bid_count")),
+        "y_ask_sz": parse_cents(None, market.get("yes_ask_size") or market.get("yes_ask_count")),
+        "n_bid_sz": parse_cents(None, market.get("no_bid_size") or market.get("no_bid_count")),
+        "n_ask_sz": parse_cents(None, market.get("no_ask_size") or market.get("no_ask_count")),
         "sprd": sprd,
         "p": spot_price,
         "tgt": target_price,
@@ -702,6 +717,9 @@ def process_single_market(
         "pct": pct_dist,
         "rem": rem_mins,
         "vol": vol_count,
+        "open_time": market.get("open_time"),
+        "close_time": market.get("close_time") or market.get("expected_expiration_time"),
+        "imp_prob": round(yes_price_cents / 100.0, 4) if yes_price_cents is not None else None,
     }
 
     if trade_executed and trade_details:
@@ -719,14 +737,15 @@ def process_hourly_market_group(
     spot_cache: dict[str, float | None] | None = None,
     dry_run: bool = False,
     force_trade_mark: bool = False,
+    circuit_breaker_tripped: bool = False,
 ) -> list[dict]:
     """
     Evaluates pricing, risk rules, multi-strike selection, tiebreaker resolution,
     and lifecycle checkpoints for hourly crypto prediction markets belonging to a single asset.
 
     Hourly Checkpoints Progression:
-    - Minute 00 (:00): Maker Buy Entry scan across multi-strike options (broad corridor 30¢–52¢, TP: 82¢).
-    - Minute 20 (:20): 20-Min Cut-Loss check on open hourly positions (<40¢/34¢) + 2nd Entry pass (tight corridor 28¢–38¢, TP: 76¢).
+    - Minute 00 (:00): Maker Buy Entry scan across multi-strike options (deep discount 18¢–34¢, TP: 62¢).
+    - Minute 20 (:20): 20-Min Cut-Loss check on open hourly positions (<15¢) + 2nd Entry pass (tight corridor 18¢–30¢, TP: 58¢).
     - Minute 40 (:40): Hourly Winner Roll (≥70¢ -> bank profit at Bid & re-buy at Ask to run to 100¢) + Stop-Loss liquidation.
     - Minute 50 (:50): 50-Min Endgame Safety Check (10m before expiry -> salvage losing positions, hold winners to 100¢).
     """
@@ -737,8 +756,8 @@ def process_hourly_market_group(
     spot_price = spot_cache.get(symbol) if spot_cache is not None else get_crypto_spot_price(symbol)
 
     # Checkpoint interval flags
-    is_hourly_00_entry = (minute_past_hour == 0) or force_trade_mark
-    is_hourly_20_entry = (minute_past_hour == 20) or force_trade_mark
+    is_hourly_00_entry = ((minute_past_hour == 0) or force_trade_mark) and not circuit_breaker_tripped
+    is_hourly_20_entry = ((minute_past_hour == 20) or force_trade_mark) and not circuit_breaker_tripped
     is_hourly_trading_interval = is_hourly_00_entry or is_hourly_20_entry
     is_hourly_20min_cut_loss = (minute_past_hour == 20) and not force_trade_mark
     is_hourly_40min_stop_loss = (minute_past_hour == 40) and not force_trade_mark
@@ -1111,6 +1130,10 @@ def process_hourly_market_group(
             "y_ask": quotes["yes_ask"],
             "n_bid": quotes["no_bid"],
             "n_ask": quotes["no_ask"],
+            "y_bid_sz": parse_cents(None, item["market"].get("yes_bid_size") or item["market"].get("yes_bid_count")),
+            "y_ask_sz": parse_cents(None, item["market"].get("yes_ask_size") or item["market"].get("yes_ask_count")),
+            "n_bid_sz": parse_cents(None, item["market"].get("no_bid_size") or item["market"].get("no_bid_count")),
+            "n_ask_sz": parse_cents(None, item["market"].get("no_ask_size") or item["market"].get("no_ask_count")),
             "sprd": item["sprd"],
             "p": spot_price,
             "tgt": item["target_price"],
@@ -1118,6 +1141,9 @@ def process_hourly_market_group(
             "pct": item["pct_dist"],
             "rem": item["rem_mins"],
             "vol": item["vol_count"],
+            "open_time": item["market"].get("open_time"),
+            "close_time": item["market"].get("close_time") or item["market"].get("expected_expiration_time"),
+            "imp_prob": round(item["yes_price_cents"] / 100.0, 4) if item["yes_price_cents"] is not None else None,
         }
         if ticker in trade_executed_by_ticker:
             compact_doc["trd"] = trade_executed_by_ticker[ticker]
@@ -1125,6 +1151,11 @@ def process_hourly_market_group(
         snapshots.append(compact_doc)
 
     return snapshots
+
+
+# Session Trading Loss Circuit Breaker ($5.00 max trading loss, immune to cash withdrawals)
+_SESSION_INITIAL_REALIZED_PNL: float | None = None
+MAX_SESSION_LOSS_DOLLARS: float = 5.00
 
 
 def run_pipeline_pass(
@@ -1137,6 +1168,8 @@ def run_pipeline_pass(
     for BOTH 15-minute and Hourly multi-strike crypto prediction markets.
     Accepts long-lived exchange clients to prevent socket leaks and connection overhead.
     """
+    global _SESSION_INITIAL_REALIZED_PNL
+    
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
 
@@ -1175,7 +1208,7 @@ def run_pipeline_pass(
     if dry_run:
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     if is_default_exploration_window(now_utc):
-        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–11:00 (Midnight–6AM ET): Trading on default broad corridors (:00 -> 30¢–52¢, :05/20m -> 28¢–38¢) for empirical discovery.")
+        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (1AM–3AM ET): Trading on default broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢) for empirical discovery.")
     log.info(f"--> INTERVAL: {interval_summary}")
     log.info("=================================================================")
 
@@ -1210,11 +1243,20 @@ def run_pipeline_pass(
         log.info(f"\n--- [{exchange_name.upper()} EXCHANGE PIPELINE] ---")
 
         # Fetch real-time Portfolio PnL & Balance
+        circuit_breaker_tripped = False
         try:
             pnl = client.get_portfolio_pnl_summary()
             pnl["ts"] = int(now_utc.timestamp())
             pnl["exchange"] = exchange_name.lower()
             sign = "+" if pnl.get("total_realized_pnl_dollars", 0) >= 0 else ""
+
+            # Circuit Breaker Evaluation (Trading loss >= $5.00 limit, immune to cash withdrawals)
+            current_realized_pnl = float(pnl.get("total_realized_pnl_dollars") or 0.0)
+            if _SESSION_INITIAL_REALIZED_PNL is None:
+                _SESSION_INITIAL_REALIZED_PNL = current_realized_pnl
+
+            session_trading_loss = round(_SESSION_INITIAL_REALIZED_PNL - current_realized_pnl, 2)
+            circuit_breaker_tripped = (session_trading_loss >= MAX_SESSION_LOSS_DOLLARS)
 
             log.info(
                 f"{LogTag.PORTFOLIO_PNL.value} [{exchange_name}] Cash: ${pnl.get('balance_dollars', 0.0):.2f} | "
@@ -1223,6 +1265,13 @@ def run_pipeline_pass(
                 f"({sign}{pnl.get('total_realized_pnl_cents', 0)}¢ across {pnl.get('settlements_count', 0)} mkts) | "
                 f"Active: {pnl.get('open_positions_count', 0)} pos (${pnl.get('open_exposure_dollars', 0.0):.2f})"
             )
+
+            if circuit_breaker_tripped and not force_trade_mark:
+                log.warning(
+                    f"🛑 [LOSS CIRCUIT BREAKER ACTIVE] Session trading loss is -${session_trading_loss:.2f} "
+                    f"(exceeds ${MAX_SESSION_LOSS_DOLLARS:.2f} limit). New buy entries are halted to preserve capital."
+                )
+                is_15m_trading_interval = False
 
             if not dry_run:
                 save_portfolio_pnl(pnl)
@@ -1300,6 +1349,7 @@ def run_pipeline_pass(
                         spot_cache=spot_price_cache,
                         dry_run=dry_run,
                         force_trade_mark=force_trade_mark,
+                        circuit_breaker_tripped=circuit_breaker_tripped,
                     )
                     for s in hourly_snapshots:
                         s["ex"] = exchange_name.lower()

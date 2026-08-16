@@ -127,12 +127,28 @@ class BaseTradingClient(ABC):
             log.debug(f"Could not load entry price for {ticker} from DB: {err}")
         return None
 
-    def set_entry_price(self, ticker: str, price_cents: int, side: str = "yes", count: int = 1) -> None:
+    def set_entry_price(
+        self,
+        ticker: str,
+        price_cents: int,
+        side: str = "yes",
+        count: int = 1,
+        client_order_id: str | None = None,
+        tp_order_id: str | None = None,
+    ) -> None:
         """Records the exact entry price in cents in memory and MongoDB Atlas."""
         self.entry_prices[ticker] = price_cents
         try:
             from database import save_active_position_cost
-            save_active_position_cost(ticker, side, count, price_cents, getattr(self, "exchange_name", "kalshi"))
+            save_active_position_cost(
+                ticker=ticker,
+                side=side,
+                count=count,
+                entry_price_cents=price_cents,
+                ex=getattr(self, "exchange_name", "kalshi"),
+                client_order_id=client_order_id,
+                tp_order_id=tp_order_id,
+            )
         except Exception as err:
             log.debug(f"Could not persist entry price for {ticker} to DB: {err}")
 
@@ -173,8 +189,8 @@ class BaseTradingClient(ABC):
         current_yes_ask: int | None = None,
         current_no_ask: int | None = None,
         dry_run: bool = False,
-        stop_loss_threshold_cents: int = 10,
-        price_floor: int = 30,
+        stop_loss_threshold_cents: int = 25,
+        price_floor: int = 15,
         win_threshold_cents: int = 70,
     ) -> dict:
         """
@@ -331,8 +347,8 @@ class BaseTradingClient(ABC):
         current_yes_price: int | None,
         current_no_price: int | None,
         dry_run: bool = False,
-        stop_loss_threshold_cents: int = 10,
-        price_floor: int = 30,
+        stop_loss_threshold_cents: int = 25,
+        price_floor: int = 15,
     ) -> dict:
         """Alias for 10-minute strategy evaluation."""
         return self.evaluate_and_execute_10min_strategy(
@@ -349,7 +365,7 @@ class BaseTradingClient(ABC):
         ticker: str,
         current_yes_price: int | None,
         current_no_price: int | None,
-        min_price_threshold: int = 40,
+        min_price_threshold: int = 15,
         dry_run: bool = False,
     ) -> dict:
         """
@@ -437,7 +453,7 @@ class BaseTradingClient(ABC):
         current_yes_price: int | None,
         current_no_price: int | None,
         dry_run: bool = False,
-        endgame_floor: int = 25,
+        endgame_floor: int = 15,
     ) -> dict:
         """
         Evaluates active positions at the endgame mark (2.5m before 15m expiry, or 10m before hourly expiry):

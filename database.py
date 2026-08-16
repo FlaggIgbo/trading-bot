@@ -229,6 +229,8 @@ def save_active_position_cost(
     entry_price_cents: int,
     ex: str = "kalshi",
     tf: str | None = None,
+    client_order_id: str | None = None,
+    tp_order_id: str | None = None,
 ) -> bool:
     """
     Persists an active trade cost-basis into MongoDB Atlas 'active_positions' collection.
@@ -245,19 +247,24 @@ def save_active_position_cost(
     ex_name = str(ex or "kalshi").lower()
     timeframe = tf or detect_market_timeframe(ticker)
     try:
+        set_doc = {
+            "ticker": ticker,
+            "ex": ex_name,
+            "tf": timeframe,
+            "side": side.lower(),
+            "count": count,
+            "entry_price_cents": entry_price_cents,
+            "total_cost_dollars": round((entry_price_cents * count) / 100.0, 4),
+            "updated_at": int(time.time()),
+        }
+        if client_order_id:
+            set_doc["client_order_id"] = client_order_id
+        if tp_order_id:
+            set_doc["tp_order_id"] = tp_order_id
+
         col.update_one(
             {"ticker": ticker, "ex": ex_name},
-            {
-                "$set": {
-                    "ticker": ticker,
-                    "ex": ex_name,
-                    "tf": timeframe,
-                    "side": side.lower(),
-                    "count": count,
-                    "entry_price_cents": entry_price_cents,
-                    "updated_at": int(time.time()),
-                }
-            },
+            {"$set": set_doc},
             upsert=True,
         )
         return True
@@ -357,64 +364,56 @@ def load_all_active_positions(ex: str = "kalshi") -> dict[str, int]:
 
 DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | bool]]] = {
     "BTC": {
-        "00": {"min_buy": 32, "max_buy": 52, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "ETH": {
-        "00": {"min_buy": 32, "max_buy": 52, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "SOL": {
-        "00": {"min_buy": 32, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "XRP": {
-        "00": {"min_buy": 30, "max_buy": 48, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "DOGE": {
-        # High win-rate & mean-reverting: widen stop-loss & cut thresholds to prevent false alarm shakeouts
-        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "BNB": {
-        # High win-rate & mean-reverting: widen stop-loss & cut thresholds to prevent false alarm shakeouts
-        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 15, "sl_floor": 25, "cut_5min": 34, "endgame_12_5_floor": 22, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "ZEC": {
-        # High volatility: deeper discount floor, higher TP, adaptive stop loss
-        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "NEAR": {
-        # High volatility: deeper discount floor, higher TP, adaptive stop loss
-        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "HYPE": {
-        # High volatility & fast-moving: deep discount entry, higher TP, protective stop loss
-        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "TON": {
-        # High volatility: wider TP target, protective cut thresholds
-        "00": {"min_buy": 28, "max_buy": 48, "tp": 85, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 36, "tp": 78, "sl_threshold": 12, "sl_floor": 26, "cut_5min": 36, "endgame_12_5_floor": 24, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "ADA": {
-        # Moderate volatility: standard baseline corridor
-        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "BCH": {
-        # Moderate volatility: standard baseline corridor
-        "00": {"min_buy": 30, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
     "DEFAULT": {
-        "00": {"min_buy": 32, "max_buy": 50, "tp": 82, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
-        "05": {"min_buy": 28, "max_buy": 38, "tp": 76, "sl_threshold": 10, "sl_floor": 30, "cut_5min": 40, "endgame_12_5_floor": 25, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "00": {"min_buy": 18, "max_buy": 44, "tp": 62, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
+        "05": {"min_buy": 18, "max_buy": 30, "tp": 58, "sl_threshold": 25, "sl_floor": 15, "cut_5min": 15, "endgame_12_5_floor": 15, "avoid_mid_zone": True, "mid_zone_min": 37, "mid_zone_max": 43},
     },
 }
 
@@ -426,12 +425,12 @@ _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 
 def is_default_exploration_window(now_utc: datetime | None = None) -> bool:
     """
-    Returns True if current UTC time is between 05:00 and 11:00 UTC (Midnight to 6:00 AM Eastern Time).
-    During this 6-hour window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢)
-    for wide empirical signal harvesting across Asian & European market open sessions.
+    Returns True if current UTC time is between 05:00 and 07:00 UTC (1:00 AM to 3:00 AM Eastern Time).
+    During this window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors (:00 -> 18¢–34¢, :05 -> 18¢–30¢)
+    for empirical signal harvesting.
     """
     now = now_utc or datetime.now(timezone.utc)
-    return 5 <= now.hour < 11
+    return 5 <= now.hour < 7
 
 
 def should_refresh_dynamic_map(
@@ -444,9 +443,9 @@ def should_refresh_dynamic_map(
 
     Rule 1 (Cold Start): If memory is empty (bot just booted up), refresh immediately!
     Rule 2 (6-Hour Expiry): If more than 6 hours passed since last refresh, refresh!
-    Rule 3 (11:00 UTC Recalibration Anchor): Immediately after exiting the 05:00-11:00 UTC default window,
-            force a fresh recalibration at 11:00 UTC to lock in calibrated parameters for the US market open.
-    Rule 4 (Clock Markers): If current UTC time hits 00:00, 06:00, 11:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
+    Rule 3 (07:00 UTC Recalibration Anchor): Immediately after exiting the 05:00-07:00 UTC default window,
+            force a fresh recalibration at 07:00 UTC to lock in calibrated parameters.
+    Rule 4 (Clock Markers): If current UTC time hits 00:00, 05:00, 07:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
     """
     if cache_is_empty is None:
         cache_is_empty = (_DYNAMIC_PRICE_MAP_CACHE is None)
@@ -466,14 +465,14 @@ def should_refresh_dynamic_map(
     if elapsed >= _CACHE_TTL_SECONDS:
         return True
 
-    # 2. Check if we just entered 11:00 UTC (the recalibration anchor right after 05:00-11:00 UTC default window)
-    if now.hour == 11 and now.minute < 10:
+    # 2. Check if we just entered 07:00 UTC (the recalibration anchor right after 05:00-07:00 UTC default window)
+    if now.hour == 7 and now.minute < 10:
         hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
         if last_refresh_time < hour_start_ts:
             return True
 
-    # 3. Check standard clock marks (00:00, 06:00, 11:00, 12:00, 18:00 UTC) and haven't refreshed this hour
-    if now.hour in (0, 6, 11, 12, 18) and now.minute < 10:
+    # 3. Check standard clock marks (00:00, 05:00, 07:00, 12:00, 18:00 UTC) and haven't refreshed this hour
+    if now.hour in (0, 5, 7, 12, 18) and now.minute < 10:
         hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
         if last_refresh_time < hour_start_ts:
             return True
@@ -620,20 +619,12 @@ def calibrate_dynamic_price_map_from_db(
                 asset_sl_threshold = 15
                 asset_sl_floor = 25
                 asset_cut_5min = 34
-                asset_endgame_floor = 22
-            # High volatility behavior: detected when standard deviation of 15m price swings >= 10%
-            elif vol_std >= 0.10:
-                # Adaptive thresholds for high-beta assets
-                asset_sl_threshold = 12
-                asset_sl_floor = 26
-                asset_cut_5min = 36
-                asset_endgame_floor = 24
-            else:
-                # Trending / low-beta behavior: tight, decisive SL and standard endgame floor
-                asset_sl_threshold = 10
-                asset_sl_floor = 30
-                asset_cut_5min = 40
-                asset_endgame_floor = 25
+            # Dynamic Asset Classification & Stop-Loss Calibration
+            # Deep discount corridor with wide stop loss (25¢ loss threshold, 15¢ floor, 15¢ 5-min cut)
+            asset_sl_threshold = 25
+            asset_sl_floor = 15
+            asset_cut_5min = 15
+            asset_endgame_floor = 15
 
             # Middle Zone Analysis (Recommendation 3)
             mid_trades = mid_zone_trades_by_sym.get(sym, [])
@@ -645,19 +636,10 @@ def calibrate_dynamic_price_map_from_db(
             for mark in ("00", "05"):
                 trades = trades_by_sym_mark.get(sym, {}).get(mark, [])
 
-                # Step 1: Base parameters based dynamically on measured asset volatility
-                if vol_std >= 0.10:
-                    base_min_buy = 28
-                    base_max_buy = 48 if mark == "00" else 36
-                    base_tp = 85 if mark == "00" else 78
-                elif vol_std >= 0.05:
-                    base_min_buy = 32
-                    base_max_buy = 50 if mark == "00" else 38
-                    base_tp = 82 if mark == "00" else 76
-                else:
-                    base_min_buy = 32
-                    base_max_buy = 52 if mark == "00" else 38
-                    base_tp = 82 if mark == "00" else 76
+                # Step 1: Base parameters based dynamically on deep discount strategy
+                base_min_buy = 18
+                base_max_buy = 44 if mark == "00" else 30
+                base_tp = 62 if mark == "00" else 58
 
                 # Step 2: Fine-tune using winning trade history
                 min_buy = base_min_buy
@@ -667,23 +649,16 @@ def calibrate_dynamic_price_map_from_db(
                 if len(trades) >= 5:
                     win_prices = [t["buy"] for t in trades if t["won"]]
                     if win_prices:
-                        calibrated_max = int(statistics.median(win_prices) + 3)
-                        calibrated_min = max(26, min(win_prices) - 2)
+                        calibrated_max = int(statistics.median(win_prices) + 2)
                         max_buy = min(base_max_buy, calibrated_max)
-                        min_buy = max(base_min_buy, calibrated_min)
-                    else:
-                        max_buy = min(base_max_buy, 36)
-                        min_buy = base_min_buy
 
-                # Step 3: Runway Timing Enforcement (Recommendation 1)
-                # For Minute :05 (10m runway), strictly clamp max_buy <= 38 to eliminate theta drag
+                # Step 3: Runway Timing Enforcement (Bounds: 18¢–44¢ at :00, 18¢–30¢ at :05)
+                min_buy = 18
                 if mark == "05":
-                    min_buy = max(25, min(min_buy, 34))
-                    max_buy = max(min_buy + 2, min(max_buy, 38))
+                    max_buy = max(min_buy + 2, min(max_buy, 30))
                 else:
-                    min_buy = max(25, min(min_buy, 40))
-                    max_buy = max(min_buy + 2, min(max_buy, 54))
-                tp_price = max(max_buy + 15, min(tp_price, 90))
+                    max_buy = max(min_buy + 2, min(max_buy, 44))
+                tp_price = max(max_buy + 12, min(tp_price, 65))
 
                 calibrated_map[sym][mark] = {
                     "min_buy": min_buy,
@@ -746,13 +721,13 @@ def get_dynamic_filter_for_market(
 ) -> dict[str, int | bool]:
     """
     Convenience lookup to get exact dynamic filter parameters for a specific market and timing mark.
-    Between 05:00 and 11:00 UTC (Midnight - 6:00 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
-    broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢) for wide empirical signal harvesting.
+    Between 05:00 and 07:00 UTC (1:00 AM - 3:00 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
+    broad corridors (:00 -> 18¢–34¢, :05 -> 18¢–30¢) for empirical signal harvesting.
 
     Args:
         asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "DOGE", "ZEC").
         is_5min_mark: True if running at the 5-minute mark (:05), False if at minute 00 (:00).
-        dynamic_map: Optional preloaded map. If None, uses defaults during 05:00-11:00 UTC or cached in-memory map.
+        dynamic_map: Optional preloaded map. If None, uses defaults during 00:00-02:00 UTC or cached in-memory map.
         now_utc: Optional current UTC datetime for timing/regime evaluation.
 
     Returns:
@@ -785,13 +760,13 @@ def get_dynamic_filter_for_market(
     mark_filter = asset_filters.get(mark) or asset_filters.get("00") or DEFAULT_DYNAMIC_PRICE_MAP["DEFAULT"]["00"]
 
     return {
-        "min_buy": int(mark_filter.get("min_buy", 32)),
-        "max_buy": int(mark_filter.get("max_buy", 38 if is_5min_mark else 50)),
-        "tp": int(mark_filter.get("tp", 76 if is_5min_mark else 82)),
-        "sl_threshold": int(mark_filter.get("sl_threshold", 10)),
-        "sl_floor": int(mark_filter.get("sl_floor", 30)),
-        "cut_5min": int(mark_filter.get("cut_5min", 40)),
-        "endgame_12_5_floor": int(mark_filter.get("endgame_12_5_floor", 25)),
+        "min_buy": int(mark_filter.get("min_buy", 18)),
+        "max_buy": int(mark_filter.get("max_buy", 30 if is_5min_mark else 34)),
+        "tp": int(mark_filter.get("tp", 58 if is_5min_mark else 62)),
+        "sl_threshold": int(mark_filter.get("sl_threshold", 25)),
+        "sl_floor": int(mark_filter.get("sl_floor", 15)),
+        "cut_5min": int(mark_filter.get("cut_5min", 15)),
+        "endgame_12_5_floor": int(mark_filter.get("endgame_12_5_floor", 15)),
         "avoid_mid_zone": bool(mark_filter.get("avoid_mid_zone", True)),
         "mid_zone_min": int(mark_filter.get("mid_zone_min", 37)),
         "mid_zone_max": int(mark_filter.get("mid_zone_max", 43)),

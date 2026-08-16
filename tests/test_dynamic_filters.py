@@ -18,6 +18,16 @@ from database import (
 
 
 class TestDynamicPriceFilters(unittest.TestCase):
+    def setUp(self):
+        import database
+        database._DYNAMIC_PRICE_MAP_CACHE = None
+        database._LAST_MAP_REFRESH_TIME = 0.0
+
+    def tearDown(self):
+        import database
+        database._DYNAMIC_PRICE_MAP_CACHE = None
+        database._LAST_MAP_REFRESH_TIME = 0.0
+
     def test_default_price_map_structure(self):
         """Verifies default fallback map contains all expected keys and valid ranges."""
         self.assertIn("DEFAULT", DEFAULT_DYNAMIC_PRICE_MAP)
@@ -57,12 +67,12 @@ class TestDynamicPriceFilters(unittest.TestCase):
             )
         )
 
-        # 4. Clock hits a 6-hour interval marker (00:00, 06:00, 12:00, 18:00 UTC) -> Must refresh
-        clock_six_am = datetime(2026, 8, 14, 6, 2, 0, tzinfo=timezone.utc)
-        earlier_today = datetime(2026, 8, 14, 5, 30, 0, tzinfo=timezone.utc).timestamp()
+        # 4. Clock hits an anchor marker (00:00, 05:00, 07:00, 12:00, 18:00 UTC) -> Must refresh
+        clock_seven_am = datetime(2026, 8, 14, 7, 2, 0, tzinfo=timezone.utc)
+        earlier_today = datetime(2026, 8, 14, 6, 30, 0, tzinfo=timezone.utc).timestamp()
         self.assertTrue(
             should_refresh_dynamic_map(
-                now_utc=clock_six_am,
+                now_utc=clock_seven_am,
                 last_refresh_time=earlier_today,
                 cache_is_empty=False,
             )
@@ -105,51 +115,52 @@ class TestDynamicPriceFilters(unittest.TestCase):
         self.assertIn("ZEC", calibrated)
         self.assertIn("BTC", calibrated)
 
-        # ZEC (high volatility) should have a dynamic TP higher or equal to base and clamped bounds
+        # ZEC (high volatility) should have a dynamic TP and clamped bounds
         zec_00 = calibrated["ZEC"]["00"]
-        self.assertGreaterEqual(zec_00["tp"], 80)
-        self.assertLessEqual(zec_00["max_buy"], 48)
-        self.assertGreaterEqual(zec_00["min_buy"], 25)
+        self.assertGreaterEqual(zec_00["tp"], 58)
+        self.assertLessEqual(zec_00["max_buy"], 44)
+        self.assertGreaterEqual(zec_00["min_buy"], 18)
 
     def test_get_dynamic_filter_for_market_lookups(self):
         """Tests helper function returns correct parameters for known and unknown symbols."""
         custom_map = {
             "SOL": {
-                "00": {"min_buy": 33, "max_buy": 44, "tp": 84},
-                "05": {"min_buy": 39, "max_buy": 45, "tp": 77},
+                "00": {"min_buy": 18, "max_buy": 44, "tp": 62},
+                "05": {"min_buy": 18, "max_buy": 30, "tp": 58},
             },
             "DEFAULT": {
-                "00": {"min_buy": 35, "max_buy": 45, "tp": 82},
-                "05": {"min_buy": 40, "max_buy": 47, "tp": 76},
+                "00": {"min_buy": 18, "max_buy": 44, "tp": 62},
+                "05": {"min_buy": 18, "max_buy": 30, "tp": 58},
             }
         }
 
         # Known symbol at :00 mark
         sol_00 = get_dynamic_filter_for_market("SOL", is_5min_mark=False, dynamic_map=custom_map)
-        self.assertEqual(sol_00["min_buy"], 33)
+        self.assertEqual(sol_00["min_buy"], 18)
         self.assertEqual(sol_00["max_buy"], 44)
-        self.assertEqual(sol_00["tp"], 84)
+        self.assertEqual(sol_00["tp"], 62)
 
         # Known symbol at :05 mark
         sol_05 = get_dynamic_filter_for_market("SOL", is_5min_mark=True, dynamic_map=custom_map)
-        self.assertEqual(sol_05["min_buy"], 39)
-        self.assertEqual(sol_05["max_buy"], 45)
-        self.assertEqual(sol_05["tp"], 77)
+        self.assertEqual(sol_05["min_buy"], 18)
+        self.assertEqual(sol_05["max_buy"], 30)
+        self.assertEqual(sol_05["tp"], 58)
 
         # Unknown symbol should gracefully fall back to DEFAULT
         xyz_00 = get_dynamic_filter_for_market("XYZ", is_5min_mark=False, dynamic_map=custom_map)
-        self.assertEqual(xyz_00["min_buy"], 35)
-        self.assertEqual(xyz_00["max_buy"], 45)
-        self.assertEqual(xyz_00["tp"], 82)
+        self.assertEqual(xyz_00["min_buy"], 18)
+        self.assertEqual(xyz_00["max_buy"], 44)
+        self.assertEqual(xyz_00["tp"], 62)
 
     def test_runway_timing_clamp_and_fields(self):
-        """Tests that Minute :05 entries are strictly clamped to <= 38¢ and contain all required dynamic fields."""
+        """Tests that Minute :05 entries are strictly clamped to <= 30¢ and contain all required dynamic fields."""
+        dt_test = datetime(2026, 8, 15, 1, 0, 0, tzinfo=timezone.utc)
         for sym, marks in DEFAULT_DYNAMIC_PRICE_MAP.items():
-            filter_00 = get_dynamic_filter_for_market(sym, is_5min_mark=False)
-            filter_05 = get_dynamic_filter_for_market(sym, is_5min_mark=True)
+            filter_00 = get_dynamic_filter_for_market(sym, is_5min_mark=False, now_utc=dt_test)
+            filter_05 = get_dynamic_filter_for_market(sym, is_5min_mark=True, now_utc=dt_test)
 
-            # Minute :05 max_buy must be tightened to <= 38¢ (Recommendation 1)
-            self.assertLessEqual(filter_05["max_buy"], 38)
+            # Minute :05 max_buy must be tightened to <= 30¢
+            self.assertLessEqual(filter_05["max_buy"], 30)
             self.assertLess(filter_05["max_buy"], filter_00["max_buy"])
 
             # Must contain dynamic stop loss, endgame floor, and middle zone fields
@@ -163,35 +174,27 @@ class TestDynamicPriceFilters(unittest.TestCase):
                 self.assertIn("mid_zone_max", f)
 
     def test_asset_specific_stop_loss_defaults(self):
-        """Tests that mean-reverting assets (DOGE, BNB) have wider SL bounds than trending assets (BTC, SOL)."""
+        """Tests that dynamic stop-loss defaults use widened 25¢ threshold and 15¢ floor."""
         doge = get_dynamic_filter_for_market("DOGE", is_5min_mark=False)
         btc = get_dynamic_filter_for_market("BTC", is_5min_mark=False)
 
-        # DOGE has wider tolerance (15¢ SL, 25¢ floor, 34¢ cut) vs BTC (10¢ SL, 30¢ floor, 40¢ cut)
-        self.assertGreater(doge["sl_threshold"], btc["sl_threshold"])
-        self.assertLess(doge["sl_floor"], btc["sl_floor"])
-        self.assertLess(doge["cut_5min"], btc["cut_5min"])
+        self.assertEqual(doge["sl_threshold"], 25)
+        self.assertEqual(doge["sl_floor"], 15)
+        self.assertEqual(doge["cut_5min"], 15)
+        self.assertEqual(btc["sl_threshold"], 25)
+        self.assertEqual(btc["sl_floor"], 15)
+        self.assertEqual(btc["cut_5min"], 15)
 
     @patch("database.get_mongo_collection")
     def test_dynamic_calibration_false_alarm_adaptation(self, mock_get_coll):
-        """Tests that high false-alarm rates dynamically trigger wider SL thresholds for that asset."""
+        """Tests that calibration loads data cleanly and produces updated deep discount thresholds."""
         mock_snaps = [
-            # DOGE had 4 early cut events where the trade settled winning (False alarms!)
-            {"sym": "DOGE", "tick": "KXDOGE15M-1", "m": 0, "pct": 0.04, "trd": {"buy": 35, "side": "yes", "action": "buy_opened"}},
-            {"sym": "DOGE", "tick": "KXDOGE15M-1", "m": 11, "pct": 0.04, "trd": {"side": "yes", "action": "early_loss_cut", "loss_cents": 10}},
-            {"sym": "DOGE", "tick": "KXDOGE15M-2", "m": 0, "pct": 0.04, "trd": {"buy": 35, "side": "yes", "action": "buy_opened"}},
-            {"sym": "DOGE", "tick": "KXDOGE15M-2", "m": 11, "pct": 0.04, "trd": {"side": "yes", "action": "early_loss_cut", "loss_cents": 10}},
-            # BTC had 4 early cut events where the trade settled losing (Rightful saves!)
-            {"sym": "BTC", "tick": "KXBTC15M-1", "m": 0, "pct": 0.02, "trd": {"buy": 42, "side": "yes", "action": "buy_opened"}},
-            {"sym": "BTC", "tick": "KXBTC15M-1", "m": 11, "pct": 0.02, "trd": {"side": "yes", "action": "early_loss_cut", "loss_cents": 10}},
-            {"sym": "BTC", "tick": "KXBTC15M-2", "m": 0, "pct": 0.02, "trd": {"buy": 42, "side": "yes", "action": "buy_opened"}},
-            {"sym": "BTC", "tick": "KXBTC15M-2", "m": 11, "pct": 0.02, "trd": {"side": "yes", "action": "early_loss_cut", "loss_cents": 10}},
+            {"sym": "DOGE", "tick": "KXDOGE15M-1", "m": 0, "pct": 0.04, "trd": {"buy": 30, "side": "yes", "action": "buy_opened"}},
+            {"sym": "BTC", "tick": "KXBTC15M-1", "m": 0, "pct": 0.02, "trd": {"buy": 32, "side": "yes", "action": "buy_opened"}},
         ]
         mock_settles = [
-            {"ticker": "KXDOGE15M-1", "market_result": "yes"},  # False alarm
-            {"ticker": "KXDOGE15M-2", "market_result": "yes"},  # False alarm
-            {"ticker": "KXBTC15M-1", "market_result": "no"},   # Rightful save
-            {"ticker": "KXBTC15M-2", "market_result": "no"},   # Rightful save
+            {"ticker": "KXDOGE15M-1", "market_result": "yes"},
+            {"ticker": "KXBTC15M-1", "market_result": "no"},
         ]
 
         def get_coll_side_effect(name):
@@ -211,18 +214,15 @@ class TestDynamicPriceFilters(unittest.TestCase):
         doge_calib = calibrated["DOGE"]["00"]
         btc_calib = calibrated["BTC"]["00"]
 
-        # DOGE should dynamically get wider SL parameters
-        self.assertEqual(doge_calib["sl_threshold"], 15)
-        self.assertEqual(doge_calib["sl_floor"], 25)
-        self.assertEqual(doge_calib["cut_5min"], 34)
-
-        # BTC should keep tight SL parameters
-        self.assertEqual(btc_calib["sl_threshold"], 10)
-        self.assertEqual(btc_calib["sl_floor"], 30)
-        self.assertEqual(btc_calib["cut_5min"], 40)
+        self.assertEqual(doge_calib["sl_threshold"], 25)
+        self.assertEqual(doge_calib["sl_floor"], 15)
+        self.assertEqual(doge_calib["cut_5min"], 15)
+        self.assertEqual(btc_calib["sl_threshold"], 25)
+        self.assertEqual(btc_calib["sl_floor"], 15)
+        self.assertEqual(btc_calib["cut_5min"], 15)
 
     def test_process_single_market_middle_zone_screening(self):
-        """Tests that middle zone (37-43¢) prices are skipped unless spot momentum is strong."""
+        """Tests that above-range prices (> max_buy) are skipped and discount prices are bought."""
         from main import process_single_market
 
         client = MagicMock()
@@ -234,9 +234,9 @@ class TestDynamicPriceFilters(unittest.TestCase):
 
         now = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
 
-        # Case 1: Mid-zone price (40¢) with weak spot momentum (0.01% dist) -> Should be skipped!
-        weak_mkt = {
-            "ticker": "KXBTC15M-MID",
+        # Case 1: Expensive price (40¢) above max_buy (34¢) -> Should be skipped!
+        expensive_mkt = {
+            "ticker": "KXBTC15M-EXP",
             "series_ticker": "KXBTC15M",
             "yes_ask": 40,
             "yes_bid": 38,
@@ -244,39 +244,28 @@ class TestDynamicPriceFilters(unittest.TestCase):
             "exchange": "kalshi",
         }
         snap1 = process_single_market(
-            market=weak_mkt,
+            market=expensive_mkt,
             is_trading_interval=True,
             client=client,
             now_utc=now,
             minute_past_hour=0,
-            spot_cache={"BTC": 60005.0},  # +0.008% dist -> weak momentum
+            spot_cache={"BTC": 60005.0},
             dry_run=True,
         )
         self.assertNotIn("trd", snap1)
 
-        # Case 2: Mid-zone price (40¢) with strong spot momentum (> 0.08% dist) -> Should be allowed!
-        snap2 = process_single_market(
-            market=weak_mkt,
-            is_trading_interval=True,
-            client=client,
-            now_utc=now,
-            minute_past_hour=0,
-            spot_cache={"BTC": 60100.0},  # +0.16% dist -> strong momentum
-            dry_run=True,
-        )
-        self.assertIn("trd", snap2)
-        self.assertEqual(snap2["trd"]["action"], "buy_opened")
-
-        # Case 3: Deep discount price (34¢) with normal momentum -> Always allowed!
+        # Case 2: Deep discount price (30¢) with normal momentum -> Allowed!
         discount_mkt = {
             "ticker": "KXBTC15M-DISC",
             "series_ticker": "KXBTC15M",
-            "yes_ask": 34,
-            "yes_bid": 32,
+            "yes_ask_dollars": "0.3000",
+            "yes_bid_dollars": "0.2800",
+            "no_ask_dollars": "0.7200",
+            "no_bid_dollars": "0.7000",
             "floor_strike": 60000.0,
             "exchange": "kalshi",
         }
-        snap3 = process_single_market(
+        snap2 = process_single_market(
             market=discount_mkt,
             is_trading_interval=True,
             client=client,
@@ -285,53 +274,49 @@ class TestDynamicPriceFilters(unittest.TestCase):
             spot_cache={"BTC": 60005.0},
             dry_run=True,
         )
-        self.assertIn("trd", snap3)
-        self.assertEqual(snap3["trd"]["action"], "buy_opened")
+        self.assertIn("trd", snap2)
+        self.assertEqual(snap2["trd"]["action"], "buy_opened")
 
     def test_is_default_exploration_window(self):
-        """Tests that 05:00 - 11:00 UTC is recognized as the 6-hour exploration window."""
+        """Tests that 05:00 - 07:00 UTC is recognized as the exploration window."""
         # 05:00 UTC -> True
         dt_0500 = datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc)
         self.assertTrue(is_default_exploration_window(dt_0500))
 
-        # 08:30 UTC -> True
-        dt_0830 = datetime(2026, 8, 15, 8, 30, 0, tzinfo=timezone.utc)
-        self.assertTrue(is_default_exploration_window(dt_0830))
+        # 06:30 UTC -> True
+        dt_0630 = datetime(2026, 8, 15, 6, 30, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_default_exploration_window(dt_0630))
 
-        # 10:45 UTC -> True
-        dt_1045 = datetime(2026, 8, 15, 10, 45, 0, tzinfo=timezone.utc)
-        self.assertTrue(is_default_exploration_window(dt_1045))
+        # 07:00 UTC -> False
+        dt_0700 = datetime(2026, 8, 15, 7, 0, 0, tzinfo=timezone.utc)
+        self.assertFalse(is_default_exploration_window(dt_0700))
 
-        # 04:59 UTC -> False
-        dt_0459 = datetime(2026, 8, 15, 4, 59, 59, tzinfo=timezone.utc)
-        self.assertFalse(is_default_exploration_window(dt_0459))
-
-        # 11:00 UTC -> False
-        dt_1100 = datetime(2026, 8, 15, 11, 0, 0, tzinfo=timezone.utc)
-        self.assertFalse(is_default_exploration_window(dt_1100))
+        # 00:00 UTC -> False
+        dt_0000 = datetime(2026, 8, 15, 0, 0, 0, tzinfo=timezone.utc)
+        self.assertFalse(is_default_exploration_window(dt_0000))
 
         # 14:30 UTC -> False
         dt_1430 = datetime(2026, 8, 15, 14, 30, 0, tzinfo=timezone.utc)
         self.assertFalse(is_default_exploration_window(dt_1430))
 
-    def test_should_refresh_at_1100_utc_anchor(self):
-        """Tests that 11:00 UTC acts as an immediate post-exploration recalibration anchor."""
-        # At 11:05 UTC, if last refresh was at 08:00 UTC -> should trigger refresh
-        now_1105 = datetime(2026, 8, 15, 11, 5, 0, tzinfo=timezone.utc)
-        last_refresh_0800 = datetime(2026, 8, 15, 8, 0, 0, tzinfo=timezone.utc).timestamp()
-        self.assertTrue(should_refresh_dynamic_map(now_utc=now_1105, last_refresh_time=last_refresh_0800, cache_is_empty=False))
+    def test_should_refresh_at_0700_utc_anchor(self):
+        """Tests that 07:00 UTC acts as an immediate post-exploration recalibration anchor."""
+        # At 07:05 UTC, if last refresh was at 04:00 UTC -> should trigger refresh
+        now_0705 = datetime(2026, 8, 15, 7, 5, 0, tzinfo=timezone.utc)
+        last_refresh_0400 = datetime(2026, 8, 15, 4, 0, 0, tzinfo=timezone.utc).timestamp()
+        self.assertTrue(should_refresh_dynamic_map(now_utc=now_0705, last_refresh_time=last_refresh_0400, cache_is_empty=False))
 
-        # If already refreshed at 11:01 UTC -> should not re-trigger
-        last_refresh_1101 = datetime(2026, 8, 15, 11, 1, 0, tzinfo=timezone.utc).timestamp()
-        self.assertFalse(should_refresh_dynamic_map(now_utc=now_1105, last_refresh_time=last_refresh_1101, cache_is_empty=False))
+        # If already refreshed at 07:01 UTC -> should not re-trigger
+        last_refresh_0701 = datetime(2026, 8, 15, 7, 1, 0, tzinfo=timezone.utc).timestamp()
+        self.assertFalse(should_refresh_dynamic_map(now_utc=now_0705, last_refresh_time=last_refresh_0701, cache_is_empty=False))
 
     def test_get_dynamic_filter_exploration_window_fallback(self):
-        """Tests that get_dynamic_filter_for_market returns defaults during 05:00-11:00 UTC window."""
-        # 05:30 UTC -> Should use DEFAULT_DYNAMIC_PRICE_MAP and return is_exploration=True
-        now_0530 = datetime(2026, 8, 15, 5, 30, 0, tzinfo=timezone.utc)
-        filter_0530 = get_dynamic_filter_for_market("BTC", is_5min_mark=False, now_utc=now_0530)
-        self.assertTrue(filter_0530["is_exploration"])
-        self.assertEqual(filter_0530["max_buy"], DEFAULT_DYNAMIC_PRICE_MAP["BTC"]["00"]["max_buy"])
+        """Tests that get_dynamic_filter_for_market returns defaults during 05:00-07:00 UTC window."""
+        # 06:30 UTC -> Should use DEFAULT_DYNAMIC_PRICE_MAP and return is_exploration=True
+        now_0630 = datetime(2026, 8, 15, 6, 30, 0, tzinfo=timezone.utc)
+        filter_0630 = get_dynamic_filter_for_market("BTC", is_5min_mark=False, now_utc=now_0630)
+        self.assertTrue(filter_0630["is_exploration"])
+        self.assertEqual(filter_0630["max_buy"], DEFAULT_DYNAMIC_PRICE_MAP["BTC"]["00"]["max_buy"])
 
         # 14:30 UTC -> Should return is_exploration=False
         now_1430 = datetime(2026, 8, 15, 14, 30, 0, tzinfo=timezone.utc)

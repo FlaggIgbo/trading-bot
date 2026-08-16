@@ -152,36 +152,26 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
         now_utc = datetime(2026, 8, 15, 20, 0, 30, tzinfo=timezone.utc)
         spot_cache = {"BTC": 71000.0}
 
+        # Strike A ($70,000): spot is 71k (> 70k) -> YES aligned. Ask is 34¢ (in corridor 18¢-34¢).
+        # Strike B ($74,000): spot is 71k (< 74k) -> NO aligned. Ask is 30¢ (in corridor 18¢-34¢).
         markets = [
-            # Strike A ($70,000): spot is 71k (> 70k) -> YES aligned. Ask is 34¢ (in corridor 32¢-52¢).
             {
                 "ticker": "KXBTCD-STRIKE-A",
                 "series_ticker": "KXBTCD",
                 "floor_strike": 70000.0,
                 "yes_ask_dollars": "0.3400",
-                "yes_bid_dollars": "0.3300",
+                "yes_bid_dollars": "0.3200",
                 "no_ask_dollars": "0.6800",
                 "no_bid_dollars": "0.6600",
             },
-            # Strike B ($72,000): spot is 71k (< 72k) -> NO aligned. Ask is 36¢ (in corridor 32¢-52¢).
             {
                 "ticker": "KXBTCD-STRIKE-B",
                 "series_ticker": "KXBTCD",
-                "floor_strike": 72000.0,
-                "yes_ask_dollars": "0.6600",
-                "yes_bid_dollars": "0.6400",
-                "no_ask_dollars": "0.3600",
-                "no_bid_dollars": "0.3500",
-            },
-            # Strike C ($74,000): NO ask is 48¢ (valid but 36¢ on Strike B is cheaper).
-            {
-                "ticker": "KXBTCD-STRIKE-C",
-                "series_ticker": "KXBTCD",
                 "floor_strike": 74000.0,
-                "yes_ask_dollars": "0.5500",
-                "yes_bid_dollars": "0.5300",
-                "no_ask_dollars": "0.4800",
-                "no_bid_dollars": "0.4600",
+                "yes_ask_dollars": "0.7200",
+                "yes_bid_dollars": "0.7000",
+                "no_ask_dollars": "0.3000",
+                "no_bid_dollars": "0.2800",
             },
         ]
 
@@ -201,14 +191,14 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
 
         self.assertIn("KXBTCD-STRIKE-A", buys_by_ticker)
         self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-A"]["side"], "yes")
-        self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-A"]["price"], 34)
+        self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-A"]["price"], 33)
 
         self.assertIn("KXBTCD-STRIKE-B", buys_by_ticker)
         self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-B"]["side"], "no")
-        self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-B"]["price"], 36)
+        self.assertEqual(buys_by_ticker["KXBTCD-STRIKE-B"]["price"], 29)
 
         # Verify snapshot documents produced with tf="1h"
-        self.assertEqual(len(snapshots), 3)
+        self.assertEqual(len(snapshots), 2)
         for s in snapshots:
             self.assertEqual(s["tf"], "1h")
             self.assertEqual(s["sym"], "BTC")
@@ -216,12 +206,11 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
     def test_hourly_same_ticker_tiebreaker_cheaper_selected(self):
         """
         Tests tiebreaker on the SAME contract ticker:
-        On Strike A, BUY_YES is 52¢ and BUY_NO is 48¢ (both within broad corridor, spot ATM).
-        Bot cannot buy both on same contract; should pick BUY_NO because 48¢ < 52¢.
+        On Strike A, BUY_YES is 34¢ and BUY_NO is 28¢ (both within deep discount corridor, spot ATM).
+        Bot cannot buy both on same contract; should pick BUY_NO because 28¢ < 34¢.
         """
         client = DummyHourlyTradingClient()
         now_utc = datetime(2026, 8, 15, 20, 0, 30, tzinfo=timezone.utc)
-        # Spot is right at strike (dead-heat ATM within 0.05%) so both YES and NO are permitted
         spot_cache = {"BTC": 70000.0}
 
         markets = [
@@ -229,10 +218,10 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
                 "ticker": "KXBTCD-SAME-CONTRACT",
                 "series_ticker": "KXBTCD",
                 "floor_strike": 70000.0,
-                "yes_ask_dollars": "0.5200",
-                "yes_bid_dollars": "0.5000",
-                "no_ask_dollars": "0.4800",
-                "no_bid_dollars": "0.4600",
+                "yes_ask_dollars": "0.3400",
+                "yes_bid_dollars": "0.3200",
+                "no_ask_dollars": "0.2800",
+                "no_bid_dollars": "0.2600",
             },
         ]
 
@@ -249,13 +238,13 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
         self.assertEqual(len(client.executed_buys), 1)
         executed_buy = client.executed_buys[0]
         self.assertEqual(executed_buy["ticker"], "KXBTCD-SAME-CONTRACT")
-        # 48¢ NO is cheaper than 52¢ YES -> picked NO
+        # 28¢ NO is cheaper than 34¢ YES -> picked NO
         self.assertEqual(executed_buy["side"], "no")
-        self.assertEqual(executed_buy["price"], 47)  # Maker bid + 1 = 46 + 1 = 47
+        self.assertEqual(executed_buy["price"], 27)  # Maker bid + 1 = 26 + 1 = 27
 
     def test_hourly_same_ticker_equal_price_spot_momentum_tiebreaker(self):
         """
-        Tests tiebreaker on same contract when YES and NO prices are identical (e.g. 46¢ vs 46¢):
+        Tests tiebreaker on same contract when YES and NO prices are identical (e.g. 30¢ vs 30¢):
         Picks side with positive spot momentum advantage.
         """
         client = DummyHourlyTradingClient()
@@ -268,10 +257,10 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
                 "ticker": "KXBTCD-EQUAL-PRICE",
                 "series_ticker": "KXBTCD",
                 "floor_strike": 70000.0,
-                "yes_ask_dollars": "0.4600",
-                "yes_bid_dollars": "0.4400",
-                "no_ask_dollars": "0.4600",
-                "no_bid_dollars": "0.4400",
+                "yes_ask_dollars": "0.3000",
+                "yes_bid_dollars": "0.2800",
+                "no_ask_dollars": "0.3000",
+                "no_bid_dollars": "0.2800",
             },
         ]
 
@@ -291,8 +280,8 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
     def test_hourly_20min_cut_loss_and_second_entry(self):
         """
         Tests Minute 20:
-        1. Open position on Strike A entered at 48¢ drops to 32¢ (< 40¢ cut threshold) -> early loss cut.
-        2. Tighter entry corridor (28¢-38¢) evaluates new opportunity on Strike B (35¢) and buys it.
+        1. Open position on Strike A entered at 48¢ drops to 12¢ (< 15¢ cut threshold) -> early loss cut.
+        2. Tighter entry corridor (18¢-30¢) evaluates new opportunity on Strike B (28¢) and buys it.
         """
         client = DummyHourlyTradingClient()
         # Seed an open losing position on Strike A
@@ -303,25 +292,25 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
         spot_cache = {"BTC": 71000.0}
 
         markets = [
-            # Strike A: open position dropping to 32¢
+            # Strike A: open position dropping to 12¢
             {
                 "ticker": "KXBTCD-STRIKE-A",
                 "series_ticker": "KXBTCD",
                 "floor_strike": 70000.0,
-                "yes_ask_dollars": "0.3200",
-                "yes_bid_dollars": "0.3000",
-                "no_ask_dollars": "0.7000",
-                "no_bid_dollars": "0.6800",
+                "yes_ask_dollars": "0.1400",
+                "yes_bid_dollars": "0.1200",
+                "no_ask_dollars": "0.8800",
+                "no_bid_dollars": "0.8600",
             },
-            # Strike B: new opportunity at 35¢ (in tight corridor 28¢-38¢)
+            # Strike B: new opportunity at 28¢ (in tight corridor 18¢-30¢)
             {
                 "ticker": "KXBTCD-STRIKE-B",
                 "series_ticker": "KXBTCD",
                 "floor_strike": 70500.0,
-                "yes_ask_dollars": "0.3500",
-                "yes_bid_dollars": "0.3400",
-                "no_ask_dollars": "0.6700",
-                "no_bid_dollars": "0.6500",
+                "yes_ask_dollars": "0.2800",
+                "yes_bid_dollars": "0.2600",
+                "no_ask_dollars": "0.7400",
+                "no_bid_dollars": "0.7200",
             },
         ]
 
@@ -342,13 +331,13 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
         # Verify Strike B was bought in 20m corridor
         self.assertEqual(len(client.executed_buys), 1)
         self.assertEqual(client.executed_buys[0]["ticker"], "KXBTCD-STRIKE-B")
-        self.assertEqual(client.executed_buys[0]["price"], 35)
+        self.assertEqual(client.executed_buys[0]["price"], 27)
 
     def test_hourly_40min_winner_roll_and_stop_loss(self):
         """
         Tests Minute 40:
         1. Winning position (entered at 36¢, now 74¢ >= 70¢): rolls winner (sells at Bid, re-buys at Ask).
-        2. Losing position (entered at 45¢, now 28¢ with loss 17¢ >= 10¢): triggers stop-loss liquidation.
+        2. Losing position (entered at 45¢, now 14¢ with loss 31¢ >= 25¢ and <= 15¢ floor): triggers stop-loss liquidation.
         """
         client = DummyHourlyTradingClient()
         # Seed winning position on Strike A and losing position on Strike B
@@ -370,15 +359,15 @@ class TestHourlyCryptoMarkets(unittest.TestCase):
                 "no_ask_dollars": "0.2600",
                 "no_bid_dollars": "0.2400",
             },
-            # Strike Loser: NO bid is 28¢ (loss = 45 - 28 = 17¢ >= 10¢ SL)
+            # Strike Loser: NO bid is 14¢ (loss = 45 - 14 = 31¢ >= 25¢ SL)
             {
                 "ticker": "KXBTCD-LOSER",
                 "series_ticker": "KXBTCD",
                 "floor_strike": 72000.0,
-                "yes_ask_dollars": "0.7400",
-                "yes_bid_dollars": "0.7200",
-                "no_ask_dollars": "0.3000",
-                "no_bid_dollars": "0.2800",
+                "yes_ask_dollars": "0.8800",
+                "yes_bid_dollars": "0.8600",
+                "no_ask_dollars": "0.1600",
+                "no_bid_dollars": "0.1400",
             },
         ]
 

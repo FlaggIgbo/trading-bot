@@ -749,12 +749,12 @@ class KalshiClient(BaseTradingClient):
         ticker: str,
         side: str,
         count: int = 1,
-        take_profit_cents: int = 82,
+        take_profit_cents: int = 62,
     ) -> dict | None:
         """
         Places a resting take-profit limit order for an existing position:
-        - If holding YES: Sell YES by placing Ask at `take_profit_cents` (e.g. 82¢).
-        - If holding NO: Sell NO by placing Bid at (100 - `take_profit_cents`) (e.g. 18¢).
+        - If holding YES: Sell YES by placing Ask at `take_profit_cents` (e.g. 62¢).
+        - If holding NO: Sell NO by placing Bid at (100 - `take_profit_cents`) (e.g. 38¢).
         """
         side_clean = side.lower()
         now_ms = int(time.time() * 1000)
@@ -793,7 +793,7 @@ class KalshiClient(BaseTradingClient):
         ticker: str,
         side: str,
         buy_price_cents: int,
-        take_profit_cents: int = 82,
+        take_profit_cents: int = 62,
         count: int = 1,
         maker_bid_cents: int | None = None,
     ) -> dict:
@@ -837,31 +837,24 @@ class KalshiClient(BaseTradingClient):
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
-        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
-        # Record the exact price we paid into our bot's memory
-        self.set_entry_price(ticker, effective_buy_cents)
-
-        # Check if filled immediately
-        fill_count = float(
-            buy_order_res.get("fill_count")
-            or buy_order_res.get("order", {}).get("fill_count_fp")
-            or 0
+        order_id = buy_order_res.get("order", {}).get("order_id") or buy_order_res.get("order_id")
+        client_order_id = buy_payload["client_order_id"]
+        tp_order_id = (
+            sell_order_res.get("order", {}).get("order_id")
+            or sell_order_res.get("order_id")
+            if (isinstance(sell_order_res, dict))
+            else None
         )
-        sell_order_res = None
 
-        if fill_count > 0:
-            log.info(f"✅ Maker Buy filled immediately for {ticker} ({fill_count} contracts). Placing Take-Profit...")
-            sell_order_res = self.place_take_profit_order(
-                ticker=ticker,
-                side=side_clean,
-                count=int(round(fill_count)),
-                take_profit_cents=take_profit_cents,
-            )
-        else:
-            log.info(
-                f"{LogTag.MAKER_BUY_RESTING.value} Buy order resting at {effective_buy_cents}¢ for {ticker}. "
-                f"Take-Profit ({take_profit_cents}¢) will be placed once filled."
-            )
+        # Record the exact price we paid into our bot's memory and MongoDB
+        self.set_entry_price(
+            ticker=ticker,
+            price_cents=effective_buy_cents,
+            side=side_clean,
+            count=count,
+            client_order_id=client_order_id,
+            tp_order_id=tp_order_id,
+        )
 
         return {
             "buy_order": buy_order_res,
@@ -869,6 +862,9 @@ class KalshiClient(BaseTradingClient):
             "side": side_clean,
             "buy_price_cents": effective_buy_cents,
             "take_profit_cents": take_profit_cents,
+            "client_order_id": client_order_id,
+            "order_id": order_id,
+            "tp_order_id": tp_order_id,
         }
 
     def cancel_order(self, order_id: str) -> dict:

@@ -229,23 +229,23 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
             "entry_price_cents": 42,
         }
 
-        # Market drops to 30¢ (loss = 12¢ >= 10¢ limit and price <= 30¢)
+        # Market drops to 14¢ (loss = 28¢ >= 25¢ limit and price <= 15¢)
         with patch.object(self.client, "cancel_and_verify_resting_orders") as mock_cancel, \
              patch.object(self.client, "execute_liquidation") as mock_liquidate:
             res = self.client.evaluate_and_execute_10min_strategy(
                 ticker=self.ticker,
-                current_yes_bid=30,
-                current_no_bid=68,
-                current_yes_ask=32,
-                current_no_ask=70,
+                current_yes_bid=14,
+                current_no_bid=84,
+                current_yes_ask=16,
+                current_no_ask=86,
                 dry_run=False,
             )
             self.assertTrue(res["triggered"])
             self.assertEqual(res["action"], "stop_loss_sold")
-            self.assertEqual(res["loss_cents"], 12)
-            self.assertEqual(res["exit_price"], 30)
+            self.assertEqual(res["loss_cents"], 28)
+            self.assertEqual(res["exit_price"], 14)
             mock_cancel.assert_called_once_with(self.ticker)
-            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 30)
+            mock_liquidate.assert_called_once_with(self.ticker, "yes", 1, 14)
 
     def test_entry_price_tracking_and_cleanup(self):
         self.client.set_entry_price("TEST-TICKER", 54)
