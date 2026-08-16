@@ -43,6 +43,7 @@ from database import (
     get_dynamic_filter_for_market,
     get_dynamic_price_filter_map,
     is_default_exploration_window,
+    is_mid_zone_exploration_window,
     save_market_snapshots,
     save_portfolio_pnl,
     save_settlements,
@@ -1476,7 +1477,8 @@ def run_pipeline_pass(
     if dry_run:
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     if is_default_exploration_window(now_utc):
-        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (1AM–3AM ET): Trading on default broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢) and allowing coin-flip middle zone (45¢–55¢) for empirical data collection.")
+        mid_zone_note = " (including 45¢–55¢ mid-zone)" if is_mid_zone_exploration_window(now_utc) else " (45¢–55¢ mid-zone avoided)"
+        log.info(f"--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (1AM–3AM ET): Trading on default broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢){mid_zone_note} for empirical discovery.")
     log.info(f"--> INTERVAL: {interval_summary}")
     log.info("=================================================================")
 

@@ -398,12 +398,22 @@ _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 def is_default_exploration_window(now_utc: datetime | None = None) -> bool:
     """
     Returns True if current UTC time is between 05:00 and 07:00 UTC (1:00 AM to 3:00 AM Eastern Time).
-    During this window (the hours of 05:00 and 06:00 UTC), the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP
-    broad corridors (:00 -> 18¢–44¢, :05 -> 18¢–30¢) and permits low-EV coin-flip middle zone trades (45¢–55¢)
-    for empirical signal harvesting and data collection.
+    During this 2-hour window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors
+    (:00 -> 18¢–44¢, :05 -> 18¢–30¢) for empirical signal harvesting.
     """
     now = now_utc or datetime.now(timezone.utc)
     return (5 <= now.hour < 7)
+
+
+def is_mid_zone_exploration_window(now_utc: datetime | None = None) -> bool:
+    """
+    Returns True strictly between 05:00 and 06:00 UTC (1:00 AM to 2:00 AM Eastern Time).
+    During this single 1-hour window (now.hour == 5), the bot allows low-EV coin-flip middle zone trades (45¢–55¢)
+    for empirical signal harvesting and data collection.
+    Between 06:00 and 07:00 UTC (now.hour == 6) and other hours, middle zone trades are strictly avoided.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    return (now.hour == 5)
 
 
 def should_refresh_dynamic_map(
@@ -714,6 +724,7 @@ def get_dynamic_filter_for_market(
     """
     now = now_utc or datetime.now(timezone.utc)
     is_exploration = is_default_exploration_window(now)
+    is_mid_zone_exploration = is_mid_zone_exploration_window(now)
 
     if is_exploration and dynamic_map is None:
         active_map = DEFAULT_DYNAMIC_PRICE_MAP
@@ -740,7 +751,7 @@ def get_dynamic_filter_for_market(
         "sl_floor": int(mark_filter.get("sl_floor", 15)),
         "cut_5min": int(mark_filter.get("cut_5min", 15)),
         "endgame_12_5_floor": int(mark_filter.get("endgame_12_5_floor", 15)),
-        "avoid_mid_zone": False if is_exploration else bool(mark_filter.get("avoid_mid_zone", True)),
+        "avoid_mid_zone": False if is_mid_zone_exploration else bool(mark_filter.get("avoid_mid_zone", True)),
         "mid_zone_min": int(mark_filter.get("mid_zone_min", 37)),
         "mid_zone_max": int(mark_filter.get("mid_zone_max", 55)),
         "is_exploration": is_exploration,
