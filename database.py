@@ -95,15 +95,20 @@ def get_mongo_collection(collection_name: str = "market_snapshots"):
         return None
 
 
+def detect_market_timeframe(ticker: str) -> str:
+    """
+    Determines market timeframe ('15m' or '1h') from ticker string.
+    - 15-minute series contain '15M' (e.g. 'KXBTC15M-...')
+    - Hourly directional series end in 'D' or 'H' (e.g. 'KXBTCD-...', 'KXTONH-...')
+    """
+    tick_upper = (ticker or "").upper()
+    return "15m" if "15M" in tick_upper else "1h"
+
+
 def save_market_snapshots(snapshots: list[dict]) -> bool:
     """
-    Saves a list of ultra-compact market snapshot documents into MongoDB.
-
-    Args:
-        snapshots: List of compact dictionary records.
-
-    Returns:
-        bool: True if inserted into MongoDB successfully, False otherwise.
+    Saves a list of ultra-compact market snapshot documents into MongoDB 'market_snapshots' collection.
+    Every document is explicitly tagged with 'tf' ('15m' or '1h') to distinguish timeframes.
     """
     if not snapshots:
         log.info("No snapshots to save.")
@@ -113,8 +118,12 @@ def save_market_snapshots(snapshots: list[dict]) -> bool:
     if collection is None:
         return False
 
+    # Ensure tf is explicitly set on each snapshot document
+    for s in snapshots:
+        if "tf" not in s or not s["tf"]:
+            s["tf"] = detect_market_timeframe(s.get("tick", ""))
+
     try:
-        # Insert all snapshot records into the MongoDB collection
         result = collection.insert_many(snapshots)
         log.info(
             f"Successfully saved {len(result.inserted_ids)} ultra-compact snapshot(s) to MongoDB Atlas!"
@@ -159,23 +168,18 @@ def save_portfolio_pnl(pnl_summary: dict) -> bool:
             "total_settled_cost_dollars": pnl_summary.get("total_settled_cost_dollars"),
         }
         collection.insert_one(doc)
-        log.info(f"💰 [{ex_name.upper()}] Successfully recorded Portfolio PnL snapshot to MongoDB Atlas!")
+        log.info("💰 Successfully recorded Portfolio PnL snapshot to MongoDB Atlas!")
         return True
     except Exception as error:
-        log.error(f"Failed to insert [{ex_name.upper()}] portfolio PnL snapshot to MongoDB: {error}")
+        log.error(f"Failed to insert portfolio PnL to MongoDB: {error}")
         return False
 
 
 def save_settlements(settlements: list[dict]) -> int:
     """
-    Upserts settled market trade records into the MongoDB 'settlements' collection.
+    Saves individual settled market PnL records into MongoDB 'settlements' collection.
+    Tagging with 'tf' ('15m' vs '1h') ensures distinct performance reporting per timeframe.
     Prevents duplicate entries by keying on (ticker, ex, settled_time).
-
-    Args:
-        settlements: List of settlement records with payout, cost, and pnl.
-
-    Returns:
-        int: Number of new/updated settlement documents saved.
     """
     if not settlements:
         return 0
@@ -197,7 +201,8 @@ def save_settlements(settlements: list[dict]) -> int:
             if settled_time:
                 filter_query["settled_time"] = settled_time
 
-            s_doc = {**s, "ex": ex_name}
+            s_tf = s.get("tf") or detect_market_timeframe(ticker)
+            s_doc = {**s, "ex": ex_name, "tf": s_tf}
             collection.update_one(
                 filter_query,
                 {"$set": s_doc},
@@ -223,9 +228,11 @@ def save_active_position_cost(
     count: int,
     entry_price_cents: int,
     ex: str = "kalshi",
+    tf: str | None = None,
 ) -> bool:
     """
     Persists an active trade cost-basis into MongoDB Atlas 'active_positions' collection.
+    Tagged with 'tf' ('15m' or '1h') to distinguish timeframes.
     Ensures that if the Render worker restarts/redeploys, exact entry price is preserved.
     """
     if not ticker or entry_price_cents <= 0:
@@ -236,6 +243,7 @@ def save_active_position_cost(
         return False
 
     ex_name = str(ex or "kalshi").lower()
+    timeframe = tf or detect_market_timeframe(ticker)
     try:
         col.update_one(
             {"ticker": ticker, "ex": ex_name},
@@ -243,6 +251,7 @@ def save_active_position_cost(
                 "$set": {
                     "ticker": ticker,
                     "ex": ex_name,
+                    "tf": timeframe,
                     "side": side.lower(),
                     "count": count,
                     "entry_price_cents": entry_price_cents,

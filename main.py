@@ -62,8 +62,11 @@ log = logging.getLogger(__name__)
 # Supported 15-minute crypto symbols across exchanges
 SUPPORTED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC")
 
-# Persistent HTTP session with connection pooling for Coinbase spot checks
+# Persistent HTTP session with connection pooling sized for parallel thread queries
 http_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=25)
+http_session.mount("https://", _adapter)
+http_session.mount("http://", _adapter)
 
 
 def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> float:
@@ -984,6 +987,11 @@ def process_hourly_market_group(
                         "target_price": target_price,
                         "pct_dist": pct_dist,
                     })
+                else:
+                    log.info(
+                        f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                        f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
+                    )
 
             # Evaluate NO
             no_p = item["no_price_cents"]
@@ -1008,6 +1016,11 @@ def process_hourly_market_group(
                         "target_price": target_price,
                         "pct_dist": pct_dist,
                     })
+                else:
+                    log.info(
+                        f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                        f"Spot ${spot_price} >= Target ${target_price} (Diff: {item['price_diff']}). Bullish spot momentum."
+                    )
 
         # Step 3D: Multi-Strike Selection & Tiebreaker Execution
         best_yes = min(valid_yes_candidates, key=lambda c: c["price"]) if valid_yes_candidates else None
@@ -1291,7 +1304,19 @@ def run_pipeline_pass(
                     for s in hourly_snapshots:
                         s["ex"] = exchange_name.lower()
                         snapshots_to_save.append(s)
-                        if s.get("trd") or s.get("y") is not None or s.get("n") is not None:
+
+                        # Render Log Optimization:
+                        # Only console.log strikes where YES or NO is in the broad tradeable corridor (20¢ - 80¢)
+                        # or where a trade action occurred. This eliminates 300+ lines of out-of-the-money 1¢ strikes.
+                        y_val = s.get("y")
+                        n_val = s.get("n")
+                        has_trade = s.get("trd") is not None
+                        in_broad_corridor = (
+                            (y_val is not None and 20 <= y_val <= 80)
+                            or (n_val is not None and 20 <= n_val <= 80)
+                        )
+
+                        if has_trade or in_broad_corridor:
                             diff_val = s.get("diff")
                             diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
                             log.info(
