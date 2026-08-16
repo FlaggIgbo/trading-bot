@@ -63,6 +63,7 @@ import logging
 import re
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -170,25 +171,71 @@ calculate_seconds_until_next_check = calculate_seconds_until_next_checkpoint
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
     """
     Extracts the short crypto symbol (e.g. 'BTC', 'ETH', 'SOL') from full ticker strings.
-    Example: 'KXBTC15M-26AUG141315-15' -> 'BTC', 'btc-updown-15m-1786835700' -> 'BTC'
+    Example:
+      'KXBTC15M-26AUG141315-15' -> 'BTC'
+      'KXBTCD-26AUG1521-T69399.99' -> 'BTC'
+      'KXSOLD-26AUG1617-T99.9999' -> 'SOL'
+      'KXNEARH-...' -> 'NEAR'
+      'btc-updown-15m-1786835700' -> 'BTC'
     """
     # 1. Check ticker prefix if hyphen-separated (e.g. btc-updown-15m-...)
     ticker_prefix = ticker.split("-")[0].upper() if "-" in ticker else ""
     if ticker_prefix in SUPPORTED_SYMBOLS:
         return ticker_prefix
 
-    # 2. Check series ticker directly (e.g. KXBTC15M -> BTC, BTC15M -> BTC)
-    series_clean = series_ticker.replace("15M", "").replace("KX", "").upper()
+    # 2. Check series ticker or ticker prefix against supported symbols
+    series_upper = (series_ticker or "").upper()
+    for sym in SUPPORTED_SYMBOLS:
+        if series_upper.startswith(f"KX{sym}") or series_upper.startswith(sym) or ticker_prefix.startswith(f"KX{sym}"):
+            return sym
+
+    # 3. Clean known prefixes/suffixes (KX, 15M, D, H, W) and match
+    series_clean = series_upper.replace("15M", "").replace("KX", "").rstrip("DHWE").upper()
     if series_clean in SUPPORTED_SYMBOLS:
         return series_clean
 
-    # 3. Search with word boundary regex
+    # 4. Search with word boundary regex
     combined = f"{series_ticker} {ticker}".upper()
     for sym in SUPPORTED_SYMBOLS:
         if re.search(rf"\b{sym}\b", combined):
             return sym
 
     return next((sym for sym in SUPPORTED_SYMBOLS if sym in combined), series_ticker or "CRYPTO")
+
+
+def extract_target_strike(market: dict) -> float | None:
+    """
+    Safely extracts the strike / target price from a market dict across 15M and hourly formats.
+    Checks:
+    1. 'floor_strike', 'cap_strike', 'strike_price'
+    2. 'subtitle' (e.g. '$72,250 or above')
+    3. 'ticker' (e.g. 'KXBTCD-26AUG1617-T72249.99' or 'KXDOGED-26AUG1617-T0.1549999')
+    """
+    for k in ("floor_strike", "cap_strike", "strike_price"):
+        val = market.get(k)
+        if val is not None:
+            try:
+                f_val = float(val)
+                if f_val > 0:
+                    return f_val
+            except (ValueError, TypeError):
+                pass
+
+    if subtitle := market.get("subtitle"):
+        if m := re.search(r"\$([0-9,]+(?:\.[0-9]+)?)", str(subtitle)):
+            try:
+                return float(m.group(1).replace(",", ""))
+            except (ValueError, TypeError):
+                pass
+
+    if ticker := market.get("ticker"):
+        if m := re.search(r"-T([0-9]+(?:\.[0-9]+)?)", str(ticker)):
+            try:
+                return float(m.group(1))
+            except (ValueError, TypeError):
+                pass
+
+    return None
 
 
 def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = None) -> int | None:
@@ -411,7 +458,7 @@ def process_single_market(
 
     # 2. Extract spot price from cache & strike target metrics
     spot_price = spot_cache.get(asset_symbol) if spot_cache is not None else get_crypto_spot_price(asset_symbol)
-    target_price = market.get("floor_strike")
+    target_price = extract_target_strike(market)
 
     price_diff, pct_dist = None, None
     if spot_price is not None and target_price is not None:
@@ -644,6 +691,7 @@ def process_single_market(
     compact_document = {
         "ts": int(now_utc.timestamp()),
         "m": minute_past_hour,
+        "tf": "15m",
         "sym": asset_symbol,
         "tick": ticker,
         "ex": market.get("exchange", "kalshi"),
@@ -668,36 +716,463 @@ def process_single_market(
     return compact_document
 
 
+def process_hourly_market_group(
+    symbol: str,
+    markets: list[dict],
+    client: BaseTradingClient,
+    now_utc: datetime,
+    minute_past_hour: int,
+    spot_cache: dict[str, float | None] | None = None,
+    dry_run: bool = False,
+    force_trade_mark: bool = False,
+) -> list[dict]:
+    """
+    Evaluates pricing, risk rules, multi-strike selection, tiebreaker resolution,
+    and lifecycle checkpoints for hourly crypto prediction markets belonging to a single asset.
+
+    Hourly Checkpoints Progression:
+    - Minute 00 (:00): Maker Buy Entry scan across multi-strike options (broad corridor 30¢–52¢, TP: 82¢).
+    - Minute 20 (:20): 20-Min Cut-Loss check on open hourly positions (<40¢/34¢) + 2nd Entry pass (tight corridor 28¢–38¢, TP: 76¢).
+    - Minute 40 (:40): Hourly Winner Roll (≥70¢ -> bank profit at Bid & re-buy at Ask to run to 100¢) + Stop-Loss liquidation.
+    - Minute 50 (:50): 50-Min Endgame Safety Check (10m before expiry -> salvage losing positions, hold winners to 100¢).
+    """
+    if not markets:
+        return []
+
+    ex_name = getattr(client, "exchange_name", "Exchange")
+    spot_price = spot_cache.get(symbol) if spot_cache is not None else get_crypto_spot_price(symbol)
+
+    # Checkpoint interval flags
+    is_hourly_00_entry = (minute_past_hour == 0) or force_trade_mark
+    is_hourly_20_entry = (minute_past_hour == 20) or force_trade_mark
+    is_hourly_trading_interval = is_hourly_00_entry or is_hourly_20_entry
+    is_hourly_20min_cut_loss = (minute_past_hour == 20) and not force_trade_mark
+    is_hourly_40min_stop_loss = (minute_past_hour == 40) and not force_trade_mark
+    is_hourly_50min_endgame = (minute_past_hour == 50) and not force_trade_mark
+
+    # Dynamic filter parameters (20-min uses tighter 05m filter, 00-min uses 00m broad filter)
+    is_tight_corridor = (minute_past_hour == 20)
+    dynamic_filters = get_dynamic_filter_for_market(symbol, is_5min_mark=is_tight_corridor, now_utc=now_utc)
+    min_buy_price = dynamic_filters["min_buy"]
+    max_buy_price = dynamic_filters["max_buy"]
+    take_profit_cents = dynamic_filters["tp"]
+    is_exploration = dynamic_filters.get("is_exploration", False)
+    avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
+    mid_min = dynamic_filters.get("mid_zone_min", 37)
+    mid_max = dynamic_filters.get("mid_zone_max", 43)
+
+    snapshots: list[dict] = []
+    trade_executed_by_ticker: dict[str, dict] = {}
+
+    # Pre-parse quote & strike metrics for all strikes in the group
+    parsed_markets = []
+    for market in markets:
+        ticker = market.get("ticker", "UNKNOWN")
+        series_ticker = market.get("series_ticker", "UNKNOWN")
+        target_price = extract_target_strike(market)
+
+        yes_price_cents = extract_price_cents(market, "yes", client=client)
+        no_price_cents = extract_price_cents(market, "no", client=client)
+
+        quotes = {
+            k: parse_cents(market.get(f"{k}_dollars"), market.get(k))
+            for k in ("yes_ask", "yes_bid", "no_ask", "no_bid")
+        }
+        sprd = (
+            (quotes["yes_ask"] - quotes["yes_bid"])
+            if (quotes["yes_ask"] is not None and quotes["yes_bid"] is not None)
+            else None
+        )
+
+        price_diff, pct_dist = None, None
+        if spot_price is not None and target_price is not None:
+            try:
+                p_float, tgt_float = float(spot_price), float(target_price)
+                price_diff = round(p_float - tgt_float, 4)
+                if tgt_float > 0:
+                    pct_dist = round((price_diff / tgt_float) * 100.0, 4)
+            except (ValueError, TypeError):
+                pass
+
+        rem_mins = None
+        if close_iso := (market.get("close_time") or market.get("expected_expiration_time")):
+            try:
+                close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
+                rem_mins = round(max(0.0, (close_dt - now_utc).total_seconds() / 60.0), 1)
+            except Exception:
+                pass
+
+        vol_count = None
+        if (vol_raw := (market.get("volume_fp") or market.get("volume_24h_fp"))) is not None:
+            try:
+                vol_count = int(round(float(vol_raw)))
+            except (ValueError, TypeError):
+                pass
+
+        parsed_markets.append({
+            "market": market,
+            "ticker": ticker,
+            "series_ticker": series_ticker,
+            "target_price": target_price,
+            "yes_price_cents": yes_price_cents,
+            "no_price_cents": no_price_cents,
+            "quotes": quotes,
+            "sprd": sprd,
+            "price_diff": price_diff,
+            "pct_dist": pct_dist,
+            "rem_mins": rem_mins,
+            "vol_count": vol_count,
+        })
+
+    # -----------------------------------------------------------------------
+    # Step 1: 50-Minute Endgame Safety Check (:50 mark - 10m before hourly close)
+    # -----------------------------------------------------------------------
+    if is_hourly_50min_endgame:
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            pos = client.get_market_position(ticker)
+            if pos is not None:
+                quotes = item["quotes"]
+                sellable_yes = quotes["yes_bid"] if quotes["yes_bid"] is not None else item["yes_price_cents"]
+                sellable_no = quotes["no_bid"] if quotes["no_bid"] is not None else item["no_price_cents"]
+                endgame_floor = dynamic_filters.get("endgame_12_5_floor", 25)
+
+                eg_res = client.evaluate_and_execute_12_5min_endgame_check(
+                    ticker=ticker,
+                    current_yes_price=sellable_yes,
+                    current_no_price=sellable_no,
+                    dry_run=dry_run,
+                    endgame_floor=endgame_floor,
+                )
+                if isinstance(eg_res, dict) and eg_res.get("triggered"):
+                    eg_side = eg_res.get("side", "yes")
+                    action_name = eg_res.get("action", "endgame_loss_cut")
+                    trade_details = {
+                        "ex": ex_name.lower(),
+                        "action": action_name,
+                        "side": eg_side,
+                        "exit_price": eg_res.get("exit_price"),
+                        "loss_cents": eg_res.get("loss_cents"),
+                        "outcome": determine_counterfactual_outcome(
+                            eg_side, action_name, spot_price, item["target_price"], item["market"].get("result")
+                        ),
+                    }
+                    if "profit_locked_cents" in eg_res:
+                        trade_details["profit_locked_cents"] = eg_res["profit_locked_cents"]
+                    trade_executed_by_ticker[ticker] = trade_details
+
+    # -----------------------------------------------------------------------
+    # Step 2: 40-Minute Winner-Roll & Stop-Loss Evaluation (:40 mark)
+    # -----------------------------------------------------------------------
+    elif is_hourly_40min_stop_loss:
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            pos = client.get_market_position(ticker)
+            if pos is not None:
+                quotes = item["quotes"]
+                sellable_yes = quotes["yes_bid"] if quotes["yes_bid"] is not None else item["yes_price_cents"]
+                sellable_no = quotes["no_bid"] if quotes["no_bid"] is not None else item["no_price_cents"]
+
+                sl_threshold = dynamic_filters.get("sl_threshold", 10)
+                sl_floor = dynamic_filters.get("sl_floor", 30)
+
+                sl_res = client.evaluate_and_execute_10min_strategy(
+                    ticker=ticker,
+                    current_yes_bid=sellable_yes,
+                    current_no_bid=sellable_no,
+                    current_yes_ask=quotes.get("yes_ask"),
+                    current_no_ask=quotes.get("no_ask"),
+                    dry_run=dry_run,
+                    stop_loss_threshold_cents=sl_threshold,
+                    price_floor=sl_floor,
+                )
+                if isinstance(sl_res, dict) and sl_res.get("triggered"):
+                    sl_side = sl_res.get("side", "yes")
+                    action_name = sl_res.get("action", "stop_loss_sold")
+                    trade_details = {
+                        "ex": ex_name.lower(),
+                        "action": action_name,
+                        "side": sl_side,
+                        "exit_price": sl_res.get("exit_price"),
+                        "outcome": determine_counterfactual_outcome(
+                            sl_side, action_name, spot_price, item["target_price"], item["market"].get("result")
+                        ),
+                    }
+                    if "loss_cents" in sl_res:
+                        trade_details["loss_cents"] = sl_res["loss_cents"]
+                    if "profit_locked_cents" in sl_res:
+                        trade_details["profit_locked_cents"] = sl_res["profit_locked_cents"]
+                    if "rebuy_price_cents" in sl_res:
+                        trade_details["rebuy_price_cents"] = sl_res["rebuy_price_cents"]
+                    trade_executed_by_ticker[ticker] = trade_details
+
+    # -----------------------------------------------------------------------
+    # Step 3: Hourly Buy Entry & 20-Min Cut-Loss (:00, :20)
+    # -----------------------------------------------------------------------
+    elif is_hourly_trading_interval:
+        # Step 3A: 20-Minute Cut-Loss Check
+        cut_loss_tickers = set()
+        if is_hourly_20min_cut_loss:
+            cut_threshold = dynamic_filters.get("cut_5min", 40)
+            for item in parsed_markets:
+                ticker = item["ticker"]
+                pos = client.get_market_position(ticker)
+                if pos is not None:
+                    side = pos["side"]
+                    cut_res = client.evaluate_and_execute_5min_cut_loss(
+                        ticker=ticker,
+                        current_yes_price=item["yes_price_cents"],
+                        current_no_price=item["no_price_cents"],
+                        min_price_threshold=cut_threshold,
+                        dry_run=dry_run,
+                    )
+                    if isinstance(cut_res, dict) and cut_res.get("triggered"):
+                        cut_loss_tickers.add(ticker)
+                        trade_details = {
+                            "ex": ex_name.lower(),
+                            "action": "early_loss_cut",
+                            "side": side,
+                            "exit_price": cut_res.get("exit_price"),
+                            "loss_cents": cut_res.get("loss_cents"),
+                            "outcome": determine_counterfactual_outcome(
+                                side, "early_loss_cut", spot_price, item["target_price"], item["market"].get("result")
+                            ),
+                        }
+                        trade_executed_by_ticker[ticker] = trade_details
+
+        # Step 3B: Prune stale unfilled buy orders
+        if not dry_run:
+            for item in parsed_markets:
+                client.cancel_unfilled_buy_orders(item["ticker"])
+
+        # Step 3C: Collect valid BUY_YES and BUY_NO candidates across all strike options
+        valid_yes_candidates = []
+        valid_no_candidates = []
+
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            target_price = item["target_price"]
+            quotes = item["quotes"]
+            pct_dist = item["pct_dist"]
+
+            # Position check: skip if we already hold an active position or resting order
+            if ticker in cut_loss_tickers:
+                continue
+            if client.has_existing_position_or_order(ticker):
+                pos = client.get_market_position(ticker)
+                has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
+                if pos is not None and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
+                    client.place_take_profit_order(
+                        ticker=ticker,
+                        side=pos["side"],
+                        count=pos["count"],
+                        take_profit_cents=take_profit_cents,
+                    )
+                continue
+
+            # Evaluate YES
+            yes_p = item["yes_price_cents"]
+            if yes_p is not None and min_buy_price <= yes_p <= max_buy_price:
+                if is_spot_momentum_aligned("yes", spot_price, target_price):
+                    # Check middle zone avoidance (37¢–43¢)
+                    in_mid = (mid_min <= yes_p <= mid_max)
+                    if avoid_mid_zone and in_mid:
+                        pct_dist_val = pct_dist if pct_dist is not None else 0.0
+                        if pct_dist_val < 0.08:
+                            log.info(
+                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
+                                f"falls in middle band ({mid_min}¢-{mid_max}¢) without strong spot edge. Skipping."
+                            )
+                            continue
+                    valid_yes_candidates.append({
+                        "item": item,
+                        "ticker": ticker,
+                        "side": "yes",
+                        "price": yes_p,
+                        "bid": quotes["yes_bid"],
+                        "target_price": target_price,
+                        "pct_dist": pct_dist,
+                    })
+
+            # Evaluate NO
+            no_p = item["no_price_cents"]
+            if no_p is not None and min_buy_price <= no_p <= max_buy_price:
+                if is_spot_momentum_aligned("no", spot_price, target_price):
+                    # Check middle zone avoidance (37¢–43¢)
+                    in_mid = (mid_min <= no_p <= mid_max)
+                    if avoid_mid_zone and in_mid:
+                        pct_dist_val = pct_dist if pct_dist is not None else 0.0
+                        if pct_dist_val > -0.08:
+                            log.info(
+                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
+                                f"falls in middle band ({mid_min}¢-{mid_max}¢) without strong spot edge. Skipping."
+                            )
+                            continue
+                    valid_no_candidates.append({
+                        "item": item,
+                        "ticker": ticker,
+                        "side": "no",
+                        "price": no_p,
+                        "bid": quotes["no_bid"],
+                        "target_price": target_price,
+                        "pct_dist": pct_dist,
+                    })
+
+        # Step 3D: Multi-Strike Selection & Tiebreaker Execution
+        best_yes = min(valid_yes_candidates, key=lambda c: c["price"]) if valid_yes_candidates else None
+        best_no = min(valid_no_candidates, key=lambda c: c["price"]) if valid_no_candidates else None
+
+        candidates_to_execute = []
+
+        if best_yes and best_no:
+            if best_yes["ticker"] == best_no["ticker"]:
+                # Conflict: Same contract ticker cannot hold both YES and NO
+                # Tiebreaker: Pick the strictly cheaper side; if tied in price, use spot momentum direction
+                if best_yes["price"] < best_no["price"]:
+                    chosen = best_yes
+                    log.info(
+                        f"{LogTag.TIEBREAKER_CHOSEN.value} [{ex_name}] {chosen['ticker']}: "
+                        f"BUY_YES ({best_yes['price']}¢) is cheaper than BUY_NO ({best_no['price']}¢). Picking BUY_YES."
+                    )
+                elif best_no["price"] < best_yes["price"]:
+                    chosen = best_no
+                    log.info(
+                        f"{LogTag.TIEBREAKER_CHOSEN.value} [{ex_name}] {chosen['ticker']}: "
+                        f"BUY_NO ({best_no['price']}¢) is cheaper than BUY_YES ({best_yes['price']}¢). Picking BUY_NO."
+                    )
+                else:
+                    pct_val = best_yes.get("pct_dist") or 0.0
+                    chosen = best_yes if pct_val >= 0 else best_no
+                    log.info(
+                        f"{LogTag.TIEBREAKER_CHOSEN.value} [{ex_name}] {chosen['ticker']}: "
+                        f"YES and NO tied at {chosen['price']}¢. Picking {chosen['side'].upper()} based on spot momentum ({pct_val:+.2f}%)."
+                    )
+                candidates_to_execute.append(chosen)
+            else:
+                # Different strike contracts: Execute DUAL BUY!
+                log.info(
+                    f"{LogTag.DUAL_BUY_MATCH.value} [{ex_name}] Hourly Multi-Strike Dual Buy for {symbol}: "
+                    f"Buying YES on {best_yes['ticker']} (@ {best_yes['price']}¢) AND NO on {best_no['ticker']} (@ {best_no['price']}¢)."
+                )
+                candidates_to_execute.append(best_yes)
+                candidates_to_execute.append(best_no)
+        elif best_yes:
+            candidates_to_execute.append(best_yes)
+        elif best_no:
+            candidates_to_execute.append(best_no)
+
+        # Execute candidate orders
+        for cand in candidates_to_execute:
+            item = cand["item"]
+            ticker = cand["ticker"]
+            side = cand["side"]
+            price_cents = cand["price"]
+            maker_bid = cand["bid"]
+
+            executed, details = _execute_buy_flow(
+                ticker=ticker,
+                side=side,
+                price_cents=price_cents,
+                maker_bid=maker_bid,
+                min_buy=min_buy_price,
+                max_buy=max_buy_price,
+                take_profit_cents=take_profit_cents,
+                spot_price=spot_price,
+                target_price=cand["target_price"],
+                market_result=item["market"].get("result"),
+                client=client,
+                dry_run=dry_run,
+                is_exploration=is_exploration,
+            )
+            if executed and details:
+                trade_executed_by_ticker[ticker] = details
+
+    # -----------------------------------------------------------------------
+    # Step 4: Build Compact Snapshot Documents for all strikes in the group
+    # -----------------------------------------------------------------------
+    for item in parsed_markets:
+        ticker = item["ticker"]
+        quotes = item["quotes"]
+
+        compact_doc = {
+            "ts": int(now_utc.timestamp()),
+            "m": minute_past_hour,
+            "tf": "1h",
+            "sym": symbol,
+            "tick": ticker,
+            "ex": item["market"].get("exchange", "kalshi"),
+            "y": item["yes_price_cents"],
+            "n": item["no_price_cents"],
+            "y_bid": quotes["yes_bid"],
+            "y_ask": quotes["yes_ask"],
+            "n_bid": quotes["no_bid"],
+            "n_ask": quotes["no_ask"],
+            "sprd": item["sprd"],
+            "p": spot_price,
+            "tgt": item["target_price"],
+            "diff": item["price_diff"],
+            "pct": item["pct_dist"],
+            "rem": item["rem_mins"],
+            "vol": item["vol_count"],
+        }
+        if ticker in trade_executed_by_ticker:
+            compact_doc["trd"] = trade_executed_by_ticker[ticker]
+
+        snapshots.append(compact_doc)
+
+    return snapshots
+
+
 def run_pipeline_pass(
     clients: list[tuple[str, BaseTradingClient]] | None = None,
     dry_run: bool = False,
     force_trade_mark: bool = False,
 ):
     """
-    Executes a single market processing & trading pass across all active exchanges.
+    Executes a single market processing & trading pass across all active exchanges
+    for BOTH 15-minute and Hourly multi-strike crypto prediction markets.
     Accepts long-lived exchange clients to prevent socket leaks and connection overhead.
     """
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
 
-    minute_into_market = current_minute % 15
-    is_trading_interval = (minute_into_market in (0, 5)) or force_trade_mark
-    is_10min_interval = (minute_into_market == 10) and not force_trade_mark
-    is_12_5min_interval = (minute_into_market == 12) and not force_trade_mark
+    minute_into_market_15m = current_minute % 15
+    is_15m_trading_interval = (minute_into_market_15m in (0, 5)) or force_trade_mark
+    is_15m_10min_interval = (minute_into_market_15m == 10) and not force_trade_mark
+    is_15m_12_5min_interval = (minute_into_market_15m == 12) and not force_trade_mark
+
+    is_hourly_00_entry = (current_minute == 0) or force_trade_mark
+    is_hourly_20_mark = (current_minute == 20) and not force_trade_mark
+    is_hourly_40_mark = (current_minute == 40) and not force_trade_mark
+    is_hourly_50_mark = (current_minute == 50) and not force_trade_mark
+
+    # Human-readable interval descriptions
+    intervals_active = []
+    if is_15m_trading_interval:
+        intervals_active.append("15M BUY ENTRY / 5M CUT")
+    elif is_15m_10min_interval:
+        intervals_active.append("15M WINNER ROLL / SL")
+    elif is_15m_12_5min_interval:
+        intervals_active.append("15M ENDGAME SAFETY CHECK")
+
+    if is_hourly_00_entry:
+        intervals_active.append("HOURLY 00M MULTI-STRIKE ENTRY")
+    elif is_hourly_20_mark:
+        intervals_active.append("HOURLY 20M CUT-LOSS & 2ND ENTRY")
+    elif is_hourly_40_mark:
+        intervals_active.append("HOURLY 40M WINNER ROLL & SL")
+    elif is_hourly_50_mark:
+        intervals_active.append("HOURLY 50M ENDGAME SAFETY CHECK")
+
+    interval_summary = " + ".join(intervals_active) if intervals_active else "DATA COLLECTION ONLY MARK"
 
     log.info("=================================================================")
     log.info(f"RUNNING BOT AT UTC TIME: {now_utc.isoformat()} (Minute :{current_minute:02d}:{now_utc.second:02d})")
     if dry_run:
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     if is_default_exploration_window(now_utc):
-        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (Midnight–2AM ET): Trading on default broad corridors (:00 -> 30¢–52¢, :05 -> 28¢–38¢) for empirical discovery.")
-    log.info(
-        "--> INTERVAL: "
-        + ("BUY TRADING & 5-MIN CUT-LOSS / DATA COLLECTION MARK (:00, :05, :15, :20...)" if is_trading_interval
-           else "10-MIN STOP-LOSS & LET-RUN EVALUATION MARK (:10, :25, :40, :55)" if is_10min_interval
-           else "12.5-MIN ENDGAME SAFETY CHECK MARK (:12.5, :27.5, :42.5, :57.5)" if is_12_5min_interval
-           else "DATA COLLECTION ONLY MARK")
-    )
+        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (Midnight–2AM ET): Trading on default broad corridors (:00 -> 30¢–52¢, :05/20m -> 28¢–38¢) for empirical discovery.")
+    log.info(f"--> INTERVAL: {interval_summary}")
     log.info("=================================================================")
 
     # Ensure dynamic price filters are in memory (auto-refreshes every 6 hours, at 07:00 UTC anchor, or on cold start)
@@ -752,18 +1227,21 @@ def run_pipeline_pass(
         except Exception as err:
             log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
 
+        # -------------------------------------------------------------------
+        # 1. 15-Minute Crypto Markets Pipeline
+        # -------------------------------------------------------------------
         log.info(f"Fetching active 15-minute crypto markets from {exchange_name}...")
         try:
-            markets = client.get_15m_crypto_markets(status="open")
-            log.info(f"Retrieved {len(markets)} active 15-minute crypto markets from {exchange_name}.")
+            markets_15m = client.get_15m_crypto_markets(status="open")
+            log.info(f"Retrieved {len(markets_15m)} active 15-minute crypto markets from {exchange_name}.")
         except Exception as error:
             log.error(f"Failed to fetch 15-minute crypto markets from {exchange_name}: {error}")
-            continue
+            markets_15m = []
 
-        for market in markets:
+        for market in markets_15m:
             snapshot = process_single_market(
                 market,
-                is_trading_interval,
+                is_15m_trading_interval,
                 client,
                 now_utc,
                 current_minute,
@@ -776,14 +1254,59 @@ def run_pipeline_pass(
             diff_val = snapshot.get("diff")
             diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
             log.info(
-                f"  • [{exchange_name}] Market [{snapshot['sym']} | {snapshot['tick']}] -> "
+                f"  • [{exchange_name}] [15M] [{snapshot['sym']} | {snapshot['tick']}] -> "
                 f"YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
                 f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
             )
 
+        # -------------------------------------------------------------------
+        # 2. Hourly Multi-Strike Crypto Markets Pipeline
+        # -------------------------------------------------------------------
+        if hasattr(client, "get_hourly_crypto_markets"):
+            log.info(f"Fetching active hourly crypto markets from {exchange_name}...")
+            try:
+                markets_1h = client.get_hourly_crypto_markets(
+                    status="open", current_hour_only=True, now_utc=now_utc
+                )
+                log.info(f"Retrieved {len(markets_1h)} active hourly crypto strike markets from {exchange_name}.")
+            except Exception as error:
+                log.error(f"Failed to fetch hourly crypto markets from {exchange_name}: {error}")
+                markets_1h = []
+
+            # Group hourly markets by crypto symbol (e.g. BTC, ETH, SOL, etc.)
+            hourly_by_symbol = defaultdict(list)
+            for m in markets_1h:
+                series_tick = m.get("series_ticker", "UNKNOWN")
+                tick = m.get("ticker", "UNKNOWN")
+                sym = extract_asset_symbol(series_tick, tick)
+                hourly_by_symbol[sym].append(m)
+
+            for sym, sym_markets in hourly_by_symbol.items():
+                hourly_snapshots = process_hourly_market_group(
+                    symbol=sym,
+                    markets=sym_markets,
+                    client=client,
+                    now_utc=now_utc,
+                    minute_past_hour=current_minute,
+                    spot_cache=spot_price_cache,
+                    dry_run=dry_run,
+                    force_trade_mark=force_trade_mark,
+                )
+                for s in hourly_snapshots:
+                    s["ex"] = exchange_name.lower()
+                    snapshots_to_save.append(s)
+                    if s.get("trd") or s.get("y") is not None or s.get("n") is not None:
+                        diff_val = s.get("diff")
+                        diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
+                        log.info(
+                            f"  • [{exchange_name}] [1H] [{s['sym']} | {s['tick']}] -> "
+                            f"YES: {s['y']}¢ | NO: {s['n']}¢ | "
+                            f"Price: ${s.get('p')} | Target: ${s.get('tgt')} | Diff: {diff_str}"
+                        )
+
     # Save valid market snapshots to MongoDB Atlas
-    # We save snapshots on regular checkpoints (:00, :05, :10, :12.5) OR whenever a trade occurs to keep database tiny
-    is_standard_save_mark = (minute_into_market in (0, 5, 10, 12))
+    # We save snapshots on regular checkpoints (:00, :05, :10, :12.5, :20, :40, :50) OR whenever a trade occurs
+    is_standard_save_mark = (minute_into_market_15m in (0, 5, 10, 12)) or (current_minute in (0, 20, 40, 50))
     valid_snapshots = [
         s for s in snapshots_to_save
         if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
@@ -794,7 +1317,7 @@ def run_pipeline_pass(
     elif dry_run:
         log.info(f"\n{LogTag.DRY_RUN_PREVIEW.value} Skipped saving snapshots to MongoDB Atlas in Dry-Run mode.")
     elif not is_standard_save_mark:
-        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :05, :10, :12.5 marks).")
+        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :05, :10, :12.5, :20, :40, :50 marks).")
     else:
         log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")

@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -76,6 +77,26 @@ SERIES_15M_CRYPTO = [
     "KXBCH15M",   # Bitcoin Cash (BCH) 15-minute up/down
     "KXNEAR15M",  # NEAR Protocol 15-minute up/down
     "KXZEC15M",   # Zcash (ZEC) 15-minute up/down
+]
+
+# ---------------------------------------------------------------------------
+# Hourly Crypto Series Tickers (Directional / Above-Below)
+# ---------------------------------------------------------------------------
+# Kalshi groups hourly multi-strike crypto markets under these series identifiers:
+SERIES_HOURLY_CRYPTO = [
+    "KXBTCD",   # Bitcoin Hourly Above/Below
+    "KXETHD",   # Ethereum Hourly Above/Below
+    "KXSOLD",   # Solana Hourly Directional
+    "KXXRPD",   # Ripple / XRP Hourly Above/Below
+    "KXDOGED",  # Dogecoin Hourly Above/Below
+    "KXBNBD",   # Binance Coin (BNB) Hourly Directional
+    "KXHYPED",  # Hyperliquid (HYPE) Hourly Directional
+    "KXTOND",   # Toncoin (TON) Hourly Directional
+    "KXNEARD",  # NEAR Protocol Hourly Directional
+    "KXZECD",   # Zcash (ZEC) Hourly Directional
+    "KXTONH",   # Toncoin (TON) Alternate Hourly Directional
+    "KXNEARH",  # NEAR Alternate Hourly Directional
+    "KXZECH",   # Zcash Alternate Hourly Directional
 ]
 
 # Common Kalshi API 400 error codes
@@ -484,6 +505,56 @@ class KalshiClient(BaseTradingClient):
                 )
 
         return all_15m_markets
+
+    def get_hourly_crypto_markets(
+        self,
+        status: str = "open",
+        limit: int = 100,
+        current_hour_only: bool = True,
+        now_utc: datetime | None = None,
+    ) -> list[dict]:
+        """
+        Retrieves active hourly multi-strike crypto prediction markets across all supported crypto series:
+        BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, TON, NEAR, and ZEC.
+
+        Args:
+            status: Market status ('open', 'closed', 'settled')
+            limit: Pagination limit per series
+            current_hour_only: If True, filters only for contracts closing in the current hour (<= 75 mins remaining)
+            now_utc: Reference UTC time for expiration filtering
+
+        Returns:
+            list[dict]: List of market dictionaries matching active hourly crypto contracts.
+        """
+        all_hourly_markets = []
+        ref_time = now_utc or datetime.now(timezone.utc)
+
+        for series_ticker in SERIES_HOURLY_CRYPTO:
+            try:
+                response = self.get_markets(
+                    series_ticker=series_ticker, status=status, limit=limit
+                )
+                markets = response.get("markets", [])
+                for m in markets:
+                    if current_hour_only:
+                        # Ensure market expires within the current hourly window
+                        close_iso = m.get("close_time") or m.get("expected_expiration_time")
+                        if close_iso:
+                            try:
+                                close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
+                                remaining_minutes = (close_dt - ref_time).total_seconds() / 60.0
+                                # Current hour contract should be closing in -2 to 75 minutes
+                                if remaining_minutes < -2.0 or remaining_minutes > 75.0:
+                                    continue
+                            except Exception:
+                                pass
+                    all_hourly_markets.append(m)
+            except Exception as error:
+                log.warning(
+                    f"Could not fetch hourly markets for series '{series_ticker}': {error}"
+                )
+
+        return all_hourly_markets
 
     def get_market(self, ticker: str) -> dict:
         """Fetches detailed information for a single market ticker."""
