@@ -86,9 +86,9 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
   - **Losing Positions**: If losing (`current_price < entry_price` or `current_price < endgame_floor`), liquidates immediately via taker execution to salvage capital.
   - **Winning Positions**: If in profit (`current_price ≥ entry_price`), holds position through settlement to collect the **full 100¢ ($1.00 payout)**!
 
-### 10. 05:00 – 07:00 UTC Signal Discovery Window (Midnight – 2:00 AM ET) 🌍
-- **Empirical Signal Harvesting**: Between 05:00 and 07:00 UTC (Tokyo / Asian crypto open), the bot temporarily falls back to broad default corridors (`30¢–52¢` at `:00`, `28¢–38¢` at `:05`/`20m`) to gather empirical execution data across wider price regimes.
-- **Recalibration Anchor at 07:00 UTC**: Cache automatically refreshes with a fresh 48-hour calibration query from MongoDB Atlas.
+### 10. 05:00 – 11:00 UTC Signal Discovery Window (Midnight – 6:00 AM ET) 🌍
+- **Empirical Signal Harvesting**: Between 05:00 and 11:00 UTC (6-hour Asian & European session window), the bot temporarily falls back to broad default corridors (`30¢–52¢` at `:00`, `28¢–38¢` at `:05`/`20m`) to gather empirical execution data across wider price regimes.
+- **Recalibration Anchor at 11:00 UTC**: Cache automatically refreshes with a fresh 48-hour calibration query from MongoDB Atlas right as the US trading day begins.
 
 ---
 

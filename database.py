@@ -426,12 +426,12 @@ _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 
 def is_default_exploration_window(now_utc: datetime | None = None) -> bool:
     """
-    Returns True if current UTC time is between 05:00 and 07:00 UTC (Midnight to 2:00 AM Eastern Time).
-    During this window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢)
-    for wide empirical signal harvesting across Asian market opens.
+    Returns True if current UTC time is between 05:00 and 11:00 UTC (Midnight to 6:00 AM Eastern Time).
+    During this 6-hour window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢)
+    for wide empirical signal harvesting across Asian & European market open sessions.
     """
     now = now_utc or datetime.now(timezone.utc)
-    return 5 <= now.hour < 7
+    return 5 <= now.hour < 11
 
 
 def should_refresh_dynamic_map(
@@ -444,9 +444,9 @@ def should_refresh_dynamic_map(
 
     Rule 1 (Cold Start): If memory is empty (bot just booted up), refresh immediately!
     Rule 2 (6-Hour Expiry): If more than 6 hours passed since last refresh, refresh!
-    Rule 3 (07:00 UTC Recalibration Anchor): Immediately after exiting the 05:00-07:00 UTC default window,
-            force a fresh recalibration at 07:00 UTC to lock in calibrated parameters for the rest of the day.
-    Rule 4 (Clock Markers): If current UTC time hits 00:00, 06:00, 07:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
+    Rule 3 (11:00 UTC Recalibration Anchor): Immediately after exiting the 05:00-11:00 UTC default window,
+            force a fresh recalibration at 11:00 UTC to lock in calibrated parameters for the US market open.
+    Rule 4 (Clock Markers): If current UTC time hits 00:00, 06:00, 11:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
     """
     if cache_is_empty is None:
         cache_is_empty = (_DYNAMIC_PRICE_MAP_CACHE is None)
@@ -466,14 +466,14 @@ def should_refresh_dynamic_map(
     if elapsed >= _CACHE_TTL_SECONDS:
         return True
 
-    # 2. Check if we just entered 07:00 UTC (the recalibration anchor right after 05:00-07:00 UTC default window)
-    if now.hour == 7 and now.minute < 10:
+    # 2. Check if we just entered 11:00 UTC (the recalibration anchor right after 05:00-11:00 UTC default window)
+    if now.hour == 11 and now.minute < 10:
         hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
         if last_refresh_time < hour_start_ts:
             return True
 
-    # 3. Check standard clock marks (00:00, 06:00, 12:00, 18:00 UTC) and haven't refreshed this hour
-    if now.hour in (0, 6, 12, 18) and now.minute < 10:
+    # 3. Check standard clock marks (00:00, 06:00, 11:00, 12:00, 18:00 UTC) and haven't refreshed this hour
+    if now.hour in (0, 6, 11, 12, 18) and now.minute < 10:
         hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
         if last_refresh_time < hour_start_ts:
             return True
@@ -746,13 +746,13 @@ def get_dynamic_filter_for_market(
 ) -> dict[str, int | bool]:
     """
     Convenience lookup to get exact dynamic filter parameters for a specific market and timing mark.
-    Between 05:00 and 07:00 UTC (Midnight - 2:00 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
+    Between 05:00 and 11:00 UTC (Midnight - 6:00 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
     broad corridors (:00 -> 30¢-52¢, :05 -> 28¢-38¢) for wide empirical signal harvesting.
 
     Args:
         asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "DOGE", "ZEC").
         is_5min_mark: True if running at the 5-minute mark (:05), False if at minute 00 (:00).
-        dynamic_map: Optional preloaded map. If None, uses defaults during 05:00-07:00 UTC or cached in-memory map.
+        dynamic_map: Optional preloaded map. If None, uses defaults during 05:00-11:00 UTC or cached in-memory map.
         now_utc: Optional current UTC datetime for timing/regime evaluation.
 
     Returns:

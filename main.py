@@ -1175,11 +1175,11 @@ def run_pipeline_pass(
     if dry_run:
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     if is_default_exploration_window(now_utc):
-        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (Midnight–2AM ET): Trading on default broad corridors (:00 -> 30¢–52¢, :05/20m -> 28¢–38¢) for empirical discovery.")
+        log.info("--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–11:00 (Midnight–6AM ET): Trading on default broad corridors (:00 -> 30¢–52¢, :05/20m -> 28¢–38¢) for empirical discovery.")
     log.info(f"--> INTERVAL: {interval_summary}")
     log.info("=================================================================")
 
-    # Ensure dynamic price filters are in memory (auto-refreshes every 6 hours, at 07:00 UTC anchor, or on cold start)
+    # Ensure dynamic price filters are in memory (auto-refreshes every 6 hours, at 11:00 UTC anchor, or on cold start)
     get_dynamic_price_filter_map(now_utc=now_utc)
 
     # Initialize fallback clients if persistent instances were not passed

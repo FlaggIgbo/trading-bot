@@ -565,6 +565,63 @@ class TestKalshiTradingAndRiskStrategy(unittest.TestCase):
             self.assertEqual(second_call_payload["time_in_force"], "immediate_or_cancel")
             self.assertNotEqual(second_call_payload["time_in_force"], "good_till_canceled")
 
+    def test_kalshi_client_batch_position_and_order_caching(self):
+        """Verifies that KalshiClient batch-caches portfolio positions and resting orders to eliminate 429 rate limit errors."""
+        client = KalshiClient(api_key_id="test_key", private_key=MagicMock())
+
+        fake_positions_resp = {
+            "market_positions": [
+                {
+                    "ticker": "KXBTC15M-TEST",
+                    "position_fp": "1.0",
+                    "market_exposure_dollars": "0.42",
+                },
+                {
+                    "ticker": "KXETHD-TEST",
+                    "position_fp": "-2.0",
+                    "market_exposure_dollars": "0.76",
+                }
+            ]
+        }
+
+        fake_orders_resp = {
+            "orders": [
+                {
+                    "ticker": "KXBTC15M-TEST",
+                    "order_id": "ord_1",
+                    "client_order_id": "sell_tp_yes_KXBTC15M-TEST_123",
+                    "side": "ask",
+                }
+            ]
+        }
+
+        with patch.object(client, "get_positions", return_value=fake_positions_resp) as mock_get_pos:
+            with patch.object(client, "get_orders", return_value=fake_orders_resp) as mock_get_orders:
+                # Query 50 different strike tickers in a loop
+                for i in range(50):
+                    pos = client.get_market_position(f"KXBTC15M-STRIKE-{i}")
+                    self.assertIsNone(pos)
+                    has_tp = client.has_resting_take_profit_order(f"KXBTC15M-STRIKE-{i}")
+                    self.assertFalse(has_tp)
+
+                # Query the existing tickers
+                pos_btc = client.get_market_position("KXBTC15M-TEST")
+                self.assertIsNotNone(pos_btc)
+                self.assertEqual(pos_btc["side"], "yes")
+                self.assertEqual(pos_btc["count"], 1)
+
+                pos_eth = client.get_market_position("KXETHD-TEST")
+                self.assertIsNotNone(pos_eth)
+                self.assertEqual(pos_eth["side"], "no")
+                self.assertEqual(pos_eth["count"], 2)
+
+                has_tp_btc = client.has_resting_take_profit_order("KXBTC15M-TEST")
+                self.assertTrue(has_tp_btc)
+
+                # Despite 100+ lookups, exactly 1 batch GET /portfolio/positions and 1 batch GET /portfolio/orders were made!
+                self.assertEqual(mock_get_pos.call_count, 1)
+                self.assertEqual(mock_get_orders.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

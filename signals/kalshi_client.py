@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
@@ -254,6 +255,13 @@ class KalshiClient(BaseTradingClient):
 
         # Persistent HTTP session for connection pooling across 24/7 execution
         self.session = requests.Session()
+
+        # In-memory batch caches for positions and resting orders to eliminate 429 rate limit errors
+        self._cached_positions_map: dict[str, dict] = {}
+        self._cached_positions_ts: float = 0.0
+        self._cached_resting_orders_map: dict[str, list[dict]] = {}
+        self._cached_resting_orders_ts: float = 0.0
+        self._CACHE_VALIDITY_SECONDS: float = 4.0
 
     def _build_auth_headers(self, http_method: str, path: str) -> dict[str, str]:
         """
@@ -652,55 +660,88 @@ class KalshiClient(BaseTradingClient):
 
         return self.post("/portfolio/events/orders", payload=order_payload)
 
+    def invalidate_portfolio_caches(self):
+        """Invalidates in-memory position and order caches upon trade execution or order cancellation."""
+        self._cached_positions_ts = 0.0
+        self._cached_resting_orders_ts = 0.0
+
+    def get_all_active_positions(self, force_refresh: bool = False) -> dict[str, dict]:
+        """
+        Fetches all active open positions in the portfolio in a single batch REST call.
+        Caches results for 4.0 seconds to eliminate hundreds of redundant per-ticker calls
+        and prevent 429 Too Many Requests rate limit errors on multi-strike scans.
+        """
+        now = time.time()
+        if not force_refresh and (now - self._cached_positions_ts) < self._CACHE_VALIDITY_SECONDS:
+            return self._cached_positions_map
+
+        positions_map: dict[str, dict] = {}
+        try:
+            pos_resp = self.get_positions()
+            positions = pos_resp.get("market_positions") or []
+            for p in positions:
+                ticker = p.get("ticker")
+                if not ticker:
+                    continue
+                fp = float(p.get("position_fp") or p.get("position") or 0)
+                if abs(fp) > 0:
+                    side = "yes" if fp > 0 else "no"
+                    count = int(round(abs(fp)))
+                    exposure = float(p.get("market_exposure_dollars") or 0)
+                    entry_price = int(round((exposure / count) * 100)) if (count > 0 and exposure > 0) else None
+                    positions_map[ticker] = {
+                        "ticker": ticker,
+                        "side": side,
+                        "count": count,
+                        "position_fp": fp,
+                        "entry_price_cents": entry_price,
+                        "exposure_dollars": exposure,
+                    }
+            self._cached_positions_map = positions_map
+            self._cached_positions_ts = now
+        except Exception as error:
+            log.warning(f"Could not batch-fetch active market positions: {error}")
+
+        return self._cached_positions_map
+
+    def get_all_resting_orders(self, force_refresh: bool = False) -> dict[str, list[dict]]:
+        """
+        Fetches all resting orders across all markets in the portfolio in a single batch REST call.
+        Caches results for 4.0 seconds to prevent 429 Too Many Requests rate limit errors.
+        """
+        now = time.time()
+        if not force_refresh and (now - self._cached_resting_orders_ts) < self._CACHE_VALIDITY_SECONDS:
+            return self._cached_resting_orders_map
+
+        orders_map: dict[str, list[dict]] = defaultdict(list)
+        try:
+            orders_resp = self.get_orders(status="resting")
+            orders = orders_resp.get("orders") or []
+            for o in orders:
+                ticker = o.get("ticker")
+                if ticker:
+                    orders_map[ticker].append(o)
+            self._cached_resting_orders_map = dict(orders_map)
+            self._cached_resting_orders_ts = now
+        except Exception as error:
+            log.warning(f"Could not batch-fetch resting orders: {error}")
+
+        return self._cached_resting_orders_map
+
     def get_market_position(self, ticker: str) -> dict | None:
         """
         Retrieves active position details for `ticker`.
-        Returns None if position is 0 or does not exist.
-
-        Returns:
-            dict: {
-                "ticker": str,
-                "side": "yes" | "no",
-                "count": int,
-                "position_fp": float,
-                "entry_price_cents": int | None,
-                "exposure_dollars": float,
-            }
+        Uses batch-cached positions map to prevent 429 rate limit errors on multi-strike scans.
         """
-        try:
-            pos_resp = self.get_positions(ticker=ticker)
-            positions = pos_resp.get("market_positions") or []
-            for p in positions:
-                if p.get("ticker") == ticker:
-                    fp = float(p.get("position_fp") or p.get("position") or 0)
-                    if abs(fp) > 0:
-                        side = "yes" if fp > 0 else "no"
-                        count = int(round(abs(fp)))
-                        exposure = float(p.get("market_exposure_dollars") or 0)
-                        entry_price = int(round((exposure / count) * 100)) if (count > 0 and exposure > 0) else None
-                        return {
-                            "ticker": ticker,
-                            "side": side,
-                            "count": count,
-                            "position_fp": fp,
-                            "entry_price_cents": entry_price,
-                            "exposure_dollars": exposure,
-                        }
-        except Exception as error:
-            log.warning(f"Could not fetch market position for {ticker}: {error}")
-        return None
+        return self.get_all_active_positions().get(ticker)
 
     def has_resting_take_profit_order(self, ticker: str) -> bool:
         """Checks if a resting take-profit order already exists for this ticker."""
-        try:
-            orders_resp = self.get_orders(ticker=ticker, status="resting")
-            orders = orders_resp.get("orders") or []
-            for o in orders:
-                client_order_id = o.get("client_order_id") or ""
-                if "sell_tp_" in client_order_id:
-                    return True
-        except Exception as error:
-            log.warning(f"Could not check resting TP orders for {ticker}: {error}")
+        orders = self.get_all_resting_orders().get(ticker, [])
+        for o in orders:
+            client_order_id = o.get("client_order_id") or ""
+            if "sell_tp_" in client_order_id:
+                return True
         return False
 
     def place_take_profit_order(
@@ -737,6 +778,7 @@ class KalshiClient(BaseTradingClient):
 
         try:
             res = self.post("/portfolio/events/orders", payload=sell_payload)
+            self.invalidate_portfolio_caches()
             log.info(
                 f"{LogTag.AUTO_SELL_SET.value} Placed resting Take-Profit order for {side_clean.upper()} "
                 f"(exit at {take_profit_cents}¢) on {ticker}"
@@ -915,8 +957,7 @@ class KalshiClient(BaseTradingClient):
         """
         canceled_count = 0
         try:
-            orders_resp = self.get_orders(ticker=ticker, status="resting")
-            orders = orders_resp.get("orders") or []
+            orders = self.get_all_resting_orders().get(ticker, [])
             for o in orders:
                 client_order_id = o.get("client_order_id") or ""
                 action = (o.get("action") or "").lower()
@@ -931,6 +972,8 @@ class KalshiClient(BaseTradingClient):
                     if self.cancel_order_safe(order_id):
                         canceled_count += 1
                         log.info(f"{LogTag.PRUNE_STALE_BUY.value} Canceled stale unfilled buy order {order_id} for {ticker}")
+            if canceled_count > 0:
+                self.invalidate_portfolio_caches()
         except Exception as error:
             log.warning(f"⚠️ Could not check/prune resting buy orders for {ticker}: {error}")
 
@@ -939,7 +982,7 @@ class KalshiClient(BaseTradingClient):
     def has_existing_position_or_order(self, ticker: str) -> bool:
         """
         Checks if we ALREADY hold an active position or resting order for the given market ticker.
-        Returns True if an open contract or resting order exists, False otherwise.
+        Uses batch-cached position and order maps to eliminate 429 rate limits.
         """
         # Step 1: Check active market positions
         pos = self.get_market_position(ticker)
@@ -951,14 +994,10 @@ class KalshiClient(BaseTradingClient):
             return True
 
         # Step 2: Check resting orders
-        try:
-            orders_resp = self.get_orders(ticker=ticker, status="resting")
-            orders = orders_resp.get("orders") or []
-            if len(orders) > 0:
-                log.info(f"{LogTag.ORDER_EXISTS.value} Found {len(orders)} resting order(s) for {ticker}")
-                return True
-        except Exception as error:
-            log.warning(f"Could not check resting orders for {ticker}: {error}")
+        orders = self.get_all_resting_orders().get(ticker, [])
+        if len(orders) > 0:
+            log.info(f"{LogTag.ORDER_EXISTS.value} Found {len(orders)} resting order(s) for {ticker}")
+            return True
 
         return False
 
@@ -1010,6 +1049,7 @@ class KalshiClient(BaseTradingClient):
 
         try:
             res = self.post("/portfolio/events/orders", payload=sell_payload)
+            self.invalidate_portfolio_caches()
             log.info(f"✅ Executed immediate taker liquidation for {ticker} ({side_clean.upper()} x{count}): {res}")
             return res
         except Exception as error:
@@ -1031,6 +1071,7 @@ class KalshiClient(BaseTradingClient):
 
                 sell_payload["time_in_force"] = "immediate_or_cancel"
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
+                self.invalidate_portfolio_caches()
                 log.info(f"✅ Executed secondary IOC taker liquidation for {ticker}: {res}")
                 return res
             except Exception as err2:
@@ -1064,6 +1105,6 @@ class KalshiClient(BaseTradingClient):
             "self_trade_prevention_type": "taker_at_cross",
         }
         res = self.post("/portfolio/events/orders", payload=buy_payload)
+        self.invalidate_portfolio_caches()
         self.set_entry_price(ticker, clamped_cents)
         return res
-
