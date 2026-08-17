@@ -473,11 +473,18 @@ class BaseTradingClient(ABC):
                 "exit_price": current_price,
             }
         else:
-            log.info(
-                f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
-                f"Current price is {current_price}¢ (>= {min_price_threshold}¢ threshold, {pnl_label}). "
-                f"Position is healthy and winning! Holding for Take-Profit auto-sell or $1.00 settlement."
-            )
+            if loss_cents > 0:
+                log.info(
+                    f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Current price is {current_price}¢ (>= {min_price_threshold}¢ safety threshold, {pnl_label}). "
+                    f"Position is currently trailing entry but above safety cut floor ({min_price_threshold}¢). Holding to allow price recovery before Stop-Loss / Endgame marks."
+                )
+            else:
+                log.info(
+                    f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Current price is {current_price}¢ (>= {min_price_threshold}¢ threshold, {pnl_label}). "
+                    f"Position is healthy and winning! Holding for Take-Profit auto-sell or $1.00 settlement."
+                )
 
         return {"triggered": False}
 
