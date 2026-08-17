@@ -120,6 +120,42 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
 
 ---
 
-## 📝 Roadmap & Future Enhancements
+## 📝 TODO & Engineering Roadmap
+
+Transitioning this project from a functional trading script into an enterprise-grade data engineering and distributed systems portfolio piece involves focusing on streaming architecture, schema enforcement, asynchronous I/O, and backtesting infrastructure.
+
+### 1. Data Engineering & Pipeline Architecture
+- [ ] **Migrate from Polling to WebSocket Streams**:
+  - Replace scheduled HTTP polling with real-time WebSocket connections (e.g., Kalshi WS and Coinbase WS).
+  - Instead of periodic snapshots at fixed minute marks, maintain an in-memory, event-driven order book and stream raw tick-level deltas.
+- [ ] **Separation of OLTP and OLAP Storage**:
+  - Keep MongoDB or Redis for fast, low-latency OLTP (active positions, order tracking).
+  - Stream historical market snapshots and trade logs to an OLAP time-series database (e.g., **ClickHouse**, **TimescaleDB**, or partitioned **Parquet** files on S3/GCS queried via DuckDB) for scalable EV aggregations and backtesting.
+- [ ] **Strict Data Contracts & Schema Validation**:
+  - Replace ad-hoc dictionary lookups (`market.get(...)`) and regex parsers with **Pydantic V2** or **Msgspec** models.
+  - Define explicit schemas for incoming market payloads, orders, and snapshot documents to catch malformed payloads at the ingestion boundary.
+
+### 2. Software Engineering & System Design
+- [ ] **Full Asynchronous I/O (`asyncio` + `aiohttp` / `httpx`)**:
+  - Convert network and database layers to `asyncio` to eliminate thread-switching overhead, simplify concurrent exchange queries, and prevent timing jitter during critical checkpoint windows.
+- [ ] **Clean Architecture & Decoupled Domain Layers**:
+  - Decouple `main.py` into independent services or modules:
+    - **Data Feed / Ingestor**: Ingests and normalizes order books and spot feeds.
+    - **Strategy / Signal Engine**: Pure, stateless functions taking market state and returning buy/sell signals without side effects.
+    - **Execution / Risk Manager**: Handles order submission, fill tracking, and circuit breakers.
+    - **Sink Service**: Asynchronously batches and flushes metrics and snapshots to persistent storage.
+- [ ] **State Machine for Order Lifecycle**:
+  - Replace loosely coupled flags and order IDs with a formal **Finite State Machine (FSM)** for trade lifecycles (`PENDING_SUBMISSION` $\to$ `OPEN_RESTING` $\to$ `FILLED` $\to$ `TP_ARMED` $\to$ `EXIT_LIQUIDATED` $\to$ `SETTLED`).
+
+### 3. Observability & Backtesting Framework
+- [ ] **Structured Logging & OpenTelemetry Metrics**:
+  - Replace standard string formatting with structured JSON logs (`structlog`) and expose a **Prometheus** metrics endpoint (`/metrics`).
+  - Track REST request latency, order fill ratios, slippage against top-of-book, and WebSocket message lag.
+- [ ] **Event-Driven Historical Backtester**:
+  - Build a deterministic backtesting simulator consuming stored historical snapshots from MongoDB to replay market events chronologically.
+  - Test strategy adjustments, cut-loss timings, and corridor parameters against empirical data without capital risk.
+
+### 4. Strategy & Asset Expansion
 - [ ] **Multi-Contract Sizing Implementation**: Wire account-equity fractional Kelly and conviction scoring directly into live order execution.
 - [ ] **Stock Indices**: Add support for index prediction markets on Kalshi (e.g. S&P 500 / `INX` / `SPY`, Nasdaq 100 / `NDX`).
+
