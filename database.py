@@ -502,15 +502,36 @@ def calibrate_dynamic_price_map_from_db(
             log.warning("MongoDB collections unavailable. Using default price filter map.")
             return calibrated_map
 
-        # 1. Fetch recent snapshots and settlements
+        # 1. Fetch recent snapshots and settlements (with projection & limits for sub-second execution)
         now_ts = int(datetime.now(timezone.utc).timestamp())
         cutoff_ts = now_ts - (max_history_hours * 3600)
 
-        recent_snapshots = list(snap_col.find({"ts": {"$gte": cutoff_ts}}))
+        recent_snapshots = list(
+            snap_col.find(
+                {"ts": {"$gte": cutoff_ts}},
+                {"sym": 1, "pct": 1, "trd": 1, "m": 1, "tick": 1, "ts": 1, "_id": 0},
+            )
+            .sort("ts", -1)
+            .limit(3000)
+        )
         if not recent_snapshots:
-            recent_snapshots = list(snap_col.find().sort("ts", -1).limit(3000))
+            recent_snapshots = list(
+                snap_col.find(
+                    {},
+                    {"sym": 1, "pct": 1, "trd": 1, "m": 1, "tick": 1, "ts": 1, "_id": 0},
+                )
+                .sort("ts", -1)
+                .limit(3000)
+            )
 
-        recent_settlements = list(settle_col.find())
+        recent_settlements = list(
+            settle_col.find(
+                {},
+                {"ticker": 1, "market_result": 1, "pnl_cents": 1, "_id": 0},
+            )
+            .sort("ts", -1)
+            .limit(1000)
+        )
         settlement_map = {s.get("ticker"): s for s in recent_settlements if s.get("ticker")}
 
         if not recent_snapshots:

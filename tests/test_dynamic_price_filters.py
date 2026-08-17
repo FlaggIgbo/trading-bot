@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import time
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -17,8 +18,8 @@ from main import process_single_market
 @pytest.fixture(autouse=True)
 def reset_db_cache():
     import database
-    database._DYNAMIC_PRICE_MAP_CACHE = None
-    database._LAST_MAP_REFRESH_TIME = 0.0
+    database._DYNAMIC_PRICE_MAP_CACHE = dict(database.DEFAULT_DYNAMIC_PRICE_MAP)
+    database._LAST_MAP_REFRESH_TIME = time.time()
     yield
     database._DYNAMIC_PRICE_MAP_CACHE = None
     database._LAST_MAP_REFRESH_TIME = 0.0
@@ -27,7 +28,7 @@ def reset_db_cache():
 def test_default_price_map_and_sl_defaults():
     for sym in ("DEFAULT", "BTC", "DOGE"):
         assert sym in DEFAULT_DYNAMIC_PRICE_MAP or sym in ("BTC", "DOGE")
-        f = get_dynamic_filter_for_market(sym, is_5min_mark=False)
+        f = get_dynamic_filter_for_market(sym, is_5min_mark=False, now_utc=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc))
         assert f["sl_threshold"] == 25
         assert f["sl_floor"] == 15
         assert f["cut_5min"] == 15
