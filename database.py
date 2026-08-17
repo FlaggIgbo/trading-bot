@@ -412,7 +412,11 @@ def _make_default_mark(mark: str) -> dict[str, int | bool]:
 
 DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | bool]]] = {
     sym: {"00": _make_default_mark("00"), "05": _make_default_mark("05")}
-    for sym in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH", "DEFAULT")
+    for sym in (
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH",
+        "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
+        "DEFAULT"
+    )
 }
 
 # In-memory global cache variables (so the bot doesn't slow down by querying Mongo every 5 seconds)
@@ -621,6 +625,11 @@ def calibrate_dynamic_price_map_from_db(
         all_symbols = set(volatility_by_sym.keys()).union(trades_by_sym_mark.keys())
         for sym in all_symbols:
             pct_samples = volatility_by_sym.get(sym, [])
+            # Note on Session-Bounded Markets (e.g. S&P 500 / Nasdaq 10:00 AM - 6:00 PM ET):
+            # Snapshots are ONLY recorded when Kalshi markets are open and active.
+            # During closed hours, no snapshots are saved, eliminating artificial zero-movement distortion.
+            # Volatility (standard deviation of % move from strike) is computed strictly over live market hours.
+            # If fewer than 2 snapshots exist (e.g. cold start over weekend), it falls back safely to 0.08% baseline.
             vol_std = statistics.stdev(pct_samples) if len(pct_samples) > 1 else 0.08
 
             # Asset-level stop-loss analysis (Recommendation 2)

@@ -79,7 +79,7 @@ DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 PRODUCTION_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 # ---------------------------------------------------------------------------
-# 15-Minute Crypto Series Tickers
+# 15-Minute Series Tickers (Crypto & Commodities)
 # ---------------------------------------------------------------------------
 # Kalshi groups 15-minute crypto markets under these series identifiers:
 SERIES_15M_CRYPTO = [
@@ -97,8 +97,18 @@ SERIES_15M_CRYPTO = [
     "KXZEC15M",   # Zcash (ZEC) 15-minute up/down
 ]
 
+# Kalshi groups 15-minute commodity markets under these series identifiers:
+SERIES_15M_COMMODITIES = [
+    "KXGOLD15M",    # Gold 15-minute up/down
+    "KXWTI15M",     # WTI Crude Oil 15-minute up/down
+    "KXSILVER15M",  # Silver 15-minute up/down
+]
+
+# Unified list of all active 15-minute prediction market series
+SERIES_15M_ALL = SERIES_15M_CRYPTO + SERIES_15M_COMMODITIES
+
 # ---------------------------------------------------------------------------
-# Hourly Crypto Series Tickers (Directional / Above-Below)
+# Hourly Multi-Strike Series Tickers (Crypto, Commodities & Equity Indices)
 # ---------------------------------------------------------------------------
 # Kalshi groups hourly multi-strike crypto markets under these series identifiers:
 SERIES_HOURLY_CRYPTO = [
@@ -116,6 +126,22 @@ SERIES_HOURLY_CRYPTO = [
     "KXNEARH",  # NEAR Alternate Hourly Directional
     "KXZECH",   # Zcash Alternate Hourly Directional
 ]
+
+# Kalshi groups hourly commodity markets under these series identifiers:
+SERIES_HOURLY_COMMODITIES = [
+    "KXGOLDH",    # Gold Hourly Above/Below
+    "KXSILVERH",  # Silver Hourly Above/Below
+    "KXWTIH",     # WTI Crude Oil Hourly Above/Below
+]
+
+# Kalshi groups hourly equity index markets under these series identifiers:
+SERIES_HOURLY_INDICES = [
+    "KXINXU",        # S&P 500 Hourly Above/Below
+    "KXNASDAQ100U",  # Nasdaq-100 Hourly Above/Below
+]
+
+# Unified list of all active hourly prediction market series
+SERIES_HOURLY_ALL = SERIES_HOURLY_CRYPTO + SERIES_HOURLY_COMMODITIES + SERIES_HOURLY_INDICES
 
 # Common Kalshi API 400 error codes
 KALSHI_ERROR_INSUFFICIENT_BALANCE = "insufficient_balance"
@@ -529,24 +555,31 @@ class KalshiClient(BaseTradingClient):
 
 
     # -----------------------------------------------------------------------
-    # Market Data & 15-Minute Crypto Retrieval
+    # Market Data & Multi-Asset 15-Minute / Hourly Retrieval
     # -----------------------------------------------------------------------
 
     def get_markets(self, **params) -> dict:
         """Queries markets from Kalshi (supports filtering by series_ticker, status, limit)."""
         return self.get("/markets", params)
 
-    def get_15m_crypto_markets(self, status: str = "open", limit: int = 100) -> list[dict]:
+    def get_15m_crypto_markets(
+        self,
+        status: str = "open",
+        limit: int = 100,
+        series_list: list[str] | None = None,
+    ) -> list[dict]:
         """
-        Retrieves active 15-minute crypto prediction markets across all 12 crypto series:
-        BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, and ZEC.
+        Retrieves active 15-minute prediction markets across all supported series
+        (Crypto: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC;
+         Commodities: GOLD, WTI Oil, SILVER).
 
         Returns:
-            list[dict]: A list of market dictionaries matching active 15m crypto contracts.
+            list[dict]: A list of market dictionaries matching active 15m contracts.
         """
         all_15m_markets = []
+        target_series = series_list or SERIES_15M_ALL
 
-        for series_ticker in SERIES_15M_CRYPTO:
+        for series_ticker in target_series:
             try:
                 response = self.get_markets(
                     series_ticker=series_ticker, status=status, limit=limit
@@ -560,30 +593,38 @@ class KalshiClient(BaseTradingClient):
 
         return all_15m_markets
 
+    # Alias for general 15m retrieval
+    get_15m_markets = get_15m_crypto_markets
+
     def get_hourly_crypto_markets(
         self,
         status: str = "open",
         limit: int = 100,
         current_hour_only: bool = True,
         now_utc: datetime | None = None,
+        series_list: list[str] | None = None,
     ) -> list[dict]:
         """
-        Retrieves active hourly multi-strike crypto prediction markets across all supported crypto series:
-        BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, TON, NEAR, and ZEC.
+        Retrieves active hourly multi-strike prediction markets across all supported series:
+        Crypto (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, TON, NEAR, ZEC),
+        Commodities (Gold, Silver, WTI Oil), and
+        Equity Indices (S&P 500 / INX, Nasdaq-100).
 
         Args:
             status: Market status ('open', 'closed', 'settled')
             limit: Pagination limit per series
             current_hour_only: If True, filters only for contracts closing in the current hour (<= 75 mins remaining)
             now_utc: Reference UTC time for expiration filtering
+            series_list: Optional override of series tickers to query (defaults to SERIES_HOURLY_ALL)
 
         Returns:
-            list[dict]: List of market dictionaries matching active hourly crypto contracts.
+            list[dict]: List of market dictionaries matching active hourly contracts.
         """
         all_hourly_markets = []
         ref_time = now_utc or datetime.now(timezone.utc)
+        target_series = series_list or SERIES_HOURLY_ALL
 
-        for series_ticker in SERIES_HOURLY_CRYPTO:
+        for series_ticker in target_series:
             try:
                 response = self.get_markets(
                     series_ticker=series_ticker, status=status, limit=limit
@@ -605,9 +646,9 @@ class KalshiClient(BaseTradingClient):
                             except Exception:
                                 pass
 
-                        # Fallback: Parse expiration from ticker (e.g. KXBTCD-26AUG1616 -> 2026-08-16 16:00 UTC)
+                        # Fallback: Parse expiration from ticker (e.g. KXBTCD-26AUG1616 -> 2026-08-16 16:00 UTC or KXINXU-26AUG17H1000 -> 2026-08-17 10:00 EDT)
                         if close_dt is None and (tick := m.get("ticker")):
-                            m_match = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(\d{2})", tick)
+                            m_match = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(?:H)?(\d{2})", tick)
                             if m_match:
                                 yy, mmm, dd, hh = m_match.groups()
                                 try:
@@ -632,6 +673,9 @@ class KalshiClient(BaseTradingClient):
                 )
 
         return all_hourly_markets
+
+    # Alias for general hourly retrieval
+    get_hourly_markets = get_hourly_crypto_markets
 
     def get_market(self, ticker: str) -> dict:
         """Fetches detailed information for a single market ticker."""

@@ -1,16 +1,23 @@
-# Kalshi 15-Minute & Hourly Crypto Trading Bot 🚀
+# Kalshi 15-Minute & Hourly Multi-Asset Trading Bot 🚀
 
-A high-performance Python trading bot for 15-minute and Hourly multi-strike crypto prediction markets on **Kalshi**, recording microstructure snapshots to MongoDB Atlas for Expected Value (EV) optimization and volatility analysis.
+A high-performance Python trading bot for 15-minute and Hourly multi-strike prediction markets on **Kalshi** (Crypto, Commodities, and Equity Indices), recording microstructure snapshots to MongoDB Atlas for Expected Value (EV) optimization and volatility analysis.
 
 ## 🛠️ Architecture & Stack
 - **Exchange APIs**:
   - **Kalshi Trade API V2** (`POST /portfolio/events/orders` with RSA-PSS digital signatures)
   - *Gemini Trading Client*: Disabled / commented out.
+- **Spot Price Oracle Feeds**:
+  - **Coinbase Spot API**: High-frequency spot prices for Crypto assets.
+  - **Pyth Network Hermes API**: Sub-second spot prices for Commodities (`GOLD`, `SILVER`, `WTI` Oil) matching Kalshi's official settlement source.
+  - **Yahoo Finance Chart API**: Real-time equity index pricing for S&P 500 (`INX` / `^GSPC`) and Nasdaq-100 (`NASDAQ100` / `^NDX`).
 - **Database**: MongoDB Atlas (`trading_bot_db.market_snapshots`, `portfolio_pnl`, `settlements`, `active_positions`)
 - **Hosting**: 24/7 Render.com Background Worker (synchronized across 15M and 1H checkpoints)
-- **Tracked Assets (12 Series)**:
-  - **15-Minute Series**: `KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`, `KXADA15M`, `KXTON15M`, `KXBCH15M`, `KXNEAR15M`, `KXZEC15M`
-  - **Hourly Multi-Strike Series**: `KXBTCD`, `KXETHD`, `KXSOLD`, `KXXRPD`, `KXDOGED`, `KXBNBD`, `KXHYPED`, `KXTOND`, `KXNEARD`, `KXZECD`
+- **Tracked Assets (17 Active Assets Across 23 Series)**:
+  - **15-Minute Crypto Series**: `KXBTC15M`, `KXETH15M`, `KXSOL15M`, `KXXRP15M`, `KXDOGE15M`, `KXBNB15M`, `KXHYPE15M`, `KXADA15M`, `KXTON15M`, `KXBCH15M`, `KXNEAR15M`, `KXZEC15M`
+  - **15-Minute Commodity Series**: `KXGOLD15M` (Gold), `KXWTI15M` (WTI Crude Oil), `KXSILVER15M` (Silver)
+  - **Hourly Multi-Strike Crypto Series**: `KXBTCD`, `KXETHD`, `KXSOLD`, `KXXRPD`, `KXDOGED`, `KXBNBD`, `KXHYPED`, `KXTOND`, `KXNEARD`, `KXZECD`, `KXTONH`, `KXNEARH`, `KXZECH`
+  - **Hourly Multi-Strike Commodity Series**: `KXGOLDH` (Gold), `KXSILVERH` (Silver), `KXWTIH` (WTI Crude Oil)
+  - **Hourly Multi-Strike Equity Index Series**: `KXINXU` (S&P 500), `KXNASDAQ100U` (Nasdaq-100)
 
 ---
 
@@ -18,8 +25,8 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
 
 1. **Order Cancellation Verification**:
    - Strictly verifies that 0 resting orders remain before firing taker liquidations or rolls, preventing `position_locked` errors from Kalshi.
-2. **Parallel Spot Ingestion**:
-   - `batch_fetch_crypto_spot_prices` runs parallel worker threads across all 12 coins simultaneously (<300ms total), preventing timing drift during Coinbase latency.
+2. **Parallel Multi-Source Spot Ingestion**:
+   - `batch_fetch_spot_prices` runs parallel worker threads across all 17 assets simultaneously (<150ms total), batching Pyth Hermes feeds and querying Coinbase/Yahoo concurrently.
 3. **Crash-Proof Persistent State (`active_positions`)**:
    - Records live entry prices into MongoDB Atlas upon fill. Restarts or redeployments on Render instantly reload true cost bases rather than falling back to static estimates.
 4. **Per-Market & Per-Symbol Error Boundaries**:
@@ -37,17 +44,18 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
   - **False-Alarm Rates**: Ratio of early stop-loss exits where the market ended up settling as a winner.
   - **Empirical Win Rates**: Historical win percentages by entry price band.
 - **Dynamic Adaptation**: High-beta assets (e.g. `NEAR`, `ZEC`, `HYPE`) receive deeper discount buy requirements and elevated take-profit targets (85¢), while bouncy assets (e.g. `DOGE`, `BNB`) receive wider stop-loss bands.
+- **Session-Bounded Market Calibration (Equity Indices & Commodities)**: For equity index prediction markets (S&P 500, Nasdaq-100) that trade during specific exchange sessions (e.g. 10:00 AM – 6:00 PM ET), snapshots are recorded strictly during active market hours. Volatility ($\sigma$) is calculated only from live market movements without off-hour zero-movement skew, and automatically falls back to default baselines on cold starts or over weekends.
 
 ### 2. Hourly Multi-Strike Selection & Tiebreaker Logic 🎯
 - **Multi-Strike Option Scanning**: Iterates through all available strike options (e.g. `$X or above`) for the active hourly event.
-- **Cheapest YES & Cheapest NO**: Identifies the cheapest valid `BUY_YES` and `BUY_NO` adhering to dynamic price corridors and Coinbase spot momentum.
+- **Cheapest YES & Cheapest NO**: Identifies the cheapest valid `BUY_YES` and `BUY_NO` adhering to dynamic price corridors and underlying spot momentum.
 - **Conflict & Tiebreaker Resolution**:
   - **Same Contract Ticker**: If cheapest YES and cheapest NO are on the exact same contract, the bot picks the strictly cheaper side (e.g. 48¢ NO vs 52¢ YES -> buys NO). If tied in price, picks the side favored by spot momentum.
   - **Different Contract Tickers**: Buys **BOTH** contracts independently (e.g. Strike A YES + Strike B NO) with resting Take-Profit limit orders on each.
 
 ### 3. Checkpoint Lifecycle Matrices ⏱️
 
-#### A. 15-Minute Crypto Markets (Repeats Every 15-Minute Block)
+#### A. 15-Minute Markets (Crypto & Commodities - Repeats Every 15-Minute Block)
 | Block Minute | Target Time | Action Type | 15-Minute Market Strategy |
 | :--- | :--- | :--- | :--- |
 | **`:00`** | **`:00:30`** (`+30s` delay) | **Open Entry** | Broad buy corridor (`30¢–52¢`), TP `82¢` limit order placed |
@@ -57,7 +65,7 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
 | **`:10:00`** | **`:10:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss |
 | **`:12:30`** | **`:12:30`** | **Endgame Safety Check** | Liquidate losing positions 2.5m before expiration; hold winners for `100¢` settlement |
 
-#### B. Hourly Multi-Strike Crypto Markets (Every 10 Minutes Past the Hour)
+#### B. Hourly Multi-Strike Markets (Crypto, Commodities, Equity Indices - Every 10 Minutes Past the Hour)
 | Hour Minute | Target Time | Action Type | Hourly Market Strategy |
 | :--- | :--- | :--- | :--- |
 | **`:00`** | **`:00:30`** (`+30s` delay) | **Open Multi-Strike Entry** | Multi-strike scan, pick cheapest YES & NO (`30¢–52¢`), TP `82¢` |
@@ -68,7 +76,7 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike cryp
 | **`:50`** | **`:50:00`** (*no delay*) | **Endgame Safety Check** | Liquidate losing positions 10m before expiration; hold winners for `100¢` settlement |
 
 ### 4. Low-EV Middle Zone Avoidance ($37¢–43¢$) 🎯
-- **Spread Friction Gate**: Contracts in the 37¢–43¢ range are automatically bypassed unless Coinbase spot price is strongly in the money ($> 0.08\%$ in favor of the trade), shifting volume to **deep bargains ($\le 36¢$)** and **high-confidence momentum plays ($44¢–48¢$)**.
+- **Spread Friction Gate**: Contracts in the 37¢–43¢ range are automatically bypassed unless underlying spot price is strongly in the money ($> 0.08\%$ in favor of the trade), shifting volume to **deep bargains ($\le 36¢$)** and **high-confidence momentum plays ($44¢–48¢$)**.
 
 ### 5. Maker Limit Entry (Save 1¢–3¢) 💰
 - Submits maker limit buy orders at `Bid + 1¢` (or the current Bid) instead of crossing the spread as a taker, maximizing profit margins on every entry.
@@ -157,5 +165,7 @@ Transitioning this project from a functional trading script into an enterprise-g
 
 ### 4. Strategy & Asset Expansion
 - [ ] **Multi-Contract Sizing Implementation**: Wire account-equity fractional Kelly and conviction scoring directly into live order execution.
-- [ ] **Stock Indices**: Add support for index prediction markets on Kalshi (e.g. S&P 500 / `INX` / `SPY`, Nasdaq 100 / `NDX`).
+- [x] **Commodities & Stock Indices**: Supported prediction markets on Kalshi:
+  - Commodities: Gold (`KXGOLD15M`, `KXGOLDH`), Silver (`KXSILVER15M`, `KXSILVERH`), WTI Oil (`KXWTI15M`, `KXWTIH`) via Pyth Network Hermes API.
+  - Stock Indices: S&P 500 (`KXINXU`), Nasdaq-100 (`KXNASDAQ100U`) via Yahoo Finance Chart API.
 

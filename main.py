@@ -1,19 +1,22 @@
 """
-15-Minute & Hourly Crypto Prediction Trading & Data Pipeline Bot
-=================================================================
+15-Minute & Hourly Multi-Asset Prediction Trading & Data Pipeline Bot
+======================================================================
 
 What is this bot?
 ------------------------------------------------------
 A high-performance algorithmic trading and empirical microstructure data engine for
-Kalshi crypto prediction markets across 15-minute and Hourly multi-strike events.
+Kalshi prediction markets across 15-minute and Hourly multi-strike events spanning:
+- Crypto: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC
+- Commodities: Gold (KXGOLD15M, KXGOLDH), Silver (KXSILVER15M, KXSILVERH), WTI Oil (KXWTI15M, KXWTIH)
+- Equity Indices: S&P 500 (KXINXU), Nasdaq-100 (KXNASDAQ100U)
 Contracts settle at either $1.00 (100¢) if YES occurs, or $0.00 if NO occurs.
 
 Core Architecture & Risk Engines:
 ----------------------------------
-1. Synchronized Checkpoint Execution (:00:30, :05:30, :10:30, :12:30, :20:30, :40:30, :50:30):
-   - Waits 30s past clock intervals to allow market-maker books to establish depth and liquidity.
-2. Concurrent Thread-Pooled Spot Verification:
-   - Queries Coinbase spot prices for all 12 crypto assets in parallel via ThreadPoolExecutor (<300ms total).
+1. Synchronized Checkpoint Execution (:00:30, :02:30, :05:00, :07:30, :10:00, :12:30, :20:00, :30:00, :40:00, :50:00):
+   - Waits past clock intervals for market books to establish depth and liquidity.
+2. Concurrent Multi-Source Spot Oracle Ingestion:
+   - Queries Coinbase (crypto), Pyth Network Hermes (commodities), and Yahoo Finance (indices) in parallel (<150ms total).
 3. Dynamic 6-Hour Database Calibration Engine:
    - Dynamically computes volatility, empirical win rates, and optimal price bands from MongoDB Atlas.
 4. Hourly Multi-Strike Selection & Tiebreakers:
@@ -61,8 +64,30 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Supported 15-minute crypto symbols across exchanges
-SUPPORTED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC")
+# Supported symbols across exchanges (Crypto, Commodities, Equity Indices)
+SUPPORTED_SYMBOLS = (
+    "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC",
+    "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
+)
+
+# Pyth Hermes Price Feeds for Kalshi Commodities (Gold, Silver, WTI Oil)
+# Kalshi contract settlement rules officially specify Pyth feeds:
+PYTH_COMMODITY_FEEDS: dict[str, str] = {
+    "GOLD": "765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2",    # Metal.XAU/USD (Spot Gold)
+    "SILVER": "f2fb02c32b055c805e7238d628e5e9dadef274376114eb1f012337cabe93871e",  # Metal.XAG/USD (Spot Silver)
+    "WTI": "925ca92ff005ae943c158e3563f59698ce7e75c5a8c8dd43303a0a154887b3e6",     # Commodities.USOILSPOT (WTI Oil)
+}
+
+# Yahoo Finance ticker mapping for Equity Indices
+INDEX_TICKER_MAP: dict[str, str] = {
+    "INX": "^GSPC",          # S&P 500 Index
+    "SPX": "^GSPC",
+    "NASDAQ100": "^NDX",     # Nasdaq-100 Index
+    "NDX": "^NDX",
+}
+
+COMMODITY_SYMBOLS = set(PYTH_COMMODITY_FEEDS.keys())
+INDEX_SYMBOLS = set(INDEX_TICKER_MAP.keys())
 
 # Default expiration in seconds for Maker limit buy orders to protect against adverse price drops
 BUY_ORDER_EXPIRATION_SECONDS = int(os.getenv("BUY_ORDER_EXPIRATION_SECONDS", "45"))
@@ -184,13 +209,15 @@ calculate_seconds_until_next_check = calculate_seconds_until_next_checkpoint
 
 def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
     """
-    Extracts the short crypto symbol (e.g. 'BTC', 'ETH', 'SOL') from full ticker strings.
+    Extracts the short asset symbol (e.g. 'BTC', 'ETH', 'GOLD', 'WTI', 'SILVER', 'INX', 'NASDAQ100') from full ticker strings.
     Example:
       'KXBTC15M-26AUG141315-15' -> 'BTC'
       'KXBTCD-26AUG1521-T69399.99' -> 'BTC'
       'KXSOLD-26AUG1617-T99.9999' -> 'SOL'
-      'KXNEARH-...' -> 'NEAR'
-      'btc-updown-15m-1786835700' -> 'BTC'
+      'KXGOLD15M-26AUG162345-45' -> 'GOLD'
+      'KXGOLDH-26AUG1701-T4427.99' -> 'GOLD'
+      'KXINXU-26AUG17H1000-T7919.9999' -> 'INX'
+      'KXNASDAQ100U-26AUG17H1000-T31989.99' -> 'NASDAQ100'
     """
     # 1. Check ticker prefix if hyphen-separated (e.g. btc-updown-15m-...)
     ticker_prefix = ticker.split("-")[0].upper() if "-" in ticker else ""
@@ -200,11 +227,20 @@ def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
     # 2. Check series ticker or ticker prefix against supported symbols
     series_upper = (series_ticker or "").upper()
     for sym in SUPPORTED_SYMBOLS:
-        if series_upper.startswith(f"KX{sym}") or series_upper.startswith(sym) or ticker_prefix.startswith(f"KX{sym}"):
+        if (
+            series_upper == f"KX{sym}"
+            or series_upper.startswith(f"KX{sym}15M")
+            or series_upper.startswith(f"KX{sym}H")
+            or series_upper.startswith(f"KX{sym}D")
+            or series_upper.startswith(f"KX{sym}U")
+            or series_upper.startswith(f"KX{sym}")
+            or series_upper.startswith(sym)
+            or ticker_prefix.startswith(f"KX{sym}")
+        ):
             return sym
 
-    # 3. Clean known prefixes/suffixes (KX, 15M, D, H, W) and match
-    series_clean = series_upper.replace("15M", "").replace("KX", "").rstrip("DHWE").upper()
+    # 3. Clean known prefixes/suffixes (KX, 15M, D, H, W, U) and match
+    series_clean = series_upper.replace("15M", "").replace("KX", "").rstrip("DHWEU").upper()
     if series_clean in SUPPORTED_SYMBOLS:
         return series_clean
 
@@ -214,7 +250,7 @@ def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
         if re.search(rf"\b{sym}\b", combined):
             return sym
 
-    return next((sym for sym in SUPPORTED_SYMBOLS if sym in combined), series_ticker or "CRYPTO")
+    return next((sym for sym in SUPPORTED_SYMBOLS if sym in combined), series_ticker or "ASSET")
 
 
 def extract_target_strike(market: dict) -> float | None:
@@ -222,8 +258,8 @@ def extract_target_strike(market: dict) -> float | None:
     Safely extracts the strike / target price from a market dict across 15M and hourly formats.
     Checks:
     1. 'floor_strike', 'cap_strike', 'strike_price'
-    2. 'subtitle' (e.g. '$72,250 or above')
-    3. 'ticker' (e.g. 'KXBTCD-26AUG1617-T72249.99' or 'KXDOGED-26AUG1617-T0.1549999')
+    2. 'subtitle', 'yes_sub_title', 'no_sub_title' (e.g. '$72,250 or above', 'Target Price: $4,393.04', '7,920 or above')
+    3. 'ticker' (e.g. 'KXBTCD-26AUG1617-T72249.99' or 'KXINXU-26AUG17H1000-T7919.9999')
     """
     for k in ("floor_strike", "cap_strike", "strike_price"):
         val = market.get(k)
@@ -235,12 +271,18 @@ def extract_target_strike(market: dict) -> float | None:
             except (ValueError, TypeError):
                 pass
 
-    if subtitle := market.get("subtitle"):
-        if m := re.search(r"\$([0-9,]+(?:\.[0-9]+)?)", str(subtitle)):
-            try:
-                return float(m.group(1).replace(",", ""))
-            except (ValueError, TypeError):
-                pass
+    for sub_k in ("subtitle", "yes_sub_title", "no_sub_title"):
+        if sub_text := market.get(sub_k):
+            if m := re.search(r"\$([0-9,]+(?:\.[0-9]+)?)", str(sub_text)):
+                try:
+                    return float(m.group(1).replace(",", ""))
+                except (ValueError, TypeError):
+                    pass
+            if m := re.search(r"([0-9,]+(?:\.[0-9]+)?)\s+or\s+above", str(sub_text), re.I):
+                try:
+                    return float(m.group(1).replace(",", ""))
+                except (ValueError, TypeError):
+                    pass
 
     if ticker := market.get("ticker"):
         if m := re.search(r"-T([0-9]+(?:\.[0-9]+)?)", str(ticker)):
@@ -268,6 +310,65 @@ def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = N
     return None
 
 
+def get_pyth_commodity_spot_prices(symbols: list[str]) -> dict[str, float | None]:
+    """
+    Fetches real-time commodity spot prices directly from Pyth Network Hermes API.
+    Matches Kalshi's official settlement source for Gold, Silver, and WTI Oil.
+    """
+    feeds_to_fetch = {sym: PYTH_COMMODITY_FEEDS[sym] for sym in symbols if sym in PYTH_COMMODITY_FEEDS}
+    result: dict[str, float | None] = {sym: None for sym in symbols}
+    if not feeds_to_fetch:
+        return result
+
+    try:
+        params = [("ids[]", fid) for fid in feeds_to_fetch.values()]
+        resp = http_session.get(
+            "https://hermes.pyth.network/v2/updates/price/latest",
+            params=params,
+            timeout=3.5,
+        )
+        if resp.status_code == 200 and resp.text:
+            data = resp.json()
+            id_to_sym = {v: k for k, v in feeds_to_fetch.items()}
+            for p in data.get("parsed", []):
+                sym = id_to_sym.get(p.get("id"))
+                if sym:
+                    p_info = p.get("price", {})
+                    raw_price = int(p_info.get("price", 0))
+                    expo = int(p_info.get("expo", 0))
+                    result[sym] = round(raw_price * (10 ** expo), 4)
+    except Exception as error:
+        log.debug(f"Could not batch-fetch Pyth commodity spot prices: {error}")
+
+    return result
+
+
+def get_index_spot_price(symbol: str) -> float | None:
+    """
+    Fetches real-time equity index spot price (e.g. S&P 500, Nasdaq-100) from Yahoo Finance chart API.
+    """
+    ticker = INDEX_TICKER_MAP.get(symbol.upper(), symbol)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for base_url in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
+        try:
+            resp = http_session.get(
+                f"{base_url}/v8/finance/chart/{ticker}?interval=1m&range=1d",
+                headers=headers,
+                timeout=3.5,
+            )
+            if resp.status_code == 200 and resp.text:
+                data = resp.json()
+                results = data.get("chart", {}).get("result", [])
+                if results:
+                    meta = results[0].get("meta", {})
+                    price = meta.get("regularMarketPrice") or meta.get("chartPreviousClose")
+                    if price is not None:
+                        return round(float(price), 2)
+        except Exception as error:
+            log.debug(f"Could not fetch index spot price for {symbol} from {base_url}: {error}")
+    return None
+
+
 def get_crypto_spot_price(symbol: str) -> float | None:
     """
     Fetches real-time underlying crypto spot price from Coinbase public API.
@@ -287,18 +388,32 @@ def get_crypto_spot_price(symbol: str) -> float | None:
     return None
 
 
-def batch_fetch_crypto_spot_prices(
+def get_spot_price(symbol: str) -> float | None:
+    """
+    Unified single spot price lookup router:
+    - Commodities (GOLD, SILVER, WTI) -> Pyth Hermes API
+    - Indices (INX, NASDAQ100) -> Yahoo Finance Chart API
+    - Crypto (BTC, ETH, SOL, etc.) -> Coinbase Spot API
+    """
+    sym_upper = symbol.upper()
+    if sym_upper in COMMODITY_SYMBOLS:
+        res = get_pyth_commodity_spot_prices([sym_upper])
+        return res.get(sym_upper)
+    elif sym_upper in INDEX_SYMBOLS:
+        return get_index_spot_price(sym_upper)
+    else:
+        return get_crypto_spot_price(sym_upper)
+
+
+def batch_fetch_spot_prices(
     symbols: tuple[str, ...] | list[str],
-    max_workers: int = 12,
+    max_workers: int = 16,
 ) -> dict[str, float | None]:
     """
-    Fetches spot prices for all unique crypto symbols concurrently in parallel using a thread pool.
-
-    Why parallel batching?
-    -----------------------
-    Instead of making 12 sequential blocking HTTP calls (which could stall for up to 42s during Coinbase latency),
-    we fire all requests in parallel on a lightweight thread pool. Total runtime is bounded by the single
-    slowest network round-trip (~150ms-300ms total), guaranteeing we never miss checkpoint timing windows.
+    Fetches spot prices for all assets (Crypto, Commodities, Equity Indices) concurrently in parallel.
+    - Commodities (GOLD, SILVER, WTI) batch-queried in 1 call via Pyth Hermes API (~80-100ms)
+    - Indices (INX, NASDAQ100) queried concurrently via Yahoo Finance
+    - Cryptos queried concurrently via Coinbase API
     """
     unique_symbols = list(set(symbols))
     spot_cache: dict[str, float | None] = {sym: None for sym in unique_symbols}
@@ -306,20 +421,34 @@ def batch_fetch_crypto_spot_prices(
     if not unique_symbols:
         return spot_cache
 
-    with ThreadPoolExecutor(max_workers=min(len(unique_symbols), max_workers)) as executor:
-        future_to_sym = {
-            executor.submit(get_crypto_spot_price, sym): sym
-            for sym in unique_symbols
-        }
-        for future in as_completed(future_to_sym):
-            sym = future_to_sym[future]
+    commodities = [s for s in unique_symbols if s in COMMODITY_SYMBOLS]
+    indices = [s for s in unique_symbols if s in INDEX_SYMBOLS]
+    cryptos = [s for s in unique_symbols if s not in COMMODITY_SYMBOLS and s not in INDEX_SYMBOLS]
+
+    with ThreadPoolExecutor(max_workers=min(len(unique_symbols) + 2, max_workers)) as executor:
+        futures = []
+        if commodities:
+            futures.append(executor.submit(lambda: ("__COMMODITIES__", get_pyth_commodity_spot_prices(commodities))))
+        for idx_sym in indices:
+            futures.append(executor.submit(lambda s=idx_sym: (s, get_index_spot_price(s))))
+        for cry_sym in cryptos:
+            futures.append(executor.submit(lambda s=cry_sym: (s, get_crypto_spot_price(s))))
+
+        for future in as_completed(futures):
             try:
-                spot_cache[sym] = future.result()
+                k, v = future.result()
+                if k == "__COMMODITIES__":
+                    spot_cache.update(v)
+                else:
+                    spot_cache[k] = v
             except Exception as err:
-                log.debug(f"Spot price lookup failed for {sym}: {err}")
-                spot_cache[sym] = None
+                log.debug(f"Batch spot fetch worker error: {err}")
 
     return spot_cache
+
+
+# Alias for backward compatibility with existing tests
+batch_fetch_crypto_spot_prices = batch_fetch_spot_prices
 
 
 def is_spot_momentum_aligned(
@@ -539,7 +668,7 @@ def process_single_market(
     )
 
     # 2. Extract spot price from cache & strike target metrics
-    spot_price = spot_cache.get(asset_symbol) if spot_cache is not None else get_crypto_spot_price(asset_symbol)
+    spot_price = spot_cache.get(asset_symbol) if spot_cache is not None else get_spot_price(asset_symbol)
     target_price = extract_target_strike(market)
 
     price_diff, pct_dist = None, None
@@ -910,7 +1039,7 @@ def process_hourly_market_group(
         return []
 
     ex_name = getattr(client, "exchange_name", "Exchange")
-    spot_price = spot_cache.get(symbol) if spot_cache is not None else get_crypto_spot_price(symbol)
+    spot_price = spot_cache.get(symbol) if spot_cache is not None else get_spot_price(symbol)
 
     # Checkpoint interval flags
     is_hourly_00_or_10_entry = ((minute_past_hour in (0, 10)) or force_trade_mark) and not circuit_breaker_tripped
@@ -1543,8 +1672,8 @@ def run_pipeline_pass(
         log.error("No active exchange clients initialized. Exiting pipeline pass.")
         return
 
-    # Batch-fetch all underlying spot prices from Coinbase once per cycle
-    spot_price_cache = batch_fetch_crypto_spot_prices(SUPPORTED_SYMBOLS)
+    # Batch-fetch all underlying spot prices across Crypto, Commodities (Pyth), and Indices (Yahoo)
+    spot_price_cache = batch_fetch_spot_prices(SUPPORTED_SYMBOLS)
 
     snapshots_to_save = []
     for exchange_name, client in active_clients:
@@ -1589,14 +1718,14 @@ def run_pipeline_pass(
             log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
 
         # -------------------------------------------------------------------
-        # 1. 15-Minute Crypto Markets Pipeline
+        # 1. 15-Minute Markets Pipeline (Crypto & Commodities)
         # -------------------------------------------------------------------
-        log.info(f"Fetching active 15-minute crypto markets from {exchange_name}...")
+        log.info(f"Fetching active 15-minute markets from {exchange_name}...")
         try:
             markets_15m = client.get_15m_crypto_markets(status="open")
-            log.info(f"Retrieved {len(markets_15m)} active 15-minute crypto markets from {exchange_name}.")
+            log.info(f"Retrieved {len(markets_15m)} active 15-minute markets from {exchange_name}.")
         except Exception as error:
-            log.error(f"Failed to fetch 15-minute crypto markets from {exchange_name}: {error}")
+            log.error(f"Failed to fetch 15-minute markets from {exchange_name}: {error}")
             markets_15m = []
 
         for market in markets_15m:
@@ -1625,20 +1754,20 @@ def run_pipeline_pass(
                 log.error(f"❌ [{exchange_name}] Unhandled error processing 15M market {tick}: {mkt_err}", exc_info=True)
 
         # -------------------------------------------------------------------
-        # 2. Hourly Multi-Strike Crypto Markets Pipeline
+        # 2. Hourly Multi-Strike Markets Pipeline (Crypto, Commodities, Equity Indices)
         # -------------------------------------------------------------------
         if hasattr(client, "get_hourly_crypto_markets"):
-            log.info(f"Fetching active hourly crypto markets from {exchange_name}...")
+            log.info(f"Fetching active hourly multi-strike markets from {exchange_name}...")
             try:
                 markets_1h = client.get_hourly_crypto_markets(
                     status="open", current_hour_only=True, now_utc=now_utc
                 )
-                log.info(f"Retrieved {len(markets_1h)} active hourly crypto strike markets from {exchange_name}.")
+                log.info(f"Retrieved {len(markets_1h)} active hourly strike markets from {exchange_name}.")
             except Exception as error:
-                log.error(f"Failed to fetch hourly crypto markets from {exchange_name}: {error}")
+                log.error(f"Failed to fetch hourly markets from {exchange_name}: {error}")
                 markets_1h = []
 
-            # Group hourly markets by crypto symbol (e.g. BTC, ETH, SOL, etc.)
+            # Group hourly markets by symbol (e.g. BTC, GOLD, WTI, INX, NASDAQ100, etc.)
             hourly_by_symbol = defaultdict(list)
             for m in markets_1h:
                 series_tick = m.get("series_ticker", "UNKNOWN")
