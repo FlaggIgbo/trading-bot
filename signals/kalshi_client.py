@@ -1016,7 +1016,6 @@ class KalshiClient(BaseTradingClient):
                 resting_orders = []
 
             if not resting_orders:
-                log.info(f"✅ Confirmed 0 resting orders for {ticker}.")
                 return True
 
             log.info(
@@ -1035,7 +1034,6 @@ class KalshiClient(BaseTradingClient):
             final_check = self.get_orders(ticker=ticker, status="resting")
             remaining = final_check.get("orders") or []
             if not remaining:
-                log.info(f"✅ Confirmed 0 resting orders for {ticker} after final check.")
                 return True
             log.error(f"❌ Could not clear all resting orders for {ticker}; {len(remaining)} order(s) still resting.")
             return False
