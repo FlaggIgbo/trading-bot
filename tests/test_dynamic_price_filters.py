@@ -204,3 +204,35 @@ def test_exploration_trade_cap_enforcement():
     reset_exploration_trades_count()
     assert can_execute_exploration_trade(dt) is True
 
+
+def test_interim_data_collection_pass_non_trading_interval():
+    """Verify that process_single_market succeeds without UnboundLocalError during data-collection-only marks."""
+    client = MagicMock(exchange_name="Kalshi")
+    client.get_market_position.return_value = None
+    client.has_existing_position_or_order.return_value = False
+
+    market = {
+        "ticker": "KXBTC15M-26AUG170200-00",
+        "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.50",
+        "yes_bid_dollars": "0.48",
+        "no_ask_dollars": "0.52",
+        "no_bid_dollars": "0.50",
+        "floor_strike": 60000.0,
+        "exchange": "kalshi",
+    }
+
+    # Calling during an off-clock minute (minute 51 past the hour, non-trading mark)
+    snap = process_single_market(
+        market=market,
+        is_trading_interval=False,
+        client=client,
+        now_utc=datetime(2026, 8, 17, 5, 51, 41, tzinfo=timezone.utc),
+        minute_past_hour=51,
+        spot_cache={"BTC": 60100.0},
+        dry_run=False,
+    )
+    assert snap is not None
+    assert snap["tick"] == "KXBTC15M-26AUG170200-00"
+    assert snap["m"] == 51
+

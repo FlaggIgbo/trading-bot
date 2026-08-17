@@ -769,6 +769,7 @@ def process_single_market(
 
     trade_executed = False
     trade_details = None
+    counterfactual_details = None
 
     # -----------------------------------------------------------------------
     # Step 4A: 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration)
