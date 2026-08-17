@@ -394,30 +394,75 @@ def load_all_active_positions(ex: str = "kalshi") -> dict[str, int]:
 # ===========================================================================
 
 
-def _make_default_mark(mark: str) -> dict[str, int | bool]:
-    is_5m = (mark == "05")
-    return {
-        "min_buy": 18,
-        "max_buy": 30 if is_5m else 44,
-        "tp": 58 if is_5m else 62,
-        "enable_momentum_buys": True,
-        "momentum_min_buy": 56,
-        "momentum_max_buy": 65 if is_5m else 68,
-        "momentum_tp": 88,
-        "momentum_min_pct_dist": 0.10,
-        "momentum_sl_floor": 40,
-        "sl_threshold": 25,
-        "sl_floor": 15,
-        "cut_5min": 15,
-        "endgame_12_5_floor": 15,
-        "avoid_mid_zone": True,
-        "mid_zone_min": 37,
-        "mid_zone_max": 55,
-    }
+def _make_default_mark(mark: str, timeframe: str = "15m") -> dict[str, int | float | bool]:
+    """
+    Builds default parameter dictionary for a given checkpoint mark ('00' or '05')
+    and market timeframe ('15m' vs '1h').
+
+    Tighter Corridor Dynamics for 15-Minute Noise Reduction:
+    - Clamped discount ceiling: 30¢ at open, 24¢ at :05 (deep discount only; eliminates 31¢-44¢ chop).
+    - Tighter momentum breakout: 62¢–68¢ with >=0.15% spot lead (avoids ambiguous 56¢–61¢ zone).
+    - Expanded middle dead-zone: 31¢–61¢ rejected (except during empirical exploration).
+    - Differentiated capital sizing: 1 contract for 15m sniper trades vs 3 contracts for 1h core trend trades.
+    """
+    is_compressed = (mark in ("05", "20", "30"))
+    tf_clean = str(timeframe).lower()
+
+    if tf_clean == "1h":
+        # 1-Hour Trend Profile (Wider runway, larger core capital sizing)
+        return {
+            "min_buy": 18,
+            "max_buy": 32 if is_compressed else 44,
+            "tp": 58 if is_compressed else 62,
+            "enable_momentum_buys": True,
+            "momentum_min_buy": 56,
+            "momentum_max_buy": 65 if is_compressed else 68,
+            "momentum_tp": 88,
+            "momentum_min_pct_dist": 0.10,
+            "momentum_sl_floor": 40,
+            "sl_threshold": 25,
+            "sl_floor": 15,
+            "cut_5min": 15,
+            "endgame_12_5_floor": 15,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 37,
+            "mid_zone_max": 55,
+            "contracts_per_trade": 3,
+        }
+    else:
+        # 15-Minute Sniper Profile (Tighter buy corridors, strict momentum lead, light sizing)
+        return {
+            "min_buy": 18,
+            "max_buy": 24 if is_compressed else 30,
+            "tp": 58 if is_compressed else 62,
+            "enable_momentum_buys": True,
+            "momentum_min_buy": 62,
+            "momentum_max_buy": 65 if is_compressed else 68,
+            "momentum_tp": 88,
+            "momentum_min_pct_dist": 0.15,
+            "momentum_sl_floor": 40,
+            "sl_threshold": 20,
+            "sl_floor": 15,
+            "cut_5min": 15,
+            "endgame_12_5_floor": 15,
+            "avoid_mid_zone": True,
+            "mid_zone_min": 31,
+            "mid_zone_max": 61,
+            "contracts_per_trade": 1,
+        }
 
 
-DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | bool]]] = {
-    sym: {"00": _make_default_mark("00"), "05": _make_default_mark("05")}
+DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | float | bool]]] = {
+    sym: {"00": _make_default_mark("00", "15m"), "05": _make_default_mark("05", "15m")}
+    for sym in (
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH",
+        "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
+        "DEFAULT"
+    )
+}
+
+DEFAULT_DYNAMIC_PRICE_MAP_1H: dict[str, dict[str, dict[str, int | float | bool]]] = {
+    sym: {"00": _make_default_mark("00", "1h"), "05": _make_default_mark("05", "1h")}
     for sym in (
         "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH",
         "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
@@ -426,7 +471,7 @@ DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | bool]]] = {
 }
 
 # In-memory global cache variables (so the bot doesn't slow down by querying Mongo every 5 seconds)
-_DYNAMIC_PRICE_MAP_CACHE: dict[str, dict[str, dict[str, int | bool]]] | None = None
+_DYNAMIC_PRICE_MAP_CACHE: dict[str, dict[str, dict[str, int | float | bool]]] | None = None
 _LAST_MAP_REFRESH_TIME: float = 0.0
 _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 
@@ -767,19 +812,26 @@ def get_dynamic_price_filter_map(
 def get_dynamic_filter_for_market(
     asset_symbol: str,
     is_5min_mark: bool,
-    dynamic_map: dict[str, dict[str, dict[str, int | bool]]] | None = None,
+    timeframe: str = "15m",
+    dynamic_map: dict[str, dict[str, dict[str, int | float | bool]]] | None = None,
     now_utc: datetime | None = None,
-) -> dict[str, int | bool]:
+) -> dict[str, int | float | bool]:
     """
-    Convenience lookup to get exact dynamic filter parameters for a specific market and timing mark.
+    Convenience lookup to get exact dynamic filter parameters for a specific market, timing mark, and timeframe.
     Between 05:00 and 05:15 UTC (1:00 AM - 1:15 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
-    broad corridors (:00 -> 18¢–44¢ discount + 56¢–68¢ momentum, :05 -> 18¢–30¢ discount + 56¢–65¢ momentum)
-    for empirical signal harvesting up to the exploration trade cap.
+    corridors for empirical signal harvesting up to the exploration trade cap.
+
+    Timeframe Differentiations:
+    - '15m': Tighter discount corridor (18¢–30¢ at :00, 18¢–24¢ at :05), stricter momentum (>=0.15% lead),
+             expanded middle dead zone (31¢–61¢), and 1-contract sniper sizing.
+    - '1h':  Broad discount corridor (18¢–44¢ at open, 18¢–32¢ at :20), standard momentum (>=0.10% lead),
+             standard middle dead zone (37¢–55¢), and 3-contract core capital sizing.
 
     Args:
-        asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "DOGE", "ZEC").
-        is_5min_mark: True if running at the 5-minute mark (:05), False if at minute 00 (:00).
-        dynamic_map: Optional preloaded map. If None, uses defaults during 00:00-02:00 UTC or cached in-memory map.
+        asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "GOLD", "WTI").
+        is_5min_mark: True if running at compressed timing mark (:05/:20/:30), False if at open (:00/:10).
+        timeframe: Market timeframe ('15m' or '1h'). Controls corridor tightness and capital sizing.
+        dynamic_map: Optional preloaded map. If None, uses cached in-memory map.
         now_utc: Optional current UTC datetime for timing/regime evaluation.
 
     Returns:
@@ -788,35 +840,41 @@ def get_dynamic_filter_for_market(
     now = now_utc or datetime.now(timezone.utc)
     is_exploration = is_default_exploration_window(now)
     is_mid_zone_exploration = is_mid_zone_exploration_window(now)
+    tf_clean = str(timeframe or "15m").lower()
+
+    default_map = DEFAULT_DYNAMIC_PRICE_MAP_1H if tf_clean == "1h" else DEFAULT_DYNAMIC_PRICE_MAP
 
     if is_exploration and dynamic_map is None:
-        active_map = DEFAULT_DYNAMIC_PRICE_MAP
+        active_map = default_map
     else:
         active_map = dynamic_map or get_dynamic_price_filter_map(now_utc=now)
 
     mark = "05" if is_5min_mark else "00"
 
     sym_clean = (asset_symbol or "").upper()
-    asset_filters = active_map.get(sym_clean) or active_map.get("DEFAULT") or DEFAULT_DYNAMIC_PRICE_MAP["DEFAULT"]
-    mark_filter = asset_filters.get(mark) or asset_filters.get("00") or DEFAULT_DYNAMIC_PRICE_MAP["DEFAULT"]["00"]
+    asset_filters = active_map.get(sym_clean) or active_map.get("DEFAULT") or default_map["DEFAULT"]
+    mark_filter = asset_filters.get(mark) or asset_filters.get("00") or default_map["DEFAULT"]["00"]
+
+    base_defaults = _make_default_mark(mark, timeframe=tf_clean)
 
     return {
-        "min_buy": int(mark_filter.get("min_buy", 18)),
-        "max_buy": int(mark_filter.get("max_buy", 30 if is_5min_mark else 44)),
-        "tp": int(mark_filter.get("tp", 58 if is_5min_mark else 62)),
-        "enable_momentum_buys": bool(mark_filter.get("enable_momentum_buys", True)),
-        "momentum_min_buy": int(mark_filter.get("momentum_min_buy", 56)),
-        "momentum_max_buy": int(mark_filter.get("momentum_max_buy", 65 if is_5min_mark else 68)),
-        "momentum_tp": int(mark_filter.get("momentum_tp", 88)),
-        "momentum_min_pct_dist": float(mark_filter.get("momentum_min_pct_dist", 0.10)),
-        "momentum_sl_floor": int(mark_filter.get("momentum_sl_floor", 40)),
-        "sl_threshold": int(mark_filter.get("sl_threshold", 25)),
-        "sl_floor": int(mark_filter.get("sl_floor", 15)),
-        "cut_5min": int(mark_filter.get("cut_5min", 15)),
-        "endgame_12_5_floor": int(mark_filter.get("endgame_12_5_floor", 15)),
-        "avoid_mid_zone": False if is_mid_zone_exploration else bool(mark_filter.get("avoid_mid_zone", True)),
-        "mid_zone_min": int(mark_filter.get("mid_zone_min", 37)),
-        "mid_zone_max": int(mark_filter.get("mid_zone_max", 55)),
+        "min_buy": int(mark_filter.get("min_buy", base_defaults["min_buy"])),
+        "max_buy": int(mark_filter.get("max_buy", base_defaults["max_buy"])),
+        "tp": int(mark_filter.get("tp", base_defaults["tp"])),
+        "enable_momentum_buys": bool(mark_filter.get("enable_momentum_buys", base_defaults["enable_momentum_buys"])),
+        "momentum_min_buy": int(mark_filter.get("momentum_min_buy", base_defaults["momentum_min_buy"])),
+        "momentum_max_buy": int(mark_filter.get("momentum_max_buy", base_defaults["momentum_max_buy"])),
+        "momentum_tp": int(mark_filter.get("momentum_tp", base_defaults["momentum_tp"])),
+        "momentum_min_pct_dist": float(mark_filter.get("momentum_min_pct_dist", base_defaults["momentum_min_pct_dist"])),
+        "momentum_sl_floor": int(mark_filter.get("momentum_sl_floor", base_defaults["momentum_sl_floor"])),
+        "sl_threshold": int(mark_filter.get("sl_threshold", base_defaults["sl_threshold"])),
+        "sl_floor": int(mark_filter.get("sl_floor", base_defaults["sl_floor"])),
+        "cut_5min": int(mark_filter.get("cut_5min", base_defaults["cut_5min"])),
+        "endgame_12_5_floor": int(mark_filter.get("endgame_12_5_floor", base_defaults["endgame_12_5_floor"])),
+        "avoid_mid_zone": False if is_mid_zone_exploration else bool(mark_filter.get("avoid_mid_zone", base_defaults["avoid_mid_zone"])),
+        "mid_zone_min": int(mark_filter.get("mid_zone_min", base_defaults["mid_zone_min"])),
+        "mid_zone_max": int(mark_filter.get("mid_zone_max", base_defaults["mid_zone_max"])),
+        "contracts_per_trade": int(mark_filter.get("contracts_per_trade", base_defaults["contracts_per_trade"])),
         "is_exploration": is_exploration,
     }
 

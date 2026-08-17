@@ -590,8 +590,9 @@ def _execute_buy_flow(
     dry_run: bool,
     is_exploration: bool = False,
     corridor_mode: str = "discount",
+    count: int = 1,
 ) -> tuple[bool, dict | None]:
-    """Helper function to execute Maker Buy order and setup resting Take-Profit Auto-Sell."""
+    """Helper function to execute Maker Buy order and setup resting Take-Profit Auto-Sell with dynamic contract sizing."""
     side_lower = side.lower()
     side_upper = side.upper()
     ex_name = getattr(client, "exchange_name", "Exchange")
@@ -604,10 +605,11 @@ def _execute_buy_flow(
 
     log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
     regime_tag = " [EXPLORATION REGIME]" if is_exploration else ""
+    contracts_str = f"{count} CONTRACT{'S' if count != 1 else ''}"
     log_action = (
-        f"WOULD BUY 1 SHARE OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL."
+        f"WOULD BUY {contracts_str} OF [{side_upper}] + SET {take_profit_cents}¢ AUTO-SELL."
         if dry_run
-        else f"Executing Maker Buy + {take_profit_cents}¢ Auto-Sell!"
+        else f"Executing Maker Buy ({contracts_str}) + {take_profit_cents}¢ Auto-Sell!"
     )
     log.info(
         f"{log_prefix}{regime_tag}{corridor_tag} [{ex_name}] {ticker} -> {side_upper} price is {price_cents}¢ "
@@ -622,7 +624,7 @@ def _execute_buy_flow(
                 side=side_lower,
                 buy_price_cents=price_cents,
                 take_profit_cents=take_profit_cents,
-                count=1,
+                count=count,
                 maker_bid_cents=maker_bid,
                 buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
             )
@@ -639,6 +641,7 @@ def _execute_buy_flow(
         "corridor": corridor_mode,
         "side": side_lower,
         "buy": effective_buy,
+        "count": count,
         "tp": take_profit_cents,
         "sl": 25,
         "outcome": determine_counterfactual_outcome(side_lower, "buy_opened", spot_price, target_price, market_result),
@@ -765,11 +768,17 @@ def process_single_market(
 
     # :05 and :07.5 use tighter dynamic price filters (is_5min_mark=True); :00 and :02.5 use broad open filters
     is_tight_corridor = (minute_into_market in (5, 7))
-    dynamic_filters = get_dynamic_filter_for_market(asset_symbol, is_5min_mark=is_tight_corridor, now_utc=now_utc)
+    dynamic_filters = get_dynamic_filter_for_market(
+        asset_symbol,
+        is_5min_mark=is_tight_corridor,
+        timeframe="15m",
+        now_utc=now_utc,
+    )
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
     take_profit_cents = dynamic_filters["tp"]
     is_exploration = dynamic_filters.get("is_exploration", False)
+    contracts_count = int(dynamic_filters.get("contracts_per_trade", 1))
 
     trade_executed = False
     trade_details = None
@@ -858,8 +867,8 @@ def process_single_market(
 
     # -----------------------------------------------------------------------
     # Step 4C: Buy Strategy & Early Cut-Loss Check (:00, :02.5, :05, :07.5...)
-    # - :00 & :02.5: Broad corridor buy entries + :02.5 disaster cut-loss (<25¢).
-    # - :05 & :07.5: Tighter corridor buy entries + early cut-loss checks (<34¢-40¢).
+    # - :00 & :02.5: Deep discount buy entries (18¢-30¢) + :02.5 disaster cut-loss.
+    # - :05 & :07.5: Clamped discount entries (18¢-24¢) + early cut-loss checks (<15¢).
     # Exclusively gated: We do NOT evaluate new buys if Stop-Loss just liquidated this market.
     # -----------------------------------------------------------------------
     elif is_trading_interval:
@@ -928,10 +937,12 @@ def process_single_market(
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
             # Screen for candidates across Dual Corridors:
-            # 1. Discount Corridor (18¢ - 36¢ clean, 37¢ - 44¢ conditional on strong spot momentum)
-            # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢) -> Strictly rejected
-            # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :05) -> High TP (88¢) with confirmed spot lead (|pct_dist| >= 0.10%)
+            # 1. Deep Discount Corridor (18¢ - 30¢ at open, 18¢ - 24¢ at :05)
+            # 2. Dead Coin-Flip Middle Zone (31¢ - 61¢) -> Strictly rejected for noise reduction
+            # 3. Momentum Breakout Corridor (62¢ - 68¢ at open, 62¢ - 65¢ at :05) -> High TP (88¢) with confirmed spot lead (|pct_dist| >= 0.15%)
             avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
+            mid_min = int(dynamic_filters.get("mid_zone_min", 31))
+            mid_max = int(dynamic_filters.get("mid_zone_max", 61))
 
             pct_dist_val = 0.0
             if spot_price and target_price and target_price > 0:
@@ -953,17 +964,8 @@ def process_single_market(
                     )
                     continue
 
-                # Corridor 1: Discount / Underdog Corridor
+                # Corridor 1: Deep Discount Corridor
                 if min_buy_price <= p_cents <= max_buy_price:
-                    if avoid_mid_zone and (37 <= p_cents <= max_buy_price):
-                        is_strong_edge = (pct_dist_val >= 0.08) if side == "yes" else (pct_dist_val <= -0.08)
-                        if not is_strong_edge:
-                            log.info(
-                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
-                                f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
-                            )
-                            continue
-
                     candidate_sides.append({
                         "side": side,
                         "price": p_cents,
@@ -973,9 +975,9 @@ def process_single_market(
                         "mode": "discount",
                     })
 
-                # Dead Coin-Flip Middle Zone (45¢ - 55¢)
-                elif 45 <= p_cents <= 55:
-                    # Option 1: Record counterfactual sample for empirical discovery in MongoDB without capital risk
+                # Dead Coin-Flip Middle Zone
+                elif mid_min <= p_cents <= mid_max:
+                    # Record counterfactual sample for empirical discovery in MongoDB without capital risk
                     counterfactual_details = {
                         "dry_run": True,
                         "ex": market.get("exchange", "kalshi"),
@@ -995,7 +997,7 @@ def process_single_market(
                     if avoid_mid_zone:
                         log.info(
                             f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
-                            f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping live order (saved as empirical snapshot)."
+                            f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
                         )
                     elif not can_execute_exploration_trade(now_utc):
                         log.info(
@@ -1011,21 +1013,21 @@ def process_single_market(
                             "side": side,
                             "price": p_cents,
                             "tp": take_profit_cents,
-                            "min_buy": 45,
-                            "max_buy": 55,
+                            "min_buy": mid_min,
+                            "max_buy": mid_max,
                             "mode": "mid_zone",
                         })
 
                 # Corridor 2: Momentum / Trend Breakout Corridor
                 elif dynamic_filters.get("enable_momentum_buys", False):
-                    mom_min = dynamic_filters.get("momentum_min_buy", 56)
-                    mom_max = dynamic_filters.get("momentum_max_buy", 68 if not is_5min_mark else 65)
-                    min_lead = dynamic_filters.get("momentum_min_pct_dist", 0.10)
+                    mom_min = int(dynamic_filters.get("momentum_min_buy", 62))
+                    mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
+                    min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.15))
                     has_breakout_lead = (pct_dist_val >= min_lead) if side == "yes" else (pct_dist_val <= -min_lead)
 
                     if mom_min <= p_cents <= mom_max:
                         if has_breakout_lead:
-                            mom_tp = dynamic_filters.get("momentum_tp", 88)
+                            mom_tp = int(dynamic_filters.get("momentum_tp", 88))
                             log.info(
                                 f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
                                 f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
@@ -1068,6 +1070,7 @@ def process_single_market(
                     dry_run=dry_run,
                     is_exploration=is_exploration,
                     corridor_mode=chosen_mode,
+                    count=contracts_count,
                 )
 
     # 5. Build Compact Snapshot Document
@@ -1139,12 +1142,18 @@ def process_hourly_market_group(
 
     # Dynamic filter parameters (20-min and 30-min use tighter filter, 00-min and 10-min use broad open filter)
     is_tight_corridor = (minute_past_hour in (20, 30))
-    dynamic_filters = get_dynamic_filter_for_market(symbol, is_5min_mark=is_tight_corridor, now_utc=now_utc)
+    dynamic_filters = get_dynamic_filter_for_market(
+        symbol,
+        is_5min_mark=is_tight_corridor,
+        timeframe="1h",
+        now_utc=now_utc,
+    )
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
     take_profit_cents = dynamic_filters["tp"]
     is_exploration = dynamic_filters.get("is_exploration", False)
     avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
+    contracts_count = int(dynamic_filters.get("contracts_per_trade", 3))
 
     snapshots: list[dict] = []
     trade_executed_by_ticker: dict[str, dict] = {}
@@ -1377,6 +1386,8 @@ def process_hourly_market_group(
 
             # Evaluate YES
             yes_p = item["yes_price_cents"]
+            mid_min = int(dynamic_filters.get("mid_zone_min", 37))
+            mid_max = int(dynamic_filters.get("mid_zone_max", 55))
             if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                 if is_spot_momentum_aligned("yes", spot_price, target_price):
                     # 1. Discount Corridor (18¢ - 44¢)
@@ -1400,8 +1411,8 @@ def process_hourly_market_group(
                                 "max_buy": max_buy_price,
                                 "mode": "discount",
                             })
-                    # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢)
-                    elif 45 <= yes_p <= 55:
+                    # 2. Dead Coin-Flip Middle Zone
+                    elif mid_min <= yes_p <= mid_max:
                         counterfactual_by_ticker[ticker] = {
                             "dry_run": True,
                             "ex": item["market"].get("exchange", "kalshi"),
@@ -1420,7 +1431,7 @@ def process_hourly_market_group(
                         if avoid_mid_zone:
                             log.info(
                                 f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping live order (saved as empirical snapshot)."
+                                f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
                             )
                         elif not can_execute_exploration_trade(now_utc):
                             log.info(
@@ -1441,19 +1452,19 @@ def process_hourly_market_group(
                                 "target_price": target_price,
                                 "pct_dist": pct_dist,
                                 "tp": take_profit_cents,
-                                "min_buy": 45,
-                                "max_buy": 55,
+                                "min_buy": mid_min,
+                                "max_buy": mid_max,
                                 "mode": "mid_zone",
                             })
                     # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
                     elif dynamic_filters.get("enable_momentum_buys", False):
-                        mom_min = dynamic_filters.get("momentum_min_buy", 56)
-                        mom_max = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65)
-                        min_lead = dynamic_filters.get("momentum_min_pct_dist", 0.10)
+                        mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
+                        mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
+                        min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
 
                         if mom_min <= yes_p <= mom_max:
                             if pct_dist_val >= min_lead:
-                                mom_tp = dynamic_filters.get("momentum_tp", 88)
+                                mom_tp = int(dynamic_filters.get("momentum_tp", 88))
                                 log.info(
                                     f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
                                     f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
@@ -1510,8 +1521,8 @@ def process_hourly_market_group(
                                 "max_buy": max_buy_price,
                                 "mode": "discount",
                             })
-                    # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢)
-                    elif 45 <= no_p <= 55:
+                    # 2. Dead Coin-Flip Middle Zone
+                    elif mid_min <= no_p <= mid_max:
                         counterfactual_by_ticker[ticker] = {
                             "dry_run": True,
                             "ex": item["market"].get("exchange", "kalshi"),
@@ -1530,7 +1541,7 @@ def process_hourly_market_group(
                         if avoid_mid_zone:
                             log.info(
                                 f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping live order (saved as empirical snapshot)."
+                                f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
                             )
                         elif not can_execute_exploration_trade(now_utc):
                             log.info(
@@ -1551,19 +1562,19 @@ def process_hourly_market_group(
                                 "target_price": target_price,
                                 "pct_dist": pct_dist,
                                 "tp": take_profit_cents,
-                                "min_buy": 45,
-                                "max_buy": 55,
+                                "min_buy": mid_min,
+                                "max_buy": mid_max,
                                 "mode": "mid_zone",
                             })
                     # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
                     elif dynamic_filters.get("enable_momentum_buys", False):
-                        mom_min = dynamic_filters.get("momentum_min_buy", 56)
-                        mom_max = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65)
-                        min_lead = dynamic_filters.get("momentum_min_pct_dist", 0.10)
+                        mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
+                        mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
+                        min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
 
                         if mom_min <= no_p <= mom_max:
                             if pct_dist_val <= -min_lead:
-                                mom_tp = dynamic_filters.get("momentum_tp", 88)
+                                mom_tp = int(dynamic_filters.get("momentum_tp", 88))
                                 log.info(
                                     f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (NO @ {no_p}¢): "
                                     f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
@@ -1650,6 +1661,7 @@ def process_hourly_market_group(
                 dry_run=dry_run,
                 is_exploration=is_exploration,
                 corridor_mode=cand.get("mode", "discount"),
+                count=contracts_count,
             )
             if executed and details:
                 trade_executed_by_ticker[ticker] = details

@@ -37,8 +37,9 @@ class DummyHourlyTradingClient(BaseTradingClient):
 
     def buy_and_set_take_profit(self, ticker: str, side: str, buy_price_cents: int, maker_bid_cents: int = None, **kw):
         effective = min(buy_price_cents, (maker_bid_cents + 1) if maker_bid_cents else buy_price_cents)
-        self._positions[ticker] = {"ticker": ticker, "side": side, "count": 1, "entry_price_cents": effective}
-        res = {"ticker": ticker, "side": side, "price": effective}
+        count = kw.get("count", 1)
+        self._positions[ticker] = {"ticker": ticker, "side": side, "count": count, "entry_price_cents": effective}
+        res = {"ticker": ticker, "side": side, "price": effective, "count": count}
         self.buys.append(res)
         return res
 
@@ -74,10 +75,11 @@ def test_hourly_multi_strike_single_directional_opportunity(hourly_client):
         {"ticker": "KXBTCD-B", "series_ticker": "KXBTCD", "floor_strike": 74000.0, "yes_ask_dollars": "0.72", "yes_bid_dollars": "0.70", "no_ask_dollars": "0.30", "no_bid_dollars": "0.28"},
     ]
     snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"BTC": 71000.0}, False)
-    
+
     assert len(hourly_client.buys) == 1
     assert hourly_client.buys[0]["ticker"] == "KXBTCD-B"
     assert hourly_client.buys[0]["side"] == "no"
+    assert hourly_client.buys[0]["count"] == 3
     assert snaps[0]["tf"] == "1h"
 
 

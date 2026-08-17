@@ -56,27 +56,29 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike pred
 ### 3. Checkpoint Lifecycle Matrices ⏱️
 
 #### A. 15-Minute Markets (Crypto & Commodities - Repeats Every 15-Minute Block)
-| Block Minute | Target Time | Action Type | 15-Minute Market Strategy |
+| Block Minute | Target Time | Action Type | 15-Minute Sniper Strategy |
 | :--- | :--- | :--- | :--- |
-| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Entry** | Full discount corridor (`18¢–44¢`, TP `62¢`) + Momentum corridor (`56¢–68¢`, TP `88¢` with `\|pct_dist\| ≥ 0.10%`) |
-| **`:02:30`** | **`:02:30`** | **2nd Chance + Disaster Cut** | **2.5m Disaster Cut-Loss** (`<15¢`) + Re-evaluates entry corridors |
-| **`:05:00`** | **`:05:00`** (*no delay*) | **Theta Cut + 2nd Entry** | **5m Cut-Loss** (`<15¢`) + Theta-compressed discount (`18¢–30¢`, TP `58¢`) & Momentum (`56¢–65¢`) |
-| **`:07:30`** | **`:07:30`** | **Mid-Candle Cut + 3rd Entry** | **7.5m Cut-Loss** (`<15¢`) + Tighter Entry corridor (`18¢–30¢`, TP `58¢`) |
-| **`:10:00`** | **`:10:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss (`sl_threshold=25¢`, `sl_floor=15¢`) |
+| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Entry** | Deep discount sniper corridor (`18¢–30¢`, TP `62¢`, `1` contract) + Strict momentum corridor (`62¢–68¢`, TP `88¢` with `\|pct_dist\| ≥ 0.15%`) |
+| **`:02:30`** | **`:02:30`** | **2nd Chance + Disaster Cut** | **2.5m Disaster Cut-Loss** (`<15¢`) + Re-evaluates sniper entry corridors |
+| **`:05:00`** | **`:05:00`** (*no delay*) | **Theta Cut + 2nd Entry** | **5m Cut-Loss** (`<15¢`) + Clamped discount (`18¢–24¢`, TP `58¢`) & Momentum (`62¢–65¢`) |
+| **`:07:30`** | **`:07:30`** | **Mid-Candle Cut + 3rd Entry** | **7.5m Cut-Loss** (`<15¢`) + Clamped discount (`18¢–24¢`, TP `58¢`) |
+| **`:10:00`** | **`:10:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss (`sl_threshold=20¢`, `sl_floor=15¢`) |
 | **`:12:30`** | **`:12:30`** | **Endgame Safety Check** | Liquidate losing positions 2.5m before expiration (`<15¢`); hold winners for `100¢` settlement |
 
 #### B. Hourly Multi-Strike Markets (Crypto, Commodities, Equity Indices - Every 10 Minutes Past the Hour)
-| Hour Minute | Target Time | Action Type | Hourly Market Strategy |
+| Hour Minute | Target Time | Action Type | Hourly Core Trend Strategy |
 | :--- | :--- | :--- | :--- |
-| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Multi-Strike Entry** | Multi-strike scan, pick cheapest YES & NO (`18¢–44¢`, TP `62¢`) + Momentum (`56¢–68¢`, TP `88¢`) |
+| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Multi-Strike Entry** | Multi-strike scan, pick cheapest YES & NO (`18¢–44¢`, TP `62¢`, `3` contracts core sizing) + Momentum (`56¢–68¢`, TP `88¢`, `\|pct_dist\| ≥ 0.10%`) |
 | **`:10`** | **`:10:00`** (*no delay*) | **2nd Chance + Disaster Cut** | **10m Disaster Cut-Loss** (`<15¢`) + 2nd Chance Multi-Strike Entry (`18¢–44¢`) |
-| **`:20`** | **`:20:00`** (*no delay*) | **Cut-Loss + 3rd Entry** | **20m Cut-Loss** (`<15¢`) + Theta-compressed Entry corridor (`18¢–30¢`, TP `58¢`) |
-| **`:30`** | **`:30:00`** (*no delay*) | **Mid-Hour Cut + Entry** | **30m Mid-Hour Cut-Loss** (`<15¢`) + Tighter Entry corridor (`18¢–30¢`, TP `58¢`) |
-| **`:40`** | **`:40:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **40m Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss |
+| **`:20`** | **`:20:00`** (*no delay*) | **Cut-Loss + 3rd Entry** | **20m Cut-Loss** (`<15¢`) + Theta-compressed Entry corridor (`18¢–32¢`, TP `58¢`) |
+| **`:30`** | **`:30:00`** (*no delay*) | **Mid-Hour Cut + Entry** | **30m Mid-Hour Cut-Loss** (`<15¢`) + Tighter Entry corridor (`18¢–32¢`, TP `58¢`) |
+| **`:40`** | **`:40:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **40m Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss (`sl_threshold=25¢`, `sl_floor=15¢`) |
 | **`:50`** | **`:50:00`** (*no delay*) | **Endgame Safety Check** | Liquidate losing positions 10m before expiration (`<15¢`); hold winners for `100¢` settlement |
 
-### 4. Low-EV Middle Zone Avoidance ($37¢–55¢$) & Risk-Free Counterfactual Tracking 🎯
-- **Coin-Flip Avoidance**: Contracts in the 37¢–55¢ band have an empirical win rate under 40% and are strictly bypassed for live capital, channeling allocation to **deep discounts ($\le 30¢–44¢$)** and **confirmed momentum breakouts ($56¢–68¢$)**.
+### 4. Low-EV Middle Zone Avoidance & Risk-Free Counterfactual Tracking 🎯
+- **Timeframe-Aware Dead Zones**:
+  - **15-Minute Markets**: Expands the dead-zone to **`31¢–61¢`** to completely eliminate 50/50 noise and false breakouts.
+  - **1-Hour Markets**: Rejects **`37¢–55¢`** coin-flip contracts unless supported by strong spot trend continuation.
 - **Counterfactual Empirical Snapshots**: When a mid-zone contract is screened and skipped, the bot logs a `counterfactual_mid_zone` snapshot to MongoDB Atlas. This allows the calibration engine to monitor statistical win rates and spreads without risking account equity.
 
 ### 5. Maker Limit Entry (Save 1¢–3¢) 💰

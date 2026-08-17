@@ -28,10 +28,23 @@ def reset_db_cache():
 def test_default_price_map_and_sl_defaults():
     for sym in ("DEFAULT", "BTC", "DOGE"):
         assert sym in DEFAULT_DYNAMIC_PRICE_MAP or sym in ("BTC", "DOGE")
-        f = get_dynamic_filter_for_market(sym, is_5min_mark=False, now_utc=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc))
-        assert f["sl_threshold"] == 25
-        assert f["sl_floor"] == 15
-        assert f["cut_5min"] == 15
+        f_15m = get_dynamic_filter_for_market(sym, is_5min_mark=False, timeframe="15m", now_utc=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc))
+        assert f_15m["sl_threshold"] == 20
+        assert f_15m["sl_floor"] == 15
+        assert f_15m["cut_5min"] == 15
+        assert f_15m["max_buy"] == 30
+        assert f_15m["contracts_per_trade"] == 1
+        assert f_15m["momentum_min_buy"] == 62
+        assert f_15m["momentum_min_pct_dist"] == 0.15
+
+        f_1h = get_dynamic_filter_for_market(sym, is_5min_mark=False, timeframe="1h", now_utc=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc))
+        assert f_1h["sl_threshold"] == 25
+        assert f_1h["sl_floor"] == 15
+        assert f_1h["cut_5min"] == 15
+        assert f_1h["max_buy"] == 44
+        assert f_1h["contracts_per_trade"] == 3
+        assert f_1h["momentum_min_buy"] == 56
+        assert f_1h["momentum_min_pct_dist"] == 0.10
 
 
 @pytest.mark.parametrize("now, last_refresh_delta_hrs, cache_empty, expected", [
@@ -59,9 +72,15 @@ def test_dynamic_calibration_from_mock_db(mock_get_coll):
     snaps = [{"sym": "BTC", "tick": "T1", "m": 0, "pct": 0.02, "trd": {"buy": 32, "side": "yes"}}]
     settles = [{"ticker": "T1", "market_result": "yes"}]
 
-    mock_get_coll.side_effect = lambda n: MagicMock(find=MagicMock(return_value=snaps if n == "market_snapshots" else settles))
+    def mock_coll(name):
+        data = snaps if name == "market_snapshots" else settles
+        mock = MagicMock()
+        mock.find.return_value.sort.return_value.limit.return_value = data
+        return mock
+
+    mock_get_coll.side_effect = mock_coll
     calibrated = calibrate_dynamic_price_map_from_db()
-    
+
     assert "BTC" in calibrated
     assert calibrated["BTC"]["00"]["sl_threshold"] == 25
 
@@ -235,4 +254,78 @@ def test_interim_data_collection_pass_non_trading_interval():
     assert snap is not None
     assert snap["tick"] == "KXBTC15M-26AUG170200-00"
     assert snap["m"] == 51
+
+
+def test_15m_tighter_corridors_and_sizing():
+    """Verify that 15m markets enforce tighter discount corridors (<=30¢), require >=0.15% spot lead for momentum, and size at 1 contract."""
+    client = MagicMock(exchange_name="Kalshi")
+    client.get_market_position.return_value = None
+    client.has_existing_position_or_order.return_value = False
+
+    # 1. 28¢ YES (Deep Discount) -> Should BUY with count=1
+    market_discount = {
+        "ticker": "KXBTC15M-TEST-28", "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.28", "yes_bid_dollars": "0.26",
+        "floor_strike": 60000.0, "exchange": "kalshi",
+    }
+    snap_discount = process_single_market(
+        market=market_discount,
+        is_trading_interval=True,
+        client=client,
+        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
+        spot_cache={"BTC": 60010.0},
+        dry_run=True,
+    )
+    assert "trd" in snap_discount
+    assert snap_discount["trd"]["corridor"] == "discount"
+    assert snap_discount["trd"]["count"] == 1
+
+    # 2. 38¢ YES (Noise / Chop Band) -> Rejected on 15m because 38¢ falls in dead zone (31¢-61¢)
+    market_chop = {
+        "ticker": "KXBTC15M-TEST-38", "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.38", "yes_bid_dollars": "0.36",
+        "floor_strike": 60000.0, "exchange": "kalshi",
+    }
+    snap_chop = process_single_market(
+        market=market_chop,
+        is_trading_interval=True,
+        client=client,
+        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
+        spot_cache={"BTC": 60050.0},
+        dry_run=True,
+    )
+    assert snap_chop.get("trd", {}).get("action") != "buy_opened"
+
+    # 3. 64¢ YES with +0.20% spot lead -> Enters momentum with count=1
+    market_mom = {
+        "ticker": "KXBTC15M-TEST-64", "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.64", "yes_bid_dollars": "0.62",
+        "floor_strike": 60000.0, "exchange": "kalshi",
+    }
+    snap_mom_strong = process_single_market(
+        market=market_mom,
+        is_trading_interval=True,
+        client=client,
+        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
+        spot_cache={"BTC": 60120.0},  # +0.20% spot lead
+        dry_run=True,
+    )
+    assert "trd" in snap_mom_strong
+    assert snap_mom_strong["trd"]["corridor"] == "momentum"
+    assert snap_mom_strong["trd"]["count"] == 1
+
+    # 4. 64¢ YES with +0.10% spot lead -> Rejected on 15m (requires >=0.15% lead)
+    snap_mom_weak = process_single_market(
+        market=market_mom,
+        is_trading_interval=True,
+        client=client,
+        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
+        spot_cache={"BTC": 60060.0},  # +0.10% spot lead (below 0.15%)
+        dry_run=True,
+    )
+    assert snap_mom_weak.get("trd", {}).get("action") != "buy_opened"
 
