@@ -1,12 +1,12 @@
-"""
+r"""
 MongoDB Atlas Database Connector & Persistent Trade State Pipeline
 ===================================================================
 
 Collections Managed:
 --------------------
 1. `trading_bot_db.market_snapshots`:
-   - Ultra-compact 5-minute pricing & execution snapshots (~50 bytes per document).
-   - Tagged by timeframe (`tf: "15m"` or `tf: "1h"`).
+   - Ultra-compact 5-minute pricing, execution, and counterfactual empirical snapshots (~50 bytes per document).
+   - Tagged by timeframe (`tf: "15m"` or `tf: "1h"`) across Crypto, Commodities (Gold, Silver, WTI), and Equity Indices.
 2. `trading_bot_db.portfolio_pnl`:
    - Real-time time-series portfolio value, cash balance, and realized PnL snapshots.
 3. `trading_bot_db.settlements`:
@@ -15,12 +15,18 @@ Collections Managed:
    - Crash-proof persistent store for active trade cost bases (`entry_price_cents`).
    - Ensures restart/redeploy resilience on Render background workers without falling back to arbitrary values.
 
+Dynamic Calibration & Exploration Architecture:
+------------------------------------------------
+- 6-Hour Dynamic Calibration: Volatility ($\sigma$), empirical win rates, and optimal buy/TP corridors are calibrated from MongoDB.
+- 15-Minute Discovery Window (`05:00–05:15 UTC`): Allows brief broad corridor discovery with a strict trade cap (3 trades/session).
+- Counterfactual Empirical Tracking: Non-traded mid-zone opportunities (37¢–55¢) are logged as dry-run counterfactuals for risk-free data collection.
+
 Storage Optimization (MongoDB Atlas Free Tier - 512MB Cap):
 ------------------------------------------------------------
 To ensure our database stays tiny and never hits storage limits over months of execution,
 we store snapshots as ultra-compact JSON documents (~50 bytes per document).
-With 12 crypto markets checked across intervals:
-- Storage consumption is ~300 KB per day (~9 MB per month).
+With 17 multi-asset markets checked across intervals:
+- Storage consumption is ~450 KB per day (~13 MB per month).
 - A 512MB free tier database easily stores years of market data!
 """
 
@@ -427,23 +433,24 @@ _CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
 
 def is_default_exploration_window(now_utc: datetime | None = None) -> bool:
     """
-    Returns True if current UTC time is between 05:00 and 07:00 UTC (1:00 AM to 3:00 AM Eastern Time).
-    During this 2-hour window, the bot falls back to DEFAULT_DYNAMIC_PRICE_MAP broad corridors
-    (:00 -> 18¢–44¢, :05 -> 18¢–30¢) for empirical signal harvesting.
+    Returns True if current UTC time is within the shortened 15-minute discovery window:
+    05:00 to 05:15 UTC (1:00 AM to 1:15 AM Eastern Time).
+    During this single 15-minute cycle, the bot allows broad corridor exploration
+    with a strict global trade cap to collect empirical orderbook data while protecting capital.
     """
     now = now_utc or datetime.now(timezone.utc)
-    return (5 <= now.hour < 7)
+    return (now.hour == 5 and now.minute < 15)
 
 
 def is_mid_zone_exploration_window(now_utc: datetime | None = None) -> bool:
     """
-    Returns True strictly between 05:00 and 06:00 UTC (1:00 AM to 2:00 AM Eastern Time).
-    During this single 1-hour window (now.hour == 5), the bot allows low-EV coin-flip middle zone trades (45¢–55¢)
-    for empirical signal harvesting and data collection.
-    Between 06:00 and 07:00 UTC (now.hour == 6) and other hours, middle zone trades are strictly avoided.
+    Returns True strictly during the 15-minute discovery window: 05:00 to 05:15 UTC (1:00 AM to 1:15 AM Eastern Time).
+    During this brief 15-minute window, low-EV middle zone trades (45¢–55¢) may be sampled
+    up to the global exploration trade cap for empirical data collection.
+    Outside this 15-minute window, middle zone trades are strictly avoided.
     """
     now = now_utc or datetime.now(timezone.utc)
-    return (now.hour == 5)
+    return (now.hour == 5 and now.minute < 15)
 
 
 def should_refresh_dynamic_map(
@@ -456,8 +463,8 @@ def should_refresh_dynamic_map(
 
     Rule 1 (Cold Start): If memory is empty (bot just booted up), refresh immediately!
     Rule 2 (6-Hour Expiry): If more than 6 hours passed since last refresh, refresh!
-    Rule 3 (07:00 UTC Recalibration Anchor): Immediately after exiting the 05:00-07:00 UTC default window,
-            force a fresh recalibration at 07:00 UTC to lock in calibrated parameters.
+    Rule 3 (05:15 UTC Post-Exploration Anchor): Immediately after exiting the 05:00-05:15 UTC discovery window,
+            force a fresh recalibration at 05:15-05:25 UTC to lock in calibrated parameters.
     Rule 4 (Clock Markers): If current UTC time hits 00:00, 05:00, 07:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
     """
     if cache_is_empty is None:
@@ -478,10 +485,10 @@ def should_refresh_dynamic_map(
     if elapsed >= _CACHE_TTL_SECONDS:
         return True
 
-    # 2. Check if we just entered 07:00 UTC (the recalibration anchor right after 05:00-07:00 UTC default window)
-    if now.hour == 7 and now.minute < 10:
-        hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
-        if last_refresh_time < hour_start_ts:
+    # 2. Check if we just exited 05:00-05:15 UTC exploration window (anchor at 05:15-05:25 UTC)
+    if now.hour == 5 and 15 <= now.minute < 25:
+        window_end_ts = now.replace(minute=15, second=0, microsecond=0).timestamp()
+        if last_refresh_time < window_end_ts:
             return True
 
     # 3. Check standard clock marks (00:00, 05:00, 07:00, 12:00, 18:00 UTC) and haven't refreshed this hour
@@ -602,7 +609,7 @@ def calibrate_dynamic_price_map_from_db(
 
                 timing_mark = "05" if (m % 15 >= 5) else "00"
 
-                if action == "buy_opened" and buy_p:
+                if action in ("buy_opened", "counterfactual_mid_zone", "simulated_exploration", "dry_run_buy") and buy_p:
                     trade_record = {
                         "buy": int(buy_p),
                         "won": won,
@@ -765,9 +772,9 @@ def get_dynamic_filter_for_market(
 ) -> dict[str, int | bool]:
     """
     Convenience lookup to get exact dynamic filter parameters for a specific market and timing mark.
-    Between 05:00 and 07:00 UTC (1:00 AM - 3:00 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
+    Between 05:00 and 05:15 UTC (1:00 AM - 1:15 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
     broad corridors (:00 -> 18¢–44¢ discount + 56¢–68¢ momentum, :05 -> 18¢–30¢ discount + 56¢–65¢ momentum)
-    for empirical signal harvesting.
+    for empirical signal harvesting up to the exploration trade cap.
 
     Args:
         asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "DOGE", "ZEC").

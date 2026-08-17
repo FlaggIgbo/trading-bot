@@ -1,4 +1,4 @@
-"""
+r"""
 15-Minute & Hourly Multi-Asset Prediction Trading & Data Pipeline Bot
 ======================================================================
 
@@ -18,13 +18,17 @@ Core Architecture & Risk Engines:
 2. Concurrent Multi-Source Spot Oracle Ingestion:
    - Queries Coinbase (crypto), Pyth Network Hermes (commodities), and Yahoo Finance (indices) in parallel (<150ms total).
 3. Dynamic 6-Hour Database Calibration Engine:
-   - Dynamically computes volatility, empirical win rates, and optimal price bands from MongoDB Atlas.
+   - Dynamically computes volatility ($\sigma$), empirical win rates, and optimal price corridors from MongoDB Atlas.
 4. Hourly Multi-Strike Selection & Tiebreakers:
    - Scans all strike options, picking cheapest YES and cheapest NO within valid corridors.
    - Dual buys on different strikes; resolves ties on same contract by price and spot momentum.
-5. Crash-Proof Persistent Trade State:
+5. 15-Minute Empirical Discovery Window (05:00–05:15 UTC):
+   - Brief 15-minute discovery window with a strict global trade cap (max 3 live exploration trades per session).
+6. Risk-Free Counterfactual Empirical Tracking:
+   - Records non-traded mid-zone opportunities (37¢–55¢) and rejected candidates as dry-run snapshots for statistical modeling without risking live capital.
+7. Crash-Proof Persistent Trade State:
    - Stores active position cost bases in MongoDB Atlas `active_positions` to survive container restarts.
-6. Error-Isolated Market Boundaries:
+8. Error-Isolated Market Boundaries:
    - Wraps each individual market and symbol group in defensive error handlers so one payload glitch never halts the pipeline.
 """
 
@@ -91,6 +95,51 @@ INDEX_SYMBOLS = set(INDEX_TICKER_MAP.keys())
 
 # Default expiration in seconds for Maker limit buy orders to protect against adverse price drops
 BUY_ORDER_EXPIRATION_SECONDS = int(os.getenv("BUY_ORDER_EXPIRATION_SECONDS", "45"))
+
+# Maximum number of live discovery/exploration trades permitted per exploration session (05:00-05:15 UTC)
+MAX_EXPLORATION_TRADES_PER_SESSION = int(
+    os.getenv("MAX_EXPLORATION_TRADES_PER_SESSION", "3")
+)
+_EXPLORATION_TRADES_COUNT: int = 0
+_LAST_EXPLORATION_SESSION_ID: str = ""
+
+
+def get_exploration_trades_count() -> int:
+    """Returns current number of executed live exploration trades in this session."""
+    return _EXPLORATION_TRADES_COUNT
+
+
+def reset_exploration_trades_count():
+    """Resets the exploration trades counter."""
+    global _EXPLORATION_TRADES_COUNT, _LAST_EXPLORATION_SESSION_ID
+    _EXPLORATION_TRADES_COUNT = 0
+    _LAST_EXPLORATION_SESSION_ID = ""
+
+
+def can_execute_exploration_trade(now_utc: datetime | None = None) -> bool:
+    """
+    Checks if an exploration trade is permitted under the session cap.
+    Automatically resets the counter when a new calendar day / session begins.
+    """
+    global _EXPLORATION_TRADES_COUNT, _LAST_EXPLORATION_SESSION_ID
+    now = now_utc or datetime.now(timezone.utc)
+    session_id = now.strftime("%Y-%m-%d")
+    if _LAST_EXPLORATION_SESSION_ID != session_id:
+        _LAST_EXPLORATION_SESSION_ID = session_id
+        _EXPLORATION_TRADES_COUNT = 0
+    return _EXPLORATION_TRADES_COUNT < MAX_EXPLORATION_TRADES_PER_SESSION
+
+
+def record_exploration_trade_executed(now_utc: datetime | None = None):
+    """Increments the exploration trade counter for this session."""
+    global _EXPLORATION_TRADES_COUNT, _LAST_EXPLORATION_SESSION_ID
+    now = now_utc or datetime.now(timezone.utc)
+    session_id = now.strftime("%Y-%m-%d")
+    if _LAST_EXPLORATION_SESSION_ID != session_id:
+        _LAST_EXPLORATION_SESSION_ID = session_id
+        _EXPLORATION_TRADES_COUNT = 0
+    _EXPLORATION_TRADES_COUNT += 1
+
 
 # Persistent HTTP session with connection pooling sized for parallel thread queries
 http_session = requests.Session()
@@ -604,6 +653,8 @@ def _execute_buy_flow(
             trade_details["order_id"] = oid
         if tp_oid := buy_res.get("tp_order_id"):
             trade_details["tp_order_id"] = tp_oid
+        if is_exploration or corridor_mode == "mid_zone":
+            record_exploration_trade_executed()
 
     return True, trade_details
 
@@ -882,6 +933,7 @@ def process_single_market(
                 pct_dist_val = ((spot_price - target_price) / target_price) * 100.0
 
             candidate_sides = []
+            counterfactual_details = None
             for side, p_cents, aligned in [
                 ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
                 ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
@@ -911,15 +963,37 @@ def process_single_market(
 
                 # Dead Coin-Flip Middle Zone (45¢ - 55¢)
                 elif 45 <= p_cents <= 55:
+                    # Option 1: Record counterfactual sample for empirical discovery in MongoDB without capital risk
+                    counterfactual_details = {
+                        "dry_run": True,
+                        "ex": market.get("exchange", "kalshi"),
+                        "action": "counterfactual_mid_zone",
+                        "regime": "exploration_sim" if is_exploration else "empirical_tracking",
+                        "corridor": "mid_zone",
+                        "side": side,
+                        "buy": p_cents,
+                        "tp": take_profit_cents,
+                        "sl": 25,
+                        "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
+                        "entry_ts": int(time.time()),
+                        "spot_at_entry": spot_price,
+                        "target_at_entry": target_price,
+                    }
+
                     if avoid_mid_zone:
                         log.info(
                             f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
-                            f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
+                            f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping live order (saved as empirical snapshot)."
+                        )
+                    elif not can_execute_exploration_trade(now_utc):
+                        log.info(
+                            f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                            f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
                         )
                     else:
                         log.info(
                             f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                            f"Allowing coin-flip middle zone trade during exploration window (05:00-06:00 UTC) for empirical data collection."
+                            f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
                         )
                         candidate_sides.append({
                             "side": side,
@@ -1016,6 +1090,8 @@ def process_single_market(
 
     if trade_executed and trade_details:
         compact_document["trd"] = trade_details
+    elif counterfactual_details is not None:
+        compact_document["trd"] = counterfactual_details
 
     return compact_document
 
@@ -1060,6 +1136,7 @@ def process_hourly_market_group(
 
     snapshots: list[dict] = []
     trade_executed_by_ticker: dict[str, dict] = {}
+    counterfactual_by_ticker: dict[str, dict] = {}
 
     # Pre-parse quote & strike metrics for all strikes in the group
     parsed_markets = []
@@ -1313,15 +1390,35 @@ def process_hourly_market_group(
                             })
                     # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢)
                     elif 45 <= yes_p <= 55:
+                        counterfactual_by_ticker[ticker] = {
+                            "dry_run": True,
+                            "ex": item["market"].get("exchange", "kalshi"),
+                            "action": "counterfactual_mid_zone",
+                            "regime": "exploration_sim" if is_exploration else "empirical_tracking",
+                            "corridor": "mid_zone",
+                            "side": "yes",
+                            "buy": yes_p,
+                            "tp": take_profit_cents,
+                            "sl": 25,
+                            "outcome": determine_counterfactual_outcome("yes", "buy_opened", spot_price, target_price, item["market"].get("result")),
+                            "entry_ts": int(time.time()),
+                            "spot_at_entry": spot_price,
+                            "target_at_entry": target_price,
+                        }
                         if avoid_mid_zone:
                             log.info(
                                 f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
+                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping live order (saved as empirical snapshot)."
+                            )
+                        elif not can_execute_exploration_trade(now_utc):
+                            log.info(
+                                f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
                             )
                         else:
                             log.info(
                                 f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                f"Allowing coin-flip middle zone trade during exploration window (05:00-06:00 UTC) for empirical data collection."
+                                f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
                             )
                             valid_yes_candidates.append({
                                 "item": item,
@@ -1361,19 +1458,20 @@ def process_hourly_market_group(
                                     "min_buy": mom_min,
                                     "max_buy": mom_max,
                                     "mode": "momentum",
+                                    "pct_dist": pct_dist,
                                 })
                             else:
                                 log.info(
                                     f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
                                     f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
                                 )
-                else:
-                    max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
-                    if min_buy_price <= yes_p <= max_eval_price:
-                        log.info(
-                            f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                            f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
-                        )
+                        else:
+                            max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
+                            if min_buy_price <= yes_p <= max_eval_price:
+                                log.info(
+                                    f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                    f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
+                                )
 
             # Evaluate NO
             no_p = item["no_price_cents"]
@@ -1402,15 +1500,35 @@ def process_hourly_market_group(
                             })
                     # 2. Dead Coin-Flip Middle Zone (45¢ - 55¢)
                     elif 45 <= no_p <= 55:
+                        counterfactual_by_ticker[ticker] = {
+                            "dry_run": True,
+                            "ex": item["market"].get("exchange", "kalshi"),
+                            "action": "counterfactual_mid_zone",
+                            "regime": "exploration_sim" if is_exploration else "empirical_tracking",
+                            "corridor": "mid_zone",
+                            "side": "no",
+                            "buy": no_p,
+                            "tp": take_profit_cents,
+                            "sl": 25,
+                            "outcome": determine_counterfactual_outcome("no", "buy_opened", spot_price, target_price, item["market"].get("result")),
+                            "entry_ts": int(time.time()),
+                            "spot_at_entry": spot_price,
+                            "target_at_entry": target_price,
+                        }
                         if avoid_mid_zone:
                             log.info(
                                 f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping."
+                                f"falls in low-EV coin-flip middle zone (45¢-55¢). Skipping live order (saved as empirical snapshot)."
+                            )
+                        elif not can_execute_exploration_trade(now_utc):
+                            log.info(
+                                f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
                             )
                         else:
                             log.info(
                                 f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                f"Allowing coin-flip middle zone trade during exploration window (05:00-06:00 UTC) for empirical data collection."
+                                f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
                             )
                             valid_no_candidates.append({
                                 "item": item,
@@ -1571,6 +1689,8 @@ def process_hourly_market_group(
         }
         if ticker in trade_executed_by_ticker:
             compact_doc["trd"] = trade_executed_by_ticker[ticker]
+        elif ticker in counterfactual_by_ticker:
+            compact_doc["trd"] = counterfactual_by_ticker[ticker]
 
         snapshots.append(compact_doc)
 
@@ -1645,7 +1765,8 @@ def run_pipeline_pass(
         log.info(f"--> MODE: {LogTag.DRY_RUN_PREVIEW.value} (No real orders will be placed)")
     if is_default_exploration_window(now_utc):
         mid_zone_note = " (including 45¢–55¢ mid-zone)" if is_mid_zone_exploration_window(now_utc) else " (45¢–55¢ mid-zone avoided)"
-        log.info(f"--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–07:00 (1AM–3AM ET): Trading on default broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢){mid_zone_note} for empirical discovery.")
+        cap_note = f" [Cap: {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} live trades used]"
+        log.info(f"--> REGIME: 🌍 [EXPLORATION REGIME] Active UTC window 05:00–05:15 (1:00AM–1:15AM ET): Trading on broad corridors (:00 -> 18¢–44¢, :05/20m -> 18¢–30¢){mid_zone_note}{cap_note} for empirical discovery.")
     log.info(f"--> INTERVAL: {interval_summary}")
     log.info("=================================================================")
 

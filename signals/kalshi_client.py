@@ -5,7 +5,7 @@ Kalshi API Client & Multi-Timeframe Crypto Execution Engine
 What is Kalshi?
 ---------------
 Kalshi is a CFTC-regulated prediction market exchange offering binary event contracts
-across 15-Minute and Hourly directional crypto markets.
+across 15-Minute and Hourly directional markets spanning Crypto, Commodities, and Equity Indices.
 Contracts settle at either $1.00 (100 cents) if YES occurs, or $0.00 if NO occurs.
 
 Authentication Explained:

@@ -58,39 +58,38 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike pred
 #### A. 15-Minute Markets (Crypto & Commodities - Repeats Every 15-Minute Block)
 | Block Minute | Target Time | Action Type | 15-Minute Market Strategy |
 | :--- | :--- | :--- | :--- |
-| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Entry** | Broad buy corridor (`30¢–52¢`), TP `82¢` limit order placed |
-| **`:02:30`** | **`:02:30`** | **2nd Chance + Disaster Cut** | **2.5m Disaster Cut-Loss** (`<25¢`) + Re-evaluates broad entry (`30¢–52¢`) |
-| **`:05:00`** | **`:05:00`** (*no delay*) | **Cut-Loss + 2nd Entry** | **5m Cut-Loss** (`<34¢–40¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
-| **`:07:30`** | **`:07:30`** | **Mid-Candle Cut + 3rd Entry** | **7.5m Cut-Loss** (`<34¢–40¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
-| **`:10:00`** | **`:10:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss |
-| **`:12:30`** | **`:12:30`** | **Endgame Safety Check** | Liquidate losing positions 2.5m before expiration; hold winners for `100¢` settlement |
+| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Entry** | Full discount corridor (`18¢–44¢`, TP `62¢`) + Momentum corridor (`56¢–68¢`, TP `88¢` with `\|pct_dist\| ≥ 0.10%`) |
+| **`:02:30`** | **`:02:30`** | **2nd Chance + Disaster Cut** | **2.5m Disaster Cut-Loss** (`<15¢`) + Re-evaluates entry corridors |
+| **`:05:00`** | **`:05:00`** (*no delay*) | **Theta Cut + 2nd Entry** | **5m Cut-Loss** (`<15¢`) + Theta-compressed discount (`18¢–30¢`, TP `58¢`) & Momentum (`56¢–65¢`) |
+| **`:07:30`** | **`:07:30`** | **Mid-Candle Cut + 3rd Entry** | **7.5m Cut-Loss** (`<15¢`) + Tighter Entry corridor (`18¢–30¢`, TP `58¢`) |
+| **`:10:00`** | **`:10:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss (`sl_threshold=25¢`, `sl_floor=15¢`) |
+| **`:12:30`** | **`:12:30`** | **Endgame Safety Check** | Liquidate losing positions 2.5m before expiration (`<15¢`); hold winners for `100¢` settlement |
 
 #### B. Hourly Multi-Strike Markets (Crypto, Commodities, Equity Indices - Every 10 Minutes Past the Hour)
 | Hour Minute | Target Time | Action Type | Hourly Market Strategy |
 | :--- | :--- | :--- | :--- |
-| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Multi-Strike Entry** | Multi-strike scan, pick cheapest YES & NO (`30¢–52¢`), TP `82¢` |
-| **`:10`** | **`:10:00`** (*no delay*) | **2nd Chance + Disaster Cut** | **10m Disaster Cut-Loss** (`<15¢–20¢`) + 2nd Chance Multi-Strike Broad Entry (`30¢–52¢`) |
-| **`:20`** | **`:20:00`** (*no delay*) | **Cut-Loss + 3rd Entry** | **20m Cut-Loss** (`<15¢–20¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
-| **`:30`** | **`:30:00`** (*no delay*) | **Mid-Hour Cut + Entry** | **30m Mid-Hour Cut-Loss** (`<15¢–20¢`) + Tighter Entry corridor (`28¢–38¢`, TP `76¢`) |
+| **`:00`** | **`:00:30`** (`+30s` delay) | **Open Multi-Strike Entry** | Multi-strike scan, pick cheapest YES & NO (`18¢–44¢`, TP `62¢`) + Momentum (`56¢–68¢`, TP `88¢`) |
+| **`:10`** | **`:10:00`** (*no delay*) | **2nd Chance + Disaster Cut** | **10m Disaster Cut-Loss** (`<15¢`) + 2nd Chance Multi-Strike Entry (`18¢–44¢`) |
+| **`:20`** | **`:20:00`** (*no delay*) | **Cut-Loss + 3rd Entry** | **20m Cut-Loss** (`<15¢`) + Theta-compressed Entry corridor (`18¢–30¢`, TP `58¢`) |
+| **`:30`** | **`:30:00`** (*no delay*) | **Mid-Hour Cut + Entry** | **30m Mid-Hour Cut-Loss** (`<15¢`) + Tighter Entry corridor (`18¢–30¢`, TP `58¢`) |
 | **`:40`** | **`:40:00`** (*no delay*) | **Winner Roll + Stop-Loss** | **40m Winner Roll** (`≥70¢` sell at Bid to bank profit, re-buy at Ask) + Stop-Loss |
-| **`:50`** | **`:50:00`** (*no delay*) | **Endgame Safety Check** | Liquidate losing positions 10m before expiration; hold winners for `100¢` settlement |
+| **`:50`** | **`:50:00`** (*no delay*) | **Endgame Safety Check** | Liquidate losing positions 10m before expiration (`<15¢`); hold winners for `100¢` settlement |
 
-### 4. Low-EV Middle Zone Avoidance ($37¢–43¢$) 🎯
-- **Spread Friction Gate**: Contracts in the 37¢–43¢ range are automatically bypassed unless underlying spot price is strongly in the money ($> 0.08\%$ in favor of the trade), shifting volume to **deep bargains ($\le 36¢$)** and **high-confidence momentum plays ($44¢–48¢$)**.
+### 4. Low-EV Middle Zone Avoidance ($37¢–55¢$) & Risk-Free Counterfactual Tracking 🎯
+- **Coin-Flip Avoidance**: Contracts in the 37¢–55¢ band have an empirical win rate under 40% and are strictly bypassed for live capital, channeling allocation to **deep discounts ($\le 30¢–44¢$)** and **confirmed momentum breakouts ($56¢–68¢$)**.
+- **Counterfactual Empirical Snapshots**: When a mid-zone contract is screened and skipped, the bot logs a `counterfactual_mid_zone` snapshot to MongoDB Atlas. This allows the calibration engine to monitor statistical win rates and spreads without risking account equity.
 
 ### 5. Maker Limit Entry (Save 1¢–3¢) 💰
 - Submits maker limit buy orders at `Bid + 1¢` (or the current Bid) instead of crossing the spread as a taker, maximizing profit margins on every entry.
 
-### 6. Relative Distance Gate / Spot Momentum Filter 🎯
-- **Dead‑Heat Zone** (`|pct_dist| ≤ 0.05%`): Within 0.05% of the strike target, buying `YES` or `NO` is allowed.
-- **Directional Zone** (`|pct_dist| > 0.05%`):
-  - **Buy `YES` only if**: `spot_price >= target_price`.
-  - **Buy `NO` only if**: `spot_price < target_price`.
+### 6. Relative Distance Gate & Breakout Lead Thresholds 🎯
+- **Spot Alignment Gate**:
+  - **Buy `YES` only if**: `spot_price >= target_price` (or within dead-heat `|pct_dist| <= 0.05%`).
+  - **Buy `NO` only if**: `spot_price < target_price` (or within dead-heat `|pct_dist| <= 0.05%`).
+- **Momentum Breakout Lead**: For higher-priced momentum entries (56¢–68¢), requires a confirmed spot lead of `|pct_dist| >= 0.10%` to prevent buying tops.
 
 ### 7. Dynamic Asset-Specific Risk Control & Stop-Loss Calibration 🛡️
-- **Bouncy / High-Win Coins (e.g. `DOGE`, `BNB`)**: Widens stop-loss threshold (**15¢**), price floor (**25¢**), cut threshold (**34¢**), and endgame floor (**22¢**).
-- **Trending Coins (e.g. `BTC`, `SOL`, `XRP`)**: Tight, decisive risk controls (**10¢** SL, **30¢** floor, **40¢** cut, **25¢** endgame floor).
-- **High-Volatility Coins (e.g. `ZEC`, `NEAR`, `HYPE`)**: Adaptive parameters (**12¢** SL, **26¢** floor, **36¢** cut, **24¢** endgame floor).
+- **Dynamic 6-Hour MongoDB Calibration**: Stop-loss loss thresholds (`25¢`), price floors (`15¢`), 5-minute cuts (`15¢`), and endgame thresholds (`15¢`) are tuned adaptively per asset based on rolling 48-hour volatility standard deviations ($\sigma$) and false-alarm historical rates.
 
 ### 8. Winner Roll & Stop‑Loss Execution 🔄🛑
 - **Winner Roll & Re-Buy (≥ 70¢)**: Sells the winning position immediately at Bid price to **bank/lock in realized cash profit**! Simultaneously **re-buys 1 contract at Ask price** to reset cost basis and **lets THAT newly re-bought position run toward 100¢ ($1.00 settlement)**.
@@ -101,9 +100,9 @@ A high-performance Python trading bot for 15-minute and Hourly multi-strike pred
   - **Losing Positions**: If losing (`current_price < entry_price` or `current_price < endgame_floor`), liquidates immediately via taker execution to salvage capital.
   - **Winning Positions**: If in profit (`current_price ≥ entry_price`), holds position through settlement to collect the **full 100¢ ($1.00 payout)**!
 
-### 10. 05:00 – 11:00 UTC Signal Discovery Window (Midnight – 6:00 AM ET) 🌍
-- **Empirical Signal Harvesting**: Between 05:00 and 11:00 UTC (6-hour Asian & European session window), the bot temporarily falls back to broad default corridors (`30¢–52¢` at `:00`, `28¢–38¢` at `:05`/`20m`) to gather empirical execution data across wider price regimes.
-- **Recalibration Anchor at 11:00 UTC**: Cache automatically refreshes with a fresh 48-hour calibration query from MongoDB Atlas right as the US trading day begins.
+### 10. 15-Minute Empirical Discovery Window (`05:00–05:15 UTC`) 🌍
+- **Rate-Limited Discovery**: Between `05:00 and 05:15 UTC` (one 15-minute cycle), the bot permits broad corridor sampling up to a strict cap of **3 live exploration trades per session** across the entire bot to measure live orderbook slippage.
+- **Post-Discovery Recalibration Anchor (`05:15 UTC`)**: Immediately upon exiting the 15-minute discovery window, the cache automatically refreshes from MongoDB Atlas to lock in calibrated parameters.
 
 ---
 

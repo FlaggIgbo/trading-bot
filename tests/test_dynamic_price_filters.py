@@ -38,7 +38,8 @@ def test_default_price_map_and_sl_defaults():
     (datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc), 0, True, True),
     (datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc), 1, False, False),
     (datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc), 7, False, True),
-    (datetime(2026, 8, 14, 7, 2, tzinfo=timezone.utc), 0.5, False, True),  # 07:00 UTC anchor
+    (datetime(2026, 8, 14, 5, 16, tzinfo=timezone.utc), 0.5, False, True),  # 05:15 UTC post-exploration anchor
+    (datetime(2026, 8, 14, 7, 2, tzinfo=timezone.utc), 0.5, False, True),  # 07:00 UTC clock anchor
 ])
 def test_should_refresh_rules(now, last_refresh_delta_hrs, cache_empty, expected):
     last_ts = (now - timedelta(hours=last_refresh_delta_hrs)).timestamp()
@@ -46,7 +47,7 @@ def test_should_refresh_rules(now, last_refresh_delta_hrs, cache_empty, expected
 
 
 @pytest.mark.parametrize("hour, minute, expected_exploring", [
-    (5, 0, True), (6, 30, True), (7, 0, False), (14, 30, False)
+    (5, 0, True), (5, 10, True), (5, 15, False), (5, 30, False), (6, 30, False), (7, 0, False), (14, 30, False)
 ])
 def test_exploration_window_flag(hour, minute, expected_exploring):
     dt = datetime(2026, 8, 15, hour, minute, 0, tzinfo=timezone.utc)
@@ -96,15 +97,18 @@ def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
     if should_buy:
         assert "trd" in snap
         assert snap["trd"]["corridor"] == corridor
+        assert snap["trd"]["action"] == "buy_opened"
     else:
-        assert "trd" not in snap
+        # Either no trade or a counterfactual dry-run sample
+        assert snap.get("trd", {}).get("action") != "buy_opened"
 
 
 @pytest.mark.parametrize("hour, minute, expected_avoid_mid, expected_is_exploration", [
     (5, 0, False, True),    # 05:00 UTC -> Mid-zone allowed, general exploration active
-    (5, 30, False, True),   # 05:30 UTC -> Mid-zone allowed, general exploration active
-    (6, 0, True, True),     # 06:00 UTC -> Mid-zone AVOIDED, general exploration active
-    (6, 59, True, True),    # 06:59 UTC -> Mid-zone AVOIDED, general exploration active
+    (5, 10, False, True),   # 05:10 UTC -> Mid-zone allowed, general exploration active
+    (5, 15, True, False),   # 05:15 UTC -> Mid-zone AVOIDED, exploration inactive
+    (5, 30, True, False),   # 05:30 UTC -> Mid-zone AVOIDED, exploration inactive
+    (6, 0, True, False),    # 06:00 UTC -> Mid-zone AVOIDED, exploration inactive
     (7, 0, True, False),    # 07:00 UTC -> Mid-zone avoided, exploration inactive
     (12, 0, True, False),   # 12:00 UTC -> Mid-zone avoided, exploration inactive
     (0, 0, True, False),    # 00:00 UTC -> Mid-zone avoided, exploration inactive
@@ -117,6 +121,9 @@ def test_mid_zone_flag_during_exploration(hour, minute, expected_avoid_mid, expe
 
 
 def test_market_screening_mid_zone_allowed_during_exploration():
+    from main import reset_exploration_trades_count
+    reset_exploration_trades_count()
+
     client = MagicMock(exchange_name="Kalshi")
     client.get_market_position.return_value = None
     client.has_existing_position_or_order.return_value = False
@@ -127,7 +134,7 @@ def test_market_screening_mid_zone_allowed_during_exploration():
         "floor_strike": 60000.0, "exchange": "kalshi",
     }
 
-    # At 05:00 UTC (mid-zone exploration window 5-6 UTC), 50¢ coin-flip mid-zone should be ALLOWED
+    # At 05:00 UTC (15m discovery window 05:00-05:15 UTC), 50¢ coin-flip mid-zone should execute as LIVE exploration order
     snap_exp = process_single_market(
         market=market,
         is_trading_interval=True,
@@ -139,21 +146,24 @@ def test_market_screening_mid_zone_allowed_during_exploration():
     )
     assert "trd" in snap_exp
     assert snap_exp["trd"]["corridor"] == "mid_zone"
+    assert snap_exp["trd"]["action"] == "buy_opened"
     assert snap_exp["trd"]["buy"] == 50
 
-    # At 06:00 UTC (between 6 and 7 UTC), 50¢ coin-flip mid-zone should be REJECTED
-    snap_06 = process_single_market(
+    # At 05:20 UTC (after 15m window), 50¢ coin-flip mid-zone should be logged as COUNTERFACTUAL sample (no real money risked)
+    snap_0520 = process_single_market(
         market=market,
         is_trading_interval=True,
         client=client,
-        now_utc=datetime(2026, 8, 15, 6, 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=0,
+        now_utc=datetime(2026, 8, 15, 5, 20, 0, tzinfo=timezone.utc),
+        minute_past_hour=20,
         spot_cache={"BTC": 60000.0 * 1.0001},
         dry_run=True,
     )
-    assert "trd" not in snap_06
+    assert "trd" in snap_0520
+    assert snap_0520["trd"]["action"] == "counterfactual_mid_zone"
+    assert snap_0520["trd"]["dry_run"] is True
 
-    # At 12:00 UTC (normal window), 50¢ coin-flip mid-zone should be REJECTED
+    # At 12:00 UTC (normal window), 50¢ coin-flip mid-zone should also be logged as COUNTERFACTUAL sample
     snap_normal = process_single_market(
         market=market,
         is_trading_interval=True,
@@ -163,5 +173,34 @@ def test_market_screening_mid_zone_allowed_during_exploration():
         spot_cache={"BTC": 60000.0 * 1.0001},
         dry_run=True,
     )
-    assert "trd" not in snap_normal
+    assert "trd" in snap_normal
+    assert snap_normal["trd"]["action"] == "counterfactual_mid_zone"
+    assert snap_normal["trd"]["dry_run"] is True
+
+
+def test_exploration_trade_cap_enforcement():
+    from main import (
+        can_execute_exploration_trade,
+        record_exploration_trade_executed,
+        reset_exploration_trades_count,
+        get_exploration_trades_count,
+        MAX_EXPLORATION_TRADES_PER_SESSION,
+    )
+    reset_exploration_trades_count()
+    dt = datetime(2026, 8, 15, 5, 5, 0, tzinfo=timezone.utc)
+
+    assert can_execute_exploration_trade(dt) is True
+    assert get_exploration_trades_count() == 0
+
+    # Record 3 trades
+    for i in range(MAX_EXPLORATION_TRADES_PER_SESSION):
+        assert can_execute_exploration_trade(dt) is True
+        record_exploration_trade_executed(dt)
+
+    assert get_exploration_trades_count() == MAX_EXPLORATION_TRADES_PER_SESSION
+    assert can_execute_exploration_trade(dt) is False
+
+    # Reset
+    reset_exploration_trades_count()
+    assert can_execute_exploration_trade(dt) is True
 

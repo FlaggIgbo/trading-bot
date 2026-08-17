@@ -116,7 +116,7 @@ def test_hourly_mid_zone_allowed_during_exploration(hourly_client):
     assert hourly_client.buys[0]["price"] in (49, 50)
     assert snaps_exp[0]["trd"]["corridor"] == "mid_zone"
 
-    # 06:00 UTC -> Mid-zone (50¢) strictly avoided
+    # 06:00 UTC -> Mid-zone (50¢) strictly avoided for live capital, logged as counterfactual sample
     hourly_client.buys.clear()
     hourly_client._positions.clear()
     snaps_06 = process_hourly_market_group(
@@ -125,5 +125,6 @@ def test_hourly_mid_zone_allowed_during_exploration(hourly_client):
         0, {"BTC": 71000.0}, False,
     )
     assert len(hourly_client.buys) == 0
-    assert "trd" not in snaps_06[0]
+    assert snaps_06[0]["trd"]["action"] == "counterfactual_mid_zone"
+    assert snaps_06[0]["trd"]["dry_run"] is True
 
