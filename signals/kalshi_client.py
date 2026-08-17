@@ -352,13 +352,16 @@ class KalshiClient(BaseTradingClient):
                 log.debug(f"Non-JSON response from Kalshi POST {endpoint}: {response.text[:200]}")
         return {}
 
-    def delete(self, endpoint: str) -> dict:
+    def delete(self, endpoint: str, allow_404: bool = False) -> dict:
         """Sends an authenticated HTTP DELETE request to Kalshi using connection pooling."""
         signing_path = self._get_signing_path(endpoint)
         full_url = self._build_full_url(endpoint)
         headers = self._build_auth_headers("DELETE", signing_path)
 
         response = self.session.delete(full_url, headers=headers, timeout=30)
+        if allow_404 and response.status_code == 404:
+            return {"status": "not_found"}
+
         try:
             response.raise_for_status()
         except requests.HTTPError as e:
@@ -977,19 +980,25 @@ class KalshiClient(BaseTradingClient):
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancels an existing order by its unique order ID using Kalshi V2 endpoint."""
-        return self.delete(f"/portfolio/events/orders/{order_id}")
+        return self.delete(f"/portfolio/events/orders/{order_id}", allow_404=True)
 
     def cancel_order_safe(self, order_id: str) -> bool:
         """
-        Safely attempts to cancel an order. Returns True if canceled,
-        or False if order is already filled/closed (without throwing an error).
+        Safely attempts to cancel an order. Returns True if canceled or already filled/closed (404),
+        or False if unexpected error occurs.
         """
         try:
-            self.cancel_order(order_id)
+            res = self.cancel_order(order_id)
+            if isinstance(res, dict) and res.get("status") == "not_found":
+                log.debug(f"Order {order_id} already closed/filled on Kalshi (not found).")
+                return True
             return True
         except requests.HTTPError as error:
             if error.response is not None and 400 <= error.response.status_code < 500:
                 code, msg = parse_kalshi_error(error.response)
+                if code == "not_found" or error.response.status_code == 404:
+                    log.debug(f"Order {order_id} already closed/filled (not_found).")
+                    return True
                 log.warning(f"Could not cancel order {order_id}: {code or msg}")
                 return False
             raise
@@ -1036,6 +1045,9 @@ class KalshiClient(BaseTradingClient):
                 order_id = order.get("order_id")
                 if order_id:
                     self.cancel_order_safe(order_id)
+
+            # Invalidate caches so next query gets fresh data from Kalshi
+            self.invalidate_portfolio_caches()
 
             # Pause briefly to allow Kalshi orderbook state engine to process cancellations
             time.sleep(poll_interval)

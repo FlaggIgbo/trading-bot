@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 import pytest
@@ -305,5 +306,19 @@ def test_place_take_profit_order_safety_guard():
         assert payload["price"] != "0.3800"
         # TP was adjusted to 88¢, so price for YES bid is 100 - 88 = 12¢
         assert payload["price"] == "0.1200"
+
+
+def test_cancel_order_safe_handles_404_cleanly():
+    mock_key = MagicMock()
+    mock_key.sign.return_value = b"mock_signature"
+    client = KalshiClient(api_key_id="k", private_key=mock_key)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.text = json.dumps({"error": {"code": "not_found", "message": "not found"}})
+
+    with patch.object(client.session, "delete", return_value=mock_resp):
+        # Should return True without raising or throwing error logs
+        assert client.cancel_order_safe("23b665a7-dc84-4610-a618-e3f41d0b5890") is True
+
 
 
