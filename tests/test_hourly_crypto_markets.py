@@ -67,15 +67,17 @@ def test_extract_target_strike(market, expected):
     assert pytest.approx(extract_target_strike(market)) == expected
 
 
-def test_hourly_multi_strike_dual_and_tiebreaker(hourly_client):
-    # Strike A (Bullish YES) + Strike B (Bearish NO) -> Dual Buy
+def test_hourly_multi_strike_single_directional_opportunity(hourly_client):
+    # Strike A (Bullish YES @ 34¢) vs Strike B (Bearish NO @ 30¢) -> Picks single cheaper opportunity (NO @ 30¢, maker 29¢)
     markets = [
         {"ticker": "KXBTCD-A", "series_ticker": "KXBTCD", "floor_strike": 70000.0, "yes_ask_dollars": "0.34", "yes_bid_dollars": "0.32", "no_ask_dollars": "0.68", "no_bid_dollars": "0.66"},
         {"ticker": "KXBTCD-B", "series_ticker": "KXBTCD", "floor_strike": 74000.0, "yes_ask_dollars": "0.72", "yes_bid_dollars": "0.70", "no_ask_dollars": "0.30", "no_bid_dollars": "0.28"},
     ]
     snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"BTC": 71000.0}, False)
     
-    assert len(hourly_client.buys) == 2
+    assert len(hourly_client.buys) == 1
+    assert hourly_client.buys[0]["ticker"] == "KXBTCD-B"
+    assert hourly_client.buys[0]["side"] == "no"
     assert snaps[0]["tf"] == "1h"
 
 

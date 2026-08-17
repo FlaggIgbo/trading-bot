@@ -567,8 +567,8 @@ def determine_counterfactual_outcome(
     won = (trade_side.lower() == winning_side)
     if action_type in ("stop_loss_sold", "early_loss_cut", "profit_floor_sold", "endgame_loss_cut"):
         return "sold_early_would_have_won" if won else "sl_cap_saved"
-    if action_type == "winner_rolled_rebuy":
-        return "winner_roll_won" if won else "winner_roll_cut_loss"
+    if action_type in ("winner_profit_banked", "winner_rolled_rebuy"):
+        return "winner_profit_banked" if won else "winner_banked_saved_reversal"
     if action_type == "take_profit_sold":
         return "tp_full_win" if won else "sold_early_saved_from_loss"
 
@@ -655,6 +655,10 @@ def _execute_buy_flow(
             trade_details["tp_order_id"] = tp_oid
         if is_exploration or corridor_mode == "mid_zone":
             record_exploration_trade_executed()
+
+    # Record traded market on client to strictly enforce single-side lock per lifecycle
+    if getattr(client, "record_traded_market", None) is not None:
+        client.record_traded_market(ticker, side_lower)
 
     return True, trade_details
 
@@ -940,6 +944,13 @@ def process_single_market(
                 ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
             ]:
                 if p_cents is None or not aligned:
+                    continue
+
+                if not getattr(client, "is_side_allowed", lambda t, s: True)(ticker, side):
+                    log.info(
+                        f"🛡️ [SINGLE-SIDE LOCK] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                        f"Opposing side already traded for this contract lifecycle. Strictly blocking dual buy."
+                    )
                     continue
 
                 # Corridor 1: Discount / Underdog Corridor
@@ -1366,7 +1377,7 @@ def process_hourly_market_group(
 
             # Evaluate YES
             yes_p = item["yes_price_cents"]
-            if yes_p is not None:
+            if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                 if is_spot_momentum_aligned("yes", spot_price, target_price):
                     # 1. Discount Corridor (18¢ - 44¢)
                     if min_buy_price <= yes_p <= max_buy_price:
@@ -1476,7 +1487,7 @@ def process_hourly_market_group(
 
             # Evaluate NO
             no_p = item["no_price_cents"]
-            if no_p is not None:
+            if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                 if is_spot_momentum_aligned("no", spot_price, target_price):
                     # 1. Discount Corridor (18¢ - 44¢)
                     if min_buy_price <= no_p <= max_buy_price:
@@ -1590,37 +1601,27 @@ def process_hourly_market_group(
         candidates_to_execute = []
 
         if best_yes and best_no:
-            if best_yes["ticker"] == best_no["ticker"]:
-                # Conflict: Same contract ticker cannot hold both YES and NO
-                # Tiebreaker: Pick the strictly cheaper side; if tied in price, use spot momentum direction
-                if best_yes["price"] < best_no["price"]:
-                    chosen = best_yes
-                    log.info(
-                        f"{LogTag.TIEBREAKER_CHOSEN.value} [{ex_name}] {chosen['ticker']}: "
-                        f"BUY_YES ({best_yes['price']}¢) is cheaper than BUY_NO ({best_no['price']}¢). Picking BUY_YES."
-                    )
-                elif best_no["price"] < best_yes["price"]:
-                    chosen = best_no
-                    log.info(
-                        f"{LogTag.TIEBREAKER_CHOSEN.value} [{ex_name}] {chosen['ticker']}: "
-                        f"BUY_NO ({best_no['price']}¢) is cheaper than BUY_YES ({best_yes['price']}¢). Picking BUY_NO."
-                    )
-                else:
-                    pct_val = best_yes.get("pct_dist") or 0.0
-                    chosen = best_yes if pct_val >= 0 else best_no
-                    log.info(
-                        f"{LogTag.TIEBREAKER_CHOSEN.value} [{ex_name}] {chosen['ticker']}: "
-                        f"YES and NO tied at {chosen['price']}¢. Picking {chosen['side'].upper()} based on spot momentum ({pct_val:+.2f}%)."
-                    )
-                candidates_to_execute.append(chosen)
-            else:
-                # Different strike contracts: Execute DUAL BUY!
+            # Pick single best directional opportunity to eliminate dual-buy synthetic loss risk
+            if best_yes["price"] < best_no["price"]:
+                chosen = best_yes
                 log.info(
-                    f"{LogTag.DUAL_BUY_MATCH.value} [{ex_name}] Hourly Multi-Strike Dual Buy for {symbol}: "
-                    f"Buying YES on {best_yes['ticker']} (@ {best_yes['price']}¢) AND NO on {best_no['ticker']} (@ {best_no['price']}¢)."
+                    f"🎯 [SINGLE-DIRECTION OPPORTUNITY CHOSEN] [{ex_name}] {symbol} Hourly: "
+                    f"BUY_YES on {best_yes['ticker']} ({best_yes['price']}¢) is cheaper than BUY_NO on {best_no['ticker']} ({best_no['price']}¢). Picking BUY_YES."
                 )
-                candidates_to_execute.append(best_yes)
-                candidates_to_execute.append(best_no)
+            elif best_no["price"] < best_yes["price"]:
+                chosen = best_no
+                log.info(
+                    f"🎯 [SINGLE-DIRECTION OPPORTUNITY CHOSEN] [{ex_name}] {symbol} Hourly: "
+                    f"BUY_NO on {best_no['ticker']} ({best_no['price']}¢) is cheaper than BUY_YES on {best_yes['ticker']} ({best_yes['price']}¢). Picking BUY_NO."
+                )
+            else:
+                pct_val = best_yes.get("pct_dist") or 0.0
+                chosen = best_yes if pct_val >= 0 else best_no
+                log.info(
+                    f"🎯 [SINGLE-DIRECTION OPPORTUNITY CHOSEN] [{ex_name}] {symbol} Hourly: "
+                    f"YES and NO tied at {chosen['price']}¢. Picking {chosen['side'].upper()} on {chosen['ticker']} based on spot momentum ({pct_val:+.2f}%)."
+                )
+            candidates_to_execute.append(chosen)
         elif best_yes:
             candidates_to_execute.append(best_yes)
         elif best_no:

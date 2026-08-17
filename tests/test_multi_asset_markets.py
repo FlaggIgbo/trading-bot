@@ -270,7 +270,7 @@ def test_spot_momentum_alignment_multi_asset(side, spot, target, expected):
 # 6. Hourly Multi-Strike Execution for Commodities & Indices
 # ---------------------------------------------------------------------------
 
-def test_hourly_multi_strike_commodity_dual_buy(multi_asset_client, mock_filter):
+def test_hourly_multi_strike_commodity_single_directional(multi_asset_client, mock_filter):
     markets = [
         {"ticker": "KXGOLDH-A", "series_ticker": "KXGOLDH", "floor_strike": 4380.0, "yes_ask_dollars": "0.34", "yes_bid_dollars": "0.32", "no_ask_dollars": "0.68", "no_bid_dollars": "0.66"},
         {"ticker": "KXGOLDH-B", "series_ticker": "KXGOLDH", "floor_strike": 4420.0, "yes_ask_dollars": "0.72", "yes_bid_dollars": "0.70", "no_ask_dollars": "0.30", "no_bid_dollars": "0.28"},
@@ -286,7 +286,9 @@ def test_hourly_multi_strike_commodity_dual_buy(multi_asset_client, mock_filter)
             dry_run=False,
         )
 
-    assert len(multi_asset_client.buys) == 2
+    assert len(multi_asset_client.buys) == 1
+    assert multi_asset_client.buys[0]["ticker"] == "KXGOLDH-B"
+    assert multi_asset_client.buys[0]["side"] == "no"
     assert snaps[0]["tf"] == "1h"
     assert snaps[0]["sym"] == "GOLD"
 

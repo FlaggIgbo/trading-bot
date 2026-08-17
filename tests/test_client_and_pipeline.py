@@ -170,14 +170,15 @@ def test_dummy_client_order_and_risk_lifecycle(dummy_client):
     dummy_client.execute_buy(ticker, "yes", 1, 40)
     assert dummy_client.get_entry_price(ticker) == 40
 
-    # 1. 10m roll winner
+    # 1. 10m bank winner profit (no high-price re-buy)
     with patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=True), \
          patch.object(dummy_client, "execute_liquidation") as mock_liq, \
          patch.object(dummy_client, "execute_buy") as mock_buy:
         res = dummy_client.evaluate_and_execute_10min_strategy(ticker, 72, 26, 74, 28)
-        assert res["action"] == "winner_rolled_rebuy"
+        assert res["action"] == "winner_profit_banked"
+        assert res["profit_locked_cents"] == 32
         mock_liq.assert_called_once_with(ticker, "yes", 1, 72)
-        mock_buy.assert_called_once_with(ticker, "yes", 1, 74)
+        mock_buy.assert_not_called()
 
     # 2. Cancellation failure prevents execution
     with patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=False), \
@@ -319,6 +320,128 @@ def test_cancel_order_safe_handles_404_cleanly():
     with patch.object(client.session, "delete", return_value=mock_resp):
         # Should return True without raising or throwing error logs
         assert client.cancel_order_safe("23b665a7-dc84-4610-a618-e3f41d0b5890") is True
+
+
+def test_strict_single_side_market_lock(dummy_client):
+    ticker = "KXBTC15M-SINGLE-LOCK-TEST"
+    assert dummy_client.is_side_allowed(ticker, "yes") is True
+    assert dummy_client.is_side_allowed(ticker, "no") is True
+
+    # Record trade on YES
+    dummy_client.record_traded_market(ticker, "yes")
+    assert dummy_client.get_traded_market_side(ticker) == "yes"
+    assert dummy_client.is_side_allowed(ticker, "yes") is True
+    assert dummy_client.is_side_allowed(ticker, "no") is False
+
+    # Clear market
+    dummy_client.clear_traded_market(ticker)
+    assert dummy_client.is_side_allowed(ticker, "no") is True
+
+
+def test_settlement_revenue_parsing_kalshi_v2():
+    mock_key = MagicMock()
+    mock_key.sign.return_value = b"mock_signature"
+    client = KalshiClient(api_key_id="k", private_key=mock_key)
+
+    mock_settlements = {
+        "settlements": [
+            {
+                "ticker": "KXGOLD15M-WINNER-YES",
+                "market_result": "yes",
+                "yes_count_fp": "1.00",
+                "no_count_fp": "0.00",
+                "yes_total_cost_dollars": "0.3500",
+                "no_total_cost_dollars": "0.0000",
+                "revenue": 0,
+                "value": 100,
+                "settled_time": "2026-08-17T15:45:00Z",
+            },
+            {
+                "ticker": "KXWTI15M-WINNER-NO",
+                "market_result": "no",
+                "yes_count_fp": "0.00",
+                "no_count_fp": "1.00",
+                "yes_total_cost_dollars": "0.0000",
+                "no_total_cost_dollars": "0.2800",
+                "revenue": 0,
+                "value": 0,
+                "settled_time": "2026-08-17T15:45:00Z",
+            },
+            {
+                "ticker": "KXBTC15M-LOSER-YES",
+                "market_result": "no",
+                "yes_count_fp": "1.00",
+                "no_count_fp": "0.00",
+                "yes_total_cost_dollars": "0.4000",
+                "no_total_cost_dollars": "0.0000",
+                "revenue": 0,
+                "value": 0,
+                "settled_time": "2026-08-17T15:45:00Z",
+            },
+        ]
+    }
+
+    with patch.object(client, "get_balance", return_value={"balance_dollars": 10.0, "portfolio_value": 0}), \
+         patch.object(client, "get_positions", return_value={"positions": []}), \
+         patch.object(client, "get_settlements", return_value=mock_settlements):
+        summary = client.get_portfolio_pnl_summary()
+
+    records = summary["settlements"]
+    assert len(records) == 3
+
+    # Winner YES: revenue = $1.00, cost = $0.35, pnl = +$0.65
+    assert records[0]["revenue_dollars"] == 1.00
+    assert records[0]["cost_dollars"] == 0.35
+    assert records[0]["pnl_dollars"] == 0.65
+
+    # Winner NO: revenue = $1.00, cost = $0.28, pnl = +$0.72
+    assert records[1]["revenue_dollars"] == 1.00
+    assert records[1]["cost_dollars"] == 0.28
+    assert records[1]["pnl_dollars"] == 0.72
+
+    # Loser YES: revenue = $0.00, cost = $0.40, pnl = -$0.40
+    assert records[2]["revenue_dollars"] == 0.00
+    assert records[2]["cost_dollars"] == 0.40
+    assert records[2]["pnl_dollars"] == -0.40
+
+    assert summary["total_settled_revenue_dollars"] == 2.00
+    assert summary["total_settled_cost_dollars"] == 1.03
+    assert summary["total_realized_pnl_dollars"] == 0.97
+
+
+def test_passive_maker_pricing_strictly_below_ask():
+    mock_key = MagicMock()
+    mock_key.sign.return_value = b"mock_signature"
+    client = KalshiClient(api_key_id="k", private_key=mock_key)
+    ticker = "KXBTC15M-MAKER-TEST"
+
+    with patch.object(client, "post", return_value={"order_id": "ord_123", "fill_count": 0}) as mock_post:
+        # Ask is 25¢, Maker bid is 20¢ -> Limit bid must be 21¢ (strictly < 25¢)
+        res = client.buy_and_set_take_profit(
+            ticker=ticker,
+            side="yes",
+            buy_price_cents=25,
+            maker_bid_cents=20,
+            take_profit_cents=62,
+        )
+        assert res["buy_price_cents"] == 21
+        payload = mock_post.call_args[1]["payload"]
+        assert payload["price"] == "0.2100"
+        assert payload["post_only"] is True
+
+        # Ask is 30¢, No bid given -> Limit bid must be 29¢ (strictly < 30¢)
+        res2 = client.buy_and_set_take_profit(
+            ticker=ticker,
+            side="yes",
+            buy_price_cents=30,
+            maker_bid_cents=None,
+            take_profit_cents=62,
+        )
+        assert res2["buy_price_cents"] == 29
+        payload2 = mock_post.call_args[1]["payload"]
+        assert payload2["price"] == "0.2900"
+        assert payload2["post_only"] is True
+
 
 
 

@@ -83,6 +83,41 @@ class BaseTradingClient(ABC):
         self._entry_prices: dict[str, int] = {}
         # Keeps track of the intended take-profit price for this position (e.g. 88¢ or 62¢)
         self._target_tps: dict[str, int] = {}
+        # Strict Single-Side Market Lock: Maps ticker -> side ('yes' or 'no') to prevent dual buys
+        self._traded_markets: dict[str, str] = {}
+
+    @property
+    def traded_markets(self) -> dict[str, str]:
+        if not hasattr(self, "_traded_markets") or self._traded_markets is None:
+            self._traded_markets = {}
+        return self._traded_markets
+
+    def record_traded_market(self, ticker: str, side: str) -> None:
+        """Records that ticker has been traded on side during the current market lifecycle."""
+        self.traded_markets[ticker] = side.lower()
+
+    def get_traded_market_side(self, ticker: str) -> str | None:
+        """Returns the side already traded for this ticker, or None."""
+        return self.traded_markets.get(ticker)
+
+    def is_side_allowed(self, ticker: str, side: str) -> bool:
+        """
+        Strict Single-Side Market Lock:
+        If ticker was already traded on the opposing side during this lifecycle, returns False.
+        Prevents buying YES and NO on the same contract (synthetic loss).
+        """
+        side_clean = side.lower()
+        existing_side = self.get_traded_market_side(ticker)
+        if existing_side is not None and existing_side != side_clean:
+            return False
+        pos = self.get_market_position(ticker)
+        if pos is not None and pos.get("side", "").lower() != side_clean:
+            return False
+        return True
+
+    def clear_traded_market(self, ticker: str) -> None:
+        """Clears traded market record for ticker (e.g. on new contract rollover)."""
+        self.traded_markets.pop(ticker, None)
 
     @property
     def profit_floors(self) -> dict[str, int]:
@@ -269,67 +304,47 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Bid: {bid_price}¢ | Ask: {ask_price}¢ | Status: {pnl_label}"
         )
 
-        # 1. Winning Position Roll: If position reached >= 70¢ or profit >= 15¢
-        # Sell at Bid to bank realized profit, then re-buy at Ask to let the new position run to 100¢!
+        # 1. Winning Position Profit Bank: If position reached >= 70¢ or profit >= 15¢
+        # Sell at Bid to bank realized profit in cash. Keep the cash in balance (DO NOT re-buy at 85¢-98¢ into negative EV).
         if bid_price >= win_threshold_cents or profit_cents >= 15:
-            rebuy_price = ask_price if ask_price is not None else min(99, bid_price + 1)
-
             if dry_run:
                 log.info(
                     f"{LogTag.DRY_RUN_WINNER_ROLLED.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
-                    f"WOULD SELL AT {bid_price}¢ (BANK +{profit_cents}¢ PROFIT) & RE-BUY AT {rebuy_price}¢ TO RUN TO 100¢ SETTLEMENT."
+                    f"WOULD SELL AT {bid_price}¢ (BANK +{profit_cents}¢ PROFIT IN CASH). Keeping profit safely in balance."
                 )
                 return {
                     "triggered": True,
                     "side": side,
-                    "action": "winner_rolled_rebuy",
+                    "action": "winner_profit_banked",
                     "exit_price": bid_price,
                     "profit_locked_cents": profit_cents,
-                    "rebuy_price_cents": rebuy_price,
                 }
 
             # Step 1: Cancel resting TP orders with strict verification
             cleared = self.cancel_and_verify_resting_orders(ticker)
             if not cleared:
                 log.error(
-                    f"❌ [{self.exchange_name}] Cannot roll winner for {ticker}: "
-                    f"Failed to clear resting orders. Aborting roll to avoid locked position errors."
+                    f"❌ [{self.exchange_name}] Cannot bank profit for {ticker}: "
+                    f"Failed to clear resting orders. Aborting liquidation to avoid locked position errors."
                 )
                 return {"triggered": False, "error": "resting_orders_not_cleared"}
 
             # Step 2: Liquidate current position to bank profit in cash
             self.execute_liquidation(ticker, side, position_count, bid_price)
             self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
 
-            # Step 3: Re-buy at Ask and verify fill status before recording entry price
-            try:
-                buy_res = self.execute_buy(ticker, side, position_count, rebuy_price)
-                fill_count = float(
-                    buy_res.get("fill_count")
-                    or buy_res.get("order", {}).get("fill_count_fp")
-                    or (1 if buy_res.get("status") == "bought" else 0)
-                )
-                if fill_count > 0:
-                    self.set_entry_price(ticker, rebuy_price, side=side, count=int(round(fill_count)))
-                    log.info(
-                        f"{LogTag.WINNER_ROLLED.value} [{self.exchange_name}] Successfully rolled winner for {ticker} ({side.upper()}): "
-                        f"Sold at {bid_price}¢ (+{profit_cents}¢ profit banked!) and confirmed re-buy fill of {int(round(fill_count))} contract(s) at {rebuy_price}¢ to run to 100¢ ($1.00 payout)!"
-                    )
-                else:
-                    log.warning(
-                        f"⏳ [{self.exchange_name}] Winner roll re-buy order for {ticker} is resting at {rebuy_price}¢ (unfilled). "
-                        f"Entry price will be recorded upon fill confirmation."
-                    )
-            except Exception as buy_err:
-                log.error(f"❌ [{self.exchange_name}] Failed to re-buy {ticker} after banking profit: {buy_err}")
+            log.info(
+                f"💰 [WINNER PROFIT BANKED] [{self.exchange_name}] Successfully banked profit for {ticker} ({side.upper()}): "
+                f"Sold at {bid_price}¢ (+{profit_cents}¢ profit banked!). Kept cash safely in balance without high-price re-buy."
+            )
 
             return {
                 "triggered": True,
                 "side": side,
-                "action": "winner_rolled_rebuy",
+                "action": "winner_profit_banked",
                 "exit_price": bid_price,
                 "profit_locked_cents": profit_cents,
-                "rebuy_price_cents": rebuy_price,
             }
 
         # 2. Stop-Loss Check: If loss >= stop_loss_threshold_cents OR bid_price <= price_floor

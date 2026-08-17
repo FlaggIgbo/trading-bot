@@ -491,17 +491,37 @@ class KalshiClient(BaseTradingClient):
 
         for s in raw_settlements:
             ticker = s.get("ticker", "UNKNOWN")
-            result = s.get("market_result")
+            result = str(s.get("market_result") or "").lower()
             settled_time = s.get("settled_time")
 
-            # Revenue / payout
+            # Parse counts from either string float (_fp) or int
+            y_count_raw = s.get("yes_count_fp") or s.get("yes_count") or 0
+            n_count_raw = s.get("no_count_fp") or s.get("no_count") or 0
+            try:
+                y_count = float(y_count_raw)
+            except (ValueError, TypeError):
+                y_count = 0.0
+            try:
+                n_count = float(n_count_raw)
+            except (ValueError, TypeError):
+                n_count = 0.0
+
+            # Revenue / payout:
+            # On Kalshi V2, s.get("revenue") is 0 for expired events.
+            # True payout is $1.00 per winning contract held at expiration.
             rev_dollars = s.get("revenue_dollars")
             rev_cents = s.get("revenue")
-            revenue = (
-                float(rev_dollars)
-                if rev_dollars is not None
-                else ((rev_cents / 100.0) if rev_cents is not None else 0.0)
-            )
+            if rev_dollars is not None and float(rev_dollars) > 0:
+                revenue = float(rev_dollars)
+            elif rev_cents is not None and float(rev_cents) > 0:
+                revenue = float(rev_cents) / 100.0
+            else:
+                if result == "yes":
+                    revenue = round(y_count * 1.00, 4)
+                elif result == "no":
+                    revenue = round(n_count * 1.00, 4)
+                else:
+                    revenue = 0.0
 
             # Costs
             y_cost_d = s.get("yes_total_cost_dollars")
@@ -530,8 +550,8 @@ class KalshiClient(BaseTradingClient):
             settlement_records.append({
                 "ticker": ticker,
                 "market_result": result,
-                "yes_count": s.get("yes_count", 0),
-                "no_count": s.get("no_count", 0),
+                "yes_count": int(round(y_count)),
+                "no_count": int(round(n_count)),
                 "revenue_dollars": round(revenue, 2),
                 "cost_dollars": round(total_cost, 2),
                 "pnl_dollars": round(pnl, 2),
@@ -921,17 +941,21 @@ class KalshiClient(BaseTradingClient):
         """
         side_clean = side.lower()
 
-        # Taker Buy Execution Buffer (ask + 1¢):
-        # Adding +1¢ buffer to current ask ensures immediate taker fill even if ask ticks up by 1¢ during network latency.
-        if maker_bid_cents is not None:
-            effective_buy_cents = min(buy_price_cents, maker_bid_cents + 1)
+        # Passive Maker Buy Pricing (strictly <= ask - 1¢):
+        # We place our limit bid at existing Bid + 1¢ (or 1¢ below Ask if no Bid exists).
+        # This guarantees the order rests on the order book as a Maker order, earning maker rebates
+        # and avoiding aggressive taker fee friction.
+        if maker_bid_cents is not None and maker_bid_cents < buy_price_cents:
+            effective_buy_cents = min(buy_price_cents - 1, maker_bid_cents + 1)
+        elif maker_bid_cents is not None:
+            effective_buy_cents = max(1, min(buy_price_cents - 1, maker_bid_cents))
         else:
-            effective_buy_cents = min(99, buy_price_cents + 1)
+            effective_buy_cents = max(1, buy_price_cents - 1)
 
         timeout_tag = f" | Timeout: {buy_order_timeout_seconds}s" if buy_order_timeout_seconds > 0 else ""
         log.info(
             f"{LogTag.TRADE_EXECUTION.value} Market: {ticker} | Side: {side_clean.upper()} | "
-            f"Ask: {buy_price_cents}¢ | Order Limit (Ask + 1¢): {effective_buy_cents}¢{timeout_tag} | Target TP: {take_profit_cents}¢"
+            f"Ask: {buy_price_cents}¢ | Maker Limit Bid: {effective_buy_cents}¢{timeout_tag} | Target TP: {take_profit_cents}¢"
         )
 
         now_sec = int(time.time())
@@ -954,6 +978,7 @@ class KalshiClient(BaseTradingClient):
             "count": str(count),
             "price": buy_price_str,
             "time_in_force": "good_till_canceled",
+            "post_only": True,
             "self_trade_prevention_type": "taker_at_cross",
         }
         if buy_order_timeout_seconds > 0:
