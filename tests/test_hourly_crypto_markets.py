@@ -73,7 +73,7 @@ def test_hourly_multi_strike_dual_and_tiebreaker(hourly_client):
         {"ticker": "KXBTCD-A", "series_ticker": "KXBTCD", "floor_strike": 70000.0, "yes_ask_dollars": "0.34", "yes_bid_dollars": "0.32", "no_ask_dollars": "0.68", "no_bid_dollars": "0.66"},
         {"ticker": "KXBTCD-B", "series_ticker": "KXBTCD", "floor_strike": 74000.0, "yes_ask_dollars": "0.72", "yes_bid_dollars": "0.70", "no_ask_dollars": "0.30", "no_bid_dollars": "0.28"},
     ]
-    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime.now(timezone.utc), 0, {"BTC": 71000.0}, False)
+    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"BTC": 71000.0}, False)
     
     assert len(hourly_client.buys) == 2
     assert snaps[0]["tf"] == "1h"
@@ -93,7 +93,7 @@ def test_hourly_lifecycle_cut_losses(hourly_client, minute, init_pos, init_price
         "yes_ask_dollars": "0.08", "yes_bid_dollars": "0.06", "no_ask_dollars": "0.94", "no_bid_dollars": "0.92"
     }]
     
-    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime.now(timezone.utc), minute, {"BTC": 71000.0}, False)
+    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, minute, 0, tzinfo=timezone.utc), minute, {"BTC": 71000.0}, False)
     
     assert len(hourly_client.liquidations) == 1
     assert hourly_client.liquidations[0]["ticker"] == expected_liq

@@ -57,6 +57,18 @@ DEFAULT_BUY_ORDER_TIMEOUT_SECONDS = int(
     os.getenv("KALSHI_BUY_ORDER_EXPIRATION_SECONDS", os.getenv("BUY_ORDER_EXPIRATION_SECONDS", "45"))
 )
 
+
+def generate_safe_client_order_id(prefix: str, ticker: str, timestamp_ms: int | None = None) -> str:
+    """
+    Generates a sanitized client_order_id for Kalshi orders.
+    Kalshi strictly requires alphanumeric, hyphen, and underscore characters ([a-zA-Z0-9_-]).
+    Strike tickers containing decimal points (e.g. DOGE 'T0.0699999', XRP 'T0.9999', or SOL 'T99.9999')
+    will cause Kalshi to reject the order with 400 invalid_parameters if dots '.' are included.
+    """
+    safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
+    ts = timestamp_ms or int(time.time() * 1000)
+    return f"{prefix}_{safe_ticker}_{ts}"
+
 # ---------------------------------------------------------------------------
 # API Base Endpoints
 # ---------------------------------------------------------------------------
@@ -692,7 +704,7 @@ class KalshiClient(BaseTradingClient):
 
         order_payload = {
             "ticker": ticker,
-            "client_order_id": f"{action_clean}_{side_clean}_{ticker}_{now_ms}",
+            "client_order_id": generate_safe_client_order_id(f"{action_clean}_{side_clean}", ticker, now_ms),
             "side": event_side,
             "count": str(count),
             "price": f"0.{clamped_cents:02d}00",
@@ -814,7 +826,7 @@ class KalshiClient(BaseTradingClient):
 
         sell_payload = {
             "ticker": ticker,
-            "client_order_id": f"sell_tp_{side_clean}_{ticker}_{now_ms}",
+            "client_order_id": generate_safe_client_order_id(f"sell_tp_{side_clean}", ticker, now_ms),
             "side": sell_side,
             "count": str(count),
             "price": sell_price_str,
@@ -880,7 +892,7 @@ class KalshiClient(BaseTradingClient):
         # Submit Buy Order via Kalshi V2 Endpoint (/portfolio/events/orders)
         buy_payload = {
             "ticker": ticker,
-            "client_order_id": f"buy_{side_clean}_{ticker}_{now_ms}",
+            "client_order_id": generate_safe_client_order_id(f"buy_{side_clean}", ticker, now_ms),
             "side": buy_side,
             "count": str(count),
             "price": buy_price_str,
@@ -1110,7 +1122,7 @@ class KalshiClient(BaseTradingClient):
         if side_clean == "yes":
             sell_payload = {
                 "ticker": ticker,
-                "client_order_id": f"liq_yes_{ticker}_{now_ms}",
+                "client_order_id": generate_safe_client_order_id("liq_yes", ticker, now_ms),
                 "side": "ask",
                 "count": str(count),
                 "price": "0.0100",
@@ -1120,7 +1132,7 @@ class KalshiClient(BaseTradingClient):
         else:
             sell_payload = {
                 "ticker": ticker,
-                "client_order_id": f"liq_no_{ticker}_{now_ms}",
+                "client_order_id": generate_safe_client_order_id("liq_no", ticker, now_ms),
                 "side": "bid",
                 "count": str(count),
                 "price": "0.9900",
@@ -1143,12 +1155,12 @@ class KalshiClient(BaseTradingClient):
                 if side_clean == "yes":
                     top_bid = parse_cents(mkt_detail.get("yes_bid_dollars"), mkt_detail.get("yes_bid")) or 1
                     sell_payload["price"] = f"0.{max(1, top_bid):02d}00"
-                    sell_payload["client_order_id"] = f"liq_retry_yes_{ticker}_{retry_ms}"
+                    sell_payload["client_order_id"] = generate_safe_client_order_id("liq_retry_yes", ticker, retry_ms)
                 else:
                     top_no_bid = parse_cents(mkt_detail.get("no_bid_dollars"), mkt_detail.get("no_bid")) or 1
                     yes_equiv = min(99, max(1, 100 - top_no_bid))
                     sell_payload["price"] = f"0.{yes_equiv:02d}00"
-                    sell_payload["client_order_id"] = f"liq_retry_no_{ticker}_{retry_ms}"
+                    sell_payload["client_order_id"] = generate_safe_client_order_id("liq_retry_no", ticker, retry_ms)
 
                 sell_payload["time_in_force"] = "immediate_or_cancel"
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
@@ -1178,7 +1190,7 @@ class KalshiClient(BaseTradingClient):
 
         buy_payload = {
             "ticker": ticker,
-            "client_order_id": f"rebuy_{side_clean}_{ticker}_{now_ms}",
+            "client_order_id": generate_safe_client_order_id(f"rebuy_{side_clean}", ticker, now_ms),
             "side": event_side,
             "count": str(count),
             "price": price_str,

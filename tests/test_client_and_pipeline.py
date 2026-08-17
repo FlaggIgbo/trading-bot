@@ -202,3 +202,40 @@ def test_kalshi_client_caching_and_order_limits():
         assert client.has_resting_take_profit_order("KXBTC15M-TEST") is True
         assert m_pos.call_count == 1
         assert m_ord.call_count == 1
+
+
+def test_generate_safe_client_order_id():
+    from signals.kalshi_client import generate_safe_client_order_id
+    # Ensure dots and illegal characters are sanitized
+    cid = generate_safe_client_order_id("buy_no", "KXDOGED-26AUG1623-T0.0699999", 1786845635000)
+    assert cid == "buy_no_KXDOGED-26AUG1623-T0_0699999_1786845635000"
+    assert "." not in cid
+    assert cid.startswith("buy_no_")
+
+    cid_tp = generate_safe_client_order_id("sell_tp_yes", "KXXRPD-26AUG1623-T0.9999", 1786845635000)
+    assert cid_tp == "sell_tp_yes_KXXRPD-26AUG1623-T0_9999_1786845635000"
+    assert "." not in cid_tp
+    assert "sell_tp_" in cid_tp
+
+
+def test_kalshi_order_payload_sanitization():
+    client = KalshiClient(api_key_id="k", private_key=MagicMock())
+    ticker = "KXDOGED-26AUG1623-T0.0699999"
+
+    with patch.object(client, "post", return_value={"order_id": "ord_123"}) as mock_post:
+        client.buy_and_set_take_profit(
+            ticker=ticker,
+            side="no",
+            buy_price_cents=62,
+            take_profit_cents=88,
+            count=1,
+            maker_bid_cents=56,
+        )
+        assert mock_post.call_count == 1
+        payload = mock_post.call_args[1]["payload"]
+        assert "." not in payload["client_order_id"]
+        assert payload["ticker"] == ticker
+        assert payload["side"] == "ask"
+        assert payload["price"] == "0.4300"
+        assert payload["count"] == "1"
+
