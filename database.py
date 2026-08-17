@@ -231,11 +231,12 @@ def save_active_position_cost(
     tf: str | None = None,
     client_order_id: str | None = None,
     tp_order_id: str | None = None,
+    target_tp_cents: int | None = None,
 ) -> bool:
     """
     Persists an active trade cost-basis into MongoDB Atlas 'active_positions' collection.
     Tagged with 'tf' ('15m' or '1h') to distinguish timeframes.
-    Ensures that if the Render worker restarts/redeploys, exact entry price is preserved.
+    Ensures that if the Render worker restarts/redeploys, exact entry price and intended TP are preserved.
     """
     if not ticker or entry_price_cents <= 0:
         return False
@@ -261,6 +262,8 @@ def save_active_position_cost(
             set_doc["client_order_id"] = client_order_id
         if tp_order_id:
             set_doc["tp_order_id"] = tp_order_id
+        if target_tp_cents is not None:
+            set_doc["target_tp_cents"] = target_tp_cents
 
         col.update_one(
             {"ticker": ticker, "ex": ex_name},
@@ -292,6 +295,29 @@ def get_active_position_cost(ticker: str, ex: str = "kalshi") -> int | None:
             return int(doc["entry_price_cents"])
     except Exception as err:
         log.debug(f"Could not retrieve active position cost for {ticker} from MongoDB: {err}")
+
+    return None
+
+
+def get_active_position_target_tp(ticker: str, ex: str = "kalshi") -> int | None:
+    """
+    Retrieves the persisted target take-profit price for a ticker from MongoDB Atlas upon worker restart.
+    Returns integer cents (1-99) or None if not found / MongoDB unavailable.
+    """
+    if not ticker:
+        return None
+
+    col = get_mongo_collection("active_positions")
+    if col is None:
+        return None
+
+    ex_name = str(ex or "kalshi").lower()
+    try:
+        doc = col.find_one({"ticker": ticker, "ex": ex_name})
+        if doc and "target_tp_cents" in doc:
+            return int(doc["target_tp_cents"])
+    except Exception as err:
+        log.debug(f"Could not retrieve target TP for {ticker} from MongoDB: {err}")
 
     return None
 

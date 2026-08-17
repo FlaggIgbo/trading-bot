@@ -81,6 +81,8 @@ class BaseTradingClient(ABC):
         self._profit_floors: dict[str, int] = {}
         # Keeps track of the exact price we paid when entering a contract (e.g. 52¢)
         self._entry_prices: dict[str, int] = {}
+        # Keeps track of the intended take-profit price for this position (e.g. 88¢ or 62¢)
+        self._target_tps: dict[str, int] = {}
 
     @property
     def profit_floors(self) -> dict[str, int]:
@@ -110,6 +112,12 @@ class BaseTradingClient(ABC):
             self._entry_prices = {}
         return self._entry_prices
 
+    @property
+    def target_tps(self) -> dict[str, int]:
+        if not hasattr(self, "_target_tps") or self._target_tps is None:
+            self._target_tps = {}
+        return self._target_tps
+
     def get_entry_price(self, ticker: str) -> int | None:
         """
         Returns recorded buy entry price in cents for ticker.
@@ -127,6 +135,27 @@ class BaseTradingClient(ABC):
             log.debug(f"Could not load entry price for {ticker} from DB: {err}")
         return None
 
+    def get_target_tp(self, ticker: str) -> int | None:
+        """
+        Returns intended take-profit price in cents for ticker.
+        Checks in-memory cache first, then MongoDB Atlas active_positions collection upon restart.
+        """
+        if ticker in self.target_tps:
+            return self.target_tps[ticker]
+        try:
+            from database import get_active_position_target_tp
+            db_tp = get_active_position_target_tp(ticker, getattr(self, "exchange_name", "kalshi"))
+            if db_tp is not None:
+                self._target_tps[ticker] = db_tp
+                return db_tp
+        except Exception as err:
+            log.debug(f"Could not load target TP for {ticker} from DB: {err}")
+        return None
+
+    def set_target_tp(self, ticker: str, tp_cents: int) -> None:
+        """Sets or updates the intended take-profit target in cents for ticker."""
+        self.target_tps[ticker] = tp_cents
+
     def set_entry_price(
         self,
         ticker: str,
@@ -135,9 +164,12 @@ class BaseTradingClient(ABC):
         count: int = 1,
         client_order_id: str | None = None,
         tp_order_id: str | None = None,
+        take_profit_cents: int | None = None,
     ) -> None:
-        """Records the exact entry price in cents in memory and MongoDB Atlas."""
+        """Records the exact entry price and target TP in cents in memory and MongoDB Atlas."""
         self.entry_prices[ticker] = price_cents
+        if take_profit_cents is not None:
+            self.target_tps[ticker] = take_profit_cents
         try:
             from database import save_active_position_cost
             save_active_position_cost(
@@ -148,13 +180,15 @@ class BaseTradingClient(ABC):
                 ex=getattr(self, "exchange_name", "kalshi"),
                 client_order_id=client_order_id,
                 tp_order_id=tp_order_id,
+                target_tp_cents=take_profit_cents,
             )
         except Exception as err:
             log.debug(f"Could not persist entry price for {ticker} to DB: {err}")
 
     def clear_entry_price(self, ticker: str) -> None:
-        """Clears recorded entry price from memory and MongoDB Atlas."""
+        """Clears recorded entry price and target TP from memory and MongoDB Atlas."""
         self.entry_prices.pop(ticker, None)
+        self.target_tps.pop(ticker, None)
         try:
             from database import remove_active_position_cost
             remove_active_position_cost(ticker, getattr(self, "exchange_name", "kalshi"))

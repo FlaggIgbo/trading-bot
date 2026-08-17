@@ -238,4 +238,72 @@ def test_kalshi_order_payload_sanitization():
         assert payload["side"] == "ask"
         assert payload["price"] == "0.4300"
         assert payload["count"] == "1"
+        assert client.get_target_tp(ticker) == 88
+
+
+def test_target_tp_tracking_and_persistence():
+    client = KalshiClient(api_key_id="k", private_key=MagicMock())
+    ticker = "KXNEAR15M-TEST"
+
+    with patch("database.save_active_position_cost") as mock_save:
+        client.set_entry_price(ticker, price_cents=63, side="no", count=1, take_profit_cents=88)
+        assert client.get_entry_price(ticker) == 63
+        assert client.get_target_tp(ticker) == 88
+        assert mock_save.call_count == 1
+        assert mock_save.call_args[1]["target_tp_cents"] == 88
+
+    client.clear_entry_price(ticker)
+    assert client.get_entry_price(ticker) is None
+    assert client.get_target_tp(ticker) is None
+
+
+def test_resolve_safe_take_profit_for_position():
+    from main import resolve_safe_take_profit_for_position
+    client = KalshiClient(api_key_id="k", private_key=MagicMock())
+    filters = {
+        "tp": 62,
+        "momentum_tp": 88,
+        "momentum_min_buy": 56,
+    }
+
+    # Case 1: Recorded target TP exists (e.g. 88¢ from momentum trade)
+    ticker1 = "KXNEAR15M-MOMENTUM"
+    client.set_entry_price(ticker1, price_cents=63, side="no", take_profit_cents=88)
+    assert resolve_safe_take_profit_for_position(ticker1, client, filters) == 88
+
+    # Case 2: No explicit target TP, but entry price >= 56¢ (inferred momentum)
+    ticker2 = "KXSOL15M-INFERRED-MOM"
+    client.set_entry_price(ticker2, price_cents=58, side="yes")
+    assert resolve_safe_take_profit_for_position(ticker2, client, filters) == 88
+
+    # Case 3: Discount entry (e.g. 25¢)
+    ticker3 = "KXBTC15M-DISCOUNT"
+    client.set_entry_price(ticker3, price_cents=25, side="yes")
+    assert resolve_safe_take_profit_for_position(ticker3, client, filters) == 62
+
+    # Case 4: Entry price is high (e.g. 65¢) without explicit TP, TP must never be <= entry price
+    ticker4 = "KXETH15M-HIGH-ENTRY"
+    client.set_entry_price(ticker4, price_cents=65, side="no")
+    safe_tp = resolve_safe_take_profit_for_position(ticker4, client, filters)
+    assert safe_tp > 65
+    assert safe_tp == 88
+
+
+def test_place_take_profit_order_safety_guard():
+    client = KalshiClient(api_key_id="k", private_key=MagicMock())
+    ticker = "KXNEAR15M-GUARD-TEST"
+    client.set_entry_price(ticker, price_cents=63, side="no")
+
+    with patch.object(client, "post", return_value={"order_id": "tp_123"}) as mock_post:
+        # Attempt to place TP at 62¢ on a 63¢ entry
+        res = client.place_take_profit_order(ticker, side="no", count=1, take_profit_cents=62)
+        assert res == {"order_id": "tp_123"}
+        assert mock_post.call_count == 1
+        payload = mock_post.call_args[1]["payload"]
+        # NO trade: ask price for YES is (100 - TP). TP should have been auto-adjusted to 88¢ or (63+5=68) -> (100 - 88 = 12¢ or 100 - 68 = 32¢)
+        # It must NOT be (100 - 62 = 38¢) which would sell NO at 62¢!
+        assert payload["price"] != "0.3800"
+        # TP was adjusted to 88¢, so price for YES bid is 100 - 88 = 12¢
+        assert payload["price"] == "0.1200"
+
 

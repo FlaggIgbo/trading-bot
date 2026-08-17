@@ -479,6 +479,34 @@ def _execute_buy_flow(
     return True, trade_details
 
 
+def resolve_safe_take_profit_for_position(
+    ticker: str,
+    client: BaseTradingClient,
+    dynamic_filters: dict,
+) -> int:
+    """
+    Resolves the intended and safe Take-Profit target (cents) for an active position:
+    1. Checks recorded target_tp from order execution / MongoDB.
+    2. Falls back to momentum_tp (88¢) if entry price was in momentum corridor (>= momentum_min_buy or >= 50¢).
+    3. Falls back to discount tp (62¢).
+    4. Strict invariant: safe_tp must ALWAYS be strictly greater than entry_price.
+    """
+    pos_entry = client.get_entry_price(ticker)
+    intended_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
+
+    if intended_tp is not None:
+        effective_tp = intended_tp
+    elif pos_entry is not None and pos_entry >= dynamic_filters.get("momentum_min_buy", 56):
+        effective_tp = int(dynamic_filters.get("momentum_tp", 88))
+    else:
+        effective_tp = int(dynamic_filters.get("tp", 62))
+
+    if pos_entry is not None and effective_tp <= pos_entry:
+        effective_tp = min(99, max(pos_entry + 5, int(dynamic_filters.get("momentum_tp", 88))))
+
+    return effective_tp
+
+
 def process_single_market(
     market: dict,
     is_trading_interval: bool,
@@ -700,11 +728,16 @@ def process_single_market(
         elif pos is not None:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
             if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
+                safe_tp = resolve_safe_take_profit_for_position(
+                    ticker=ticker,
+                    client=client,
+                    dynamic_filters=dynamic_filters,
+                )
                 client.place_take_profit_order(
                     ticker=ticker,
                     side=pos["side"],
                     count=pos["count"],
-                    take_profit_cents=take_profit_cents,
+                    take_profit_cents=safe_tp,
                 )
         elif client.has_existing_position_or_order(ticker):
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold an active position or resting order for {ticker}. Skipping buy.")
@@ -1111,11 +1144,16 @@ def process_hourly_market_group(
                 pos = client.get_market_position(ticker)
                 has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
                 if pos is not None and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
+                    safe_tp = resolve_safe_take_profit_for_position(
+                        ticker=ticker,
+                        client=client,
+                        dynamic_filters=dynamic_filters,
+                    )
                     client.place_take_profit_order(
                         ticker=ticker,
                         side=pos["side"],
                         count=pos["count"],
-                        take_profit_cents=take_profit_cents,
+                        take_profit_cents=safe_tp,
                     )
                 continue
 

@@ -817,6 +817,16 @@ class KalshiClient(BaseTradingClient):
         side_clean = side.lower()
         now_ms = int(time.time() * 1000)
 
+        # Safeguard: Take-Profit limit sell must NEVER be placed <= entry price (which would cross the spread / cause instant loss)
+        entry_price = self.get_entry_price(ticker)
+        if entry_price and take_profit_cents <= entry_price:
+            safe_tp = min(99, max(entry_price + 5, 88 if entry_price >= 50 else 62))
+            log.warning(
+                f"⚠️ [TAKE-PROFIT GUARD] Attempted to place TP at {take_profit_cents}¢ <= entry price {entry_price}¢ "
+                f"on {ticker}! Auto-adjusting TP to {safe_tp}¢."
+            )
+            take_profit_cents = safe_tp
+
         if side_clean == "yes":
             sell_side = "ask"
             sell_price_str = f"0.{take_profit_cents:02d}00"
@@ -943,7 +953,7 @@ class KalshiClient(BaseTradingClient):
             else None
         )
 
-        # Record the exact price we paid into our bot's memory and MongoDB
+        # Record the exact price we paid and target TP into our bot's memory and MongoDB
         self.set_entry_price(
             ticker=ticker,
             price_cents=effective_buy_cents,
@@ -951,6 +961,7 @@ class KalshiClient(BaseTradingClient):
             count=count,
             client_order_id=client_order_id,
             tp_order_id=tp_order_id,
+            take_profit_cents=take_profit_cents,
         )
 
         return {
