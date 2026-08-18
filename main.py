@@ -47,6 +47,9 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from database import (
+    calculate_dynamic_contracts_count,
+    evaluate_ensemble_consensus,
+    get_asset_settlement_streak,
     get_dynamic_filter_for_market,
     get_dynamic_price_filter_map,
     is_default_exploration_window,
@@ -58,7 +61,7 @@ from database import (
 from signals.base_client import BaseTradingClient, LogTag
 
 # from signals.gemini_client import GeminiClient
-from signals.kalshi_client import KalshiClient
+from signals.kalshi_client import CFBENCHMARKS_CRYPTO_INDEX_MAP, KalshiClient
 
 # Set up clean, human-readable logging format
 logging.basicConfig(
@@ -67,6 +70,43 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+# In-memory price oscillation / lead change tracker for market choppiness filtering
+_MARKET_LEAD_CHANGES: dict[str, list[dict]] = defaultdict(list)
+
+
+def record_market_price_snapshot(ticker: str, yes_price: int, timestamp: float | None = None) -> None:
+    """Records top-of-book YES price to track price oscillation / lead changes over the 15m lifecycle."""
+    ts = timestamp or time.time()
+    snapshots = _MARKET_LEAD_CHANGES[ticker]
+    # Prune snapshots older than 20 minutes (1200s)
+    _MARKET_LEAD_CHANGES[ticker] = [s for s in snapshots if ts - s["ts"] <= 1200]
+    _MARKET_LEAD_CHANGES[ticker].append({"p": yes_price, "ts": ts})
+
+
+def get_market_lead_changes(ticker: str) -> int:
+    """
+    Counts how many times YES crossed 50¢ in its lifecycle (measuring whipsaw / chop).
+    A lead change occurs when YES transitions between >=50¢ and <50¢.
+    """
+    snapshots = _MARKET_LEAD_CHANGES.get(ticker, [])
+    if len(snapshots) < 2:
+        return 0
+    lead_changes = 0
+    last_state = None
+    for s in snapshots:
+        p = s.get("p")
+        if p is not None:
+            curr_state = (p >= 50)
+            if last_state is not None and curr_state != last_state:
+                lead_changes += 1
+            last_state = curr_state
+    return lead_changes
+
+
+def is_market_choppy(ticker: str, max_lead_changes: int = 2) -> bool:
+    """Returns True if the market has flipped direction more than max_lead_changes times."""
+    return get_market_lead_changes(ticker) > max_lead_changes
 
 # Supported symbols across exchanges (Crypto, Commodities, Equity Indices)
 SUPPORTED_SYMBOLS = (
@@ -418,11 +458,70 @@ def get_index_spot_price(symbol: str) -> float | None:
     return None
 
 
-def get_crypto_spot_price(symbol: str) -> float | None:
+def get_kalshi_cfbenchmarks_spot_price(
+    symbol: str,
+    client: BaseTradingClient | None = None,
+    calc_twap_seconds: int = 0,
+) -> float | None:
     """
-    Fetches real-time underlying crypto spot price from Coinbase public API.
-    Uses persistent HTTP connection pooling and handles HTML/JSON errors defensively.
+    Fetches real-time underlying crypto price directly from Kalshi's official CF Benchmarks feed.
+    If calc_twap_seconds > 0, calculates the 60-second TWAP matching Kalshi settlement specification.
     """
+    sym_upper = symbol.upper()
+    if client and hasattr(client, "get_cfbenchmarks_price"):
+        try:
+            val = client.get_cfbenchmarks_price(sym_upper, calc_twap_seconds=calc_twap_seconds)
+            if val is not None and val > 0:
+                return val
+        except Exception as err:
+            log.debug(f"KalshiClient CF Benchmarks query failed for {sym_upper}: {err}")
+    return None
+
+
+def get_market_settlement_source(market: dict, client: BaseTradingClient | None = None) -> str:
+    """
+    Dynamically identifies the official settlement source for a given market.
+    - Crypto series -> 'CF Benchmarks'
+    - Commodities -> 'Pyth Network'
+    - Indices -> 'Yahoo Finance'
+    """
+    series_ticker = market.get("series_ticker", "")
+    ticker = market.get("ticker", "")
+    asset_symbol = extract_asset_symbol(series_ticker, ticker)
+
+    if client and hasattr(client, "get_series_settlement_sources") and series_ticker:
+        try:
+            sources = client.get_series_settlement_sources(series_ticker)
+            if sources and isinstance(sources, list):
+                src_names = [s.get("name", "") for s in sources if isinstance(s, dict)]
+                if src_names:
+                    return src_names[0]
+        except Exception:
+            pass
+
+    if asset_symbol in COMMODITY_SYMBOLS:
+        return "Pyth Network"
+    elif asset_symbol in INDEX_SYMBOLS:
+        return "Yahoo Finance"
+    else:
+        return "CF Benchmarks"
+
+
+def get_crypto_spot_price(
+    symbol: str,
+    client: BaseTradingClient | None = None,
+    calc_twap_seconds: int = 0,
+) -> float | None:
+    """
+    Fetches real-time underlying crypto price.
+    Prioritizes Kalshi's official CF Benchmarks index feed, with defensive fallback to Coinbase Spot API.
+    """
+    # 1. Try Kalshi's official CF Benchmarks RTI feed first
+    cfb_price = get_kalshi_cfbenchmarks_spot_price(symbol, client=client, calc_twap_seconds=calc_twap_seconds)
+    if cfb_price is not None and cfb_price > 0:
+        return cfb_price
+
+    # 2. Fallback to Coinbase public spot API
     try:
         resp = http_session.get(
             f"https://api.coinbase.com/v2/prices/{symbol.upper()}-USD/spot",
@@ -433,16 +532,16 @@ def get_crypto_spot_price(symbol: str) -> float | None:
             if isinstance(data, dict) and "data" in data and "amount" in data["data"]:
                 return round(float(data["data"]["amount"]), 4)
     except (requests.RequestException, ValueError, json.JSONDecodeError, KeyError) as error:
-        log.debug(f"Could not fetch spot price for {symbol}: {error}")
+        log.debug(f"Could not fetch spot price for {symbol} from Coinbase: {error}")
     return None
 
 
-def get_spot_price(symbol: str) -> float | None:
+def get_spot_price(symbol: str, client: BaseTradingClient | None = None) -> float | None:
     """
     Unified single spot price lookup router:
     - Commodities (GOLD, SILVER, WTI) -> Pyth Hermes API
     - Indices (INX, NASDAQ100) -> Yahoo Finance Chart API
-    - Crypto (BTC, ETH, SOL, etc.) -> Coinbase Spot API
+    - Crypto (BTC, ETH, SOL, etc.) -> CF Benchmarks API / Coinbase Fallback
     """
     sym_upper = symbol.upper()
     if sym_upper in COMMODITY_SYMBOLS:
@@ -451,18 +550,20 @@ def get_spot_price(symbol: str) -> float | None:
     elif sym_upper in INDEX_SYMBOLS:
         return get_index_spot_price(sym_upper)
     else:
-        return get_crypto_spot_price(sym_upper)
+        return get_crypto_spot_price(sym_upper, client=client)
 
 
 def batch_fetch_spot_prices(
     symbols: tuple[str, ...] | list[str],
     max_workers: int = 16,
+    client: BaseTradingClient | None = None,
+    calc_twap_seconds: int = 0,
 ) -> dict[str, float | None]:
     """
     Fetches spot prices for all assets (Crypto, Commodities, Equity Indices) concurrently in parallel.
     - Commodities (GOLD, SILVER, WTI) batch-queried in 1 call via Pyth Hermes API (~80-100ms)
     - Indices (INX, NASDAQ100) queried concurrently via Yahoo Finance
-    - Cryptos queried concurrently via Coinbase API
+    - Cryptos queried concurrently via CF Benchmarks (or Coinbase fallback)
     """
     unique_symbols = list(set(symbols))
     spot_cache: dict[str, float | None] = {sym: None for sym in unique_symbols}
@@ -481,7 +582,10 @@ def batch_fetch_spot_prices(
         for idx_sym in indices:
             futures.append(executor.submit(lambda s=idx_sym: (s, get_index_spot_price(s))))
         for cry_sym in cryptos:
-            futures.append(executor.submit(lambda s=cry_sym: (s, get_crypto_spot_price(s))))
+            if client is not None or calc_twap_seconds > 0:
+                futures.append(executor.submit(lambda s=cry_sym: (s, get_crypto_spot_price(s, client=client, calc_twap_seconds=calc_twap_seconds))))
+            else:
+                futures.append(executor.submit(lambda s=cry_sym: (s, get_crypto_spot_price(s))))
 
         for future in as_completed(futures):
             try:
@@ -694,6 +798,172 @@ def resolve_safe_take_profit_for_position(
     return effective_tp
 
 
+def evaluate_favorite_maker_opportunity(
+    market: dict,
+    quotes: dict,
+    rem_mins: float | None,
+    dynamic_filters: dict,
+    client: BaseTradingClient,
+    min_fav_price: int = 74,
+    max_fav_price: int = 93,
+    min_rem_mins: float = 1.0,
+    max_rem_mins: float = 6.0,
+) -> dict | None:
+    """
+    Identifies high-probability favorites in the endgame window and calculates
+    an optimal resting maker bid inside the spread to capture the spread discount.
+
+    Rules (from Reddit findings):
+    - Confirmed favorite sits between 74¢ and 93¢ (crowd expects high win probability).
+    - Window: Final 1.0m to 6.0m of 15m lifecycle.
+    - Maker Limit Bid: Places resting bid inside the spread (1¢-2¢ below ask, or 1¢ above bid).
+    - Avoids crossing the spread (-6¢ taker friction) and captures zero maker fees on Kalshi crypto.
+    - Gated by choppiness filter (lead_changes <= 2) and portfolio directional cap (Comment p3ok6ft).
+    """
+    ticker = market.get("ticker", "")
+    if rem_mins is not None and not (min_rem_mins <= rem_mins <= max_rem_mins):
+        return None
+
+    # Choppiness check: Reject hyper-bouncing markets
+    lead_changes = get_market_lead_changes(ticker)
+    max_lead = int(dynamic_filters.get("max_lead_changes", 2))
+    if lead_changes > max_lead:
+        log.info(f"⚠️ [CHOPPY MARKET SKIP] {ticker} has {lead_changes} lead changes (> {max_lead}). Skipping Favorite Maker entry.")
+        return None
+
+    yes_bid = quotes.get("yes_bid")
+    yes_ask = quotes.get("yes_ask")
+    no_bid = quotes.get("no_bid")
+    no_ask = quotes.get("no_ask")
+
+    # 1. Check YES as favorite (Ask between 74¢ and 93¢)
+    if yes_ask is not None and min_fav_price <= yes_ask <= max_fav_price:
+        if not client.is_side_allowed(ticker, "yes"):
+            return None
+        max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
+        if hasattr(client, "check_crypto_portfolio_directional_cap"):
+            if not client.check_crypto_portfolio_directional_cap("yes", max_concurrent=max_conc):
+                return None
+
+        maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
+        maker_bid = max(min_fav_price, min(yes_ask - 1, maker_bid))
+        return {
+            "side": "yes",
+            "maker_bid": maker_bid,
+            "target_ask": yes_ask,
+            "spread_saved": max(1, yes_ask - maker_bid),
+            "favorite_type": "heavy_favorite_yes",
+        }
+
+    # 2. Check NO as favorite (Ask between 74¢ and 93¢ or YES Ask <= 26¢)
+    if no_ask is not None and min_fav_price <= no_ask <= max_fav_price:
+        if not client.is_side_allowed(ticker, "no"):
+            return None
+        max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
+        if hasattr(client, "check_crypto_portfolio_directional_cap"):
+            if not client.check_crypto_portfolio_directional_cap("no", max_concurrent=max_conc):
+                return None
+
+        maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
+        maker_bid = max(min_fav_price, min(no_ask - 1, maker_bid))
+        return {
+            "side": "no",
+            "maker_bid": maker_bid,
+            "target_ask": no_ask,
+            "spread_saved": max(1, no_ask - maker_bid),
+            "favorite_type": "heavy_favorite_no",
+        }
+
+    return None
+
+
+def _execute_favorite_maker_flow(
+    ticker: str,
+    side: str,
+    maker_bid: int,
+    target_ask: int,
+    spot_price: float | None,
+    target_price: float | None,
+    market_result: str | None,
+    client: BaseTradingClient,
+    dry_run: bool,
+    count: int = 1,
+) -> tuple[bool, dict | None]:
+    """Helper function to execute resting Favorite Maker limit bid inside the spread."""
+    side_lower = side.lower()
+    side_upper = side.upper()
+    ex_name = getattr(client, "exchange_name", "Exchange")
+    spread_saved = max(0, target_ask - maker_bid)
+
+    log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
+    log_action = (
+        f"WOULD REST MAKER BID AT {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢). Hold to 100¢ settlement."
+        if dry_run
+        else f"Executing Resting Maker Bid at {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢)!"
+    )
+    log.info(
+        f"{log_prefix} [FAVORITE MAKER] [{ex_name}] {ticker} -> Confirmed {side_upper} Favorite! {log_action}"
+    )
+
+    effective_buy = maker_bid
+    buy_res = None
+    if not dry_run:
+        try:
+            if hasattr(client, "buy_favorite_maker_order"):
+                buy_res = client.buy_favorite_maker_order(
+                    ticker=ticker,
+                    side=side_lower,
+                    maker_bid_cents=maker_bid,
+                    target_ask_cents=target_ask,
+                    count=count,
+                    buy_order_timeout_seconds=60,
+                )
+                effective_buy = buy_res.get("buy_price_cents", maker_bid)
+            else:
+                buy_res = client.buy_and_set_take_profit(
+                    ticker=ticker,
+                    side=side_lower,
+                    buy_price_cents=maker_bid,
+                    take_profit_cents=99,
+                    count=count,
+                    maker_bid_cents=maker_bid,
+                    buy_order_timeout_seconds=60,
+                )
+                effective_buy = buy_res.get("buy_price_cents", maker_bid)
+        except Exception as error:
+            log.error(f"❌ [{ex_name}] Failed to execute Favorite Maker trade on {ticker}: {error}")
+            return False, None
+
+    trade_details = {
+        **({"dry_run": True} if dry_run else {}),
+        "ex": ex_name.lower(),
+        "action": "favorite_maker_opened",
+        "strategy_tag": "endgame_favorite_maker",
+        "order_role": "maker",
+        "spread_saved_cents": spread_saved,
+        "corridor": "favorite_maker",
+        "side": side_lower,
+        "buy": effective_buy,
+        "count": count,
+        "tp": 100,
+        "sl": None,
+        "outcome": determine_counterfactual_outcome(side_lower, "favorite_maker_opened", spot_price, target_price, market_result),
+        "entry_ts": int(time.time()),
+        "spot_at_entry": spot_price,
+        "target_at_entry": target_price,
+    }
+    if not dry_run and isinstance(buy_res, dict):
+        if cid := buy_res.get("client_order_id"):
+            trade_details["client_order_id"] = cid
+        if oid := buy_res.get("order_id"):
+            trade_details["order_id"] = oid
+
+    if getattr(client, "record_traded_market", None) is not None:
+        client.record_traded_market(ticker, side_lower)
+
+    return True, trade_details
+
+
 def process_single_market(
     market: dict,
     is_trading_interval: bool,
@@ -774,15 +1044,19 @@ def process_single_market(
         timeframe="15m",
         now_utc=now_utc,
     )
+    streak_data = get_asset_settlement_streak(asset_symbol, timeframe="15m", now_utc=now_utc)
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
     take_profit_cents = dynamic_filters["tp"]
     is_exploration = dynamic_filters.get("is_exploration", False)
-    contracts_count = int(dynamic_filters.get("contracts_per_trade", 1))
+    is_restricted = dynamic_filters.get("is_restricted", False)
+    base_contracts = int(dynamic_filters.get("contracts_per_trade", 1))
 
     trade_executed = False
     trade_details = None
     counterfactual_details = None
+    fav_opp = None
+    chosen_consensus = None
 
     # -----------------------------------------------------------------------
     # Step 4A: 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration)
@@ -821,10 +1095,9 @@ def process_single_market(
                 trade_details["profit_locked_cents"] = eg_res["profit_locked_cents"]
 
     # -----------------------------------------------------------------------
-    # Step 4B: 10-Minute Winner-Roll & Stop-Loss Evaluation (:10 mark)
+    # Step 4B: 10-Minute Winner-Bank & Stop-Loss Evaluation (:10 mark)
     # At minute 10:
-    # 1. Winning positions (>= 70¢ / in profit): SELL at Bid to bank realized profit,
-    #    and immediately RE-BUY at Ask price to let that new position run to 100¢ ($1.00)!
+    # 1. Winning positions (>= 70¢ / in profit): SELL at Bid to bank realized profit directly in cash!
     # 2. Losing positions: Execute immediate stop-loss liquidation.
     # -----------------------------------------------------------------------
     elif is_stop_loss_interval:
@@ -936,144 +1209,253 @@ def process_single_market(
         elif client.has_existing_position_or_order(ticker):
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold an active position or resting order for {ticker}. Skipping buy.")
         else:
-            # Screen for candidates across Dual Corridors:
-            # 1. Deep Discount Corridor (18¢ - 30¢ at open, 18¢ - 24¢ at :05)
-            # 2. Dead Coin-Flip Middle Zone (31¢ - 61¢) -> Strictly rejected for noise reduction
-            # 3. Momentum Breakout Corridor (62¢ - 68¢ at open, 62¢ - 65¢ at :05) -> High TP (88¢) with confirmed spot lead (|pct_dist| >= 0.15%)
-            avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
-            mid_min = int(dynamic_filters.get("mid_zone_min", 31))
-            mid_max = int(dynamic_filters.get("mid_zone_max", 61))
+            # Record current price snapshot to track market oscillation / lead changes
+            if yes_price_cents is not None:
+                record_market_price_snapshot(ticker, yes_price_cents, timestamp=now_utc.timestamp())
 
-            pct_dist_val = 0.0
-            if spot_price and target_price and target_price > 0:
-                pct_dist_val = ((spot_price - target_price) / target_price) * 100.0
-
-            candidate_sides = []
-            counterfactual_details = None
-            for side, p_cents, aligned in [
-                ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
-                ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
-            ]:
-                if p_cents is None or not aligned:
-                    continue
-
-                if not getattr(client, "is_side_allowed", lambda t, s: True)(ticker, side):
-                    log.info(
-                        f"🛡️ [SINGLE-SIDE LOCK] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                        f"Opposing side already traded for this contract lifecycle. Strictly blocking dual buy."
-                    )
-                    continue
-
-                # Corridor 1: Deep Discount Corridor
-                if min_buy_price <= p_cents <= max_buy_price:
-                    candidate_sides.append({
-                        "side": side,
-                        "price": p_cents,
-                        "tp": take_profit_cents,
-                        "min_buy": min_buy_price,
-                        "max_buy": max_buy_price,
-                        "mode": "discount",
-                    })
-
-                # Dead Coin-Flip Middle Zone
-                elif mid_min <= p_cents <= mid_max:
-                    # Record counterfactual sample for empirical discovery in MongoDB without capital risk
-                    counterfactual_details = {
-                        "dry_run": True,
-                        "ex": market.get("exchange", "kalshi"),
-                        "action": "counterfactual_mid_zone",
-                        "regime": "exploration_sim" if is_exploration else "empirical_tracking",
-                        "corridor": "mid_zone",
-                        "side": side,
-                        "buy": p_cents,
-                        "tp": take_profit_cents,
-                        "sl": 25,
-                        "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
-                        "entry_ts": int(time.time()),
-                        "spot_at_entry": spot_price,
-                        "target_at_entry": target_price,
-                    }
-
-                    if avoid_mid_zone:
-                        log.info(
-                            f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
-                            f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
-                        )
-                    elif not can_execute_exploration_trade(now_utc):
-                        log.info(
-                            f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                            f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
-                        )
-                    else:
-                        log.info(
-                            f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                            f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
-                        )
-                        candidate_sides.append({
-                            "side": side,
-                            "price": p_cents,
-                            "tp": take_profit_cents,
-                            "min_buy": mid_min,
-                            "max_buy": mid_max,
-                            "mode": "mid_zone",
-                        })
-
-                # Corridor 2: Momentum / Trend Breakout Corridor
-                elif dynamic_filters.get("enable_momentum_buys", False):
-                    mom_min = int(dynamic_filters.get("momentum_min_buy", 62))
-                    mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
-                    min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.15))
-                    has_breakout_lead = (pct_dist_val >= min_lead) if side == "yes" else (pct_dist_val <= -min_lead)
-
-                    if mom_min <= p_cents <= mom_max:
-                        if has_breakout_lead:
-                            mom_tp = int(dynamic_filters.get("momentum_tp", 88))
-                            log.info(
-                                f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                                f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
-                            )
-                            candidate_sides.append({
-                                "side": side,
-                                "price": p_cents,
-                                "tp": mom_tp,
-                                "min_buy": mom_min,
-                                "max_buy": mom_max,
-                                "mode": "momentum",
-                            })
-                        else:
-                            log.info(
-                                f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                                f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
-                            )
-
-            if candidate_sides:
-                chosen_cand = min(candidate_sides, key=lambda x: x["price"])
-                chosen_side = chosen_cand["side"]
-                chosen_price = chosen_cand["price"]
-                chosen_tp = chosen_cand["tp"]
-                chosen_min = chosen_cand["min_buy"]
-                chosen_max = chosen_cand["max_buy"]
-                chosen_mode = chosen_cand["mode"]
-                chosen_bid = quotes["yes_bid"] if chosen_side == "yes" else quotes["no_bid"]
-                trade_executed, trade_details = _execute_buy_flow(
+            # Priority 1: Endgame Favorite Maker Strategy (74¢–93¢ resting maker bid)
+            fav_opp = evaluate_favorite_maker_opportunity(
+                market=market,
+                quotes=quotes,
+                rem_mins=rem_mins,
+                dynamic_filters=dynamic_filters,
+                client=client,
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+            )
+            if fav_opp is not None and dynamic_filters.get("enable_favorite_maker", True):
+                fav_side = fav_opp["side"]
+                fav_maker_bid = fav_opp["maker_bid"]
+                fav_target_ask = fav_opp["target_ask"]
+                trade_executed, trade_details = _execute_favorite_maker_flow(
                     ticker=ticker,
-                    side=chosen_side,
-                    price_cents=chosen_price,
-                    maker_bid=chosen_bid,
-                    min_buy=chosen_min,
-                    max_buy=chosen_max,
-                    take_profit_cents=chosen_tp,
+                    side=fav_side,
+                    maker_bid=fav_maker_bid,
+                    target_ask=fav_target_ask,
                     spot_price=spot_price,
                     target_price=target_price,
                     market_result=market.get("result"),
                     client=client,
                     dry_run=dry_run,
-                    is_exploration=is_exploration,
-                    corridor_mode=chosen_mode,
-                    count=contracts_count,
+                    count=1,
                 )
 
+            # Priority 2: Screen for candidates across General Corridors if Favorite Maker not triggered
+            if not trade_executed:
+                avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
+                mid_min = int(dynamic_filters.get("mid_zone_min", 31))
+                mid_max = int(dynamic_filters.get("mid_zone_max", 61))
+
+                pct_dist_val = 0.0
+                if spot_price and target_price and target_price > 0:
+                    pct_dist_val = ((spot_price - target_price) / target_price) * 100.0
+
+                candidate_sides = []
+                counterfactual_details = None
+                for side, p_cents, aligned in [
+                    ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
+                    ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
+                ]:
+                    if p_cents is None or not aligned:
+                        continue
+
+                    if not getattr(client, "is_side_allowed", lambda t, s: True)(ticker, side):
+                        log.info(
+                            f"🛡️ [SINGLE-SIDE LOCK] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                            f"Opposing side already traded for this contract lifecycle. Strictly blocking dual buy."
+                        )
+                        continue
+
+                    # Corridor 1: Deep Discount Corridor
+                    if min_buy_price <= p_cents <= max_buy_price:
+                        candidate_sides.append({
+                            "side": side,
+                            "price": p_cents,
+                            "tp": take_profit_cents,
+                            "min_buy": min_buy_price,
+                            "max_buy": max_buy_price,
+                            "mode": "discount",
+                        })
+
+                    # Dead Coin-Flip Middle Zone
+                    elif mid_min <= p_cents <= mid_max:
+                        # Record counterfactual sample for empirical discovery in MongoDB without capital risk
+                        counterfactual_details = {
+                            "dry_run": True,
+                            "ex": market.get("exchange", "kalshi"),
+                            "action": "counterfactual_mid_zone",
+                            "regime": "exploration_sim" if is_exploration else "empirical_tracking",
+                            "corridor": "mid_zone",
+                            "side": side,
+                            "buy": p_cents,
+                            "tp": take_profit_cents,
+                            "sl": 25,
+                            "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
+                            "entry_ts": int(time.time()),
+                            "spot_at_entry": spot_price,
+                            "target_at_entry": target_price,
+                        }
+
+                        if avoid_mid_zone:
+                            log.info(
+                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
+                                f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
+                            )
+                        elif not can_execute_exploration_trade(now_utc):
+                            log.info(
+                                f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                                f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
+                            )
+                        else:
+                            log.info(
+                                f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                                f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
+                            )
+                            candidate_sides.append({
+                                "side": side,
+                                "price": p_cents,
+                                "tp": take_profit_cents,
+                                "min_buy": mid_min,
+                                "max_buy": mid_max,
+                                "mode": "mid_zone",
+                            })
+
+                    # Corridor 2: Momentum / Trend Breakout Corridor
+                    elif dynamic_filters.get("enable_momentum_buys", False):
+                        mom_min = int(dynamic_filters.get("momentum_min_buy", 62))
+                        mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
+                        min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.15))
+                        has_breakout_lead = (pct_dist_val >= min_lead) if side == "yes" else (pct_dist_val <= -min_lead)
+
+                        if mom_min <= p_cents <= mom_max:
+                            if has_breakout_lead:
+                                mom_tp = int(dynamic_filters.get("momentum_tp", 88))
+                                log.info(
+                                    f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                                    f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
+                                )
+                                candidate_sides.append({
+                                    "side": side,
+                                    "price": p_cents,
+                                    "tp": mom_tp,
+                                    "min_buy": mom_min,
+                                    "max_buy": mom_max,
+                                    "mode": "momentum",
+                                })
+                            else:
+                                log.info(
+                                    f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                                    f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
+                                )
+
+                if candidate_sides:
+                    # -----------------------------------------------------------
+                    # Ensemble Consensus & Settlement Streak Filter Evaluation
+                    # (DeweyMarco Consensus Model + MongoDB Settlement Autocorrelation)
+                    # -----------------------------------------------------------
+                    # TODO (Improvement 2): Scan for intra-market synthetic arbitrage opportunities (yes_ask + no_ask <= 96¢)
+                    # TODO (Improvement 3): Check portfolio R-risk budget caps (daily -3R / weekly -8R) and break-even hibernation
+                    streak_data = get_asset_settlement_streak(asset_symbol, timeframe="15m", now_utc=now_utc)
+                    lead_changes_count = get_market_lead_changes(ticker)
+
+                    approved_candidates = []
+                    for cand in candidate_sides:
+                        cons = evaluate_ensemble_consensus(
+                            symbol=asset_symbol,
+                            proposed_side=cand["side"],
+                            price_cents=cand["price"],
+                            spot_price=spot_price,
+                            target_price=target_price,
+                            timeframe="15m",
+                            dynamic_filters=dynamic_filters,
+                            lead_changes=lead_changes_count,
+                            streak_data=streak_data,
+                            now_utc=now_utc,
+                        )
+                        cand["consensus"] = cons
+                        if cons["is_approved"]:
+                            approved_candidates.append(cand)
+                        else:
+                            log.info(
+                                f"🛡️ [ENSEMBLE CONSENSUS BLOCKED] [{ex_name}] {ticker} ({cand['side'].upper()} @ {cand['price']}¢): "
+                                f"{cons['reason']}"
+                            )
+
+                    if approved_candidates:
+                        chosen_cand = min(approved_candidates, key=lambda x: x["price"])
+                        chosen_side = chosen_cand["side"]
+                        chosen_price = chosen_cand["price"]
+                        chosen_tp = chosen_cand["tp"]
+                        chosen_min = chosen_cand["min_buy"]
+                        chosen_max = chosen_cand["max_buy"]
+                        chosen_mode = chosen_cand["mode"]
+                        chosen_consensus = chosen_cand.get("consensus", {})
+                        chosen_bid = quotes["yes_bid"] if chosen_side == "yes" else quotes["no_bid"]
+
+                        log.info(
+                            f"🚀 [ENSEMBLE CONSENSUS APPROVED] [{ex_name}] {ticker} ({chosen_side.upper()} @ {chosen_price}¢) | "
+                            f"Streak: {chosen_consensus.get('streak_length', 0)}x {chosen_consensus.get('streak_side') or 'none'} | "
+                            f"Score: {chosen_consensus.get('consensus_score', 0):+.2f} | Regime: {chosen_consensus.get('regime')}"
+                        )
+
+                        # Dynamic bankroll sizing
+                        balance_cents = None
+                        if hasattr(client, "get_balance_cents"):
+                            try:
+                                b_val = client.get_balance_cents()
+                                if isinstance(b_val, (int, float)):
+                                    balance_cents = int(b_val)
+                            except Exception:
+                                pass
+
+                        contracts_count = calculate_dynamic_contracts_count(
+                            balance_cents=balance_cents,
+                            buy_price_cents=chosen_price,
+                            base_count=base_contracts,
+                            is_restricted=is_restricted,
+                        )
+
+                        if is_restricted:
+                            log.info(
+                                f"⚠️ [DYNAMIC LOSS RESTRICTION] [{ex_name}] {ticker}: Asset {asset_symbol} is in restricted regime. "
+                                f"Enforcing tight ceiling ({chosen_max}¢) and 1 contract sniper sizing."
+                            )
+
+                        if contracts_count <= 0 and balance_cents is not None:
+                            log.info(
+                                f"⚠️ [INSUFFICIENT BALANCE] [{ex_name}] {ticker}: Available balance {balance_cents}¢ "
+                                f"is below contract price {chosen_price}¢. Skipping buy."
+                            )
+                        else:
+                            contracts_to_buy = max(1, contracts_count)
+                            trade_executed, trade_details = _execute_buy_flow(
+                                ticker=ticker,
+                                side=chosen_side,
+                                price_cents=chosen_price,
+                                maker_bid=chosen_bid,
+                                min_buy=chosen_min,
+                                max_buy=chosen_max,
+                                take_profit_cents=chosen_tp,
+                                spot_price=spot_price,
+                                target_price=target_price,
+                                market_result=market.get("result"),
+                                client=client,
+                                dry_run=dry_run,
+                                is_exploration=is_exploration,
+                                corridor_mode=chosen_mode,
+                                count=contracts_to_buy,
+                            )
+                            if trade_executed and trade_details and chosen_consensus:
+                                trade_details["consensus_score"] = chosen_consensus.get("consensus_score")
+                                trade_details["consensus_regime"] = chosen_consensus.get("regime")
+                                trade_details["streak_length"] = chosen_consensus.get("streak_length")
+
     # 5. Build Compact Snapshot Document
+    cfb_spot = get_kalshi_cfbenchmarks_spot_price(asset_symbol, client=client) if asset_symbol not in COMMODITY_SYMBOLS and asset_symbol not in INDEX_SYMBOLS else None
+    settle_src = get_market_settlement_source(market, client=client)
+    lead_changes_count = get_market_lead_changes(ticker)
+    fav_side = "yes" if (yes_price_cents or 0) >= 60 else "no" if (no_price_cents or 0) >= 60 else "coin_flip"
+
     compact_document = {
         "ts": int(now_utc.timestamp()),
         "m": minute_past_hour,
@@ -1093,6 +1475,11 @@ def process_single_market(
         "n_ask_sz": parse_cents(None, market.get("no_ask_size") or market.get("no_ask_count")),
         "sprd": sprd,
         "p": spot_price,
+        "cfb": cfb_spot,
+        "src": settle_src,
+        "fav": fav_side,
+        "fav_maker": bool(fav_opp is not None),
+        "lead_chg": lead_changes_count,
         "tgt": target_price,
         "diff": price_diff,
         "pct": pct_dist,
@@ -1101,6 +1488,10 @@ def process_single_market(
         "open_time": market.get("open_time"),
         "close_time": market.get("close_time") or market.get("expected_expiration_time"),
         "imp_prob": round(yes_price_cents / 100.0, 4) if yes_price_cents is not None else None,
+        "strk": streak_data.get("streak_length") if streak_data else None,
+        "strk_side": streak_data.get("streak_side") if streak_data else None,
+        "c_score": chosen_consensus.get("consensus_score") if chosen_consensus else None,
+        "c_regime": chosen_consensus.get("regime") if chosen_consensus else None,
     }
 
     if trade_executed and trade_details:
@@ -1148,16 +1539,19 @@ def process_hourly_market_group(
         timeframe="1h",
         now_utc=now_utc,
     )
+    streak_data = get_asset_settlement_streak(symbol, timeframe="1h", now_utc=now_utc)
     min_buy_price = dynamic_filters["min_buy"]
     max_buy_price = dynamic_filters["max_buy"]
     take_profit_cents = dynamic_filters["tp"]
     is_exploration = dynamic_filters.get("is_exploration", False)
     avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
-    contracts_count = int(dynamic_filters.get("contracts_per_trade", 3))
+    is_restricted = dynamic_filters.get("is_restricted", False)
+    base_contracts = int(dynamic_filters.get("contracts_per_trade", 1 if is_restricted else 3))
 
     snapshots: list[dict] = []
     trade_executed_by_ticker: dict[str, dict] = {}
     counterfactual_by_ticker: dict[str, dict] = {}
+    fav_opp_by_ticker: dict[str, dict] = {}
 
     # Pre-parse quote & strike metrics for all strikes in the group
     parsed_markets = []
@@ -1218,6 +1612,11 @@ def process_hourly_market_group(
             "rem_mins": rem_mins,
             "vol_count": vol_count,
         })
+
+    # Record live price snapshots for lead-change & choppiness tracking
+    for item in parsed_markets:
+        if item["yes_price_cents"] is not None:
+            record_market_price_snapshot(item["ticker"], item["yes_price_cents"], timestamp=now_utc.timestamp())
 
     # -----------------------------------------------------------------------
     # Step 1: Hourly 50-Minute Endgame Safety Check (:50 mark)
@@ -1353,121 +1752,147 @@ def process_hourly_market_group(
             for item in parsed_markets:
                 client.cancel_unfilled_buy_orders(item["ticker"])
 
-        # Step 3C: Collect valid BUY_YES and BUY_NO candidates across all strike options
+        # Step 3C-0: Priority 1 - Scan for Endgame Favorite Maker opportunities across all strikes (74¢–93¢)
+        # Empirical finding: Resting maker bids on confirmed favorites capture spread with 0% maker fees and positive EV.
+        favorite_maker_executed = False
+        fav_opp_by_ticker = {}
+        if dynamic_filters.get("enable_favorite_maker", True):
+            for item in parsed_markets:
+                ticker = item["ticker"]
+                if ticker in cut_loss_tickers or client.has_existing_position_or_order(ticker):
+                    continue
+                fav_opp = evaluate_favorite_maker_opportunity(
+                    market=item["market"],
+                    quotes=item["quotes"],
+                    rem_mins=item["rem_mins"],
+                    dynamic_filters=dynamic_filters,
+                    client=client,
+                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                    max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                    min_rem_mins=1.0,
+                    max_rem_mins=25.0,
+                )
+                if fav_opp is not None:
+                    fav_opp_by_ticker[ticker] = fav_opp
+
+            if fav_opp_by_ticker:
+                best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
+                best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
+                fav_executed, fav_details = _execute_favorite_maker_flow(
+                    ticker=best_fav_ticker,
+                    side=best_fav["side"],
+                    maker_bid=best_fav["maker_bid"],
+                    target_ask=best_fav["target_ask"],
+                    spot_price=spot_price,
+                    target_price=best_item["target_price"],
+                    market_result=best_item["market"].get("result"),
+                    client=client,
+                    dry_run=dry_run,
+                    count=1,
+                )
+                if fav_executed and fav_details:
+                    trade_executed_by_ticker[best_fav_ticker] = fav_details
+                    favorite_maker_executed = True
+
+        # Step 3C: Collect valid BUY_YES and BUY_NO candidates across all strike options (if Favorite Maker not executed)
         valid_yes_candidates = []
         valid_no_candidates = []
 
-        for item in parsed_markets:
-            ticker = item["ticker"]
-            target_price = item["target_price"]
-            quotes = item["quotes"]
-            pct_dist = item["pct_dist"]
-            pct_dist_val = pct_dist if pct_dist is not None else 0.0
+        if not favorite_maker_executed:
+            for item in parsed_markets:
+                ticker = item["ticker"]
+                target_price = item["target_price"]
+                quotes = item["quotes"]
+                pct_dist = item["pct_dist"]
+                pct_dist_val = pct_dist if pct_dist is not None else 0.0
 
-            # Position check: skip if we already hold an active position or resting order
-            if ticker in cut_loss_tickers:
-                continue
-            if client.has_existing_position_or_order(ticker):
-                pos = client.get_market_position(ticker)
-                has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
-                if pos is not None and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
-                    safe_tp = resolve_safe_take_profit_for_position(
-                        ticker=ticker,
-                        client=client,
-                        dynamic_filters=dynamic_filters,
+                # Position check: skip if we already hold an active position or resting order
+                if ticker in cut_loss_tickers:
+                    continue
+                if client.has_existing_position_or_order(ticker):
+                    pos = client.get_market_position(ticker)
+                    has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
+                    if pos is not None and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
+                        safe_tp = resolve_safe_take_profit_for_position(
+                            ticker=ticker,
+                            client=client,
+                            dynamic_filters=dynamic_filters,
+                        )
+                        client.place_take_profit_order(
+                            ticker=ticker,
+                            side=pos["side"],
+                            count=pos["count"],
+                            take_profit_cents=safe_tp,
+                        )
+                    continue
+
+                # Market Choppiness Filter: Skip markets with > 2 lead changes across 50¢
+                max_lead = int(dynamic_filters.get("max_lead_changes", 2))
+                if is_market_choppy(ticker, max_lead_changes=max_lead):
+                    log.info(
+                        f"⚠️ [CHOPPY MARKET SKIP] [{ex_name}] Hourly {ticker} has {get_market_lead_changes(ticker)} "
+                        f"lead changes (> {max_lead} max). Skipping candidate evaluation to prevent whipsaw losses."
                     )
-                    client.place_take_profit_order(
-                        ticker=ticker,
-                        side=pos["side"],
-                        count=pos["count"],
-                        take_profit_cents=safe_tp,
-                    )
-                continue
+                    continue
 
-            # Evaluate YES
-            yes_p = item["yes_price_cents"]
-            mid_min = int(dynamic_filters.get("mid_zone_min", 37))
-            mid_max = int(dynamic_filters.get("mid_zone_max", 55))
-            if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
-                if is_spot_momentum_aligned("yes", spot_price, target_price):
-                    # 1. Discount Corridor (18¢ - 44¢)
-                    if min_buy_price <= yes_p <= max_buy_price:
-                        if avoid_mid_zone and (37 <= yes_p <= max_buy_price) and pct_dist_val < 0.08:
-                            log.info(
-                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                                f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
-                            )
-                        else:
-                            valid_yes_candidates.append({
-                                "item": item,
-                                "ticker": ticker,
-                                "side": "yes",
-                                "price": yes_p,
-                                "bid": quotes["yes_bid"],
-                                "target_price": target_price,
-                                "pct_dist": pct_dist,
-                                "tp": take_profit_cents,
-                                "min_buy": min_buy_price,
-                                "max_buy": max_buy_price,
-                                "mode": "discount",
-                            })
-                    # 2. Dead Coin-Flip Middle Zone
-                    elif mid_min <= yes_p <= mid_max:
-                        counterfactual_by_ticker[ticker] = {
-                            "dry_run": True,
-                            "ex": item["market"].get("exchange", "kalshi"),
-                            "action": "counterfactual_mid_zone",
-                            "regime": "exploration_sim" if is_exploration else "empirical_tracking",
-                            "corridor": "mid_zone",
-                            "side": "yes",
-                            "buy": yes_p,
-                            "tp": take_profit_cents,
-                            "sl": 25,
-                            "outcome": determine_counterfactual_outcome("yes", "buy_opened", spot_price, target_price, item["market"].get("result")),
-                            "entry_ts": int(time.time()),
-                            "spot_at_entry": spot_price,
-                            "target_at_entry": target_price,
-                        }
-                        if avoid_mid_zone:
-                            log.info(
-                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                                f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
-                            )
-                        elif not can_execute_exploration_trade(now_utc):
-                            log.info(
-                                f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
-                            )
-                        else:
-                            log.info(
-                                f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
-                            )
-                            valid_yes_candidates.append({
-                                "item": item,
-                                "ticker": ticker,
-                                "side": "yes",
-                                "price": yes_p,
-                                "bid": quotes["yes_bid"],
-                                "target_price": target_price,
-                                "pct_dist": pct_dist,
-                                "tp": take_profit_cents,
-                                "min_buy": mid_min,
-                                "max_buy": mid_max,
-                                "mode": "mid_zone",
-                            })
-                    # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
-                    elif dynamic_filters.get("enable_momentum_buys", False):
-                        mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
-                        mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
-                        min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
-
-                        if mom_min <= yes_p <= mom_max:
-                            if pct_dist_val >= min_lead:
-                                mom_tp = int(dynamic_filters.get("momentum_tp", 88))
+                # Evaluate YES
+                yes_p = item["yes_price_cents"]
+                mid_min = int(dynamic_filters.get("mid_zone_min", 37))
+                mid_max = int(dynamic_filters.get("mid_zone_max", 55))
+                if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
+                    if is_spot_momentum_aligned("yes", spot_price, target_price):
+                        # 1. Discount Corridor (18¢ - 44¢)
+                        if min_buy_price <= yes_p <= max_buy_price:
+                            if avoid_mid_zone and (37 <= yes_p <= max_buy_price) and pct_dist_val < 0.08:
                                 log.info(
-                                    f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                    f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
+                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
+                                    f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
+                                )
+                            else:
+                                valid_yes_candidates.append({
+                                    "item": item,
+                                    "ticker": ticker,
+                                    "side": "yes",
+                                    "price": yes_p,
+                                    "bid": quotes["yes_bid"],
+                                    "target_price": target_price,
+                                    "pct_dist": pct_dist,
+                                    "tp": take_profit_cents,
+                                    "min_buy": min_buy_price,
+                                    "max_buy": max_buy_price,
+                                    "mode": "discount",
+                                })
+                        # 2. Dead Coin-Flip Middle Zone
+                        elif mid_min <= yes_p <= mid_max:
+                            counterfactual_by_ticker[ticker] = {
+                                "dry_run": True,
+                                "ex": item["market"].get("exchange", "kalshi"),
+                                "action": "counterfactual_mid_zone",
+                                "regime": "exploration_sim" if is_exploration else "empirical_tracking",
+                                "corridor": "mid_zone",
+                                "side": "yes",
+                                "buy": yes_p,
+                                "tp": take_profit_cents,
+                                "sl": 25,
+                                "outcome": determine_counterfactual_outcome("yes", "buy_opened", spot_price, target_price, item["market"].get("result")),
+                                "entry_ts": int(time.time()),
+                                "spot_at_entry": spot_price,
+                                "target_at_entry": target_price,
+                            }
+                            if avoid_mid_zone:
+                                log.info(
+                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
+                                    f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
+                                )
+                            elif not can_execute_exploration_trade(now_utc):
+                                log.info(
+                                    f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                    f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
+                                )
+                            else:
+                                log.info(
+                                    f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                    f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
                                 )
                                 valid_yes_candidates.append({
                                     "item": item,
@@ -1477,107 +1902,107 @@ def process_hourly_market_group(
                                     "bid": quotes["yes_bid"],
                                     "target_price": target_price,
                                     "pct_dist": pct_dist,
-                                    "tp": mom_tp,
-                                    "min_buy": mom_min,
-                                    "max_buy": mom_max,
-                                    "mode": "momentum",
-                                    "pct_dist": pct_dist,
+                                    "tp": take_profit_cents,
+                                    "min_buy": mid_min,
+                                    "max_buy": mid_max,
+                                    "mode": "mid_zone",
                                 })
+                        # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
+                        elif dynamic_filters.get("enable_momentum_buys", False):
+                            mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
+                            mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
+                            min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
+
+                            if mom_min <= yes_p <= mom_max:
+                                if pct_dist_val >= min_lead:
+                                    mom_tp = int(dynamic_filters.get("momentum_tp", 88))
+                                    log.info(
+                                        f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                        f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
+                                    )
+                                    valid_yes_candidates.append({
+                                        "item": item,
+                                        "ticker": ticker,
+                                        "side": "yes",
+                                        "price": yes_p,
+                                        "bid": quotes["yes_bid"],
+                                        "target_price": target_price,
+                                        "pct_dist": pct_dist,
+                                        "tp": mom_tp,
+                                        "min_buy": mom_min,
+                                        "max_buy": mom_max,
+                                        "mode": "momentum",
+                                        "pct_dist": pct_dist,
+                                    })
+                                else:
+                                    log.info(
+                                        f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                        f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
+                                    )
+                            else:
+                                max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
+                                if min_buy_price <= yes_p <= max_eval_price:
+                                    log.info(
+                                        f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
+                                        f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
+                                    )
+
+                # Evaluate NO
+                no_p = item["no_price_cents"]
+                if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
+                    if is_spot_momentum_aligned("no", spot_price, target_price):
+                        # 1. Discount Corridor (18¢ - 44¢)
+                        if min_buy_price <= no_p <= max_buy_price:
+                            if avoid_mid_zone and (37 <= no_p <= max_buy_price) and pct_dist_val > -0.08:
+                                log.info(
+                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
+                                    f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
+                                )
+                            else:
+                                valid_no_candidates.append({
+                                    "item": item,
+                                    "ticker": ticker,
+                                    "side": "no",
+                                    "price": no_p,
+                                    "bid": quotes["no_bid"],
+                                    "target_price": target_price,
+                                    "pct_dist": pct_dist,
+                                    "tp": take_profit_cents,
+                                    "min_buy": min_buy_price,
+                                    "max_buy": max_buy_price,
+                                    "mode": "discount",
+                                })
+                        # 2. Dead Coin-Flip Middle Zone
+                        elif mid_min <= no_p <= mid_max:
+                            counterfactual_by_ticker[ticker] = {
+                                "dry_run": True,
+                                "ex": item["market"].get("exchange", "kalshi"),
+                                "action": "counterfactual_mid_zone",
+                                "regime": "exploration_sim" if is_exploration else "empirical_tracking",
+                                "corridor": "mid_zone",
+                                "side": "no",
+                                "buy": no_p,
+                                "tp": take_profit_cents,
+                                "sl": 25,
+                                "outcome": determine_counterfactual_outcome("no", "buy_opened", spot_price, target_price, item["market"].get("result")),
+                                "entry_ts": int(time.time()),
+                                "spot_at_entry": spot_price,
+                                "target_at_entry": target_price,
+                            }
+                            if avoid_mid_zone:
+                                log.info(
+                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
+                                    f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
+                                )
+                            elif not can_execute_exploration_trade(now_utc):
+                                log.info(
+                                    f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                    f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
+                                )
                             else:
                                 log.info(
-                                    f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                    f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
-                                )
-                        else:
-                            max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
-                            if min_buy_price <= yes_p <= max_eval_price:
-                                log.info(
-                                    f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                    f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
-                                )
-
-            # Evaluate NO
-            no_p = item["no_price_cents"]
-            if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
-                if is_spot_momentum_aligned("no", spot_price, target_price):
-                    # 1. Discount Corridor (18¢ - 44¢)
-                    if min_buy_price <= no_p <= max_buy_price:
-                        if avoid_mid_zone and (37 <= no_p <= max_buy_price) and pct_dist_val > -0.08:
-                            log.info(
-                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                                f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
-                            )
-                        else:
-                            valid_no_candidates.append({
-                                "item": item,
-                                "ticker": ticker,
-                                "side": "no",
-                                "price": no_p,
-                                "bid": quotes["no_bid"],
-                                "target_price": target_price,
-                                "pct_dist": pct_dist,
-                                "tp": take_profit_cents,
-                                "min_buy": min_buy_price,
-                                "max_buy": max_buy_price,
-                                "mode": "discount",
-                            })
-                    # 2. Dead Coin-Flip Middle Zone
-                    elif mid_min <= no_p <= mid_max:
-                        counterfactual_by_ticker[ticker] = {
-                            "dry_run": True,
-                            "ex": item["market"].get("exchange", "kalshi"),
-                            "action": "counterfactual_mid_zone",
-                            "regime": "exploration_sim" if is_exploration else "empirical_tracking",
-                            "corridor": "mid_zone",
-                            "side": "no",
-                            "buy": no_p,
-                            "tp": take_profit_cents,
-                            "sl": 25,
-                            "outcome": determine_counterfactual_outcome("no", "buy_opened", spot_price, target_price, item["market"].get("result")),
-                            "entry_ts": int(time.time()),
-                            "spot_at_entry": spot_price,
-                            "target_at_entry": target_price,
-                        }
-                        if avoid_mid_zone:
-                            log.info(
-                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                                f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
-                            )
-                        elif not can_execute_exploration_trade(now_utc):
-                            log.info(
-                                f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
-                            )
-                        else:
-                            log.info(
-                                f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
-                            )
-                            valid_no_candidates.append({
-                                "item": item,
-                                "ticker": ticker,
-                                "side": "no",
-                                "price": no_p,
-                                "bid": quotes["no_bid"],
-                                "target_price": target_price,
-                                "pct_dist": pct_dist,
-                                "tp": take_profit_cents,
-                                "min_buy": mid_min,
-                                "max_buy": mid_max,
-                                "mode": "mid_zone",
-                            })
-                    # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
-                    elif dynamic_filters.get("enable_momentum_buys", False):
-                        mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
-                        mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
-                        min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
-
-                        if mom_min <= no_p <= mom_max:
-                            if pct_dist_val <= -min_lead:
-                                mom_tp = int(dynamic_filters.get("momentum_tp", 88))
-                                log.info(
-                                    f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                    f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
+                                    f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                    f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
                                 )
                                 valid_no_candidates.append({
                                     "item": item,
@@ -1587,23 +2012,49 @@ def process_hourly_market_group(
                                     "bid": quotes["no_bid"],
                                     "target_price": target_price,
                                     "pct_dist": pct_dist,
-                                    "tp": mom_tp,
-                                    "min_buy": mom_min,
-                                    "max_buy": mom_max,
-                                    "mode": "momentum",
+                                    "tp": take_profit_cents,
+                                    "min_buy": mid_min,
+                                    "max_buy": mid_max,
+                                    "mode": "mid_zone",
                                 })
-                            else:
+                        # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
+                        elif dynamic_filters.get("enable_momentum_buys", False):
+                            mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
+                            mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
+                            min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
+
+                            if mom_min <= no_p <= mom_max:
+                                if pct_dist_val <= -min_lead:
+                                    mom_tp = int(dynamic_filters.get("momentum_tp", 88))
+                                    log.info(
+                                        f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                        f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
+                                    )
+                                    valid_no_candidates.append({
+                                        "item": item,
+                                        "ticker": ticker,
+                                        "side": "no",
+                                        "price": no_p,
+                                        "bid": quotes["no_bid"],
+                                        "target_price": target_price,
+                                        "pct_dist": pct_dist,
+                                        "tp": mom_tp,
+                                        "min_buy": mom_min,
+                                        "max_buy": mom_max,
+                                        "mode": "momentum",
+                                    })
+                                else:
+                                    log.info(
+                                        f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                        f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
+                                    )
+                        else:
+                            max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
+                            if min_buy_price <= no_p <= max_eval_price:
                                 log.info(
-                                    f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                    f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
+                                    f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
+                                    f"Spot ${spot_price} >= Target ${target_price} (Diff: {item['price_diff']}). Bullish spot momentum."
                                 )
-                else:
-                    max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
-                    if min_buy_price <= no_p <= max_eval_price:
-                        log.info(
-                            f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                            f"Spot ${spot_price} >= Target ${target_price} (Diff: {item['price_diff']}). Bullish spot momentum."
-                        )
 
         # Step 3D: Multi-Strike Selection & Tiebreaker Execution
         best_yes = min(valid_yes_candidates, key=lambda c: c["price"]) if valid_yes_candidates else None
@@ -1638,14 +2089,99 @@ def process_hourly_market_group(
         elif best_no:
             candidates_to_execute.append(best_no)
 
-        # Execute candidate orders
+        # -------------------------------------------------------------------
+        # Ensemble Consensus & Settlement Streak Gating for Hourly Markets
+        # (DeweyMarco Consensus Model + MongoDB Settlement Autocorrelation)
+        # -------------------------------------------------------------------
+        # TODO (Improvement 2): Scan for intra-market synthetic arbitrage opportunities across strikes (yes_ask + no_ask <= 96¢)
+        # TODO (Improvement 3): Check portfolio R-risk budget caps (daily -3R / weekly -8R) and break-even hibernation
+        streak_data = get_asset_settlement_streak(symbol, timeframe="1h", now_utc=now_utc)
+
+        approved_hourly_candidates = []
         for cand in candidates_to_execute:
+            cand_ticker = cand["ticker"]
+            cand_side = cand["side"]
+            cand_price = cand["price"]
+            cand_target = cand.get("target_price")
+            lead_changes_count = get_market_lead_changes(cand_ticker)
+
+            cons = evaluate_ensemble_consensus(
+                symbol=symbol,
+                proposed_side=cand_side,
+                price_cents=cand_price,
+                spot_price=spot_price,
+                target_price=cand_target,
+                timeframe="1h",
+                dynamic_filters=dynamic_filters,
+                lead_changes=lead_changes_count,
+                streak_data=streak_data,
+                now_utc=now_utc,
+            )
+            cand["consensus"] = cons
+            if cons["is_approved"]:
+                approved_hourly_candidates.append(cand)
+                log.info(
+                    f"🚀 [HOURLY ENSEMBLE CONSENSUS APPROVED] [{ex_name}] {cand_ticker} ({cand_side.upper()} @ {cand_price}¢) | "
+                    f"Streak: {cons.get('streak_length', 0)}x {cons.get('streak_side') or 'none'} | "
+                    f"Score: {cons.get('consensus_score', 0):+.2f} | Regime: {cons.get('regime')}"
+                )
+            else:
+                log.info(
+                    f"🛡️ [HOURLY ENSEMBLE CONSENSUS BLOCKED] [{ex_name}] {cand_ticker} ({cand_side.upper()} @ {cand_price}¢): "
+                    f"{cons['reason']}"
+                )
+
+        # Execute approved candidate orders
+        for cand in approved_hourly_candidates:
             item = cand["item"]
             ticker = cand["ticker"]
             side = cand["side"]
             price_cents = cand["price"]
             maker_bid = cand["bid"]
+            chosen_consensus = cand.get("consensus", {})
 
+            # Dynamic bankroll sizing
+            balance_cents = None
+            if hasattr(client, "get_balance_cents"):
+                try:
+                    b_val = client.get_balance_cents()
+                    if isinstance(b_val, (int, float)):
+                        balance_cents = int(b_val)
+                except Exception:
+                    pass
+
+            contracts_count = calculate_dynamic_contracts_count(
+                balance_cents=balance_cents,
+                buy_price_cents=price_cents,
+                base_count=base_contracts,
+                is_restricted=is_restricted,
+            )
+
+            if is_restricted:
+                log.info(
+                    f"⚠️ [DYNAMIC LOSS RESTRICTION] [{item['market'].get('exchange', 'kalshi')}] {ticker}: "
+                    f"Asset {symbol} is in restricted regime. Enforcing tight corridor and 1 contract sizing."
+                )
+
+            if contracts_count <= 0 and balance_cents is not None:
+                log.info(
+                    f"⚠️ [INSUFFICIENT BALANCE] [{item['market'].get('exchange', 'kalshi')}] {ticker}: "
+                    f"Available balance {balance_cents}¢ is below contract price {price_cents}¢. Skipping buy."
+                )
+                continue
+
+            # Cross-Asset Portfolio Directional Risk Cap (Comment p3ok6ft):
+            # Caps total concurrent crypto directional exposure across BTC/ETH/SOL to avoid correlated wipeouts
+            max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
+            if hasattr(client, "check_crypto_portfolio_directional_cap") and symbol not in COMMODITY_SYMBOLS and symbol not in INDEX_SYMBOLS:
+                if not client.check_crypto_portfolio_directional_cap(side, max_concurrent=max_conc):
+                    log.info(
+                        f"🛡️ [HOURLY PORTFOLIO CAP REACHED] [{ex_name}] Max concurrent {side.upper()} crypto directional cap "
+                        f"({max_conc}) reached. Skipping hourly buy on {ticker}."
+                    )
+                    continue
+
+            contracts_to_buy = max(1, contracts_count)
             executed, details = _execute_buy_flow(
                 ticker=ticker,
                 side=side,
@@ -1661,18 +2197,28 @@ def process_hourly_market_group(
                 dry_run=dry_run,
                 is_exploration=is_exploration,
                 corridor_mode=cand.get("mode", "discount"),
-                count=contracts_count,
+                count=contracts_to_buy,
             )
             if executed and details:
+                if chosen_consensus:
+                    details["consensus_score"] = chosen_consensus.get("consensus_score")
+                    details["consensus_regime"] = chosen_consensus.get("regime")
+                    details["streak_length"] = chosen_consensus.get("streak_length")
                 trade_executed_by_ticker[ticker] = details
 
     # -----------------------------------------------------------------------
     # Step 4: Build Compact Snapshot Documents for all strikes in the group
     # -----------------------------------------------------------------------
+    cfb_spot = get_kalshi_cfbenchmarks_spot_price(symbol, client=client) if symbol not in COMMODITY_SYMBOLS and symbol not in INDEX_SYMBOLS else None
+
     for item in parsed_markets:
         ticker = item["ticker"]
         quotes = item["quotes"]
+        settle_src = get_market_settlement_source(item["market"], client=client)
+        lead_changes_count = get_market_lead_changes(ticker)
+        fav_side = "yes" if (item["yes_price_cents"] or 0) >= 60 else "no" if (item["no_price_cents"] or 0) >= 60 else "coin_flip"
 
+        trd_info = trade_executed_by_ticker.get(ticker) or {}
         compact_doc = {
             "ts": int(now_utc.timestamp()),
             "m": minute_past_hour,
@@ -1692,6 +2238,11 @@ def process_hourly_market_group(
             "n_ask_sz": parse_cents(None, item["market"].get("no_ask_size") or item["market"].get("no_ask_count")),
             "sprd": item["sprd"],
             "p": spot_price,
+            "cfb": cfb_spot,
+            "src": settle_src,
+            "fav": fav_side,
+            "fav_maker": bool(ticker in fav_opp_by_ticker),
+            "lead_chg": lead_changes_count,
             "tgt": item["target_price"],
             "diff": item["price_diff"],
             "pct": item["pct_dist"],
@@ -1700,6 +2251,10 @@ def process_hourly_market_group(
             "open_time": item["market"].get("open_time"),
             "close_time": item["market"].get("close_time") or item["market"].get("expected_expiration_time"),
             "imp_prob": round(item["yes_price_cents"] / 100.0, 4) if item["yes_price_cents"] is not None else None,
+            "strk": streak_data.get("streak_length") if streak_data else None,
+            "strk_side": streak_data.get("streak_side") if streak_data else None,
+            "c_score": trd_info.get("consensus_score"),
+            "c_regime": trd_info.get("consensus_regime"),
         }
         if ticker in trade_executed_by_ticker:
             compact_doc["trd"] = trade_executed_by_ticker[ticker]

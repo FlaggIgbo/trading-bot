@@ -132,3 +132,16 @@ def test_hourly_mid_zone_allowed_during_exploration(hourly_client):
     assert snaps_06[0]["trd"]["action"] == "counterfactual_mid_zone"
     assert snaps_06[0]["trd"]["dry_run"] is True
 
+
+def test_hourly_wti_restriction_and_dynamic_sizing(hourly_client):
+    """Verify that hourly WTI trades are sized to 1 contract due to restriction."""
+    markets = [
+        {"ticker": "KXWTIH-26AUG1715-T83.79", "series_ticker": "KXWTIH", "floor_strike": 83.79, "yes_ask_dollars": "0.20", "yes_bid_dollars": "0.18", "no_ask_dollars": "0.82", "no_bid_dollars": "0.80"},
+    ]
+    snaps = process_hourly_market_group("WTI", markets, hourly_client, datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc), 0, {"WTI": 84.00}, False)
+
+    assert len(hourly_client.buys) == 1
+    assert hourly_client.buys[0]["ticker"] == "KXWTIH-26AUG1715-T83.79"
+    assert hourly_client.buys[0]["count"] == 1  # Clamped to 1 contract because WTI is restricted
+
+

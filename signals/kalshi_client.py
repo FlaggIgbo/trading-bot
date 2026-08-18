@@ -143,6 +143,26 @@ SERIES_HOURLY_INDICES = [
 # Unified list of all active hourly prediction market series
 SERIES_HOURLY_ALL = SERIES_HOURLY_CRYPTO + SERIES_HOURLY_COMMODITIES + SERIES_HOURLY_INDICES
 
+# ---------------------------------------------------------------------------
+# CF Benchmarks Real-Time Index (RTI) Identifiers for Crypto Series
+# ---------------------------------------------------------------------------
+# Kalshi settles all crypto prediction markets against CF Benchmarks RTIs
+# (60-second TWAP average during the final minute before contract expiration).
+CFBENCHMARKS_CRYPTO_INDEX_MAP: dict[str, str] = {
+    "BTC": "BRTI",
+    "ETH": "ETHUSD_RTI",
+    "SOL": "SOLUSD_RTI",
+    "DOGE": "DOGEUSD_RTI",
+    "XRP": "XRPUSD_RTI",
+    "HYPE": "HYPEUSD_RTI",
+    "NEAR": "NEARUSD_RTI",
+    "ADA": "ADAUSD_RTI",
+    "BNB": "BNBUSD_RTI",
+    "BCH": "BCHUSD_RTI",
+    "TON": "TONUSD_RTI",
+    "ZEC": "ZECUSD_RTI",
+}
+
 # Common Kalshi API 400 error codes
 KALSHI_ERROR_INSUFFICIENT_BALANCE = "insufficient_balance"
 KALSHI_ERROR_INVALID_PRICE = "invalid_price"
@@ -705,6 +725,62 @@ class KalshiClient(BaseTradingClient):
         """Fetches current orderbook (bids and asks) for a given market ticker."""
         return self.get(f"/markets/{ticker}/orderbook")
 
+    def get_cfbenchmarks_values(self, index_id: str) -> dict:
+        """
+        Retrieves real-time index tick data from Kalshi's CF Benchmarks feed endpoint.
+        Returns:
+            dict containing {"data": {"serverTime": "...", "payload": [{"value": "...", "time": ...}, ...]}}
+        """
+        return self.get("/cfbenchmarks/values", params={"id": index_id})
+
+    def get_cfbenchmarks_price(self, symbol: str, calc_twap_seconds: int = 0) -> float | None:
+        """
+        Retrieves the latest CF Benchmarks index price for a crypto symbol.
+        If calc_twap_seconds > 0 (e.g. 60s for Kalshi expiration), computes the time-weighted
+        average price (TWAP) across the payload ticks in that time window matching Kalshi settlement rules.
+        """
+        idx = CFBENCHMARKS_CRYPTO_INDEX_MAP.get(symbol.upper())
+        if not idx:
+            return None
+        try:
+            res = self.get_cfbenchmarks_values(idx)
+            payload = res.get("data", {}).get("payload", [])
+            if not payload:
+                return None
+            if calc_twap_seconds > 0 and len(payload) > 1:
+                latest_time = payload[-1].get("time", 0)
+                cutoff_time = latest_time - (calc_twap_seconds * 1000)
+                window_values = [
+                    float(p["value"]) for p in payload
+                    if p.get("time", 0) >= cutoff_time and p.get("value") is not None
+                ]
+                if window_values:
+                    return round(sum(window_values) / len(window_values), 4)
+            latest_val = payload[-1].get("value")
+            return float(latest_val) if latest_val is not None else None
+        except Exception as err:
+            log.debug(f"Could not fetch CF Benchmarks price for {symbol} ({idx}): {err}")
+            return None
+
+    def get_series_settlement_sources(self, series_ticker: str) -> list[dict]:
+        """
+        Fetches official settlement sources for a given series ticker (e.g. 'KXBTC15M')
+        from Kalshi /series/{series_ticker}. Caches in-memory to prevent duplicate queries.
+        """
+        if not hasattr(self, "_series_settlement_sources_cache"):
+            self._series_settlement_sources_cache = {}
+        if series_ticker in self._series_settlement_sources_cache:
+            return self._series_settlement_sources_cache[series_ticker]
+        try:
+            res = self.get(f"/series/{series_ticker}")
+            series = res.get("series", {})
+            sources = series.get("settlement_sources", [])
+            self._series_settlement_sources_cache[series_ticker] = sources
+            return sources
+        except Exception as err:
+            log.debug(f"Could not fetch settlement sources for series {series_ticker}: {err}")
+            return []
+
     # -----------------------------------------------------------------------
     # Order Placement & Execution
     # -----------------------------------------------------------------------
@@ -1046,6 +1122,122 @@ class KalshiClient(BaseTradingClient):
             "order_id": order_id,
             "tp_order_id": tp_order_id,
         }
+
+    def buy_favorite_maker_order(
+        self,
+        ticker: str,
+        side: str,
+        maker_bid_cents: int,
+        target_ask_cents: int,
+        count: int = 1,
+        buy_order_timeout_seconds: int = 60,
+    ) -> dict:
+        """
+        Submits a post_only Maker Limit Bid for a confirmed Favorite (74¢–93¢).
+        - Places resting limit bid inside the spread (1¢–2¢ below ask, or 1¢ above bid).
+        - Captures the spread discount and avoids taker fee friction (free maker trades on Kalshi crypto).
+        - Holds position through to 100¢ ($1.00) settlement payout without premature exit.
+        """
+        side_clean = side.lower()
+        effective_bid = max(1, min(99, maker_bid_cents))
+        spread_saved = max(0, target_ask_cents - effective_bid)
+
+        now_sec = int(time.time())
+        now_ms = int(time.time() * 1000)
+
+        if side_clean == "yes":
+            buy_side = "bid"
+            buy_price_str = f"0.{effective_bid:02d}00"
+        else:
+            buy_side = "ask"
+            buy_price_str = f"0.{(100 - effective_bid):02d}00"
+
+        buy_payload = {
+            "ticker": ticker,
+            "client_order_id": generate_safe_client_order_id(f"fav_maker_{side_clean}", ticker, now_ms),
+            "side": buy_side,
+            "count": str(count),
+            "price": buy_price_str,
+            "time_in_force": "good_till_canceled",
+            "post_only": True,
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+        if buy_order_timeout_seconds > 0:
+            buy_payload["expiration_ts"] = now_sec + buy_order_timeout_seconds
+
+        log.info(
+            f"🎯 [FAVORITE MAKER BID] {ticker} | Side: {side_clean.upper()} | "
+            f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢) | Count: {count}"
+        )
+
+        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        self.invalidate_portfolio_caches()
+
+        order_id = (
+            buy_order_res.get("order", {}).get("order_id")
+            or buy_order_res.get("order_id")
+            if isinstance(buy_order_res, dict)
+            else None
+        )
+        client_order_id = buy_payload["client_order_id"]
+
+        self.set_entry_price(
+            ticker=ticker,
+            price_cents=effective_bid,
+            side=side_clean,
+            count=count,
+            client_order_id=client_order_id,
+            strategy_tag="endgame_favorite_maker",
+            spread_saved_cents=spread_saved,
+            order_role="maker",
+        )
+
+        return {
+            "buy_order": buy_order_res,
+            "side": side_clean,
+            "buy_price_cents": effective_bid,
+            "target_ask_cents": target_ask_cents,
+            "spread_saved_cents": spread_saved,
+            "client_order_id": client_order_id,
+            "order_id": order_id,
+            "strategy_tag": "endgame_favorite_maker",
+        }
+
+    def get_crypto_directional_counts(self) -> dict[str, int]:
+        """
+        Counts active open positions on crypto assets categorized by direction ('yes' vs 'no').
+        Used to enforce cross-asset portfolio correlation exposure caps (Reddit Comment p3ok6ft).
+        """
+        positions_map = self.get_all_active_positions()
+        counts = {"yes": 0, "no": 0}
+        crypto_prefixes = (
+            "KXBTC", "KXETH", "KXSOL", "KXXRP", "KXDOGE", "KXBNB",
+            "KXHYPE", "KXADA", "KXTON", "KXBCH", "KXNEAR", "KXZEC",
+        )
+        for ticker, pos in positions_map.items():
+            if any(ticker.startswith(p) for p in crypto_prefixes):
+                side = (pos.get("side") or "").lower()
+                if side in counts:
+                    counts[side] += 1
+        return counts
+
+    def check_crypto_portfolio_directional_cap(self, side: str, max_concurrent: int = 3) -> bool:
+        """
+        Enforces a cross-asset directional portfolio cap (Comment p3ok6ft).
+        Since top crypto assets settle co-directionally 74%–84% of the time, entering more than
+        max_concurrent positions in the same direction compounds downside risk.
+        Returns True if allowed to enter, False if cap is reached.
+        """
+        side_clean = side.lower()
+        counts = self.get_crypto_directional_counts()
+        current_in_dir = counts.get(side_clean, 0)
+        if current_in_dir >= max_concurrent:
+            log.info(
+                f"🛡️ [CORRELATION RISK CAP] Active crypto {side_clean.upper()} positions ({current_in_dir}) "
+                f">= max cap ({max_concurrent}). Skipping new {side_clean.upper()} entry to prevent co-directional drawdown."
+            )
+            return False
+        return True
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancels an existing order by its unique order ID using Kalshi V2 endpoint."""

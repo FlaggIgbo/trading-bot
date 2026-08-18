@@ -11,10 +11,10 @@ Key Robustness & Safety Engines:
    - Verifies 0 resting orders before executing liquidations to prevent locked position errors.
 2. Crash-Proof Persistent Cost Basis:
    - Reads/writes entry prices from MongoDB Atlas `active_positions` to survive worker restarts.
-3. Verified Winner-Roll Re-Buys:
-   - Confirms fill status before recording entry cost on rolled contracts.
+3. Winner Profit Banking (≥70¢ or ≥+15¢ Gain):
+   - Sells winning positions at Bid to lock realized profit directly into cash balance without high-price re-buys.
 4. Synchronized Checkpoint Lifecycle:
-   - Evaluates early cut-loss (5m/20m), winner rolls (10m/40m), stop-loss exits, and endgame checks (12.5m/50m).
+   - Evaluates early cut-loss (5m/20m), winner profit banking (10m/40m), stop-loss exits, and endgame checks (12.5m/50m).
 """
 
 from __future__ import annotations
@@ -49,8 +49,8 @@ class LogTag(str, Enum):
     ENDGAME_CHECK = "⏳ [12.5-MIN ENDGAME CHECK]"     # Inspecting 12.5m endgame position status (2.5m before expiration)
     ENDGAME_CUT_LOSS_TRIGGERED = "🛑 [12.5-MIN CUT-LOSS TRIGGERED]"  # Liquidating losing position at 12.5m mark
     DRY_RUN_ENDGAME_CUT_LOSS = "🛑 [DRY-RUN 12.5-MIN CUT-LOSS]"      # Preview 12.5m cut-loss liquidation in dry-run mode
-    WINNER_ROLLED = "🔄 [WINNER PROFIT LOCKED & RE-BOUGHT]"  # Selling winning position at 10m to bank profit & re-buying at ask to run to 100¢
-    DRY_RUN_WINNER_ROLLED = "🔄 [DRY-RUN WINNER ROLLED]"      # Preview 10m winner roll in dry-run mode
+    WINNER_ROLLED = "💰 [WINNER PROFIT BANKED]"        # Selling winning position at 10m/40m to bank realized cash profit
+    DRY_RUN_WINNER_ROLLED = "💰 [DRY-RUN WINNER PROFIT BANKED]"  # Preview 10m/40m winner profit banking in dry-run mode
     LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Letting winner run to 100¢ settlement payout
     PROFIT_FLOOR_ARMED = "🛡️ [PROFIT FLOOR ARMED]"     # Armed trailing profit floor (current_price - 10¢) on let-it-run winner
     PROFIT_FLOOR_TRIGGERED = "💰 [PROFIT FLOOR TRIGGERED]"  # Liquidating position when price hits trailing profit floor
@@ -83,8 +83,38 @@ class BaseTradingClient(ABC):
         self._entry_prices: dict[str, int] = {}
         # Keeps track of the intended take-profit price for this position (e.g. 88¢ or 62¢)
         self._target_tps: dict[str, int] = {}
+        # Keeps track of strategy tags (e.g. 'endgame_favorite_maker', 'discount_longshot', 'momentum')
+        self._strategy_tags: dict[str, str] = {}
         # Strict Single-Side Market Lock: Maps ticker -> side ('yes' or 'no') to prevent dual buys
         self._traded_markets: dict[str, str] = {}
+
+    @property
+    def strategy_tags(self) -> dict[str, str]:
+        if not hasattr(self, "_strategy_tags") or self._strategy_tags is None:
+            self._strategy_tags = {}
+        return self._strategy_tags
+
+    def get_strategy_tag(self, ticker: str) -> str | None:
+        """Returns the strategy tag for ticker (e.g. 'endgame_favorite_maker')."""
+        if ticker in self.strategy_tags:
+            return self.strategy_tags[ticker]
+        try:
+            from database import get_active_position_strategy_tag
+            db_tag = get_active_position_strategy_tag(ticker, getattr(self, "exchange_name", "kalshi"))
+            if db_tag is not None:
+                self.strategy_tags[ticker] = db_tag
+                return db_tag
+        except Exception as err:
+            log.debug(f"Could not load strategy tag for {ticker} from DB: {err}")
+        return None
+
+    def set_strategy_tag(self, ticker: str, tag: str) -> None:
+        """Sets or updates the strategy tag for ticker."""
+        self.strategy_tags[ticker] = tag
+
+    def clear_strategy_tag(self, ticker: str) -> None:
+        """Clears strategy tag for ticker."""
+        self.strategy_tags.pop(ticker, None)
 
     @property
     def traded_markets(self) -> dict[str, str]:
@@ -200,11 +230,16 @@ class BaseTradingClient(ABC):
         client_order_id: str | None = None,
         tp_order_id: str | None = None,
         take_profit_cents: int | None = None,
+        strategy_tag: str | None = None,
+        spread_saved_cents: int | None = None,
+        order_role: str | None = None,
     ) -> None:
-        """Records the exact entry price and target TP in cents in memory and MongoDB Atlas."""
+        """Records the exact entry price, strategy tag, and target TP in cents in memory and MongoDB Atlas."""
         self.entry_prices[ticker] = price_cents
         if take_profit_cents is not None:
             self.target_tps[ticker] = take_profit_cents
+        if strategy_tag is not None:
+            self.strategy_tags[ticker] = strategy_tag
         try:
             from database import save_active_position_cost
             save_active_position_cost(
@@ -216,19 +251,37 @@ class BaseTradingClient(ABC):
                 client_order_id=client_order_id,
                 tp_order_id=tp_order_id,
                 target_tp_cents=take_profit_cents,
+                strategy_tag=strategy_tag,
+                spread_saved_cents=spread_saved_cents,
+                order_role=order_role,
             )
         except Exception as err:
             log.debug(f"Could not persist entry price for {ticker} to DB: {err}")
 
     def clear_entry_price(self, ticker: str) -> None:
-        """Clears recorded entry price and target TP from memory and MongoDB Atlas."""
+        """Clears recorded entry price, strategy tag, and target TP from memory and MongoDB Atlas."""
         self.entry_prices.pop(ticker, None)
         self.target_tps.pop(ticker, None)
+        self.strategy_tags.pop(ticker, None)
         try:
             from database import remove_active_position_cost
             remove_active_position_cost(ticker, getattr(self, "exchange_name", "kalshi"))
         except Exception as err:
             log.debug(f"Could not remove entry price for {ticker} from DB: {err}")
+
+    def get_balance_cents(self) -> int | None:
+        """
+        Retrieves current available cash balance in cents.
+        Subclasses (e.g. KalshiClient) can override or BaseTradingClient falls back to calling get_balance().
+        """
+        if hasattr(self, "get_balance"):
+            try:
+                b = self.get_balance()
+                if isinstance(b, dict) and "balance" in b:
+                    return int(b["balance"])
+            except Exception:
+                pass
+        return None
 
     @abstractmethod
     def get_market_position(self, ticker: str) -> dict | None:
@@ -266,8 +319,8 @@ class BaseTradingClient(ABC):
         Evaluates active positions at the 10-minute / 40-minute mark:
         1. Winning Positions (Bid >= 70¢ or profit >= 15¢):
            - Cancels resting TP orders with strict verification.
-           - Sells the winning position at current Bid to LOCK IN / BANK REALIZED PROFIT in cash!
-           - Immediately re-buys 1 contract at current Ask price, verifies fill, and lets it run to 100¢ ($1.00)!
+           - Sells the winning position at current Bid to LOCK IN / BANK REALIZED PROFIT directly in cash balance.
+           - Keeps profit safely in balance without high-price re-buys.
         2. Losing Positions:
            - If loss >= stop_loss_threshold_cents OR price <= price_floor:
              Cancels resting orders with strict verification, then executes immediate taker liquidation.
@@ -304,7 +357,20 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Bid: {bid_price}¢ | Ask: {ask_price}¢ | Status: {pnl_label}"
         )
 
-        # 1. Winning Position Profit Bank: If position reached >= 70¢ or profit >= 15¢
+        # 1. Favorite Maker EV-Preservation Guard (Reddit Empirical Finding):
+        # Dipped favorites recover 70%+ of the time. Cutting dipped favorites costs ~20¢ of EV.
+        # Positions entered under the Favorite Maker strategy (entry_price >= 70¢ or strategy_tag == 'endgame_favorite_maker')
+        # are held through to 100¢ settlement rather than being cut prematurely at depressed bids.
+        is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
+        if is_favorite_maker:
+            log.info(
+                f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                f"Holding favorite position into settlement (entry: {entry_price}¢, bid: {bid_price}¢). "
+                f"Bypassing intermediate panic stop-loss / early profit banking to capture full 100¢ payout."
+            )
+            return {"triggered": False, "action": "favorite_maker_holding"}
+
+        # 2. Winning Position Profit Bank: If position reached >= 70¢ or profit >= 15¢
         # Sell at Bid to bank realized profit in cash. Keep the cash in balance (DO NOT re-buy at 85¢-98¢ into negative EV).
         if bid_price >= win_threshold_cents or profit_cents >= 15:
             if dry_run:
@@ -347,7 +413,7 @@ class BaseTradingClient(ABC):
                 "profit_locked_cents": profit_cents,
             }
 
-        # 2. Stop-Loss Check: If loss >= stop_loss_threshold_cents OR bid_price <= price_floor
+        # 3. Stop-Loss Check: If loss >= stop_loss_threshold_cents OR bid_price <= price_floor
         is_loss_exceeded = loss_cents >= stop_loss_threshold_cents
         is_below_floor = bid_price <= price_floor
 
@@ -452,6 +518,15 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | PnL: {pnl_label}"
         )
 
+        is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
+        if is_favorite_maker:
+            log.info(
+                f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                f"Favorite maker holding (entry: {entry_price}¢, price: {current_price}¢). "
+                f"Bypassing early cut-loss to preserve positive EV into expiration."
+            )
+            return {"triggered": False, "action": "favorite_maker_holding"}
+
         if current_price < min_price_threshold:
             reason = f"Current price {current_price}¢ is below safety cut threshold ({min_price_threshold}¢)"
 
@@ -543,6 +618,16 @@ class BaseTradingClient(ABC):
             f"{LogTag.ENDGAME_CHECK.value} [{self.exchange_name}] Market: {ticker} | Side: {side.upper()} | "
             f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Floor: {endgame_floor}¢ | Status: {pnl_label}"
         )
+
+        # Favorite Maker Endgame Evaluation (Hold to Settlement):
+        is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
+        if is_favorite_maker:
+            if current_price >= 25:
+                log.info(
+                    f"🚀 [FAVORITE MAKER SETTLEMENT RUN] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Favorite holding at {current_price}¢ (entry: ~{entry_price}¢). Holding into resolution for 100¢ settlement payout!"
+                )
+                return {"triggered": False, "action": "favorite_maker_holding_to_settle"}
 
         # Endgame Loss Check: If price is below endgame floor (e.g. < 25¢) or losing on entry/rebuy (loss_cents > 0)
         is_losing = (loss_cents > 0) or (current_price < endgame_floor)

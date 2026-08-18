@@ -7,6 +7,8 @@ import pytest
 
 from database import (
     DEFAULT_DYNAMIC_PRICE_MAP,
+    DEFAULT_DYNAMIC_PRICE_MAP_1H,
+    calculate_dynamic_contracts_count,
     calibrate_dynamic_price_map_from_db,
     get_dynamic_filter_for_market,
     is_default_exploration_window,
@@ -328,4 +330,86 @@ def test_15m_tighter_corridors_and_sizing():
         dry_run=True,
     )
     assert snap_mom_weak.get("trd", {}).get("action") != "buy_opened"
+
+
+def test_wti_restricted_profile_defaults():
+    """Verify that WTI has restricted profiles by default: 1 contract, tighter corridors, and higher spot lead."""
+    f_wti_1h = get_dynamic_filter_for_market("WTI", is_5min_mark=False, timeframe="1h", now_utc=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc))
+    assert f_wti_1h["is_restricted"] is True
+    assert f_wti_1h["contracts_per_trade"] == 1
+    assert f_wti_1h["max_buy"] == 30  # Tighter than standard 44¢
+    assert f_wti_1h["momentum_min_pct_dist"] == 0.20  # Stricter than standard 0.10%
+    assert f_wti_1h["sl_threshold"] == 20
+
+    f_wti_15m = get_dynamic_filter_for_market("WTI", is_5min_mark=False, timeframe="15m", now_utc=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc))
+    assert f_wti_15m["is_restricted"] is True
+    assert f_wti_15m["contracts_per_trade"] == 1
+    assert f_wti_15m["max_buy"] == 28
+    assert f_wti_15m["momentum_min_pct_dist"] == 0.20
+
+
+def test_calculate_dynamic_contracts_count_rules():
+    """Verify dynamic bankroll sizing rules across balances, prices, and restriction states."""
+    # 1. Restricted market -> strictly 1 contract even if balance is large
+    assert calculate_dynamic_contracts_count(balance_cents=5000, buy_price_cents=30, base_count=3, is_restricted=True) == 1
+
+    # 2. Small bankroll (<$10.00 / 1000¢) -> strictly 1 contract
+    assert calculate_dynamic_contracts_count(balance_cents=375, buy_price_cents=30, base_count=3, is_restricted=False) == 1
+    assert calculate_dynamic_contracts_count(balance_cents=800, buy_price_cents=25, base_count=3, is_restricted=False) == 1
+
+    # 3. Unaffordable trade (balance < price) -> returns 0
+    assert calculate_dynamic_contracts_count(balance_cents=18, buy_price_cents=30, base_count=1, is_restricted=False) == 0
+
+    # 4. Large bankroll ($50.00 / 5000¢) with 15% risk ($7.50 / 750¢ max risk per trade) -> 3 contracts @ 30¢ (cost 90¢ <= 750¢)
+    assert calculate_dynamic_contracts_count(balance_cents=5000, buy_price_cents=30, base_count=3, is_restricted=False) == 3
+
+    # 5. Base count cap respected (e.g. 15m with base_count=1 on large bankroll returns 1)
+    assert calculate_dynamic_contracts_count(balance_cents=5000, buy_price_cents=30, base_count=1, is_restricted=False) == 1
+
+    # 6. Mock / None balance -> returns base_count (or 1 if restricted)
+    assert calculate_dynamic_contracts_count(balance_cents=None, buy_price_cents=30, base_count=3, is_restricted=False) == 3
+    assert calculate_dynamic_contracts_count(balance_cents=None, buy_price_cents=30, base_count=3, is_restricted=True) == 1
+
+
+@patch("database.get_mongo_collection")
+def test_dynamic_loss_restriction_calibration_from_db(mock_get_coll):
+    """Verify that assets with recent heavy losses are dynamically restricted."""
+    snaps = [
+        {"sym": "BNB", "tick": "KXBNB15M-T1", "m": 0, "pct": 0.02, "trd": {"buy": 32, "side": "yes"}},
+        {"sym": "SOL", "tick": "KXSOL15M-T2", "m": 0, "pct": 0.02, "trd": {"buy": 28, "side": "yes"}},
+    ]
+    # BNB: 1 win, 4 losses (20% WR, negative PnL) -> Restricted
+    # SOL: 3 wins, 0 losses (100% WR, positive PnL) -> Healthy
+    settles = [
+        {"ticker": "KXBNB15M-T1", "market_result": "no", "pnl_cents": -35},
+        {"ticker": "KXBNB15M-T2", "market_result": "no", "pnl_cents": -30},
+        {"ticker": "KXBNB15M-T3", "market_result": "no", "pnl_cents": -30},
+        {"ticker": "KXBNB15M-T4", "market_result": "yes", "pnl_cents": 65},
+        {"ticker": "KXBNB15M-T5", "market_result": "no", "pnl_cents": -35},
+        {"ticker": "KXSOL15M-T1", "market_result": "yes", "pnl_cents": 70},
+        {"ticker": "KXSOL15M-T2", "market_result": "yes", "pnl_cents": 72},
+        {"ticker": "KXSOL15M-T3", "market_result": "yes", "pnl_cents": 68},
+    ]
+
+    def mock_coll(name):
+        data = snaps if name == "market_snapshots" else settles
+        mock = MagicMock()
+        mock.find.return_value.sort.return_value.limit.return_value = data
+        return mock
+
+    mock_get_coll.side_effect = mock_coll
+    calibrated = calibrate_dynamic_price_map_from_db()
+
+    # BNB should be dynamically restricted
+    assert "BNB" in calibrated
+    assert calibrated["BNB"]["00"]["is_restricted"] is True
+    assert calibrated["BNB"]["00"]["contracts_per_trade"] == 1
+    assert calibrated["BNB"]["00"]["max_buy"] <= 28
+    assert calibrated["BNB"]["00"]["momentum_min_pct_dist"] == 0.20
+
+    # SOL should be healthy
+    assert "SOL" in calibrated
+    assert calibrated["SOL"]["00"]["is_restricted"] is False
+    assert calibrated["SOL"]["00"]["contracts_per_trade"] == 3
+
 

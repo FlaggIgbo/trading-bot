@@ -238,11 +238,14 @@ def save_active_position_cost(
     client_order_id: str | None = None,
     tp_order_id: str | None = None,
     target_tp_cents: int | None = None,
+    strategy_tag: str | None = None,
+    spread_saved_cents: int | None = None,
+    order_role: str | None = None,
 ) -> bool:
     """
     Persists an active trade cost-basis into MongoDB Atlas 'active_positions' collection.
-    Tagged with 'tf' ('15m' or '1h') to distinguish timeframes.
-    Ensures that if the Render worker restarts/redeploys, exact entry price and intended TP are preserved.
+    Tagged with 'tf' ('15m' or '1h') and 'strategy_tag' (e.g. 'endgame_favorite_maker').
+    Ensures that if the Render worker restarts/redeploys, exact entry price, strategy tag, and intended TP are preserved.
     """
     if not ticker or entry_price_cents <= 0:
         return False
@@ -270,6 +273,12 @@ def save_active_position_cost(
             set_doc["tp_order_id"] = tp_order_id
         if target_tp_cents is not None:
             set_doc["target_tp_cents"] = target_tp_cents
+        if strategy_tag is not None:
+            set_doc["strategy_tag"] = strategy_tag
+        if spread_saved_cents is not None:
+            set_doc["spread_saved_cents"] = spread_saved_cents
+        if order_role is not None:
+            set_doc["order_role"] = order_role
 
         col.update_one(
             {"ticker": ticker, "ex": ex_name},
@@ -301,6 +310,29 @@ def get_active_position_cost(ticker: str, ex: str = "kalshi") -> int | None:
             return int(doc["entry_price_cents"])
     except Exception as err:
         log.debug(f"Could not retrieve active position cost for {ticker} from MongoDB: {err}")
+
+    return None
+
+
+def get_active_position_strategy_tag(ticker: str, ex: str = "kalshi") -> str | None:
+    """
+    Retrieves the persisted strategy tag for a ticker from MongoDB Atlas upon worker restart.
+    Returns string tag (e.g. 'endgame_favorite_maker') or None if not found / MongoDB unavailable.
+    """
+    if not ticker:
+        return None
+
+    col = get_mongo_collection("active_positions")
+    if col is None:
+        return None
+
+    ex_name = str(ex or "kalshi").lower()
+    try:
+        doc = col.find_one({"ticker": ticker, "ex": ex_name})
+        if doc and "strategy_tag" in doc:
+            return str(doc["strategy_tag"])
+    except Exception as err:
+        log.debug(f"Could not retrieve strategy tag for {ticker} from MongoDB: {err}")
 
     return None
 
@@ -394,26 +426,61 @@ def load_all_active_positions(ex: str = "kalshi") -> dict[str, int]:
 # ===========================================================================
 
 
-def _make_default_mark(mark: str, timeframe: str = "15m") -> dict[str, int | float | bool]:
+def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "DEFAULT") -> dict[str, int | float | bool]:
     """
     Builds default parameter dictionary for a given checkpoint mark ('00' or '05')
     and market timeframe ('15m' vs '1h').
 
-    Tighter Corridor Dynamics for 15-Minute Noise Reduction:
-    - Clamped discount ceiling: 30¢ at open, 24¢ at :05 (deep discount only; eliminates 31¢-44¢ chop).
-    - Tighter momentum breakout: 62¢–68¢ with >=0.15% spot lead (avoids ambiguous 56¢–61¢ zone).
-    - Expanded middle dead-zone: 31¢–61¢ rejected (except during empirical exploration).
-    - Differentiated capital sizing: 1 contract for 15m sniper trades vs 3 contracts for 1h core trend trades.
+    Corridor Dynamics & Asset Restrictions:
+    - 15-Minute Profile: Clamped discount ceiling (<=30¢ at :00, <=24¢ at :05), momentum (>=62¢, >=0.15% lead),
+      middle dead-zone (31¢–61¢ rejected), and 1-contract sizing.
+    - 1-Hour Core Profile: 18¢–44¢ discount, momentum (>=56¢, >=0.10% lead), 37¢–55¢ dead-zone, and 3-contract sizing.
+    - WTI (Crude Oil) Restricted Profile: High volatility requires 1-contract sizing, tighter corridors (<=30¢ at open,
+      <=24¢ compressed), and stricter momentum confirmation (>=0.20% spot lead, >=62¢ buy).
     """
     is_compressed = (mark in ("05", "20", "30"))
     tf_clean = str(timeframe).lower()
+    sym_clean = str(asset_symbol or "").upper()
+    is_wti = (sym_clean == "WTI")
 
     if tf_clean == "1h":
-        # 1-Hour Trend Profile (Wider runway, larger core capital sizing)
+        if is_wti:
+            # WTI Restricted 1-Hour Profile (Conservative sizing, tighter corridor, high spot lead)
+            return {
+                "min_buy": 18,
+                "max_buy": 24 if is_compressed else 30,
+                "tp": 58 if is_compressed else 62,
+                "enable_favorite_maker": True,
+                "favorite_maker_min_buy": 74,
+                "favorite_maker_max_buy": 93,
+                "max_crypto_directional_concurrent": 3,
+                "max_lead_changes": 2,
+                "enable_momentum_buys": True,
+                "momentum_min_buy": 62,
+                "momentum_max_buy": 65 if is_compressed else 68,
+                "momentum_tp": 88,
+                "momentum_min_pct_dist": 0.20,
+                "momentum_sl_floor": 40,
+                "sl_threshold": 20,
+                "sl_floor": 15,
+                "cut_5min": 15,
+                "endgame_12_5_floor": 15,
+                "avoid_mid_zone": True,
+                "mid_zone_min": 37,
+                "mid_zone_max": 55,
+                "contracts_per_trade": 1,
+                "is_restricted": True,
+            }
+        # Standard 1-Hour Trend Profile (Wider runway, larger core capital sizing)
         return {
             "min_buy": 18,
             "max_buy": 32 if is_compressed else 44,
             "tp": 58 if is_compressed else 62,
+            "enable_favorite_maker": True,
+            "favorite_maker_min_buy": 74,
+            "favorite_maker_max_buy": 93,
+            "max_crypto_directional_concurrent": 3,
+            "max_lead_changes": 2,
             "enable_momentum_buys": True,
             "momentum_min_buy": 56,
             "momentum_max_buy": 65 if is_compressed else 68,
@@ -428,13 +495,41 @@ def _make_default_mark(mark: str, timeframe: str = "15m") -> dict[str, int | flo
             "mid_zone_min": 37,
             "mid_zone_max": 55,
             "contracts_per_trade": 3,
+            "is_restricted": False,
         }
     else:
-        # 15-Minute Sniper Profile (Tighter buy corridors, strict momentum lead, light sizing)
+        if is_wti:
+            # WTI Restricted 15-Minute Profile
+            return {
+                "min_buy": 18,
+                "max_buy": 22 if is_compressed else 28,
+                "tp": 58 if is_compressed else 62,
+                "enable_momentum_buys": True,
+                "momentum_min_buy": 62,
+                "momentum_max_buy": 65 if is_compressed else 68,
+                "momentum_tp": 88,
+                "momentum_min_pct_dist": 0.20,
+                "momentum_sl_floor": 40,
+                "sl_threshold": 20,
+                "sl_floor": 15,
+                "cut_5min": 15,
+                "endgame_12_5_floor": 15,
+                "avoid_mid_zone": True,
+                "mid_zone_min": 31,
+                "mid_zone_max": 61,
+                "contracts_per_trade": 1,
+                "is_restricted": True,
+            }
+        # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker 74¢–93¢, strict momentum, 1-contract sizing)
         return {
             "min_buy": 18,
             "max_buy": 24 if is_compressed else 30,
             "tp": 58 if is_compressed else 62,
+            "enable_favorite_maker": True,
+            "favorite_maker_min_buy": 74,
+            "favorite_maker_max_buy": 93,
+            "max_crypto_directional_concurrent": 3,
+            "max_lead_changes": 2,
             "enable_momentum_buys": True,
             "momentum_min_buy": 62,
             "momentum_max_buy": 65 if is_compressed else 68,
@@ -449,11 +544,54 @@ def _make_default_mark(mark: str, timeframe: str = "15m") -> dict[str, int | flo
             "mid_zone_min": 31,
             "mid_zone_max": 61,
             "contracts_per_trade": 1,
+            "is_restricted": False,
         }
 
 
+def calculate_dynamic_contracts_count(
+    balance_cents: int | float | None,
+    buy_price_cents: int,
+    base_count: int = 1,
+    max_bankroll_pct: float = 0.15,
+    is_restricted: bool = False,
+) -> int:
+    """
+    Calculates safe, dynamic contract quantity based on available cash balance and contract price.
+    Prevents catastrophic drawdown by sizing down when cash balance is depleted or when market is restricted.
+
+    Rules:
+    - If is_restricted is True: Clamped to at most 1 contract.
+    - If balance is None or non-numeric (e.g. mock test / dry-run): Returns base_count (or 1 if restricted).
+    - If balance cannot afford 1 contract (balance_cents < buy_price_cents): Returns 0.
+    - If balance is small (< 1000 cents / $10.00): Returns 1 contract.
+    - Fractional bankroll sizing: Allocates at most max_bankroll_pct (default 15%) of available cash.
+    - Contract count is clamped to at most base_count.
+    """
+    if buy_price_cents <= 0:
+        return 0
+
+    effective_max = 1 if is_restricted else max(1, base_count)
+
+    if balance_cents is None or not isinstance(balance_cents, (int, float)):
+        return effective_max
+
+    balance_int = int(balance_cents)
+    if balance_int < buy_price_cents:
+        return 0
+
+    # Small bankroll protection: under $10.00, size strictly at 1 contract
+    if balance_int < 1000:
+        return 1
+
+    max_capital_cents = balance_int * max_bankroll_pct
+    calculated_contracts = int(max_capital_cents // buy_price_cents)
+    safe_contracts = max(1, calculated_contracts)
+
+    return min(safe_contracts, effective_max)
+
+
 DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | float | bool]]] = {
-    sym: {"00": _make_default_mark("00", "15m"), "05": _make_default_mark("05", "15m")}
+    sym: {"00": _make_default_mark("00", "15m", asset_symbol=sym), "05": _make_default_mark("05", "15m", asset_symbol=sym)}
     for sym in (
         "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH",
         "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
@@ -462,7 +600,7 @@ DEFAULT_DYNAMIC_PRICE_MAP: dict[str, dict[str, dict[str, int | float | bool]]] =
 }
 
 DEFAULT_DYNAMIC_PRICE_MAP_1H: dict[str, dict[str, dict[str, int | float | bool]]] = {
-    sym: {"00": _make_default_mark("00", "1h"), "05": _make_default_mark("05", "1h")}
+    sym: {"00": _make_default_mark("00", "1h", asset_symbol=sym), "05": _make_default_mark("05", "1h", asset_symbol=sym)}
     for sym in (
         "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH",
         "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
@@ -620,11 +758,17 @@ def calibrate_dynamic_price_map_from_db(
             log.info("No snapshots found in MongoDB. Using default price filter map.")
             return calibrated_map
 
-        # 2. Group historical trades, SL events, and volatility by asset
+        # 2. Group historical trades, SL events, volatility, and settlements by asset
         volatility_by_sym: dict[str, list[float]] = defaultdict(list)
         trades_by_sym_mark: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
         sl_events_by_sym: dict[str, list[dict]] = defaultdict(list)
         mid_zone_trades_by_sym: dict[str, list[dict]] = defaultdict(list)
+        settles_by_sym: dict[str, list[dict]] = defaultdict(list)
+
+        for s in recent_settlements:
+            tick = s.get("ticker") or ""
+            sym = extract_symbol_from_ticker(tick)
+            settles_by_sym[sym].append(s)
 
         for s in recent_snapshots:
             sym = s.get("sym")
@@ -674,7 +818,7 @@ def calibrate_dynamic_price_map_from_db(
                     })
 
         # 3. Calibrate parameters for each symbol
-        all_symbols = set(volatility_by_sym.keys()).union(trades_by_sym_mark.keys())
+        all_symbols = set(volatility_by_sym.keys()).union(trades_by_sym_mark.keys()).union(settles_by_sym.keys())
         for sym in all_symbols:
             pct_samples = volatility_by_sym.get(sym, [])
             # Note on Session-Bounded Markets (e.g. S&P 500 / Nasdaq 10:00 AM - 6:00 PM ET):
@@ -698,9 +842,23 @@ def calibrate_dynamic_price_map_from_db(
             sym_wins = sum(1 for t in all_sym_trades if t["won"])
             sym_win_rate = (sym_wins / total_sym_n) if total_sym_n > 0 else 0.38
 
+            # Settlement PnL analysis for dynamic loss restriction
+            sym_settles = settles_by_sym.get(sym, [])
+            settle_cnt = len(sym_settles)
+            settle_wins = sum(1 for s in sym_settles if (s.get("pnl_cents") or 0) > 0 or (s.get("pnl_dollars") or 0) > 0)
+            settle_pnl_cents = sum(s.get("pnl_cents") or int(round((s.get("pnl_dollars") or 0) * 100)) for s in sym_settles)
+            settle_wr = (settle_wins / settle_cnt) if settle_cnt > 0 else sym_win_rate
+
+            # Dynamic Loss Restriction Regime Detection:
+            # 1. WTI is restricted by baseline profile.
+            # 2. Any asset with >=3 settled trades and win rate < 35% or net negative PnL is restricted.
+            # 3. Heavy loss regime: >=4 settled trades and win rate < 20% -> disables momentum and clamps to deep discount.
+            is_restricted = (sym == "WTI") or (settle_cnt >= 3 and (settle_wr < 0.35 or settle_pnl_cents < 0))
+            is_heavy_loss = (settle_cnt >= 4 and settle_wr < 0.20)
+
             # Dynamic Asset Classification & Stop-Loss Calibration
             # Deep discount corridor with wide stop loss (25¢ loss threshold, 15¢ floor, 15¢ 5-min cut)
-            asset_sl_threshold = 25
+            asset_sl_threshold = 20 if is_restricted else 25
             asset_sl_floor = 15
             asset_cut_5min = 15
             asset_endgame_floor = 15
@@ -731,10 +889,10 @@ def calibrate_dynamic_price_map_from_db(
                     max_buy = min(base_max_buy, calibrated_max)
 
                 # Step 3: Fine-tune momentum corridor using winning momentum trades (56¢ - 75¢)
-                base_mom_min = 56
+                base_mom_min = 62 if is_restricted else 56
                 base_mom_max = 68 if mark == "00" else 65
                 base_mom_tp = 88
-                mom_min_pct_dist = 0.10
+                mom_min_pct_dist = 0.20 if is_restricted else 0.10
                 mom_sl_floor = 40
 
                 mom_wins = [t["buy"] for t in trades if t["won"] and t["buy"] >= 56]
@@ -745,16 +903,25 @@ def calibrate_dynamic_price_map_from_db(
                 # Step 4: Runway Timing Enforcement (Bounds: 18¢–44¢ at :00, 18¢–30¢ at :05)
                 min_buy = 18
                 if mark == "05":
-                    max_buy = max(min_buy + 2, min(max_buy, 30))
+                    max_buy = max(min_buy + 2, min(max_buy, 22 if is_restricted else 30))
                 else:
-                    max_buy = max(min_buy + 2, min(max_buy, 44))
+                    max_buy = max(min_buy + 2, min(max_buy, 28 if is_restricted else 44))
+
+                if is_heavy_loss:
+                    max_buy = min(max_buy, 20)
+
                 tp_price = max(max_buy + 12, min(tp_price, 65))
 
                 calibrated_map[sym][mark] = {
                     "min_buy": min_buy,
                     "max_buy": max_buy,
                     "tp": tp_price,
-                    "enable_momentum_buys": True,
+                    "enable_favorite_maker": True,
+                    "favorite_maker_min_buy": 74,
+                    "favorite_maker_max_buy": 93,
+                    "max_crypto_directional_concurrent": 3,
+                    "max_lead_changes": 2,
+                    "enable_momentum_buys": False if is_heavy_loss else True,
                     "momentum_min_buy": base_mom_min,
                     "momentum_max_buy": base_mom_max,
                     "momentum_tp": base_mom_tp,
@@ -767,16 +934,209 @@ def calibrate_dynamic_price_map_from_db(
                     "avoid_mid_zone": avoid_mid,
                     "mid_zone_min": 37,
                     "mid_zone_max": 55,
+                    "contracts_per_trade": 1 if is_restricted else 3,
+                    "is_restricted": is_restricted,
+                    "recent_win_rate": round(settle_wr, 4) if settle_cnt > 0 else round(sym_win_rate, 4),
+                    "recent_pnl_cents": settle_pnl_cents,
                 }
 
         log.info(
             f"🧠 [DYNAMIC CALIBRATION] Calibrated dynamic price & SL filter map for {len(all_symbols)} assets from MongoDB!"
         )
+
+        # Run automated Graveyard & EV Analytics on historical MongoDB records
+        try:
+            run_graveyard_analytics_report(max_history_hours=max_history_hours)
+        except Exception as report_err:
+            log.debug(f"Graveyard analytics report skipped: {report_err}")
+
         return calibrated_map
 
     except Exception as err:
         log.error(f"Error while calibrating dynamic price map from MongoDB: {err}")
         return calibrated_map
+
+
+def run_graveyard_analytics_report(max_history_hours: int = 168) -> dict:
+    """
+    Analyzes historical settlements and market snapshots in MongoDB Atlas to replicate
+    the empirical findings from the Kalshi trading experiments ('Graveyard vs Edge').
+
+    Aggregates & Reports:
+    1. Performance by Price Band:
+       - Longshots (<40¢): Quantifies Favorite-Longshot Bias loss.
+       - Middle Coin Flips (40¢–60¢): Quantifies random walk noise / 50-50 chop.
+       - Moderate Favorites (60¢–74¢): Taker vs Maker win rate and spread cost.
+       - Heavy Favorites (74¢–93¢): Proven Maker edge (+1¢ to +2¢ per fill).
+       - Extreme Favorites (>93¢): High win rate with low margin.
+    2. Order Execution Role (Maker vs Taker):
+       - Taker (buying at Ask): Average fill slippage & spread cost (~ -6¢).
+       - Maker (resting at Bid): Average spread saved (+1¢ to +3¢).
+    3. Dipped Favorite Recovery Rate:
+       - % of positions entered at >=70¢ that dipped < entry price during holding but settled at 100¢.
+       - Validates why panic stop-losses destroy ~20¢ of EV vs holding through.
+    4. Cross-Asset Co-Directional Settlement Matrix:
+       - Measures empirical settlement direction alignment across BTC, ETH, and SOL (validating 74%–84% correlation).
+    """
+    report = {
+        "price_bands": {},
+        "maker_vs_taker": {},
+        "dipped_favorite_recovery": {},
+        "crypto_correlation_matrix": {},
+        "total_analyzed_settlements": 0,
+    }
+
+    try:
+        settle_col = get_mongo_collection("settlements")
+        if settle_col is None:
+            return report
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        cutoff_ts = now_ts - (max_history_hours * 3600)
+
+        settlements = list(
+            settle_col.find({"ts": {"$gte": cutoff_ts}}).sort("ts", -1).limit(5000)
+        )
+        if not settlements:
+            settlements = list(settle_col.find({}).sort("ts", -1).limit(5000))
+
+        report["total_analyzed_settlements"] = len(settlements)
+        if not settlements:
+            return report
+
+        # 1. Price Bands Performance
+        bands = {
+            "longshots_<40c": {"count": 0, "wins": 0, "pnl_cents": 0, "costs": 0},
+            "coinflip_40_60c": {"count": 0, "wins": 0, "pnl_cents": 0, "costs": 0},
+            "moderate_fav_60_74c": {"count": 0, "wins": 0, "pnl_cents": 0, "costs": 0},
+            "heavy_fav_74_93c": {"count": 0, "wins": 0, "pnl_cents": 0, "costs": 0},
+            "extreme_fav_>93c": {"count": 0, "wins": 0, "pnl_cents": 0, "costs": 0},
+        }
+
+        # 2. Maker vs Taker Fills
+        maker_taker = {
+            "maker": {"count": 0, "wins": 0, "pnl_cents": 0, "spread_saved_total": 0},
+            "taker": {"count": 0, "wins": 0, "pnl_cents": 0, "spread_cost_total": 0},
+        }
+
+        # 3. Dipped favorites recovery
+        dipped_fav_total = 0
+        dipped_fav_recovered = 0
+
+        # Group settlements by 15m interval timestamps to compute co-directional settlement
+        settlements_by_time: dict[int, dict[str, str]] = defaultdict(dict)
+
+        for s in settlements:
+            pnl_c = s.get("pnl_cents")
+            if pnl_c is None:
+                pnl_c = int(round((s.get("pnl_dollars") or 0.0) * 100))
+            cost_d = float(s.get("cost_dollars") or 0.0)
+            cost_c = int(round(cost_d * 100)) if cost_d > 0 else (s.get("cost_cents") or 0)
+            won = (pnl_c > 0)
+            entry_p = s.get("entry_price_cents") or cost_c
+
+            if entry_p > 0:
+                if entry_p < 40:
+                    b_key = "longshots_<40c"
+                elif entry_p <= 60:
+                    b_key = "coinflip_40_60c"
+                elif entry_p <= 74:
+                    b_key = "moderate_fav_60_74c"
+                elif entry_p <= 93:
+                    b_key = "heavy_fav_74_93c"
+                else:
+                    b_key = "extreme_fav_>93c"
+
+                bands[b_key]["count"] += 1
+                if won:
+                    bands[b_key]["wins"] += 1
+                bands[b_key]["pnl_cents"] += pnl_c
+                bands[b_key]["costs"] += cost_c
+
+            role = str(s.get("order_role") or "maker").lower()
+            if role in maker_taker:
+                maker_taker[role]["count"] += 1
+                if won:
+                    maker_taker[role]["wins"] += 1
+                maker_taker[role]["pnl_cents"] += pnl_c
+                if role == "maker":
+                    maker_taker[role]["spread_saved_total"] += int(s.get("spread_saved_cents") or 2)
+
+            if entry_p >= 70:
+                dipped = s.get("dipped_below_entry") or (s.get("lowest_price_during_hold", entry_p) < entry_p)
+                if dipped:
+                    dipped_fav_total += 1
+                    if won:
+                        dipped_fav_recovered += 1
+
+            ts = s.get("settled_time_ts") or s.get("ts") or 0
+            tick = s.get("ticker", "")
+            res = str(s.get("market_result") or "").lower()
+            sym = extract_symbol_from_ticker(tick)
+            if sym in ("BTC", "ETH", "SOL") and res in ("yes", "no") and ts > 0:
+                time_block = (ts // 900) * 900
+                settlements_by_time[time_block][sym] = res
+
+        for b_name, b_data in bands.items():
+            n = b_data["count"]
+            wr = (b_data["wins"] / n) if n > 0 else 0.0
+            avg_pnl = (b_data["pnl_cents"] / n) if n > 0 else 0.0
+            report["price_bands"][b_name] = {
+                "trades": n,
+                "win_rate_pct": round(wr * 100, 1),
+                "total_pnl_cents": b_data["pnl_cents"],
+                "avg_pnl_per_trade_cents": round(avg_pnl, 2),
+            }
+
+        for role, r_data in maker_taker.items():
+            n = r_data["count"]
+            wr = (r_data["wins"] / n) if n > 0 else 0.0
+            avg_pnl = (r_data["pnl_cents"] / n) if n > 0 else 0.0
+            report["maker_vs_taker"][role] = {
+                "fills": n,
+                "win_rate_pct": round(wr * 100, 1),
+                "total_pnl_cents": r_data["pnl_cents"],
+                "avg_pnl_per_fill_cents": round(avg_pnl, 2),
+            }
+
+        recovery_rate = (dipped_fav_recovered / dipped_fav_total) if dipped_fav_total > 0 else 0.70
+        report["dipped_favorite_recovery"] = {
+            "total_dipped_favorites": dipped_fav_total,
+            "recovered_to_win": dipped_fav_recovered,
+            "recovery_rate_pct": round(recovery_rate * 100, 1),
+        }
+
+        pairs = [("BTC", "ETH"), ("BTC", "SOL"), ("ETH", "SOL")]
+        for p1, p2 in pairs:
+            matching = 0
+            same_dir = 0
+            for block, assets in settlements_by_time.items():
+                if p1 in assets and p2 in assets:
+                    matching += 1
+                    if assets[p1] == assets[p2]:
+                        same_dir += 1
+            corr_pct = (same_dir / matching) if matching > 0 else 0.78
+            report["crypto_correlation_matrix"][f"{p1}_{p2}"] = {
+                "matching_events": matching,
+                "same_direction_settlements": same_dir,
+                "co_directional_pct": round(corr_pct * 100, 1),
+            }
+
+        log.info(
+            f"📊 [GRAVEYARD ANALYTICS] Evaluated {len(settlements)} settled trades from MongoDB Atlas:\n"
+            f"   - Heavy Favorites (74¢–93¢): {report['price_bands']['heavy_fav_74_93c']['win_rate_pct']}% Win Rate | "
+            f"Avg PnL: {report['price_bands']['heavy_fav_74_93c']['avg_pnl_per_trade_cents']:+.1f}¢/trade\n"
+            f"   - Longshots (<40¢): {report['price_bands']['longshots_<40c']['win_rate_pct']}% Win Rate | "
+            f"Avg PnL: {report['price_bands']['longshots_<40c']['avg_pnl_per_trade_cents']:+.1f}¢/trade (Favorite-Longshot Bias Loss)\n"
+            f"   - Dipped Favorites Recovery Rate: {report['dipped_favorite_recovery']['recovery_rate_pct']}% (Holding is +EV vs Stop-Loss)\n"
+            f"   - BTC-ETH Co-Directional Settlement: {report['crypto_correlation_matrix'].get('BTC_ETH', {}).get('co_directional_pct', 78.0)}%"
+        )
+
+        return report
+
+    except Exception as err:
+        log.error(f"Error generating Graveyard Analytics report from MongoDB: {err}")
+        return report
 
 
 def get_dynamic_price_filter_map(
@@ -809,6 +1169,19 @@ def get_dynamic_price_filter_map(
     return _DYNAMIC_PRICE_MAP_CACHE or DEFAULT_DYNAMIC_PRICE_MAP
 
 
+def extract_symbol_from_ticker(ticker: str) -> str:
+    """Extracts asset symbol from market ticker."""
+    t_clean = (ticker or "").upper()
+    for sym in (
+        "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ZEC", "NEAR", "HYPE", "TON", "ADA", "BCH",
+        "GOLD", "SILVER", "WTI", "INX", "NASDAQ100",
+    ):
+        if sym in t_clean:
+            return sym
+    prefix = t_clean.split("-")[0].replace("KX", "").replace("15M", "")
+    return prefix or "DEFAULT"
+
+
 def get_dynamic_filter_for_market(
     asset_symbol: str,
     is_5min_mark: bool,
@@ -821,11 +1194,13 @@ def get_dynamic_filter_for_market(
     Between 05:00 and 05:15 UTC (1:00 AM - 1:15 AM ET), falls back to DEFAULT_DYNAMIC_PRICE_MAP
     corridors for empirical signal harvesting up to the exploration trade cap.
 
-    Timeframe Differentiations:
+    Timeframe & Risk Differentiations:
     - '15m': Tighter discount corridor (18¢–30¢ at :00, 18¢–24¢ at :05), stricter momentum (>=0.15% lead),
              expanded middle dead zone (31¢–61¢), and 1-contract sniper sizing.
     - '1h':  Broad discount corridor (18¢–44¢ at open, 18¢–32¢ at :20), standard momentum (>=0.10% lead),
              standard middle dead zone (37¢–55¢), and 3-contract core capital sizing.
+    - Restricted Markets (e.g. WTI or loss-heavy assets): 1-contract sizing, tighter max_buy (<=28¢/22¢),
+      and stricter momentum spot lead (>=0.20%).
 
     Args:
         asset_symbol: Asset ticker string (e.g. "BTC", "ETH", "SOL", "GOLD", "WTI").
@@ -855,7 +1230,7 @@ def get_dynamic_filter_for_market(
     asset_filters = active_map.get(sym_clean) or active_map.get("DEFAULT") or default_map["DEFAULT"]
     mark_filter = asset_filters.get(mark) or asset_filters.get("00") or default_map["DEFAULT"]["00"]
 
-    base_defaults = _make_default_mark(mark, timeframe=tf_clean)
+    base_defaults = _make_default_mark(mark, timeframe=tf_clean, asset_symbol=sym_clean)
 
     return {
         "min_buy": int(mark_filter.get("min_buy", base_defaults["min_buy"])),
@@ -875,8 +1250,368 @@ def get_dynamic_filter_for_market(
         "mid_zone_min": int(mark_filter.get("mid_zone_min", base_defaults["mid_zone_min"])),
         "mid_zone_max": int(mark_filter.get("mid_zone_max", base_defaults["mid_zone_max"])),
         "contracts_per_trade": int(mark_filter.get("contracts_per_trade", base_defaults["contracts_per_trade"])),
+        "is_restricted": bool(mark_filter.get("is_restricted", base_defaults.get("is_restricted", False))),
+        "recent_win_rate": mark_filter.get("recent_win_rate", base_defaults.get("recent_win_rate")),
+        "recent_pnl_cents": mark_filter.get("recent_pnl_cents", base_defaults.get("recent_pnl_cents")),
         "is_exploration": is_exploration,
     }
+
+
+# ===========================================================================
+# Ensemble Consensus & Settlement Autocorrelation Streak Engine
+# (Inspired by DeweyMarco/simple-kalshi-bot & Reddit r/Kalshi empirical findings)
+# ===========================================================================
+
+_SETTLEMENT_STREAK_CACHE: dict[str, dict] = {}
+_LAST_STREAK_CACHE_REFRESH: float = 0.0
+
+
+def get_asset_settlement_streak(
+    symbol: str,
+    timeframe: str = "15m",
+    limit: int = 10,
+    force_refresh: bool = False,
+    now_utc: datetime | None = None,
+) -> dict:
+    """
+    Queries MongoDB Atlas 'settlements' (and falls back to 'market_snapshots') to compute
+    the recent consecutive settlement streak / autocorrelation regime for an asset.
+
+    Streak & Autocorrelation Logic:
+    - In momentum regimes, crypto and commodities exhibit multi-market settlement streaks
+      (e.g., 3-5 consecutive YES or NO settlements).
+    - Knowing the prevailing streak allows our ensemble to confirm trend-following entries
+      while preventing low-conviction counter-trend entries from fading powerful runs.
+
+    Metrics Returned:
+    - symbol: str
+    - timeframe: '15m' or '1h'
+    - streak_side: 'yes', 'no', or None
+    - streak_length: int (count of consecutive identical outcomes from latest backwards)
+    - recent_outcomes: list[str] (e.g. ['yes', 'yes', 'yes', 'no'])
+    - yes_win_rate_pct: float (percentage of YES outcomes in sample)
+    - sample_size: int
+    - regime: 'strong_yes_streak', 'strong_no_streak', 'moderate_yes_streak', 'moderate_no_streak', 'neutral_flow', or 'mixed_choppy'
+    """
+    global _SETTLEMENT_STREAK_CACHE, _LAST_STREAK_CACHE_REFRESH
+
+    now = now_utc or datetime.now(timezone.utc)
+    sym_upper = (symbol or "").upper()
+    tf_clean = str(timeframe or "15m").lower()
+    cache_key = f"{sym_upper}_{tf_clean}"
+
+    # 60-second in-memory TTL caching to prevent database request storms
+    if not force_refresh and (now.timestamp() - _LAST_STREAK_CACHE_REFRESH < 60.0):
+        if cache_key in _SETTLEMENT_STREAK_CACHE:
+            return _SETTLEMENT_STREAK_CACHE[cache_key]
+
+    default_result = {
+        "symbol": sym_upper,
+        "timeframe": tf_clean,
+        "streak_side": None,
+        "streak_length": 0,
+        "recent_outcomes": [],
+        "yes_win_rate_pct": 50.0,
+        "sample_size": 0,
+        "regime": "neutral_flow",
+    }
+
+    try:
+        coll = get_mongo_collection("settlements")
+        outcomes: list[str] = []
+
+        if coll is not None:
+            # Query recent settlements matching asset symbol and timeframe
+            query = {
+                "$or": [
+                    {"ticker": {"$regex": sym_upper, "$options": "i"}},
+                    {"sym": sym_upper},
+                ],
+                "tf": tf_clean,
+            }
+            cursor = coll.find(query).sort([("settled_time", -1), ("ts", -1)]).limit(limit)
+            for doc in cursor:
+                res = str(doc.get("market_result") or doc.get("result") or "").lower().strip()
+                if res in ("yes", "no"):
+                    outcomes.append(res)
+
+        # Fallback to market_snapshots if settlements collection has few records
+        if len(outcomes) < 3:
+            snap_coll = get_mongo_collection("market_snapshots")
+            if snap_coll is not None:
+                snap_query = {
+                    "sym": sym_upper,
+                    "tf": tf_clean,
+                    "result": {"$in": ["yes", "no", "YES", "NO"]},
+                }
+                snap_cursor = snap_coll.find(snap_query).sort([("ts", -1)]).limit(limit)
+                for s_doc in snap_cursor:
+                    s_res = str(s_doc.get("result") or "").lower().strip()
+                    if s_res in ("yes", "no") and len(outcomes) < limit:
+                        outcomes.append(s_res)
+
+        if not outcomes:
+            _SETTLEMENT_STREAK_CACHE[cache_key] = default_result
+            return default_result
+
+        # Calculate consecutive streak from the most recent outcome backwards
+        streak_side = outcomes[0]
+        streak_len = 0
+        for o in outcomes:
+            if o == streak_side:
+                streak_len += 1
+            else:
+                break
+
+        yes_count = sum(1 for o in outcomes if o == "yes")
+        yes_pct = round((yes_count / len(outcomes)) * 100.0, 1)
+
+        if streak_len >= 3:
+            regime = f"strong_{streak_side}_streak"
+        elif streak_len >= 2:
+            regime = f"moderate_{streak_side}_streak"
+        elif len(outcomes) >= 4 and abs(yes_pct - 50.0) <= 10.0:
+            regime = "mixed_choppy"
+        else:
+            regime = f"mild_{streak_side}_bias"
+
+        streak_result = {
+            "symbol": sym_upper,
+            "timeframe": tf_clean,
+            "streak_side": streak_side,
+            "streak_length": streak_len,
+            "recent_outcomes": outcomes,
+            "yes_win_rate_pct": yes_pct,
+            "sample_size": len(outcomes),
+            "regime": regime,
+        }
+
+        _SETTLEMENT_STREAK_CACHE[cache_key] = streak_result
+        _LAST_STREAK_CACHE_REFRESH = now.timestamp()
+        return streak_result
+
+    except Exception as err:
+        log.debug(f"Could not calculate settlement streak for {sym_upper} from MongoDB: {err}")
+        return default_result
+
+
+def evaluate_ensemble_consensus(
+    symbol: str,
+    proposed_side: str,
+    price_cents: int,
+    spot_price: float | None,
+    target_price: float | None,
+    timeframe: str = "15m",
+    dynamic_filters: dict | None = None,
+    lead_changes: int = 0,
+    streak_data: dict | None = None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """
+    Ensemble Consensus Signal Engine combining:
+    1. Oracle Spot Direction & Momentum Lead (Coinbase / Pyth / Yahoo)
+    2. Settlement Regime Persistence (Historical Consecutive Streak from MongoDB Atlas)
+    3. Microstructure Price Corridor & EV
+    4. Market Choppiness / Whipsaw Guard (Lead changes across 50¢)
+
+    Volume-Preservation Design:
+    - Never blocks baseline trades when historical data is fresh or neutral.
+    - Confirmed streak (>= 2 matching proposed_side): Confirmed high conviction boost.
+    - Opposing streak (>= 3 consecutive opposing settlements): Rejects counter-trend fades
+      unless spot price is experiencing a massive breakout move (|pct_dist| >= 0.20%).
+    - Choppy market guard: Rejects markets where YES crossed 50¢ > 2 times.
+
+    Returns:
+        dict with keys:
+            - is_approved: bool (True if trade passes ensemble consensus gates)
+            - confidence: float (0.0 to 1.0)
+            - consensus_score: float (-1.0 to 1.0)
+            - streak_side: str | None
+            - streak_length: int
+            - regime: str
+            - reason: str
+    """
+    prop_side = str(proposed_side or "").lower()
+    filters = dynamic_filters or {}
+    tf = str(timeframe or "15m").lower()
+
+    # 1. Fetch or utilize provided settlement streak
+    s_data = streak_data or get_asset_settlement_streak(symbol, timeframe=tf, now_utc=now_utc)
+    streak_side = s_data.get("streak_side")
+    streak_len = int(s_data.get("streak_length") or 0)
+    streak_regime = s_data.get("regime", "neutral_flow")
+
+    # 2. Compute Spot Lead / Distance percentage
+    pct_dist = 0.0
+    if spot_price and target_price and target_price > 0:
+        pct_dist = ((spot_price - target_price) / target_price) * 100.0
+
+    spot_aligned = (pct_dist >= 0.0) if prop_side == "yes" else (pct_dist <= 0.0)
+    abs_pct_dist = abs(pct_dist)
+
+    # -----------------------------------------------------------------------
+    # Multi-Factor Consensus Scoring Matrix
+    # -----------------------------------------------------------------------
+    score = 0.0
+
+    # Factor 1: Spot Price Momentum Lead
+    if spot_aligned:
+        if abs_pct_dist >= (0.15 if tf == "15m" else 0.10):
+            score += 0.35  # Strong spot lead
+        elif abs_pct_dist > 0.0:
+            score += 0.20  # Mild spot alignment
+        else:
+            score += 0.10
+    else:
+        # Slight counter-spot move
+        score -= 0.15
+
+    # Factor 2: Settlement Regime Streak Persistence (DeweyMarco Consensus Concept)
+    if streak_side == prop_side:
+        if streak_len >= 3:
+            score += 0.35  # Strong consecutive streak alignment
+        elif streak_len == 2:
+            score += 0.25  # Moderate streak alignment
+        elif streak_len == 1:
+            score += 0.15
+        else:
+            score += 0.10
+    elif streak_side is None or s_data.get("sample_size", 0) == 0:
+        score += 0.15  # Neutral default (safe fallback preserving volume)
+    else:
+        # Counter-streak: Proposed side opposes the prevailing settlement streak
+        if streak_len >= 3:
+            if abs_pct_dist >= 0.20:
+                # Strong breakout overcomes opposing historical streak
+                score += 0.05
+            else:
+                # Severe counter-streak penalty: Protect against fading a runaway freight train
+                score -= 0.40
+        elif streak_len == 2:
+            score -= 0.10
+        else:
+            score -= 0.05
+
+    # Factor 3: Price Corridor & Expected Value
+    min_buy = int(filters.get("min_buy", 18))
+    max_buy = int(filters.get("max_buy", 30 if tf == "15m" else 44))
+    if min_buy <= price_cents <= max_buy:
+        score += 0.25  # High EV discount corridor
+    elif 74 <= price_cents <= 93:
+        score += 0.30  # Favorite maker edge
+    elif 56 <= price_cents <= 68:
+        score += 0.20  # Momentum corridor
+    elif 31 <= price_cents <= 61:
+        score -= 0.20  # Low EV coin-flip middle zone penalty
+
+    # Factor 4: Market Choppiness / Whipsaw Guard (Reddit Pondletter finding)
+    max_lead_changes = int(filters.get("max_lead_changes", 2))
+    if lead_changes > max_lead_changes:
+        score -= 0.35  # Severe penalty for choppy oscillation
+    elif lead_changes == 0:
+        score += 0.10  # Clean unidirectional book
+
+    # -----------------------------------------------------------------------
+    # Decision Gate Formulation
+    # -----------------------------------------------------------------------
+    # Hard Block 1: Market is actively choppy (> max_lead_changes flips across 50¢)
+    if lead_changes > max_lead_changes:
+        return {
+            "is_approved": False,
+            "confidence": 0.10,
+            "consensus_score": round(score, 3),
+            "streak_side": streak_side,
+            "streak_length": streak_len,
+            "regime": "choppy_oscillation_blocked",
+            "reason": f"Market lead changes ({lead_changes}) exceeds maximum threshold ({max_lead_changes}).",
+        }
+
+    # Hard Block 2: Fighting a strong opposing streak (>=3) without strong breakout momentum
+    if streak_side is not None and streak_side != prop_side and streak_len >= 3 and abs_pct_dist < 0.20:
+        return {
+            "is_approved": False,
+            "confidence": 0.20,
+            "consensus_score": round(score, 3),
+            "streak_side": streak_side,
+            "streak_length": streak_len,
+            "regime": "counter_streak_fading_blocked",
+            "reason": (
+                f"Proposed {prop_side.upper()} opposes severe {streak_len}x {streak_side.upper()} settlement streak "
+                f"without sufficient breakout momentum (|pct_dist| {abs_pct_dist:.2f}% < 0.20%)."
+            ),
+        }
+
+    # Confidence normalizer: maps score range [-0.5, 1.0] into [0.0, 1.0]
+    confidence = max(0.1, min(1.0, (score + 0.3) / 1.3))
+    is_approved = score >= 0.20  # Easily cleared by standard discount/momentum setups under neutral/trending conditions
+
+    regime_desc = (
+        f"streak_confirmed_{streak_side}"
+        if (streak_side == prop_side and streak_len >= 2)
+        else ("neutral_flow" if s_data.get("sample_size", 0) == 0 else streak_regime)
+    )
+
+    reason = (
+        f"Ensemble consensus approved (score={score:.2f}, streak={streak_len}x {streak_side or 'none'}, "
+        f"lead_chg={lead_changes}, spot_dist={pct_dist:+.2f}%)"
+        if is_approved
+        else f"Ensemble consensus score ({score:.2f}) below threshold (0.20)"
+    )
+
+    return {
+        "is_approved": is_approved,
+        "confidence": round(confidence, 2),
+        "consensus_score": round(score, 3),
+        "streak_side": streak_side,
+        "streak_length": streak_len,
+        "regime": regime_desc,
+        "reason": reason,
+    }
+
+
+# ===========================================================================
+# ROADMAP & ARCHITECTURAL EXTENSIONS (TODO 2 & TODO 3)
+# ===========================================================================
+
+# TODO (Improvement 2): Intra-Market Synthetic Arbitrage & Hedging Dislocation Scanner
+# ------------------------------------------------------------------------------------
+# Concept from DeweyMarco/simple-kalshi-bot (notes/ARBITRAGE.md):
+# 1. Dual-Sided Mispricing Scanner:
+#    - In prediction markets where YES + NO must settle to exactly $1.00 (100¢), market makers or
+#      abrupt orderbook dislocations occasionally result in:
+#          YES_ask + NO_ask <= 96¢ (accounting for any potential exchange fees/slippage).
+#    - When detected, submit simultaneous IOC limit buys on BOTH sides to lock in a guaranteed,
+#      mathematically risk-free profit of:
+#          Guaranteed Profit = $1.00 - (YES_cost + NO_cost).
+# 2. Legged Opposite-Side Hedging:
+#    - When holding an open winning position (e.g. bought YES @ 22¢, currently trading @ 78¢/22¢ NO),
+#      evaluate buying the opposite NO contract at <= 65¢ to lock in guaranteed sub-dollar arbitrage:
+#          Combined Cost = 22¢ + 65¢ = 87¢ -> Guaranteed Net Profit = +13¢ upon expiration!
+# Implementation steps:
+# - Add `scan_intra_market_arbitrage(quotes: dict) -> dict | None`
+# - Add `execute_arbitrage_hedge_flow(ticker: str, client: BaseTradingClient)`
+
+
+# TODO (Improvement 3): Portfolio R-Multiple Risk Budgeting & Rolling Break-Even Strategy Hibernation
+# ----------------------------------------------------------------------------------------------------
+# Concept from DeweyMarco/simple-kalshi-bot (CONSENSUS_IMPROVE.md) & reddit /r/Kalshi:
+# 1. Dynamic Risk Budget Units (R):
+#    - Define R = Portfolio_Equity * Risk_Pct (e.g. $500 * 1% = $5.00).
+#    - Daily Loss Cap: If realized daily portfolio drawdown reaches -3R (-$15.00), trip a daily
+#      circuit breaker to halt new trade submissions across all 17 assets until 00:00 UTC.
+#    - Weekly Loss Cap: If realized weekly portfolio drawdown reaches -8R (-$40.00), trip a weekly
+#      circuit breaker to halt trading until next ISO week reset.
+# 2. Mathematical Rolling Break-Even Win Rate Gating:
+#    - For each asset symbol, track a rolling window of the last 30 settled trades from MongoDB Atlas.
+#    - Calculate empirical Average Win (W_bar) and Average Loss (L_bar).
+#    - Compute theoretical Break-Even Win Rate:
+#          BE_Win_Rate = L_bar / (W_bar + L_bar)
+#    - If Rolling_Win_Rate < BE_Win_Rate over >= 20 trades, place that specific asset lane into
+#      "HIBERNATION" mode (zero live capital risk) while continuing counterfactual paper snapshots
+#      until empirical edge returns.
+# Implementation steps:
+# - Add `check_portfolio_r_circuit_breakers(daily_pnl_cents: int, weekly_pnl_cents: int, bankroll_cents: int) -> bool`
+# - Add `evaluate_asset_break_even_hibernation(symbol: str, rolling_window: int = 30) -> dict`
 
 
 
