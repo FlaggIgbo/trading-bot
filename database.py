@@ -1563,6 +1563,35 @@ def evaluate_ensemble_consensus(
             ),
         }
 
+    # Hard Block 3: High-Value Price (>= 80¢) Spot Direction Divergence Guard
+    if price_cents >= 80 and spot_price and target_price and target_price > 0:
+        if prop_side == "yes" and spot_price < target_price:
+            return {
+                "is_approved": False,
+                "confidence": 0.15,
+                "consensus_score": round(score, 3),
+                "streak_side": streak_side,
+                "streak_length": streak_len,
+                "regime": "high_price_spot_divergence_blocked",
+                "reason": (
+                    f"High-value {prop_side.upper()} buy ({price_cents}¢ >= 80¢) rejected: "
+                    f"Spot (${spot_price:.4f}) is below strike target (${target_price:.4f}) (Dipping/crashing)."
+                ),
+            }
+        elif prop_side == "no" and spot_price > target_price:
+            return {
+                "is_approved": False,
+                "confidence": 0.15,
+                "consensus_score": round(score, 3),
+                "streak_side": streak_side,
+                "streak_length": streak_len,
+                "regime": "high_price_spot_divergence_blocked",
+                "reason": (
+                    f"High-value {prop_side.upper()} buy ({price_cents}¢ >= 80¢) rejected: "
+                    f"Spot (${spot_price:.4f}) is above strike target (${target_price:.4f}) (Surging against NO)."
+                ),
+            }
+
     # Confidence normalizer: maps score range [-0.5, 1.0] into [0.0, 1.0]
     confidence = max(0.1, min(1.0, (score + 0.3) / 1.3))
     is_approved = score >= 0.20  # Easily cleared by standard discount/momentum setups under neutral/trending conditions

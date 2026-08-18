@@ -845,12 +845,12 @@ def evaluate_favorite_maker_opportunity(
     if yes_ask is not None and effective_min_fav <= yes_ask <= effective_max_fav:
         if not client.is_side_allowed(ticker, "yes"):
             return None
-        # On restricted / loss-heavy assets, require spot price confirmation (spot >= target)
-        if is_restricted and spot_price is not None and target_price is not None and target_price > 0:
+        # High-value direction check: Require spot price confirmation (spot >= target) to avoid buying into dips/crashes
+        if spot_price is not None and target_price is not None and target_price > 0:
             if spot_price < target_price:
                 log.info(
                     f"⚠️ [FAVORITE SPOT DIVERGENCE SKIP] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
-                    f"Spot (${spot_price}) is below strike target (${target_price}) on restricted asset."
+                    f"Spot (${spot_price:.4f}) is below strike target (${target_price:.4f}) (Dipping/crashing)."
                 )
                 return None
 
@@ -873,12 +873,12 @@ def evaluate_favorite_maker_opportunity(
     if no_ask is not None and effective_min_fav <= no_ask <= effective_max_fav:
         if not client.is_side_allowed(ticker, "no"):
             return None
-        # On restricted / loss-heavy assets, require spot price confirmation (spot <= target)
-        if is_restricted and spot_price is not None and target_price is not None and target_price > 0:
+        # High-value direction check: Require spot price confirmation (spot <= target) to avoid buying into rallies
+        if spot_price is not None and target_price is not None and target_price > 0:
             if spot_price > target_price:
                 log.info(
                     f"⚠️ [FAVORITE SPOT DIVERGENCE SKIP] {ticker} NO Favorite @ {no_ask}¢ rejected: "
-                    f"Spot (${spot_price}) is above strike target (${target_price}) on restricted asset."
+                    f"Spot (${spot_price:.4f}) is above strike target (${target_price:.4f}) (Surging against NO)."
                 )
                 return None
 
@@ -939,7 +939,7 @@ def _execute_favorite_maker_flow(
                     maker_bid_cents=maker_bid,
                     target_ask_cents=target_ask,
                     count=count,
-                    buy_order_timeout_seconds=60,
+                    buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
                 )
                 effective_buy = buy_res.get("buy_price_cents", maker_bid) if isinstance(buy_res, dict) else maker_bid
             else:
@@ -950,7 +950,7 @@ def _execute_favorite_maker_flow(
                     take_profit_cents=99,
                     count=count,
                     maker_bid_cents=maker_bid,
-                    buy_order_timeout_seconds=60,
+                    buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
                 )
                 effective_buy = buy_res.get("buy_price_cents", maker_bid) if isinstance(buy_res, dict) else maker_bid
             if isinstance(buy_res, dict) and buy_res.get("error"):

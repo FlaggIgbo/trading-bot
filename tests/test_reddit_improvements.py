@@ -197,6 +197,18 @@ def test_evaluate_favorite_maker_opportunity_yes_and_no():
         market=market_yes, quotes=quotes_yes, rem_mins=10.0, dynamic_filters=filters, client=client
     ) is None
 
+    # Case 5: YES Favorite (Ask: 84¢) but Spot ($64500) < Target ($64700) -> Must reject dipping market
+    assert evaluate_favorite_maker_opportunity(
+        market=market_yes, quotes=quotes_yes, rem_mins=3.5, dynamic_filters=filters, client=client,
+        spot_price=64500.0, target_price=64700.0
+    ) is None
+
+    # Case 6: NO Favorite (Ask: 85¢) but Spot ($64900) > Target ($64700) -> Must reject surging market against NO
+    assert evaluate_favorite_maker_opportunity(
+        market=market_no, quotes=quotes_no, rem_mins=2.0, dynamic_filters=filters, client=client,
+        spot_price=64900.0, target_price=64700.0
+    ) is None
+
 
 def test_favorite_maker_execution_and_mongo_snapshot():
     """Verify Favorite Maker order executes resting maker limit bid and records strategy_tag."""

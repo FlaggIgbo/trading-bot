@@ -837,6 +837,8 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         """
         side_clean = side.lower()
         effective_bid = max(1, min(99, maker_bid_cents))
+        if target_ask_cents and effective_bid >= target_ask_cents:
+            effective_bid = max(1, target_ask_cents - 1)
         spread_saved = max(0, target_ask_cents - effective_bid)
 
         payload = {
