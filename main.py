@@ -1450,6 +1450,42 @@ def process_single_market(
                                 trade_details["consensus_regime"] = chosen_consensus.get("regime")
                                 trade_details["streak_length"] = chosen_consensus.get("streak_length")
 
+    # -----------------------------------------------------------------------
+    # Step 4D: Endgame Favorite Maker Entry on Unowned Positions (:10 & :12.5 marks)
+    # At minutes 10.0 and 12.5 (1.0m <= rem_mins <= 6.0m): If we hold no active position
+    # or resting order on this ticker, evaluate high-probability confirmed favorites (74¢–93¢).
+    # -----------------------------------------------------------------------
+    if (is_stop_loss_interval or is_12_5min_mark) and not trade_executed:
+        if not client.has_existing_position_or_order(ticker) and dynamic_filters.get("enable_favorite_maker", True):
+            if yes_price_cents is not None:
+                record_market_price_snapshot(ticker, yes_price_cents, timestamp=now_utc.timestamp())
+
+            fav_opp = evaluate_favorite_maker_opportunity(
+                market=market,
+                quotes=quotes,
+                rem_mins=rem_mins,
+                dynamic_filters=dynamic_filters,
+                client=client,
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+            )
+            if fav_opp is not None:
+                fav_side_val = fav_opp["side"]
+                fav_maker_bid = fav_opp["maker_bid"]
+                fav_target_ask = fav_opp["target_ask"]
+                trade_executed, trade_details = _execute_favorite_maker_flow(
+                    ticker=ticker,
+                    side=fav_side_val,
+                    maker_bid=fav_maker_bid,
+                    target_ask=fav_target_ask,
+                    spot_price=spot_price,
+                    target_price=target_price,
+                    market_result=market.get("result"),
+                    client=client,
+                    dry_run=dry_run,
+                    count=1,
+                )
+
     # 5. Build Compact Snapshot Document
     cfb_spot = get_kalshi_cfbenchmarks_spot_price(asset_symbol, client=client) if asset_symbol not in COMMODITY_SYMBOLS and asset_symbol not in INDEX_SYMBOLS else None
     settle_src = get_market_settlement_source(market, client=client)
@@ -2205,6 +2241,48 @@ def process_hourly_market_group(
                     details["consensus_regime"] = chosen_consensus.get("regime")
                     details["streak_length"] = chosen_consensus.get("streak_length")
                 trade_executed_by_ticker[ticker] = details
+
+    # -----------------------------------------------------------------------
+    # Step 3D: Endgame Favorite Maker Scan on Non-Entry Marks (:40, :50, interim :55)
+    # Allows hourly strikes in 74¢–93¢ corridor to be entered with maker bids in endgame window
+    # -----------------------------------------------------------------------
+    if not is_hourly_trading_interval and not circuit_breaker_tripped and dynamic_filters.get("enable_favorite_maker", True):
+        fav_opp_by_ticker = {}
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            if ticker in trade_executed_by_ticker or client.has_existing_position_or_order(ticker):
+                continue
+            fav_opp = evaluate_favorite_maker_opportunity(
+                market=item["market"],
+                quotes=item["quotes"],
+                rem_mins=item["rem_mins"],
+                dynamic_filters=dynamic_filters,
+                client=client,
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                min_rem_mins=1.0,
+                max_rem_mins=25.0,
+            )
+            if fav_opp is not None:
+                fav_opp_by_ticker[ticker] = fav_opp
+
+        if fav_opp_by_ticker:
+            best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
+            best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
+            fav_executed, fav_details = _execute_favorite_maker_flow(
+                ticker=best_fav_ticker,
+                side=best_fav["side"],
+                maker_bid=best_fav["maker_bid"],
+                target_ask=best_fav["target_ask"],
+                spot_price=spot_price,
+                target_price=best_item["target_price"],
+                market_result=best_item["market"].get("result"),
+                client=client,
+                dry_run=dry_run,
+                count=1,
+            )
+            if fav_executed and fav_details:
+                trade_executed_by_ticker[best_fav_ticker] = fav_details
 
     # -----------------------------------------------------------------------
     # Step 4: Build Compact Snapshot Documents for all strikes in the group

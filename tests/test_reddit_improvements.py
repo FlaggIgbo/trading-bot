@@ -514,3 +514,113 @@ def test_hourly_market_choppiness_rejection():
     # Choppy market must not have executed a new buy order
     assert "trd" not in snaps[0] or snaps[0]["trd"].get("action") != "buy_opened"
 
+
+def test_favorite_maker_execution_during_10min_and_12_5min_intervals():
+    """Verify Favorite Maker enters 74¢–93¢ favorites on unowned 15M markets during :10 (:55) and :12.5 (:57.5) marks."""
+    client = MockTradingClient()
+    market = {
+        "ticker": "KXBNB15M-26AUG172300-00",
+        "series_ticker": "KXBNB15M",
+        "yes_ask_dollars": "0.84",
+        "yes_bid_dollars": "0.80",
+        "no_ask_dollars": "0.20",
+        "no_bid_dollars": "0.16",
+        "close_time": "2026-08-18T03:00:00Z",
+        "floor_strike": 600.0,
+        "exchange": "kalshi",
+    }
+    # 1. At minute :55 UTC (:10 into 15m candle, 5 minutes remaining)
+    now_55 = datetime(2026, 8, 18, 2, 55, 0, tzinfo=timezone.utc)
+    snap_55 = process_single_market(
+        market=market,
+        is_trading_interval=False,  # Normally False during :10 stop-loss mark
+        client=client,
+        now_utc=now_55,
+        minute_past_hour=55,  # 55 % 15 = 10
+        spot_cache={"BNB": 602.0},
+        dry_run=False,
+    )
+    assert snap_55 is not None
+    assert snap_55["fav_maker"] is True
+    assert "trd" in snap_55
+    assert snap_55["trd"]["strategy_tag"] == "endgame_favorite_maker"
+    assert snap_55["trd"]["order_role"] == "maker"
+
+    # 2. At minute :57.5 UTC (:12.5 into 15m candle, 2.5 minutes remaining)
+    client_12m = MockTradingClient()
+    now_57 = datetime(2026, 8, 18, 2, 57, 30, tzinfo=timezone.utc)
+    market_hype = {
+        "ticker": "KXHYPE15M-26AUG172300-00",
+        "series_ticker": "KXHYPE15M",
+        "yes_ask_dollars": "0.86",
+        "yes_bid_dollars": "0.82",
+        "no_ask_dollars": "0.18",
+        "no_bid_dollars": "0.14",
+        "close_time": "2026-08-18T03:00:00Z",
+        "floor_strike": 59.0,
+        "exchange": "kalshi",
+    }
+    snap_57 = process_single_market(
+        market=market_hype,
+        is_trading_interval=False,  # Normally False during :12.5 endgame safety check
+        client=client_12m,
+        now_utc=now_57,
+        minute_past_hour=57,  # 57 % 15 = 12
+        spot_cache={"HYPE": 59.5},
+        dry_run=False,
+    )
+    assert snap_57 is not None
+    assert snap_57["fav_maker"] is True
+    assert "trd" in snap_57
+    assert snap_57["trd"]["strategy_tag"] == "endgame_favorite_maker"
+
+
+def test_hourly_market_favorite_maker_execution_during_endgame_marks():
+    """Verify Favorite Maker scans and enters 74¢–93¢ favorites on hourly markets during :50 and :55 marks."""
+    from main import process_hourly_market_group
+
+    client = MockTradingClient()
+    markets = [
+        {
+            "ticker": "KXGOLDH-26AUG1800-T4393.99",
+            "series_ticker": "KXGOLDH",
+            "yes_ask_dollars": "0.84",
+            "yes_bid_dollars": "0.80",
+            "no_ask_dollars": "0.39",
+            "no_bid_dollars": "0.35",
+            "close_time": "2026-08-18T03:00:00Z",
+            "floor_strike": 4393.99,
+            "exchange": "kalshi",
+        },
+        {
+            "ticker": "KXGOLDH-26AUG1800-T4407.99",
+            "series_ticker": "KXGOLDH",
+            "yes_ask_dollars": "0.23",
+            "yes_bid_dollars": "0.20",
+            "no_ask_dollars": "0.98",
+            "no_bid_dollars": "0.94",
+            "close_time": "2026-08-18T03:00:00Z",
+            "floor_strike": 4407.99,
+            "exchange": "kalshi",
+        },
+    ]
+    # At minute :55 past the hour (5 minutes remaining before 03:00 UTC expiry)
+    now_utc = datetime(2026, 8, 18, 2, 55, 0, tzinfo=timezone.utc)
+    snaps = process_hourly_market_group(
+        symbol="GOLD",
+        markets=markets,
+        client=client,
+        now_utc=now_utc,
+        minute_past_hour=55,
+        spot_cache={"GOLD": 4397.875},
+        dry_run=False,
+    )
+    assert len(snaps) == 2
+    fav_strike = next(s for s in snaps if s["tick"] == "KXGOLDH-26AUG1800-T4393.99")
+    assert fav_strike["fav_maker"] is True
+    assert "trd" in fav_strike
+    assert fav_strike["trd"]["strategy_tag"] == "endgame_favorite_maker"
+    assert fav_strike["trd"]["order_role"] == "maker"
+    assert fav_strike["trd"]["action"] == "favorite_maker_opened"
+
+
