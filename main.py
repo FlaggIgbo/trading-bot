@@ -232,13 +232,16 @@ def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, of
     - Minute :10:00, :25:00, :40:00, :55:00 (10m Stop-Loss & Winner-Roll, exact timestamp without buffer)
     - Minute :12:30, :27:30, :42:30, :57:30 (12.5m Endgame Check: 2.5m before expiration)
 
-    Hourly Multi-Strike Market Checkpoints (Every 10m past the hour):
+    Hourly Multi-Strike Market Checkpoints (Every 10m past the hour + endgame checks):
     - Minute :00:30 (Open Multi-Strike Entry, +30s open delay)
     - Minute :10:00 (10m Disaster Cut-Loss & 2nd Chance Entry, exact timestamp)
     - Minute :20:00 (20m Cut-Loss & Tighter Entry, exact timestamp)
     - Minute :30:00 (30m Mid-Hour Cut-Loss & Tighter Entry, exact timestamp without delay)
     - Minute :40:00 (40m Winner-Roll & Stop-Loss, exact timestamp)
     - Minute :50:00 (50m Endgame Check, exact timestamp)
+    - Minute :52:30 (52.5m Mid-Candle Cut-Loss: 7.5m before expiration)
+    - Minute :55:00 (55m Winner-Bank & Stop-Loss Check, exact timestamp - 5m before expiration)
+    - Minute :57:30 (57.5m Endgame Safety Check: 2.5m before expiration)
     """
     if offset_seconds is not None:
         open_delay_seconds = offset_seconds
@@ -1594,11 +1597,12 @@ def process_hourly_market_group(
     is_hourly_20_or_30_entry = ((minute_past_hour in (20, 30)) or force_trade_mark) and not circuit_breaker_tripped
     is_hourly_trading_interval = is_hourly_00_or_10_entry or is_hourly_20_or_30_entry
     is_hourly_cut_loss = (minute_past_hour in (10, 20, 30)) and not force_trade_mark
-    is_hourly_40min_stop_loss = (minute_past_hour == 40) and not force_trade_mark
-    is_hourly_50min_endgame = (minute_past_hour == 50) and not force_trade_mark
+    is_hourly_52_5min_cut_loss = (minute_past_hour == 52) and not force_trade_mark
+    is_hourly_stop_loss_mark = (minute_past_hour in (40, 55)) and not force_trade_mark
+    is_hourly_endgame_mark = (minute_past_hour in (50, 57)) and not force_trade_mark
 
     # Dynamic filter parameters (20-min and 30-min use tighter filter, 00-min and 10-min use broad open filter)
-    is_tight_corridor = (minute_past_hour in (20, 30))
+    is_tight_corridor = (minute_past_hour in (20, 30, 40, 50, 52, 55, 57))
     dynamic_filters = get_dynamic_filter_for_market(
         symbol,
         is_5min_mark=is_tight_corridor,
@@ -1685,9 +1689,12 @@ def process_hourly_market_group(
             record_market_price_snapshot(item["ticker"], item["yes_price_cents"], timestamp=now_utc.timestamp())
 
     # -----------------------------------------------------------------------
-    # Step 1: Hourly 50-Minute Endgame Safety Check (:50 mark)
+    # Step 1: Hourly Endgame Safety Check (:50 & :57.5 marks)
+    # At minute 50 and minute 57.5 (:57): If losing (loss > 0 or price < endgame_floor),
+    # liquidate immediately to salvage capital before 0¢ expiration! If winning, hold to 100¢ settlement.
     # -----------------------------------------------------------------------
-    if is_hourly_50min_endgame:
+    if is_hourly_endgame_mark:
+        action_name = "57_5min_loss_cut" if minute_past_hour == 57 else "50min_loss_cut"
         for item in parsed_markets:
             ticker = item["ticker"]
             pos = client.get_market_position(ticker)
@@ -1707,13 +1714,13 @@ def process_hourly_market_group(
                 if isinstance(eg_res, dict) and eg_res.get("triggered"):
                     trade_executed_by_ticker[ticker] = {
                         "ex": ex_name.lower(),
-                        "action": "50min_loss_cut",
+                        "action": action_name,
                         "side": eg_res.get("side", "yes"),
                         "exit_price": eg_res.get("exit_price"),
                         "loss_cents": eg_res.get("loss_cents"),
                         "outcome": determine_counterfactual_outcome(
                             eg_res.get("side", "yes"),
-                            "50min_loss_cut",
+                            action_name,
                             spot_price,
                             item["target_price"],
                             item["market"].get("result"),
@@ -1723,9 +1730,12 @@ def process_hourly_market_group(
                         trade_executed_by_ticker[ticker]["profit_locked_cents"] = eg_res["profit_locked_cents"]
 
     # -----------------------------------------------------------------------
-    # Step 2: Hourly 40-Minute Stop-Loss & Winner-Roll Check (:40 mark)
+    # Step 2: Hourly Stop-Loss & Winner-Roll Check (:40 & :55 marks)
+    # At minute 40 and minute 55:
+    # 1. Winning positions (>= 70¢ / profit >= 15¢): SELL at Bid to bank realized profit directly in cash!
+    # 2. Losing positions: Execute immediate stop-loss liquidation.
     # -----------------------------------------------------------------------
-    elif is_hourly_40min_stop_loss:
+    elif is_hourly_stop_loss_mark:
         for item in parsed_markets:
             ticker = item["ticker"]
             pos = client.get_market_position(ticker)
@@ -1765,6 +1775,38 @@ def process_hourly_market_group(
                         trade_details["profit_locked_cents"] = sl_res["profit_locked_cents"]
                     if "rebuy_price_cents" in sl_res:
                         trade_details["rebuy_price_cents"] = sl_res["rebuy_price_cents"]
+                    trade_executed_by_ticker[ticker] = trade_details
+
+    # -----------------------------------------------------------------------
+    # Step 2B: Hourly 52.5-Minute Cut-Loss Check (:52.5 mark - 7.5m before expiration)
+    # Like 15m :07.5 mark, cuts losing positions dropping below safety threshold before stop-loss/endgame marks
+    # -----------------------------------------------------------------------
+    elif is_hourly_52_5min_cut_loss:
+        cut_threshold = dynamic_filters.get("cut_5min", 15)
+        action_tag = "52_5min_loss_cut"
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            pos = client.get_market_position(ticker)
+            if pos is not None:
+                side = pos["side"]
+                cut_res = client.evaluate_and_execute_5min_cut_loss(
+                    ticker=ticker,
+                    current_yes_price=item["yes_price_cents"],
+                    current_no_price=item["no_price_cents"],
+                    min_price_threshold=cut_threshold,
+                    dry_run=dry_run,
+                )
+                if isinstance(cut_res, dict) and cut_res.get("triggered"):
+                    trade_details = {
+                        "ex": ex_name.lower(),
+                        "action": action_tag,
+                        "side": side,
+                        "exit_price": cut_res.get("exit_price"),
+                        "loss_cents": cut_res.get("loss_cents"),
+                        "outcome": determine_counterfactual_outcome(
+                            side, action_tag, spot_price, item["target_price"], item["market"].get("result")
+                        ),
+                    }
                     trade_executed_by_ticker[ticker] = trade_details
 
     # -----------------------------------------------------------------------
@@ -2275,7 +2317,7 @@ def process_hourly_market_group(
                 trade_executed_by_ticker[ticker] = details
 
     # -----------------------------------------------------------------------
-    # Step 3D: Endgame Favorite Maker Scan on Non-Entry Marks (:40, :50, interim :55)
+    # Step 3D: Endgame Favorite Maker Scan on Non-Entry Marks (:40, :50, :55, :57.5)
     # Allows hourly strikes in 74¢–93¢ corridor to be entered with maker bids in endgame window
     # -----------------------------------------------------------------------
     if not is_hourly_trading_interval and not circuit_breaker_tripped and dynamic_filters.get("enable_favorite_maker", True):
@@ -2408,6 +2450,9 @@ def run_pipeline_pass(
     is_hourly_20_or_30_mark = (current_minute in (20, 30)) and not force_trade_mark
     is_hourly_40_mark = (current_minute == 40) and not force_trade_mark
     is_hourly_50_mark = (current_minute == 50) and not force_trade_mark
+    is_hourly_52_5_mark = (current_minute == 52) and not force_trade_mark
+    is_hourly_55_mark = (current_minute == 55) and not force_trade_mark
+    is_hourly_57_5_mark = (current_minute == 57) and not force_trade_mark
 
     # Human-readable interval descriptions
     intervals_active = []
@@ -2437,6 +2482,12 @@ def run_pipeline_pass(
         intervals_active.append("HOURLY 40M WINNER ROLL & SL")
     elif current_minute == 50:
         intervals_active.append("HOURLY 50M ENDGAME SAFETY CHECK")
+    elif current_minute == 52:
+        intervals_active.append("HOURLY 52.5M MID-CANDLE CUT-LOSS")
+    elif current_minute == 55:
+        intervals_active.append("HOURLY 55M WINNER BANK & SL")
+    elif current_minute == 57:
+        intervals_active.append("HOURLY 57.5M ENDGAME SAFETY CHECK")
 
     interval_summary = " + ".join(intervals_active) if intervals_active else "DATA COLLECTION ONLY MARK"
 
@@ -2616,8 +2667,8 @@ def run_pipeline_pass(
                     log.error(f"❌ [{exchange_name}] Unhandled error processing hourly group for {sym}: {sym_err}", exc_info=True)
 
     # Save valid market snapshots to MongoDB Atlas
-    # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50) OR whenever a trade occurs
-    is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12)) or (current_minute in (0, 10, 20, 30, 40, 50))
+    # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50, :52.5, :55, :57.5) OR whenever a trade occurs
+    is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12)) or (current_minute in (0, 10, 20, 30, 40, 50, 52, 55, 57))
     valid_snapshots = [
         s for s in snapshots_to_save
         if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
@@ -2628,7 +2679,7 @@ def run_pipeline_pass(
     elif dry_run:
         log.info(f"\n{LogTag.DRY_RUN_PREVIEW.value} Skipped saving snapshots to MongoDB Atlas in Dry-Run mode.")
     elif not is_standard_save_mark:
-        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50 marks).")
+        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50, :52.5, :55, :57.5 marks).")
     else:
         log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")

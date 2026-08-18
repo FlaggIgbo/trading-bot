@@ -14,7 +14,7 @@ Key Robustness & Safety Engines:
 3. Winner Profit Banking (≥70¢ or ≥+15¢ Gain):
    - Sells winning positions at Bid to lock realized profit directly into cash balance without high-price re-buys.
 4. Synchronized Checkpoint Lifecycle:
-   - Evaluates early cut-loss (5m/20m), winner profit banking (10m/40m), stop-loss exits, and endgame checks (12.5m/50m).
+   - Evaluates early cut-loss (5m/20m), winner profit banking (10m/40m/55m), stop-loss exits, and endgame checks (12.5m/50m/57.5m).
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ class LogTag(str, Enum):
     HOURLY_MULTI_STRIKE = "🎯 [HOURLY MULTI-STRIKE SCAN]"  # Scanning hourly multi-strike options
     TIEBREAKER_CHOSEN = "⚖️ [TIEBREAKER CHOSEN]"       # Resolved tiebreaker between YES and NO on same contract
     DUAL_BUY_MATCH = "⚡ [DUAL-STRIKE BUY MATCH]"     # Executing dual buy on different strike contracts
-    HOURLY_CHECK = "⏱️ [HOURLY POSITION CHECK]"       # Hourly lifecycle position check (20m, 40m, 50m)
+    HOURLY_CHECK = "⏱️ [HOURLY POSITION CHECK]"       # Hourly lifecycle position check (20m, 30m, 40m, 50m, 55m, 57.5m)
 
 
 class BaseTradingClient(ABC):
@@ -326,7 +326,7 @@ class BaseTradingClient(ABC):
         win_threshold_cents: int = 70,
     ) -> dict:
         """
-        Evaluates active positions at the 10-minute / 40-minute mark:
+        Evaluates active positions at the 10-minute / 40-minute / 55-minute mark:
         1. Winning Positions (Bid >= 70¢ or profit >= 15¢):
            - Cancels resting TP orders with strict verification.
            - Sells the winning position at current Bid to LOCK IN / BANK REALIZED PROFIT directly in cash balance.
@@ -597,7 +597,7 @@ class BaseTradingClient(ABC):
         endgame_floor: int = 15,
     ) -> dict:
         """
-        Evaluates active positions at the endgame mark (2.5m before 15m expiry, or 10m before hourly expiry):
+        Evaluates active positions at the endgame mark (2.5m before 15m expiry, or 10m / 2.5m before hourly expiry e.g. 50m / 57.5m):
         - If we are losing (current price < entry price / loss > 0, or current price < endgame_floor e.g. < 25¢),
           verifies resting order cancellation and liquidates immediately to salvage capital before 0¢ expiration.
         - If winning (current price >= entry price and >= endgame_floor), holds position for 100¢ ($1.00) settlement payout!

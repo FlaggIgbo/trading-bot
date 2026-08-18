@@ -22,7 +22,7 @@ Architecture & Market Parity:
 This client provides full parity with KalshiClient across:
 - 15-Minute & Hourly multi-asset discovery across Crypto, Commodities, and Equity Indices.
 - Passive Maker execution (Bid + 1¢ limit orders) and endgame Favorite Maker orders (74¢–93¢).
-- Checkpoint lifecycle: stop-loss liquidations, 5m/20m early cuts, 10m/40m profit banking, and 12.5m/50m endgame cuts.
+- Checkpoint lifecycle: stop-loss liquidations, 5m/20m early cuts, 10m/40m/55m profit banking, and 12.5m/50m/57.5m endgame cuts.
 - Cross-asset directional portfolio risk caps and single-side market locks.
 """
 
