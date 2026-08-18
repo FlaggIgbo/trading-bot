@@ -838,7 +838,16 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         side_clean = side.lower()
         effective_bid = max(1, min(99, maker_bid_cents))
         if target_ask_cents and effective_bid >= target_ask_cents:
-            effective_bid = max(1, target_ask_cents - 1)
+            effective_bid = target_ask_cents - 1
+
+        if effective_bid < 1 or (target_ask_cents and target_ask_cents <= 1):
+            log.warning(
+                f"⚠️ [POST-ONLY CROSS SKIPPED] [Gemini] Favorite Maker bid on {ticker} ({side_clean.upper()}) "
+                f"would cross ask ({target_ask_cents}¢) or produce <1¢ price. Skipping to avoid taker fill."
+            )
+            return {"error": "post_only_cross", "reason": "target_ask_too_low"}
+
+        effective_bid = max(1, min(99, effective_bid))
         spread_saved = max(0, target_ask_cents - effective_bid)
 
         payload = {

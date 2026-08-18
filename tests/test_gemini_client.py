@@ -302,6 +302,19 @@ def test_gemini_buy_favorite_maker_order(gemini_trading_client):
         assert gemini_trading_client.get_strategy_tag(ticker) == "endgame_favorite_maker"
 
 
+def test_gemini_buy_favorite_maker_order_target_ask_too_low(gemini_trading_client):
+    ticker = "ETH15M-FAVORITE-LOW"
+    res = gemini_trading_client.buy_favorite_maker_order(
+        ticker=ticker,
+        side="yes",
+        maker_bid_cents=1,
+        target_ask_cents=1,
+        count=1,
+    )
+    assert res.get("error") == "post_only_cross"
+    assert res.get("reason") == "target_ask_too_low"
+
+
 def test_gemini_liquidation_and_cleanup(gemini_trading_client):
     ticker = "SOL15M-TEST"
     gemini_trading_client.set_entry_price(ticker, 50)
