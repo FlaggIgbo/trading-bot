@@ -577,13 +577,16 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         if not headers:
             return {}
         try:
-            resp = self.session.post(url, headers=headers, timeout=10)
-            if resp.status_code == 200 and resp.text:
-                return resp.json()
+            resp = self.session.post(url, headers=headers, data="", timeout=10)
+            if resp.status_code in (200, 201) and resp.text:
+                try:
+                    return resp.json()
+                except Exception:
+                    return {}
             else:
-                log.debug(f"Gemini POST {path} returned status {resp.status_code}: {resp.text}")
+                log.warning(f"Gemini POST {path} returned status {resp.status_code}: {resp.text}")
         except Exception as e:
-            log.debug(f"Gemini POST {path} exception: {e}")
+            log.warning(f"Gemini POST {path} exception: {e}")
         return {}
 
     def invalidate_portfolio_caches(self):
@@ -612,19 +615,20 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         return {"balance": 0.0, "available": 0.0, "amount": 0.0}
 
     def get_portfolio_pnl_summary(self) -> dict:
-        """Calculates portfolio PnL summary for Gemini account."""
+        """Calculates portfolio PnL summary for Gemini account using live exchange positions."""
         bal = self.get_balance()
         avail_usd = bal.get("available", 0.0)
+        live_positions = self.get_all_active_positions(force_refresh=True)
         total_open_cost = sum(
-            (pos.get("entry_price_cents", 0) / 100.0) * pos.get("count", 1)
-            for pos in self._positions_cache.values()
+            float(pos.get("exposure_dollars") or (pos.get("entry_price_cents", 0) / 100.0) * pos.get("count", 1))
+            for pos in live_positions.values()
         )
-        port_val = avail_usd + total_open_cost
+        port_val = round(avail_usd + total_open_cost, 4)
         return {
             "balance_dollars": avail_usd,
             "portfolio_value_dollars": port_val,
-            "open_positions_count": len(self._positions_cache),
-            "open_exposure_dollars": total_open_cost,
+            "open_positions_count": len(live_positions),
+            "open_exposure_dollars": round(total_open_cost, 4),
             "total_realized_pnl_dollars": 0.0,
             "total_realized_pnl_cents": 0,
             "settlements_count": 0,
@@ -635,25 +639,95 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         }
 
     def get_all_active_positions(self, force_refresh: bool = False) -> dict[str, dict]:
-        """Fetches all active open positions in the portfolio."""
-        return self._positions_cache
+        """
+        Fetches all live open positions from Gemini's /v1/prediction-markets/positions endpoint.
+        Caches results for 4 seconds to prevent redundant REST calls.
+        """
+        now = time.time()
+        if not force_refresh and (now - self._cached_positions_ts) < self._CACHE_VALIDITY_SECONDS:
+            return self._cached_positions_map
+
+        positions_map: dict[str, dict] = {}
+        try:
+            res = self._post("/v1/prediction-markets/positions", {})
+            raw_positions = res.get("positions", []) if isinstance(res, dict) else []
+            for p in raw_positions:
+                sym = p.get("symbol") or p.get("contractMetadata", {}).get("instrumentSymbol")
+                if not sym:
+                    continue
+                qty = float(p.get("totalQuantity") or p.get("quantity") or 0)
+                if qty > 0:
+                    side = (p.get("outcome") or p.get("side") or "yes").lower()
+                    count = int(round(qty))
+                    avg_price = float(p.get("avgPrice") or p.get("price") or 0)
+                    entry_price = int(round(avg_price * 100)) if avg_price > 0 else self.get_entry_price(sym)
+                    exposure = float(p.get("marketValue") or 0) or round(((entry_price or 0) * count) / 100.0, 4)
+                    positions_map[sym] = {
+                        "ticker": sym,
+                        "side": side,
+                        "count": count,
+                        "position_fp": qty,
+                        "entry_price_cents": entry_price,
+                        "exposure_dollars": exposure,
+                        "avg_price": avg_price,
+                    }
+            self._cached_positions_map = positions_map
+            self._cached_positions_ts = now
+        except Exception as error:
+            log.warning(f"Could not batch-fetch active Gemini prediction positions: {error}")
+
+        return self._cached_positions_map
 
     def get_all_resting_orders(self, force_refresh: bool = False) -> dict[str, list[dict]]:
-        """Fetches all resting orders across all markets in the portfolio."""
-        return dict(self._orders_cache)
+        """
+        Fetches all active resting orders from Gemini's /v1/prediction-markets/orders/active endpoint.
+        """
+        now = time.time()
+        if not force_refresh and (now - self._cached_resting_orders_ts) < self._CACHE_VALIDITY_SECONDS:
+            return self._cached_resting_orders_map
+
+        orders_map: dict[str, list[dict]] = defaultdict(list)
+        try:
+            res = self._post("/v1/prediction-markets/orders/active", {"limit": 50})
+            orders = res.get("orders", []) if isinstance(res, dict) else []
+            for o in orders:
+                sym = o.get("symbol")
+                if sym:
+                    orders_map[sym].append(o)
+            self._cached_resting_orders_map = dict(orders_map)
+            self._cached_resting_orders_ts = now
+        except Exception as error:
+            log.warning(f"Could not batch-fetch active Gemini resting orders: {error}")
+
+        return self._cached_resting_orders_map
 
     def get_market_position(self, ticker: str) -> dict | None:
         """Checks if there is an active position for the given market ticker."""
-        return self._positions_cache.get(ticker)
+        return self.get_all_active_positions().get(ticker)
 
     def has_resting_take_profit_order(self, ticker: str) -> bool:
         """Returns True if there is a resting take profit order for ticker."""
-        orders = self._orders_cache.get(ticker, [])
-        return any(o.get("type") == "take_profit" for o in orders)
+        orders = self.get_all_resting_orders().get(ticker, [])
+        return any(o.get("side") == "sell" or o.get("type") == "take_profit" for o in orders)
 
     def has_existing_position_or_order(self, ticker: str) -> bool:
         """Returns True if an active position or resting order exists for ticker."""
-        return (ticker in self._positions_cache) or bool(self._orders_cache.get(ticker))
+        pos = self.get_market_position(ticker)
+        if pos is not None:
+            log.info(
+                f"{LogTag.POSITION_EXISTS.value} [Gemini] Found active {pos['side'].upper()} "
+                f"position of {pos['count']} contract(s) in {ticker}"
+            )
+            return True
+
+        orders = self.get_all_resting_orders().get(ticker, [])
+        if orders:
+            log.info(
+                f"{LogTag.ORDER_EXISTS.value} [Gemini] Found {len(orders)} resting order(s) for {ticker}"
+            )
+            return True
+
+        return False
 
     def place_take_profit_order(
         self,
@@ -662,7 +736,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         count: int = 1,
         take_profit_cents: int = 62,
     ) -> dict | None:
-        """Places a resting take-profit limit order on Gemini."""
+        """Places a resting take-profit limit sell order on Gemini Prediction Markets."""
         side_clean = side.lower()
 
         # Safeguard: Take-Profit limit sell must NEVER be placed <= entry price
@@ -675,16 +749,19 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             )
             take_profit_cents = safe_tp
 
-        order_dict = {
-            "type": "take_profit",
+        payload = {
+            "symbol": ticker,
             "side": "sell",
-            "price_cents": take_profit_cents,
-            "count": count,
+            "outcome": side_clean,
+            "quantity": str(count),
+            "price": f"{(take_profit_cents / 100.0):.2f}",
+            "orderType": "limit",
+            "timeInForce": "good-til-cancel",
         }
-        self._orders_cache[ticker].append(order_dict)
+        res = self._post("/v1/prediction-markets/order", payload)
         self.invalidate_portfolio_caches()
         log.info(f"{LogTag.AUTO_SELL_SET.value} [Gemini] Placed resting TP order for {ticker} ({side_clean.upper()}) at {take_profit_cents}¢.")
-        return {"take_profit_cents": take_profit_cents, "order": order_dict}
+        return {"take_profit_cents": take_profit_cents, "order": res}
 
     def buy_and_set_take_profit(
         self,
@@ -704,20 +781,22 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
         payload = {
             "symbol": ticker,
-            "amount": str(count),
-            "price": f"{(effective_buy_cents / 100.0):.2f}",
             "side": "buy",
-            "type": "exchange limit",
+            "outcome": side_clean,
+            "quantity": str(count),
+            "price": f"{(effective_buy_cents / 100.0):.2f}",
+            "orderType": "limit",
+            "timeInForce": "good-til-cancel",
         }
-        res = self._post("/v1/order/new", payload)
+        res = self._post("/v1/prediction-markets/order", payload)
+        order_id = res.get("orderId") if isinstance(res, dict) else None
+
+        if not order_id and not res.get("status"):
+            log.warning(f"❌ [ORDER FAILED] [Gemini] Order rejected for {ticker} ({side_clean.upper()}): {res}")
+            return {"error": "order_rejected", "res": res}
 
         client_order_id = generate_safe_client_order_id(f"buy_{side_clean}", ticker)
 
-        self._positions_cache[ticker] = {
-            "side": side_clean,
-            "count": count,
-            "entry_price_cents": effective_buy_cents,
-        }
         self.set_entry_price(
             ticker=ticker,
             price_cents=effective_buy_cents,
@@ -734,6 +813,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             take_profit_cents=take_profit_cents,
         )
 
+        self.invalidate_portfolio_caches()
         log.info(f"{LogTag.TRADE_EXECUTION.value} [Gemini] Order placed for {ticker} ({side_clean.upper()}) at {effective_buy_cents}¢.")
         return {
             "buy_price_cents": effective_buy_cents,
@@ -761,19 +841,22 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
         payload = {
             "symbol": ticker,
-            "amount": str(count),
-            "price": f"{(effective_bid / 100.0):.2f}",
             "side": "buy",
-            "type": "exchange limit",
+            "outcome": side_clean,
+            "quantity": str(count),
+            "price": f"{(effective_bid / 100.0):.2f}",
+            "orderType": "limit",
+            "timeInForce": "good-til-cancel",
         }
-        res = self._post("/v1/order/new", payload)
+        res = self._post("/v1/prediction-markets/order", payload)
+        order_id = res.get("orderId") if isinstance(res, dict) else None
+
+        if not order_id and not res.get("status"):
+            log.warning(f"❌ [FAVORITE MAKER FAILED] [Gemini] Order rejected for {ticker} ({side_clean.upper()}): {res}")
+            return {"error": "favorite_maker_rejected", "res": res}
+
         client_order_id = generate_safe_client_order_id(f"fav_maker_{side_clean}", ticker)
 
-        self._positions_cache[ticker] = {
-            "side": side_clean,
-            "count": count,
-            "entry_price_cents": effective_bid,
-        }
         self.set_entry_price(
             ticker=ticker,
             price_cents=effective_bid,
@@ -785,6 +868,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             order_role="maker",
         )
 
+        self.invalidate_portfolio_caches()
         log.info(
             f"🎯 [FAVORITE MAKER BID] [Gemini] {ticker} | Side: {side_clean.upper()} | "
             f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢) | Count: {count}"
@@ -802,39 +886,44 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
     def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
         """Executes a buy order on Gemini."""
+        side_clean = side.lower()
         payload = {
             "symbol": ticker,
-            "amount": str(count),
-            "price": f"{(price_cents / 100.0):.2f}",
             "side": "buy",
-            "type": "exchange limit",
+            "outcome": side_clean,
+            "quantity": str(count),
+            "price": f"{(price_cents / 100.0):.2f}",
+            "orderType": "limit",
+            "timeInForce": "good-til-cancel",
         }
-        res = self._post("/v1/order/new", payload)
-        self._positions_cache[ticker] = {
-            "side": side.lower(),
-            "count": count,
-            "entry_price_cents": price_cents,
-        }
-        self.set_entry_price(ticker, price_cents)
+        res = self._post("/v1/prediction-markets/order", payload)
+        if res.get("orderId") or res.get("status"):
+            self.set_entry_price(ticker, price_cents, side=side_clean, count=count)
+            self.invalidate_portfolio_caches()
         return res
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
-        """Executes position liquidation order on Gemini and removes from local cache."""
-        res = self._post("/v1/order/new", {
+        """Executes position liquidation sell order on Gemini and clears local entry price."""
+        side_clean = side.lower()
+        payload = {
             "symbol": ticker,
-            "amount": str(count),
-            "price": f"{(current_price / 100.0):.2f}",
             "side": "sell",
-            "type": "exchange limit",
-        })
-        self._positions_cache.pop(ticker, None)
+            "outcome": side_clean,
+            "quantity": str(count),
+            "price": f"{(current_price / 100.0):.2f}",
+            "orderType": "limit",
+            "timeInForce": "good-til-cancel",
+        }
+        res = self._post("/v1/prediction-markets/order", payload)
         self.clear_profit_floor(ticker)
         self.clear_entry_price(ticker)
+        self.invalidate_portfolio_caches()
         return res
 
     def cancel_order(self, order_id: str | int) -> dict:
         """Cancels an existing order by its unique order ID."""
-        return self._post("/v1/order/cancel", {"order_id": str(order_id)})
+        order_val = int(order_id) if str(order_id).isdigit() else order_id
+        return self._post("/v1/prediction-markets/order/cancel", {"orderId": order_val})
 
     def cancel_order_safe(self, order_id: str | int) -> bool:
         """Safely attempts to cancel an order."""
@@ -846,11 +935,16 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
     def cancel_unfilled_buy_orders(self, ticker: str) -> int:
         """Cancels any unfilled buy orders for ticker."""
-        if ticker in self._orders_cache:
-            initial_count = len(self._orders_cache[ticker])
-            self._orders_cache[ticker] = [o for o in self._orders_cache[ticker] if o.get("side") != "buy"]
-            return initial_count - len(self._orders_cache[ticker])
-        return 0
+        orders = self.get_all_resting_orders(force_refresh=True).get(ticker, [])
+        cancelled = 0
+        for o in orders:
+            if o.get("side") == "buy":
+                oid = o.get("orderId")
+                if oid and self.cancel_order_safe(oid):
+                    cancelled += 1
+        if cancelled > 0:
+            self.invalidate_portfolio_caches()
+        return cancelled
 
     def cancel_and_verify_resting_orders(
         self,
@@ -858,15 +952,18 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         max_retries: int = 5,
         poll_interval: float = 0.2,
     ) -> bool:
-        """Cancels all resting orders for ticker."""
-        if ticker in self._orders_cache:
-            self._orders_cache.pop(ticker, None)
-            return True
+        """Cancels all resting orders for ticker and verifies they are cleared."""
+        orders = self.get_all_resting_orders(force_refresh=True).get(ticker, [])
+        for o in orders:
+            oid = o.get("orderId")
+            if oid:
+                self.cancel_order_safe(oid)
+        self.invalidate_portfolio_caches()
         return True
 
     def get_crypto_directional_counts(self) -> dict[str, int]:
         """Counts active open positions on crypto assets categorized by direction."""
-        positions_map = self._positions_cache
+        positions_map = self.get_all_active_positions()
         counts = {"yes": 0, "no": 0}
         crypto_prefixes = (
             "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB",
@@ -895,3 +992,4 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
 # Primary Gemini client alias
 GeminiClient = GeminiTradingClient
+

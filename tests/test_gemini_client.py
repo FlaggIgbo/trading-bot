@@ -265,26 +265,29 @@ def test_gemini_get_balance_and_portfolio_pnl(gemini_trading_client):
 def test_gemini_buy_and_set_take_profit(gemini_trading_client):
     ticker = "BTC15M-26AUG181215-60000"
 
-    with patch.object(gemini_trading_client, "_post", return_value={"order_id": "gemini_ord_1"}):
-        res = gemini_trading_client.buy_and_set_take_profit(
-            ticker=ticker,
-            side="yes",
-            buy_price_cents=45,
-            take_profit_cents=62,
-            count=1,
-            maker_bid_cents=40,
-        )
+    mock_res = {"orderId": 145828835378730783, "status": "accepted"}
+    with patch.object(gemini_trading_client, "_post", return_value=mock_res):
+        with patch.object(gemini_trading_client, "get_all_resting_orders", return_value={ticker: [{"orderId": 145828835378730783, "side": "buy"}]}):
+            res = gemini_trading_client.buy_and_set_take_profit(
+                ticker=ticker,
+                side="yes",
+                buy_price_cents=45,
+                take_profit_cents=62,
+                count=1,
+                maker_bid_cents=40,
+            )
 
-        assert res["buy_price_cents"] == 41  # Maker bid + 1
-        assert res["take_profit_cents"] == 62
-        assert gemini_trading_client.get_entry_price(ticker) == 41
-        assert gemini_trading_client.has_existing_position_or_order(ticker) is True
+            assert res["buy_price_cents"] == 41  # Maker bid + 1
+            assert res["take_profit_cents"] == 62
+            assert gemini_trading_client.get_entry_price(ticker) == 41
+            assert gemini_trading_client.has_existing_position_or_order(ticker) is True
 
 
 def test_gemini_buy_favorite_maker_order(gemini_trading_client):
     ticker = "ETH15M-FAVORITE"
 
-    with patch.object(gemini_trading_client, "_post", return_value={"order_id": "fav_gemini_1"}):
+    mock_res = {"orderId": 145828835378730784, "status": "accepted"}
+    with patch.object(gemini_trading_client, "_post", return_value=mock_res):
         res = gemini_trading_client.buy_favorite_maker_order(
             ticker=ticker,
             side="yes",
@@ -301,25 +304,29 @@ def test_gemini_buy_favorite_maker_order(gemini_trading_client):
 
 def test_gemini_liquidation_and_cleanup(gemini_trading_client):
     ticker = "SOL15M-TEST"
-    gemini_trading_client._positions_cache[ticker] = {"side": "yes", "count": 1, "entry_price_cents": 50}
     gemini_trading_client.set_entry_price(ticker, 50)
     gemini_trading_client.set_profit_floor(ticker, 40)
 
-    with patch.object(gemini_trading_client, "_post", return_value={"order_id": "liq_1"}):
-        gemini_trading_client.execute_liquidation(ticker, "yes", 1, 35)
+    mock_res = {"orderId": 145828835378730785, "status": "filled"}
+    with patch.object(gemini_trading_client, "_post", return_value=mock_res):
+        with patch.object(gemini_trading_client, "get_all_active_positions", return_value={}):
+            gemini_trading_client.execute_liquidation(ticker, "yes", 1, 35)
 
-        assert gemini_trading_client.get_market_position(ticker) is None
-        assert gemini_trading_client.get_entry_price(ticker) is None
-        assert gemini_trading_client.get_profit_floor(ticker) is None
+            assert gemini_trading_client.get_market_position(ticker) is None
+            assert gemini_trading_client.get_entry_price(ticker) is None
+            assert gemini_trading_client.get_profit_floor(ticker) is None
 
 
 def test_gemini_directional_risk_cap(gemini_trading_client):
-    # Fill 3 YES positions
-    gemini_trading_client._positions_cache["BTC15M-1"] = {"side": "yes", "count": 1}
-    gemini_trading_client._positions_cache["ETH15M-1"] = {"side": "yes", "count": 1}
-    gemini_trading_client._positions_cache["SOL15M-1"] = {"side": "yes", "count": 1}
+    mock_positions = {
+        "BTC15M-1": {"ticker": "BTC15M-1", "side": "yes", "count": 1},
+        "ETH15M-1": {"ticker": "ETH15M-1", "side": "yes", "count": 1},
+        "SOL15M-1": {"ticker": "SOL15M-1", "side": "yes", "count": 1},
+    }
 
-    # Directional cap for YES should now block 4th YES trade
-    assert gemini_trading_client.check_crypto_portfolio_directional_cap("yes", max_concurrent=3) is False
-    # NO trade should still be permitted
-    assert gemini_trading_client.check_crypto_portfolio_directional_cap("no", max_concurrent=3) is True
+    with patch.object(gemini_trading_client, "get_all_active_positions", return_value=mock_positions):
+        # Directional cap for YES should now block 4th YES trade
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("yes", max_concurrent=3) is False
+        # NO trade should still be permitted
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("no", max_concurrent=3) is True
+
