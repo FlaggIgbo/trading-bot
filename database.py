@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import statistics
 import time
 from collections import defaultdict
@@ -217,11 +218,14 @@ def get_mongo_collection(collection_name: str = "market_snapshots"):
 
 def detect_market_timeframe(ticker: str) -> str:
     """
-    Determines market timeframe ('15m' or '1h') from ticker string.
-    - 15-minute series contain '15M' (e.g. 'KXBTC15M-...')
-    - Hourly directional series end in 'D' or 'H' (e.g. 'KXBTCD-...', 'KXTONH-...')
+    Determines market timeframe ('5m', '15m', or '1h') from ticker string.
+    - 5-minute series contain '05M' or '5M' (e.g. 'GEMI-BTC05M-...', 'BTC05M')
+    - 15-minute series contain '15M' (e.g. 'KXBTC15M-...', 'GEMI-BTC15M-...')
+    - Hourly directional series end in 'D', 'H', 'U', or '1H' (e.g. 'KXBTCD-...', 'KXTONH-...', 'INXU-...')
     """
     tick_upper = (ticker or "").upper()
+    if re.search(r"(?:05M|(?<![0-9])5M|05MIN|5MIN|05-MIN|5-MIN|5_MIN|05_MIN)", tick_upper):
+        return "5m"
     return "15m" if "15M" in tick_upper else "1h"
 
 

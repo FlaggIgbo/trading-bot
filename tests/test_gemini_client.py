@@ -343,3 +343,181 @@ def test_gemini_directional_risk_cap(gemini_trading_client):
         # NO trade should still be permitted
         assert gemini_trading_client.check_crypto_portfolio_directional_cap("no", max_concurrent=3) is True
 
+
+# ---------------------------------------------------------------------------
+# 5. 5-Minute Market Identification & Strict Isolation Tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ticker_str, expected", [
+    ("BTC05M", True),
+    ("GEMI-BTC05M2606011000-UP", True),
+    ("ETH5M", True),
+    ("GEMI-ETH5M2606011000-UP", True),
+    ("05M", True),
+    ("5M", True),
+    ("05MIN", True),
+    ("5MIN", True),
+    ("5-MIN", True),
+    ("05-MIN", True),
+    ("GOLD05M", True),
+    ("WTI5M", True),
+    # Non-5m markets must be False
+    ("BTC15M", False),
+    ("GEMI-BTC15M2602251745-UP", False),
+    ("KXBTC15M", False),
+    ("KXBTCD", False),
+    ("BTCD", False),
+    ("BTCH", False),
+    ("INXU", False),
+    ("GOLD15M", False),
+    ("GOLDH", False),
+    ("BTC25M", False),
+    ("BTC50M", False),
+    ("", False),
+    (None, False),
+])
+def test_is_5min_market(ticker_str, expected):
+    from signals.gemini_client import is_5min_market
+    assert is_5min_market(ticker_str) is expected
+
+
+def test_gemini_strictly_filters_5min_markets(gemini_pred_client):
+    """Verify that 5-minute markets are excluded from both 15M and hourly market feeds."""
+    mock_events = {
+        "data": [
+            # 5-minute market (MUST BE EXCLUDED FROM BOTH)
+            {
+                "ticker": "GEMI-BTC05M2608181235-UP",
+                "series": "BTC05M",
+                "expiryDate": "2026-08-18T12:35:00Z",
+                "contracts": [
+                    {
+                        "instrumentSymbol": "GEMI-BTC05M2608181235-UP",
+                        "strike": {"value": "60000.0"},
+                        "prices": {"buy": {"yes": "0.5000", "no": "0.5000"}},
+                    }
+                ],
+            },
+            # 15-minute market (MUST BE IN 15M ONLY)
+            {
+                "ticker": "GEMI-BTC15M2608181245-UP",
+                "series": "BTC15M",
+                "expiryDate": "2026-08-18T12:45:00Z",
+                "contracts": [
+                    {
+                        "instrumentSymbol": "GEMI-BTC15M2608181245-UP",
+                        "strike": {"value": "60000.0"},
+                        "prices": {"buy": {"yes": "0.4500", "no": "0.5500"}},
+                    }
+                ],
+            },
+            # Hourly market (MUST BE IN HOURLY ONLY)
+            {
+                "ticker": "GEMI-BTCH2608181300-UP",
+                "series": "BTCH",
+                "expiryDate": "2026-08-18T13:00:00Z",
+                "contracts": [
+                    {
+                        "instrumentSymbol": "GEMI-BTCH2608181300-HI60000",
+                        "strike": {"value": "60000.0"},
+                        "prices": {"buy": {"yes": "0.3500", "no": "0.6500"}},
+                    }
+                ],
+            },
+        ]
+    }
+
+    with patch.object(gemini_pred_client, "get_events", return_value=mock_events):
+        now_utc = datetime(2026, 8, 18, 12, 30, 0, tzinfo=timezone.utc)
+
+        # 1. 15-Minute retrieval: only 15m market returned
+        with patch("signals.gemini_client.datetime") as mock_dt:
+            mock_dt.now.return_value = now_utc
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mkts_15m = gemini_pred_client.get_15m_crypto_markets()
+            assert len(mkts_15m) == 1
+            assert mkts_15m[0]["series_ticker"] == "BTC15M"
+            assert "05M" not in mkts_15m[0]["ticker"]
+
+        # 2. Hourly retrieval: only hourly market returned
+        mkts_1h = gemini_pred_client.get_hourly_crypto_markets(current_hour_only=True, now_utc=now_utc)
+        assert len(mkts_1h) == 1
+        assert mkts_1h[0]["series_ticker"] == "BTCH"
+        assert "05M" not in mkts_1h[0]["ticker"]
+        assert "15M" not in mkts_1h[0]["ticker"]
+
+
+def test_gemini_15m_non_boundary_expiry_filtered_out(gemini_pred_client):
+    """Verify 15M market fetcher ignores events expiring at non-15m minute marks (e.g. :05, :10, :20, :35)."""
+    mock_events = {
+        "data": [
+            {
+                "ticker": "BTC15M-ODD-EXPIRY",
+                "series": "BTC15M",
+                "expiryDate": "2026-08-18T12:35:00Z",  # :35 is not a 15m mark (:00, :15, :30, :45)
+                "contracts": [
+                    {
+                        "instrumentSymbol": "BTC15M-ODD-60000",
+                        "strike": {"value": "60000.0"},
+                        "prices": {"buy": {"yes": "0.5000", "no": "0.5000"}},
+                    }
+                ],
+            }
+        ]
+    }
+    with patch.object(gemini_pred_client, "get_events", return_value=mock_events):
+        with patch("signals.gemini_client.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 8, 18, 12, 30, 0, tzinfo=timezone.utc)
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mkts = gemini_pred_client.get_15m_crypto_markets()
+            assert len(mkts) == 0
+
+
+def test_gemini_hourly_non_hour_boundary_expiry_filtered_out(gemini_pred_client):
+    """Verify Hourly market fetcher ignores events expiring at non-hourly marks (e.g. :15, :30, :45)."""
+    mock_events = {
+        "data": [
+            {
+                "ticker": "BTCD-NON-HOUR",
+                "series": "BTCD",
+                "expiryDate": "2026-08-18T12:45:00Z",  # :45 is not on the hour (:00)
+                "contracts": [
+                    {
+                        "instrumentSymbol": "BTCD-NON-HOUR-60000",
+                        "strike": {"value": "60000.0"},
+                        "prices": {"buy": {"yes": "0.5000", "no": "0.5000"}},
+                    }
+                ],
+            }
+        ]
+    }
+    with patch.object(gemini_pred_client, "get_events", return_value=mock_events):
+        now_utc = datetime(2026, 8, 18, 12, 30, 0, tzinfo=timezone.utc)
+        mkts = gemini_pred_client.get_hourly_crypto_markets(current_hour_only=True, now_utc=now_utc)
+        assert len(mkts) == 0
+
+
+def test_gemini_trading_client_order_rejection_on_5min_market(gemini_trading_client):
+    """Verify that trading client buy methods refuse to place orders on 5-minute markets."""
+    five_min_ticker = "GEMI-BTC05M2606011000-UP"
+
+    with patch.object(gemini_trading_client, "_post") as mock_post:
+        res1 = gemini_trading_client.buy_and_set_take_profit(
+            ticker=five_min_ticker, side="yes", buy_price_cents=45
+        )
+        assert res1.get("error") == "5min_market_rejected"
+
+        res2 = gemini_trading_client.buy_favorite_maker_order(
+            ticker=five_min_ticker, side="yes", maker_bid_cents=80, target_ask_cents=82
+        )
+        assert res2.get("error") == "5min_market_rejected"
+
+        res3 = gemini_trading_client.execute_buy(
+            ticker=five_min_ticker, side="yes", price_cents=50
+        )
+        assert res3.get("error") == "5min_market_rejected"
+
+        # Ensure no HTTP requests were sent to the exchange
+        mock_post.assert_not_called()
+
+

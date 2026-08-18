@@ -320,3 +320,29 @@ def test_hourly_multi_strike_index_tiebreaker(multi_asset_client, mock_filter):
     assert len(multi_asset_client.buys) == 1
     assert multi_asset_client.buys[0]["side"] == "no"
     assert snaps[0]["sym"] == "INX"
+
+
+# ---------------------------------------------------------------------------
+# 6. Timeframe Detection Tests (5M vs 15M vs 1H)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ticker, expected_tf", [
+    ("GEMI-BTC05M2606011000-UP", "5m"),
+    ("BTC05M", "5m"),
+    ("GOLD05M", "5m"),
+    ("KXBTC5M", "5m"),
+    ("GEMI-ETH5M2606011000-UP", "5m"),
+    ("GEMI-BTC15M2602251745-UP", "15m"),
+    ("KXBTC15M-26AUG141315-15", "15m"),
+    ("KXGOLD15M-26AUG162345-45", "15m"),
+    ("KXWTI15M", "15m"),
+    ("KXSILVER15M", "15m"),
+    ("GEMI-BTCH2608181300-UP", "1h"),
+    ("KXBTCD-26AUG1521-T69399.99", "1h"),
+    ("KXGOLDH-26AUG1701-T4427.99", "1h"),
+    ("KXINXU-26AUG17H1000-T7919.9999", "1h"),
+    ("KXNASDAQ100U-26AUG17H1000-T31989.99", "1h"),
+])
+def test_detect_market_timeframe_5m_15m_1h(ticker, expected_tf):
+    from database import detect_market_timeframe
+    assert detect_market_timeframe(ticker) == expected_tf

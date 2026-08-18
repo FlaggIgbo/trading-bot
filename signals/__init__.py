@@ -1,6 +1,13 @@
 """
 Signals module: Prediction market exchange API clients (Kalshi & Gemini).
 """
+from signals.base_client import (  # noqa: F401
+    BaseTradingClient,
+    LogTag,
+    is_5min_market,
+    parse_market_close_datetime,
+    validate_market_closure_time,
+)
 from signals.gemini_client import (  # noqa: F401
     GEMINI_CATEGORIES,
     SERIES_15M_ALL as GEMINI_SERIES_15M_ALL,
@@ -24,3 +31,4 @@ from signals.kalshi_client import (  # noqa: F401
     SERIES_HOURLY_INDICES,
     KalshiClient,
 )
+

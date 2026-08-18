@@ -58,7 +58,12 @@ from database import (
     save_portfolio_pnl,
     save_settlements,
 )
-from signals.base_client import BaseTradingClient, LogTag
+from signals.base_client import (
+    BaseTradingClient,
+    LogTag,
+    is_5min_market,
+    validate_market_closure_time,
+)
 from signals.gemini_client import GeminiClient
 from signals.kalshi_client import CFBENCHMARKS_CRYPTO_INDEX_MAP, KalshiClient
 
@@ -304,16 +309,34 @@ def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
     Example:
       'KXBTC15M-26AUG141315-15' -> 'BTC'
       'KXBTCD-26AUG1521-T69399.99' -> 'BTC'
+      'GEMI-BTC15M2602251745-UP' -> 'BTC'
+      'GEMI-BTC05M2602251745-UP' -> 'BTC'
+      'GEMI-GOLD15M2602251745-UP' -> 'GOLD'
+      'GEMI-INXU-26AUG1813' -> 'INX'
       'KXSOLD-26AUG1617-T99.9999' -> 'SOL'
       'KXGOLD15M-26AUG162345-45' -> 'GOLD'
       'KXGOLDH-26AUG1701-T4427.99' -> 'GOLD'
       'KXINXU-26AUG17H1000-T7919.9999' -> 'INX'
       'KXNASDAQ100U-26AUG17H1000-T31989.99' -> 'NASDAQ100'
     """
-    # 1. Check ticker prefix if hyphen-separated (e.g. btc-updown-15m-...)
-    ticker_prefix = ticker.split("-")[0].upper() if "-" in ticker else ""
+    # 1. Clean exchange prefix (GEMI-, GEMINI-, KX)
+    tick_upper = (ticker or "").upper()
+    if tick_upper.startswith("GEMI-"):
+        tick_body = tick_upper[5:]
+    elif tick_upper.startswith("GEMINI-"):
+        tick_body = tick_upper[7:]
+    elif tick_upper.startswith("KX"):
+        tick_body = tick_upper[2:]
+    else:
+        tick_body = tick_upper
+
+    ticker_prefix = tick_body.split("-")[0] if "-" in tick_body else tick_body
     if ticker_prefix in SUPPORTED_SYMBOLS:
         return ticker_prefix
+
+    for sym in SUPPORTED_SYMBOLS:
+        if ticker_prefix.startswith(sym):
+            return sym
 
     # 2. Check series ticker or ticker prefix against supported symbols
     series_upper = (series_ticker or "").upper()
@@ -326,12 +349,13 @@ def extract_asset_symbol(series_ticker: str, ticker: str) -> str:
             or series_upper.startswith(f"KX{sym}U")
             or series_upper.startswith(f"KX{sym}")
             or series_upper.startswith(sym)
-            or ticker_prefix.startswith(f"KX{sym}")
+            or tick_body.startswith(f"KX{sym}")
+            or tick_body.startswith(sym)
         ):
             return sym
 
-    # 3. Clean known prefixes/suffixes (KX, 15M, D, H, W, U) and match
-    series_clean = series_upper.replace("15M", "").replace("KX", "").rstrip("DHWEU").upper()
+    # 3. Clean known prefixes/suffixes (KX, 15M, 05M, 5M, D, H, W, U) and match
+    series_clean = series_upper.replace("15M", "").replace("05M", "").replace("5M", "").replace("KX", "").rstrip("DHWEU").upper()
     if series_clean in SUPPORTED_SYMBOLS:
         return series_clean
 
@@ -1010,6 +1034,21 @@ def process_single_market(
     series_ticker = market.get("series_ticker", "UNKNOWN")
     asset_symbol = extract_asset_symbol(series_ticker, ticker)
 
+    # Defensive guard: Do not process or trade 5-minute markets in 15M pipeline
+    if is_5min_market(ticker) or is_5min_market(series_ticker):
+        log.warning(f"🛑 [5-MINUTE MARKET SKIPPED] Refusing to process 5-minute market in 15M pipeline: {ticker}")
+        return {
+            "tick": ticker,
+            "sym": asset_symbol,
+            "tf": "5m",
+            "p": None,
+            "tgt": None,
+            "y": None,
+            "n": None,
+            "trd": None,
+            "ts": int(now_utc.timestamp()),
+        }
+
     # 1. Parse top-of-book prices and bid-ask spread
     yes_price_cents = extract_price_cents(market, "yes", client=client)
     no_price_cents = extract_price_cents(market, "no", client=client)
@@ -1038,14 +1077,35 @@ def process_single_market(
         except (ValueError, TypeError):
             pass
 
-    # 3. Time decay and market volume
+    # 3. Time decay, expiration validation and market volume
     rem_mins = None
-    if close_iso := (market.get("close_time") or market.get("expected_expiration_time")):
-        try:
-            close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
-            rem_mins = round(max(0.0, (close_dt - now_utc).total_seconds() / 60.0), 1)
-        except Exception:
-            pass
+    close_iso = (
+        market.get("close_time")
+        or market.get("expiration_time")
+        or market.get("expected_expiration_time")
+        or market.get("latest_expiration_time")
+    )
+    if close_iso or ticker:
+        is_valid_time, time_reason, rem_mins_val = validate_market_closure_time(
+            close_time_raw=close_iso,
+            now_utc=now_utc,
+            timeframe="15m",
+            ticker=ticker,
+        )
+        if not is_valid_time:
+            log.warning(f"🛑 [TIME-DISTANCE REJECTED] [15M] Refusing to process {ticker}: {time_reason}")
+            return {
+                "tick": ticker,
+                "sym": asset_symbol,
+                "tf": "15m",
+                "p": None,
+                "tgt": None,
+                "y": None,
+                "n": None,
+                "trd": None,
+                "ts": int(now_utc.timestamp()),
+            }
+        rem_mins = round(rem_mins_val, 1) if rem_mins_val is not None else None
 
     vol_count = None
     if (vol_raw := (market.get("volume_fp") or market.get("volume_24h_fp"))) is not None:
@@ -1628,6 +1688,33 @@ def process_hourly_market_group(
     for market in markets:
         ticker = market.get("ticker", "UNKNOWN")
         series_ticker = market.get("series_ticker", "UNKNOWN")
+
+        # Defensive guard: Do not process 5-minute or 15-minute markets in Hourly pipeline
+        if is_5min_market(ticker) or is_5min_market(series_ticker) or "15M" in ticker.upper() or "15M" in series_ticker.upper():
+            log.warning(f"🛑 [NON-HOURLY MARKET SKIPPED] Refusing to process non-hourly market in Hourly pipeline: {ticker}")
+            continue
+
+        # Time-distance-to-closure safety check: verify hourly expiration boundary (:00) and active cycle distance
+        close_iso = (
+            market.get("close_time")
+            or market.get("expiration_time")
+            or market.get("expected_expiration_time")
+            or market.get("latest_expiration_time")
+        )
+        if close_iso or ticker:
+            is_valid_time, time_reason, rem_mins_val = validate_market_closure_time(
+                close_time_raw=close_iso,
+                now_utc=now_utc,
+                timeframe="1h",
+                ticker=ticker,
+            )
+            if not is_valid_time:
+                log.warning(f"🛑 [TIME-DISTANCE REJECTED] [1H] Refusing to process {ticker}: {time_reason}")
+                continue
+            rem_mins = round(rem_mins_val, 1) if rem_mins_val is not None else None
+        else:
+            rem_mins = None
+
         target_price = extract_target_strike(market)
 
         yes_price_cents = extract_price_cents(market, "yes", client=client)
@@ -1651,14 +1738,6 @@ def process_hourly_market_group(
                 if tgt_float > 0:
                     pct_dist = round((price_diff / tgt_float) * 100.0, 4)
             except (ValueError, TypeError):
-                pass
-
-        rem_mins = None
-        if close_iso := (market.get("close_time") or market.get("expected_expiration_time")):
-            try:
-                close_dt = datetime.fromisoformat(close_iso.replace("Z", "+00:00"))
-                rem_mins = round(max(0.0, (close_dt - now_utc).total_seconds() / 60.0), 1)
-            except Exception:
                 pass
 
         vol_count = None

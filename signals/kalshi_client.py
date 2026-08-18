@@ -41,7 +41,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
 
-from signals.base_client import BaseTradingClient, LogTag
+from signals.base_client import (
+    BaseTradingClient,
+    LogTag,
+    is_5min_market,
+    validate_market_closure_time,
+)
 
 # Load configuration from the project's .env file if available
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -614,25 +619,52 @@ class KalshiClient(BaseTradingClient):
         status: str = "open",
         limit: int = 100,
         series_list: list[str] | None = None,
+        now_utc: datetime | None = None,
     ) -> list[dict]:
         """
         Retrieves active 15-minute prediction markets across all supported series
         (Crypto: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC;
          Commodities: GOLD, WTI Oil, SILVER).
+        Strictly excludes 5-minute markets and verifies expiry is within active 15m window (:00/:15/:30/:45).
 
         Returns:
             list[dict]: A list of market dictionaries matching active 15m contracts.
         """
         all_15m_markets = []
+        ref_time = now_utc or datetime.now(timezone.utc)
         target_series = series_list or SERIES_15M_ALL
 
         for series_ticker in target_series:
+            # Skip any 5-minute series
+            if is_5min_market(series_ticker):
+                continue
             try:
                 response = self.get_markets(
                     series_ticker=series_ticker, status=status, limit=limit
                 )
                 markets = response.get("markets", [])
-                all_15m_markets.extend(markets)
+                for m in markets:
+                    ticker = m.get("ticker", "")
+                    if is_5min_market(ticker):
+                        continue
+
+                    # Validate 15m expiration boundary and active cycle time distance
+                    close_iso = (
+                        m.get("close_time")
+                        or m.get("expiration_time")
+                        or m.get("expected_expiration_time")
+                        or m.get("latest_expiration_time")
+                    )
+                    is_valid, reason, _ = validate_market_closure_time(
+                        close_time_raw=close_iso,
+                        now_utc=ref_time,
+                        timeframe="15m",
+                        ticker=ticker,
+                    )
+                    if not is_valid:
+                        continue
+
+                    all_15m_markets.append(m)
             except Exception as error:
                 log.warning(
                     f"Could not fetch 15m markets for series '{series_ticker}': {error}"
@@ -656,11 +688,12 @@ class KalshiClient(BaseTradingClient):
         Crypto (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, TON, NEAR, ZEC),
         Commodities (Gold, Silver, WTI Oil), and
         Equity Indices (S&P 500 / INX, Nasdaq-100).
+        Strictly excludes 5-minute and 15-minute contracts, and validates hourly boundary (:00).
 
         Args:
             status: Market status ('open', 'closed', 'settled')
             limit: Pagination limit per series
-            current_hour_only: If True, filters only for contracts closing in the current hour (<= 75 mins remaining)
+            current_hour_only: If True, filters only for contracts closing in the current hour (<= 65 mins remaining)
             now_utc: Reference UTC time for expiration filtering
             series_list: Optional override of series tickers to query (defaults to SERIES_HOURLY_ALL)
 
@@ -672,45 +705,33 @@ class KalshiClient(BaseTradingClient):
         target_series = series_list or SERIES_HOURLY_ALL
 
         for series_ticker in target_series:
+            # Skip any 5-minute or 15-minute series from hourly discovery
+            if is_5min_market(series_ticker) or "15M" in series_ticker.upper():
+                continue
             try:
                 response = self.get_markets(
                     series_ticker=series_ticker, status=status, limit=limit
                 )
                 markets = response.get("markets", [])
                 for m in markets:
+                    ticker = m.get("ticker", "")
+                    if is_5min_market(ticker) or "15M" in ticker.upper():
+                        continue
+
                     if current_hour_only:
-                        # Ensure market expires within the active current hourly window (0 to 65 minutes ahead)
                         close_iso = (
                             m.get("close_time")
                             or m.get("expiration_time")
                             or m.get("expected_expiration_time")
                             or m.get("latest_expiration_time")
                         )
-                        close_dt = None
-                        if close_iso:
-                            try:
-                                close_dt = datetime.fromisoformat(str(close_iso).replace("Z", "+00:00"))
-                            except Exception:
-                                pass
-
-                        # Fallback: Parse expiration from ticker (e.g. KXBTCD-26AUG1616 -> 2026-08-16 16:00 UTC or KXINXU-26AUG17H1000 -> 2026-08-17 10:00 EDT)
-                        if close_dt is None and (tick := m.get("ticker")):
-                            m_match = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(?:H)?(\d{2})", tick)
-                            if m_match:
-                                yy, mmm, dd, hh = m_match.groups()
-                                try:
-                                    dt_str = f"20{yy}-{mmm}-{dd} {hh}:00:00"
-                                    close_dt = datetime.strptime(dt_str, "%Y-%b-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                                except Exception:
-                                    pass
-
-                        if close_dt is not None:
-                            remaining_minutes = (close_dt - ref_time).total_seconds() / 60.0
-                            # Current hour contract must be active and closing between 0 and 65 minutes in the future
-                            if remaining_minutes <= 0.0 or remaining_minutes > 65.0:
-                                continue
-                        else:
-                            # Skip if expiration is unverified
+                        is_valid, reason, _ = validate_market_closure_time(
+                            close_time_raw=close_iso,
+                            now_utc=ref_time,
+                            timeframe="1h",
+                            ticker=ticker,
+                        )
+                        if not is_valid:
                             continue
 
                     all_hourly_markets.append(m)
@@ -1022,6 +1043,10 @@ class KalshiClient(BaseTradingClient):
         If resting as an unfilled Maker order, Kalshi automatically cancels the buy order upon timeout.
         Take-Profit is placed upon fill confirmation.
         """
+        if is_5min_market(ticker):
+            log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Kalshi] Refusing to place order on 5-minute market: {ticker}")
+            return {"error": "5min_market_rejected", "ticker": ticker}
+
         side_clean = side.lower()
 
         # Passive Maker Buy Pricing (strictly <= ask - 1¢):
@@ -1169,6 +1194,10 @@ class KalshiClient(BaseTradingClient):
         - Captures the spread discount and avoids taker fee friction (free maker trades on Kalshi crypto).
         - Holds position through to 100¢ ($1.00) settlement payout without premature exit.
         """
+        if is_5min_market(ticker):
+            log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Kalshi] Refusing to place Favorite Maker order on 5-minute market: {ticker}")
+            return {"error": "5min_market_rejected", "ticker": ticker}
+
         side_clean = side.lower()
         effective_bid = max(1, min(99, maker_bid_cents))
         if target_ask_cents and effective_bid >= target_ask_cents:
@@ -1534,6 +1563,10 @@ class KalshiClient(BaseTradingClient):
         - When buying YES: Places a bid on YES at `price_cents` (e.g. 73¢)
         - When buying NO: Places an ask on YES at `100 - price_cents` (e.g. 27¢)
         """
+        if is_5min_market(ticker):
+            log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Kalshi] Refusing to place buy order on 5-minute market: {ticker}")
+            return {"error": "5min_market_rejected", "ticker": ticker}
+
         side_clean = side.lower()
         now_ms = int(time.time() * 1000)
         clamped_cents = max(1, min(99, price_cents))

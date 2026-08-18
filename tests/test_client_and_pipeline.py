@@ -79,6 +79,10 @@ def test_parse_cents(val, default, expected):
     ("KXBTC15M", "KXBTC15M-26AUG140015-15", "BTC"),
     ("KXETH15M", "KXETH15M-26AUG140015-15", "ETH"),
     ("ETH15M", "GEMINI-ETH15M-100", "ETH"),
+    ("BTC15M", "GEMI-BTC15M2602251745-UP", "BTC"),
+    ("BTC05M", "GEMI-BTC05M2602251745-UP", "BTC"),
+    ("GOLD15M", "GEMI-GOLD15M2602251745-UP", "GOLD"),
+    ("INXU", "GEMI-INXU-26AUG1813", "INX"),
     ("UNKNOWN", "XYZ123", "UNKNOWN"),
 ])
 def test_extract_asset_symbol(series, ticker, expected):
@@ -441,6 +445,115 @@ def test_passive_maker_pricing_strictly_below_ask():
         payload2 = mock_post.call_args[1]["payload"]
         assert payload2["price"] == "0.2900"
         assert payload2["post_only"] is True
+
+
+# --- Time-Distance-to-Closure Validation & 5M Safety Tests ---
+
+@pytest.mark.parametrize("now_dt, close_iso, tf, expected_valid, expected_rem_mins", [
+    # 15M: At :05, expiry :15 -> 10 mins away (valid)
+    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:15:00Z", "15m", True, 10.0),
+    # 15M: At :00:30, expiry :15 -> 14.5 mins away (valid)
+    (datetime(2026, 8, 18, 12, 0, 30, tzinfo=timezone.utc), "2026-08-18T12:15:00Z", "15m", True, 14.5),
+    # 15M: At :12:30, expiry :15 -> 2.5 mins away (valid)
+    (datetime(2026, 8, 18, 12, 12, 30, tzinfo=timezone.utc), "2026-08-18T12:15:00Z", "15m", True, 2.5),
+    # 15M: 5-minute market (expiry at :10 when now is :05 -> 5 mins away, non-15m boundary) -> INVALID
+    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:10:00Z", "15m", False, 5.0),
+    # 15M: 5-minute market (expiry at :35 -> :35 % 15 != 0) -> INVALID
+    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:35:00Z", "15m", False, 30.0),
+    # 15M: Market already closed (expiry :00 when now is :05) -> INVALID
+    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:00:00Z", "15m", False, -5.0),
+    # 15M: Next cycle market (expiry :30 when now is :05 -> 25 mins away) -> INVALID
+    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:30:00Z", "15m", False, 25.0),
+    # 1H: At :20, expiry :00 -> 40 mins away (valid)
+    (datetime(2026, 8, 18, 12, 20, 0, tzinfo=timezone.utc), "2026-08-18T13:00:00Z", "1h", True, 40.0),
+    # 1H: At :00:30, expiry :00 -> 59.5 mins away (valid)
+    (datetime(2026, 8, 18, 12, 0, 30, tzinfo=timezone.utc), "2026-08-18T13:00:00Z", "1h", True, 59.5),
+    # 1H: At :50, expiry :00 -> 10 mins away (valid)
+    (datetime(2026, 8, 18, 12, 50, 0, tzinfo=timezone.utc), "2026-08-18T13:00:00Z", "1h", True, 10.0),
+    # 1H: Non-hourly 15m/30m market (expiry at :30 when now is :20) -> INVALID (minute :30 != :00)
+    (datetime(2026, 8, 18, 12, 20, 0, tzinfo=timezone.utc), "2026-08-18T12:30:00Z", "1h", False, 10.0),
+    # 1H: Closed S&P market outside trading hours (expiry tomorrow 14:00 UTC when now is 20:00 UTC) -> INVALID
+    (datetime(2026, 8, 18, 20, 0, 0, tzinfo=timezone.utc), "2026-08-19T14:00:00Z", "1h", False, 1080.0),
+])
+def test_validate_market_closure_time(now_dt, close_iso, tf, expected_valid, expected_rem_mins):
+    from signals.base_client import validate_market_closure_time
+    is_valid, reason, rem_mins = validate_market_closure_time(
+        close_time_raw=close_iso,
+        now_utc=now_dt,
+        timeframe=tf,
+    )
+    assert is_valid is expected_valid
+    if expected_rem_mins is not None:
+        assert rem_mins == pytest.approx(expected_rem_mins, abs=0.1)
+
+
+def test_kalshi_trading_client_order_rejection_on_5min_market():
+    """Verify that Kalshi trading client refuses to place orders on 5-minute markets."""
+    mock_key = MagicMock()
+    client = KalshiClient(api_key_id="test_key", private_key=mock_key)
+    five_min_ticker = "KXBTC05M-26AUG181235-35"
+
+    with patch.object(client, "post") as mock_post:
+        res1 = client.buy_and_set_take_profit(
+            ticker=five_min_ticker, side="yes", buy_price_cents=45
+        )
+        assert res1.get("error") == "5min_market_rejected"
+
+        res2 = client.buy_favorite_maker_order(
+            ticker=five_min_ticker, side="yes", maker_bid_cents=80, target_ask_cents=82
+        )
+        assert res2.get("error") == "5min_market_rejected"
+
+        res3 = client.execute_buy(
+            ticker=five_min_ticker, side="yes", price_cents=50
+        )
+        assert res3.get("error") == "5min_market_rejected"
+
+        # Ensure no HTTP requests were sent to the exchange
+        mock_post.assert_not_called()
+
+
+def test_kalshi_get_markets_filters_5m_and_time_distance():
+    """Verify Kalshi get_15m_crypto_markets and get_hourly_crypto_markets filter 5m and distant markets."""
+    mock_key = MagicMock()
+    client = KalshiClient(api_key_id="test_key", private_key=mock_key)
+
+    mock_15m_markets = {
+        "markets": [
+            # 5-minute market (must be excluded)
+            {"ticker": "KXBTC05M-TEST", "close_time": "2026-08-18T12:10:00Z"},
+            # 15-minute market (valid)
+            {"ticker": "KXBTC15M-TEST", "close_time": "2026-08-18T12:15:00Z"},
+            # 15-minute next cycle market (too far)
+            {"ticker": "KXBTC15M-NEXT", "close_time": "2026-08-18T12:30:00Z"},
+        ]
+    }
+
+    mock_hourly_markets = {
+        "markets": [
+            # 5-minute market (must be excluded)
+            {"ticker": "KXBTC05M-TEST", "close_time": "2026-08-18T12:25:00Z"},
+            # 15-minute market (must be excluded from hourly)
+            {"ticker": "KXBTC15M-TEST", "close_time": "2026-08-18T12:30:00Z"},
+            # Hourly market (valid)
+            {"ticker": "KXBTCD-TEST", "close_time": "2026-08-18T13:00:00Z"},
+            # S&P 500 market closing tomorrow (outside trading hours)
+            {"ticker": "KXINXU-TOMORROW", "close_time": "2026-08-19T14:00:00Z"},
+        ]
+    }
+
+    now_utc_15m = datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc)
+    with patch.object(client, "get_markets", return_value=mock_15m_markets):
+        mkts_15m = client.get_15m_crypto_markets(series_list=["KXBTC15M"], now_utc=now_utc_15m)
+        assert len(mkts_15m) == 1
+        assert mkts_15m[0]["ticker"] == "KXBTC15M-TEST"
+
+    now_utc_1h = datetime(2026, 8, 18, 12, 20, 0, tzinfo=timezone.utc)
+    with patch.object(client, "get_markets", return_value=mock_hourly_markets):
+        mkts_1h = client.get_hourly_crypto_markets(series_list=["KXBTCD"], current_hour_only=True, now_utc=now_utc_1h)
+        assert len(mkts_1h) == 1
+        assert mkts_1h[0]["ticker"] == "KXBTCD-TEST"
+
 
 
 

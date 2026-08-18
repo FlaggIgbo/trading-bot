@@ -285,3 +285,27 @@ def test_hourly_wti_restriction_and_dynamic_sizing(hourly_client):
     assert hourly_client.buys[0]["count"] == 1  # Clamped to 1 contract because WTI is restricted
 
 
+def test_hourly_skips_5min_markets(hourly_client):
+    """Verify that 5-minute markets mistakenly passed to hourly group are safely skipped and not traded."""
+    markets = [
+        {
+            "ticker": "GEMI-BTC05M2608181235-UP",
+            "series_ticker": "BTC05M",
+            "floor_strike": 70000.0,
+            "yes_ask_dollars": "0.25",
+            "yes_bid_dollars": "0.23",
+            "no_ask_dollars": "0.77",
+            "no_bid_dollars": "0.75",
+        }
+    ]
+    snaps = process_hourly_market_group(
+        "BTC", markets, hourly_client,
+        datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        0, {"BTC": 71000.0}, False
+    )
+
+    assert len(hourly_client.buys) == 0
+    assert len(snaps) == 0
+
+
+

@@ -43,7 +43,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from signals.base_client import BaseTradingClient, LogTag
+from signals.base_client import BaseTradingClient, LogTag, validate_market_closure_time
 
 # Load configuration from the project's .env file if available
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -142,6 +142,21 @@ def parse_gemini_error(response: requests.Response | dict) -> tuple[str | None, 
     return reason, msg
 
 
+def is_5min_market(text: str | None) -> bool:
+    """
+    Returns True if the given ticker, series, or instrument symbol indicates a 5-minute prediction market.
+    
+    Gemini uses 3-character zero-padded duration markers:
+    - 5-Minute Contracts: '05M' or '5M' (e.g. 'GEMI-BTC05M2606011000-UP', 'BTC05M', '05MIN', '5MIN')
+    - 15-Minute Contracts: '15M' (e.g. 'GEMI-BTC15M2602251745-UP', 'BTC15M')
+    
+    Matches '05M' or '5M' (where 5 is not preceded by a digit, avoiding false positives on '15M' or '25M').
+    """
+    if not text:
+        return False
+    return bool(re.search(r"(?:05M|(?<![0-9])5M|05MIN|5MIN|05-MIN|5-MIN|5_MIN|05_MIN|5MINUTE|05MINUTE)", str(text), re.IGNORECASE))
+
+
 def generate_safe_client_order_id(prefix: str, ticker: str, timestamp_ms: int | None = None) -> str:
     """Generates a sanitized client_order_id for Gemini orders."""
     safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
@@ -203,6 +218,7 @@ class GeminiPredictionClient:
         (Crypto: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC;
          Commodities: Gold, Silver, WTI Oil).
         Parses contract structures, prices, strike values, and expiration dates.
+        Strictly excludes 5-minute markets (e.g. 05M, 5M) and verifies 15-minute boundary (:00, :15, :30, :45).
         """
         target_series = set(s.upper() for s in (series_list or SERIES_15M_ALL))
         events_resp = self.get_events(category=["crypto", "commodities", "commodity"], status="active", limit=limit)
@@ -219,6 +235,10 @@ class GeminiPredictionClient:
             series = str(evt.get("series") or evt.get("series_ticker") or "")
             expiry = evt.get("expiryDate") or evt.get("close_time") or evt.get("expiration_time")
 
+            # Explicitly exclude 5-minute markets
+            if is_5min_market(event_ticker) or is_5min_market(series):
+                continue
+
             # Filter for 15M / 15-minute prediction series
             is_15m = (
                 "15M" in series.upper()
@@ -228,15 +248,16 @@ class GeminiPredictionClient:
             if not is_15m:
                 continue
 
-            # Only include markets for the current active cycle (expiring within the next 15-16 minutes)
-            if expiry:
-                try:
-                    expiry_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
-                    seconds_to_expiry = (expiry_dt - now_utc).total_seconds()
-                    if seconds_to_expiry <= 0 or seconds_to_expiry > (15 * 60 + 60):
-                        continue
-                except Exception:
-                    pass
+            # Only include markets for the current active cycle (expiring within the next 15-16 minutes on a :00/:15/:30/:45 boundary with matching time distance)
+            if expiry or event_ticker:
+                is_valid, reason, _ = validate_market_closure_time(
+                    close_time_raw=expiry,
+                    now_utc=now_utc,
+                    timeframe="15m",
+                    ticker=event_ticker,
+                )
+                if not is_valid:
+                    continue
 
             contracts = evt.get("contracts", [])
             if not isinstance(contracts, list) or not contracts:
@@ -247,6 +268,10 @@ class GeminiPredictionClient:
                     continue
 
                 inst = str(c.get("instrumentSymbol") or c.get("ticker") or event_ticker)
+
+                # Skip any contract with 5-minute marker in instrument symbol
+                if is_5min_market(inst):
+                    continue
 
                 # Extract Strike Price
                 strike_val = None
@@ -342,6 +367,7 @@ class GeminiPredictionClient:
         Crypto (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, TON, NEAR, ZEC),
         Commodities (Gold, Silver, WTI Oil), and
         Equity Indices (S&P 500 / INX, Nasdaq-100).
+        Strictly excludes 5-minute and 15-minute contracts, and verifies expiry is on the hour (:00).
         """
         ref_time = now_utc or datetime.now(timezone.utc)
         target_series = set(s.upper() for s in (series_list or SERIES_HOURLY_ALL))
@@ -363,21 +389,33 @@ class GeminiPredictionClient:
             series = str(evt.get("series") or evt.get("series_ticker") or "")
             expiry = evt.get("expiryDate") or evt.get("close_time") or evt.get("expiration_time")
 
-            # Hourly series check
+            # Strictly exclude any 5-minute or 15-minute markets from hourly discovery
+            if is_5min_market(event_ticker) or is_5min_market(series):
+                continue
+            if "15M" in series.upper() or "15M" in event_ticker.upper():
+                continue
+
+            # Hourly series check: must match supported hourly series or hourly conventions
             is_hourly = (
                 any(s in series.upper() or s in event_ticker.upper() for s in target_series)
-                or (("15M" not in series.upper()) and ("15M" not in event_ticker.upper()))
+                or series.upper().endswith(("H", "D", "U", "1H", "60M"))
+                or event_ticker.upper().endswith(("H", "D", "U", "1H", "60M"))
+                or any(sym in series.upper() or sym in event_ticker.upper() for sym in (
+                    "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC",
+                    "GOLD", "SILVER", "WTI", "XAU", "XAG", "CL", "INX", "NASDAQ100", "SPX", "NDX", "SP500"
+                ))
             )
             if not is_hourly:
                 continue
 
-            if current_hour_only and expiry:
-                try:
-                    expiry_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
-                    remaining_minutes = (expiry_dt - ref_time).total_seconds() / 60.0
-                    if remaining_minutes <= 0.0 or remaining_minutes > 65.0:
-                        continue
-                except Exception:
+            if current_hour_only:
+                is_valid, reason, _ = validate_market_closure_time(
+                    close_time_raw=expiry,
+                    now_utc=ref_time,
+                    timeframe="1h",
+                    ticker=event_ticker,
+                )
+                if not is_valid:
                     continue
 
             contracts = evt.get("contracts", [])
@@ -389,6 +427,10 @@ class GeminiPredictionClient:
                     continue
 
                 inst = str(c.get("instrumentSymbol") or c.get("ticker") or event_ticker)
+
+                # Skip any contract with 5-minute or 15-minute marker in instrument symbol
+                if is_5min_market(inst) or "15M" in inst.upper():
+                    continue
 
                 # Extract Strike Price
                 strike_val = None
@@ -776,6 +818,10 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         """
         Submits a Maker limit buy order and places resting take-profit sell order on Gemini.
         """
+        if is_5min_market(ticker):
+            log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Gemini] Refusing to place order on 5-minute market: {ticker}")
+            return {"error": "5min_market_rejected", "ticker": ticker}
+
         side_clean = side.lower()
         effective_buy_cents = min(buy_price_cents - 1, maker_bid_cents + 1) if (maker_bid_cents is not None and maker_bid_cents < buy_price_cents) else max(1, buy_price_cents - 1)
 
@@ -835,6 +881,10 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         """
         Submits a post_only Maker Limit Bid for a confirmed Favorite (74¢–93¢) on Gemini.
         """
+        if is_5min_market(ticker):
+            log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Gemini] Refusing to place Favorite Maker order on 5-minute market: {ticker}")
+            return {"error": "5min_market_rejected", "ticker": ticker}
+
         side_clean = side.lower()
         effective_bid = max(1, min(99, maker_bid_cents))
         if target_ask_cents and effective_bid >= target_ask_cents:
@@ -897,6 +947,10 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
     def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
         """Executes a buy order on Gemini."""
+        if is_5min_market(ticker):
+            log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Gemini] Refusing to place buy order on 5-minute market: {ticker}")
+            return {"error": "5min_market_rejected", "ticker": ticker}
+
         side_clean = side.lower()
         payload = {
             "symbol": ticker,

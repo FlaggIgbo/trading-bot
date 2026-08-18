@@ -20,10 +20,198 @@ Key Robustness & Safety Engines:
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Market Closure Time, Expiration & Timeframe Validation Helpers
+# ---------------------------------------------------------------------------
+
+def is_5min_market(text: str | None) -> bool:
+    """
+    Returns True if the given ticker, series, or instrument symbol indicates a 5-minute prediction market.
+    Matches '05M', '5M' (not preceded by digit), '05MIN', '5MIN', '5-MIN', '05-MIN', '5_MIN', '05_MIN', '5MINUTE', '05MINUTE'.
+    """
+    if not text:
+        return False
+    return bool(re.search(r"(?:05M|(?<![0-9])5M|05MIN|5MIN|05-MIN|5-MIN|5_MIN|05_MIN|5MINUTE|05MINUTE)", str(text), re.IGNORECASE))
+
+
+def parse_market_close_datetime(
+    close_time_raw: str | int | float | datetime | None,
+    ticker: str | None = None,
+) -> datetime | None:
+    """
+    Parses market closure / expiration time into an aware UTC datetime object.
+    Supports ISO 8601 strings, UNIX epoch timestamps (seconds or ms),
+    and exchange ticker pattern fallbacks (Kalshi & Gemini).
+    """
+    if close_time_raw is None and not ticker:
+        return None
+
+    if isinstance(close_time_raw, datetime):
+        if close_time_raw.tzinfo is None:
+            return close_time_raw.replace(tzinfo=timezone.utc)
+        return close_time_raw.astimezone(timezone.utc)
+
+    if isinstance(close_time_raw, (int, float)):
+        val = float(close_time_raw)
+        if val > 1e11:  # Milliseconds
+            val /= 1000.0
+        try:
+            return datetime.fromtimestamp(val, tz=timezone.utc)
+        except Exception:
+            pass
+
+    if isinstance(close_time_raw, str) and close_time_raw.strip():
+        s = close_time_raw.strip()
+        # Check if numeric string
+        try:
+            val = float(s)
+            if val > 1e11:
+                val /= 1000.0
+            return datetime.fromtimestamp(val, tz=timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
+        # Try ISO 8601 parsing
+        iso_clean = s.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(iso_clean)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+
+    # Fallback to parsing expiration from ticker string if available
+    tick = str(ticker or close_time_raw or "").upper()
+
+    # Kalshi 15M: e.g. KXBTC15M-26AUG181215-15 (YYMMMDDHHMM)
+    m_k15 = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(\d{2})(\d{2})", tick)
+    if m_k15:
+        yy, mmm, dd, hh, mm = m_k15.groups()
+        try:
+            return datetime.strptime(f"20{yy}-{mmm}-{dd} {hh}:{mm}:00", "%Y-%b-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    # Kalshi Hourly: e.g. KXBTCD-26AUG1813-T60000 or KXINXU-26AUG18H1000-T7919.9999
+    m_kh = re.search(r"-(\d{2})([A-Z]{3})(\d{2})(?:H)?(\d{2})(?:(\d{2}))?", tick)
+    if m_kh:
+        yy, mmm, dd, hh, mm = m_kh.groups()
+        mm_str = mm or "00"
+        try:
+            return datetime.strptime(f"20{yy}-{mmm}-{dd} {hh}:{mm_str}:00", "%Y-%b-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    # Gemini 15M / Hourly: e.g. GEMI-BTC15M2608181215-UP or GEMI-BTCH2608181300-UP (YYMMDDHHMM)
+    m_gem = re.search(r"(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})", tick)
+    if m_gem:
+        yy, mo, dd, hh, mm = m_gem.groups()
+        try:
+            return datetime.strptime(f"20{yy}-{mo}-{dd} {hh}:{mm}:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+
+    return None
+
+
+def validate_market_closure_time(
+    close_time_raw: str | int | float | datetime | None,
+    now_utc: datetime,
+    timeframe: str = "15m",
+    ticker: str | None = None,
+    max_drift_seconds: float = 90.0,
+) -> tuple[bool, str, float | None]:
+    """
+    Validates that a market's expiration / closure time precisely aligns with the
+    current active cycle window ('15m' or '1h') and checks the time distance to market closure.
+
+    Args:
+        close_time_raw: Raw close/expiry timestamp, ISO string, or None.
+        now_utc: Current reference UTC datetime.
+        timeframe: '15m' or '1h'.
+        ticker: Optional market ticker string for fallback date parsing.
+        max_drift_seconds: Allowable tolerance in seconds (default 90s) between market close and target boundary.
+
+    Returns:
+        tuple[bool, str, float | None]: (is_valid, reason, remaining_minutes)
+    """
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now_utc.astimezone(timezone.utc)
+
+    if close_time_raw is None:
+        return True, "no_close_time_specified", None
+
+    close_dt = parse_market_close_datetime(close_time_raw, ticker=ticker)
+    if close_dt is None:
+        return False, "unparseable_close_time", None
+
+    remaining_seconds = (close_dt - now_utc).total_seconds()
+    remaining_minutes = remaining_seconds / 60.0
+
+    if remaining_seconds <= 0:
+        return False, "market_already_closed", remaining_minutes
+
+    tf_clean = str(timeframe).lower()
+
+    if tf_clean == "15m":
+        # 15-minute markets strictly expire on 15-minute boundaries (:00, :15, :30, :45)
+        # We also allow second=59 or second=00
+        if close_dt.minute % 15 != 0 and (close_dt.minute != 59 or (close_dt.minute + 1) % 15 != 0):
+            return False, f"invalid_15m_expiry_boundary (minute :{close_dt.minute:02d})", remaining_minutes
+
+        # Compute exact target expiration for the current active 15m cycle
+        cur_minute = now_utc.minute
+        next_15m_mark = (cur_minute // 15 + 1) * 15
+        target_close_dt = now_utc.replace(second=0, microsecond=0) + timedelta(minutes=(next_15m_mark - cur_minute))
+        expected_remaining_seconds = (target_close_dt - now_utc).total_seconds()
+
+        drift = abs((close_dt - target_close_dt).total_seconds())
+        if drift > max_drift_seconds:
+            return (
+                False,
+                f"time_distance_mismatch (expected {expected_remaining_seconds/60.0:.1f}m away, got {remaining_minutes:.1f}m away)",
+                remaining_minutes,
+            )
+
+        if remaining_seconds > (16 * 60):
+            return False, f"market_beyond_active_15m_cycle ({remaining_minutes:.1f}m away)", remaining_minutes
+
+        return True, "valid_15m_market", remaining_minutes
+
+    elif tf_clean in ("1h", "hourly", "60m"):
+        # Hourly markets strictly expire on the hour (:00 or :59)
+        if close_dt.minute not in (0, 59):
+            return False, f"invalid_1h_expiry_boundary (minute :{close_dt.minute:02d})", remaining_minutes
+
+        # Compute exact target expiration for the current active 1h cycle (upcoming top of the hour)
+        target_close_dt = now_utc.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        expected_remaining_seconds = (target_close_dt - now_utc).total_seconds()
+
+        drift = abs((close_dt - target_close_dt).total_seconds())
+        if drift > max_drift_seconds:
+            return (
+                False,
+                f"time_distance_mismatch (expected {expected_remaining_seconds/60.0:.1f}m away, got {remaining_minutes:.1f}m away)",
+                remaining_minutes,
+            )
+
+        if remaining_seconds > (65 * 60):
+            return False, f"market_beyond_active_hourly_cycle ({remaining_minutes:.1f}m away)", remaining_minutes
+
+        return True, "valid_hourly_market", remaining_minutes
+
+    return True, f"unvalidated_timeframe_{timeframe}", remaining_minutes
 
 
 # ---------------------------------------------------------------------------
