@@ -1060,7 +1060,32 @@ class KalshiClient(BaseTradingClient):
         if buy_order_timeout_seconds > 0:
             buy_payload["expiration_ts"] = now_sec + buy_order_timeout_seconds
 
-        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        try:
+            buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        except requests.HTTPError as err:
+            err_text = str(err).lower()
+            if "post only cross" in err_text:
+                # If post_only crossed, attempt retry 1 tick deeper inside the spread
+                if effective_buy_cents - 1 >= 1:
+                    retry_price = effective_buy_cents - 1
+                    if side_clean == "yes":
+                        buy_payload["price"] = f"0.{retry_price:02d}00"
+                    else:
+                        buy_payload["price"] = f"0.{(100 - retry_price):02d}00"
+                    buy_payload["client_order_id"] = generate_safe_client_order_id(f"buy_{side_clean}", ticker, int(time.time() * 1000))
+                    try:
+                        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+                        effective_buy_cents = retry_price
+                        log.info(f"🔄 [POST-ONLY RETRY] Successfully rested buy order 1¢ deeper at {effective_buy_cents}¢ on {ticker}.")
+                    except Exception as retry_err:
+                        log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (orderbook moved): {retry_err}")
+                        return {"error": "post_only_cross", "ticker": ticker}
+                else:
+                    log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (orderbook moved).")
+                    return {"error": "post_only_cross", "ticker": ticker}
+            else:
+                raise
+
         self.invalidate_portfolio_caches()
 
         order_id = (
@@ -1101,7 +1126,6 @@ class KalshiClient(BaseTradingClient):
             else None
         )
 
-        # Record the exact price we paid and target TP into our bot's memory and MongoDB
         self.set_entry_price(
             ticker=ticker,
             price_cents=effective_buy_cents,
@@ -1140,6 +1164,8 @@ class KalshiClient(BaseTradingClient):
         """
         side_clean = side.lower()
         effective_bid = max(1, min(99, maker_bid_cents))
+        if target_ask_cents and effective_bid >= target_ask_cents:
+            effective_bid = max(1, target_ask_cents - 1)
         spread_saved = max(0, target_ask_cents - effective_bid)
 
         now_sec = int(time.time())
@@ -1170,7 +1196,33 @@ class KalshiClient(BaseTradingClient):
             f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢) | Count: {count}"
         )
 
-        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        try:
+            buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+        except requests.HTTPError as err:
+            err_text = str(err).lower()
+            if "post only cross" in err_text:
+                # If post_only crossed because spread narrowed, retry 1 tick deeper
+                if effective_bid - 1 >= 1:
+                    retry_bid = effective_bid - 1
+                    if side_clean == "yes":
+                        buy_payload["price"] = f"0.{retry_bid:02d}00"
+                    else:
+                        buy_payload["price"] = f"0.{(100 - retry_bid):02d}00"
+                    buy_payload["client_order_id"] = generate_safe_client_order_id(f"fav_maker_{side_clean}", ticker, int(time.time() * 1000))
+                    try:
+                        buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
+                        effective_bid = retry_bid
+                        spread_saved = max(0, target_ask_cents - effective_bid)
+                        log.info(f"🔄 [POST-ONLY RETRY] Successfully rested maker bid 1¢ deeper at {effective_bid}¢ on {ticker}.")
+                    except Exception as retry_err:
+                        log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (orderbook moved): {retry_err}")
+                        return {"error": "post_only_cross", "ticker": ticker}
+                else:
+                    log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (orderbook moved).")
+                    return {"error": "post_only_cross", "ticker": ticker}
+            else:
+                raise
+
         self.invalidate_portfolio_caches()
 
         order_id = (

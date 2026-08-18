@@ -860,7 +860,7 @@ def evaluate_favorite_maker_opportunity(
                 return None
 
         maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
-        maker_bid = max(effective_min_fav, min(yes_ask - 1, maker_bid))
+        maker_bid = min(yes_ask - 1, max(1, maker_bid))
         return {
             "side": "yes",
             "maker_bid": maker_bid,
@@ -888,7 +888,7 @@ def evaluate_favorite_maker_opportunity(
                 return None
 
         maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
-        maker_bid = max(effective_min_fav, min(no_ask - 1, maker_bid))
+        maker_bid = min(no_ask - 1, max(1, maker_bid))
         return {
             "side": "no",
             "maker_bid": maker_bid,
@@ -941,7 +941,7 @@ def _execute_favorite_maker_flow(
                     count=count,
                     buy_order_timeout_seconds=60,
                 )
-                effective_buy = buy_res.get("buy_price_cents", maker_bid)
+                effective_buy = buy_res.get("buy_price_cents", maker_bid) if isinstance(buy_res, dict) else maker_bid
             else:
                 buy_res = client.buy_and_set_take_profit(
                     ticker=ticker,
@@ -952,7 +952,10 @@ def _execute_favorite_maker_flow(
                     maker_bid_cents=maker_bid,
                     buy_order_timeout_seconds=60,
                 )
-                effective_buy = buy_res.get("buy_price_cents", maker_bid)
+                effective_buy = buy_res.get("buy_price_cents", maker_bid) if isinstance(buy_res, dict) else maker_bid
+            if isinstance(buy_res, dict) and buy_res.get("error"):
+                log.warning(f"⚠️ [{ex_name}] Favorite Maker order not placed on {ticker}: {buy_res.get('error')}")
+                return False, None
         except Exception as error:
             log.error(f"❌ [{ex_name}] Failed to execute Favorite Maker trade on {ticker}: {error}")
             return False, None
