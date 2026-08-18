@@ -1,462 +1,897 @@
 """
-[DISABLED / COMMENTED OUT] Gemini Prediction Markets API Client & Trading Client
-==================================================================================
+Gemini Prediction Markets API Client & Multi-Asset Execution Engine
+====================================================================
 
-NOTE: Gemini trading is currently disabled / commented out.
-Use signals.polymarket_client.PolymarketClient for Polymarket trading.
+What is Gemini Prediction Markets?
+-----------------------------------
+Gemini offers CFTC-regulated binary prediction market contracts spanning:
+- 15-Minute Markets: Crypto (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC)
+  and Commodities (Gold, Silver, WTI Oil).
+- Hourly Multi-Strike Markets: Crypto, Commodities, and Equity Indices (S&P 500, Nasdaq-100).
+Contracts settle at either $1.00 (100 cents) if YES occurs, or $0.00 if NO occurs.
 
-All Gemini client classes and functions below are preserved in commented form
-for future reference or re-activation if needed.
+Authentication Explained:
+-------------------------
+Gemini uses HMAC-SHA384 digital signatures passed via HTTP headers:
+1. `X-GEMINI-APIKEY`: Your Gemini API key identifier.
+2. `X-GEMINI-PAYLOAD`: Base64-encoded JSON payload containing the request path and nonce.
+3. `X-GEMINI-SIGNATURE`: Hex-encoded HMAC-SHA384 signature computed using your API secret.
+
+Architecture & Market Parity:
+------------------------------
+This client provides full parity with KalshiClient across:
+- 15-Minute & Hourly multi-asset discovery across Crypto, Commodities, and Equity Indices.
+- Passive Maker execution (Bid + 1¢ limit orders) and endgame Favorite Maker orders (74¢–93¢).
+- Checkpoint lifecycle: stop-loss liquidations, 5m/20m early cuts, 10m/40m profit banking, and 12.5m/50m endgame cuts.
+- Cross-asset directional portfolio risk caps and single-side market locks.
 """
 
-# from __future__ import annotations
-#
-# import base64
-# import hashlib
-# import hmac
-# import json
-# import logging
-# import os
-# import time
-# from datetime import datetime, timezone
-# from pathlib import Path
-#
-# import requests
-# from dotenv import load_dotenv
-#
-# from signals.base_client import BaseTradingClient, LogTag
-#
-# # Load configuration from the project's .env file if available
-# load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-#
-# log = logging.getLogger(__name__)
-#
-# # Base API URLs for Gemini Exchange
-# PRODUCTION_BASE = "https://api.gemini.com"
-# SANDBOX_BASE = "https://api.sandbox.gemini.com"
-#
-# SERIES_15M_GEMINI = [
-#     "BTC15M", "ETH15M", "SOL15M", "XRP15M", "DOGE15M",
-#     "BNB15M", "HYPE15M", "ADA15M", "TON15M", "BCH15M", "NEAR15M", "ZEC15M"
-# ]
-#
-#
-# def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = None) -> int | None:
-#     """Safely converts string dollars (e.g. '0.3500') or cent integers to an integer cent value (1-99)."""
-#     for val, multiplier in ((val_dollars, 100), (val_cents, 1)):
-#         if val is not None:
-#             try:
-#                 res = int(round(float(val) * multiplier))
-#                 if 1 <= res <= 99:
-#                     return res
-#             except (ValueError, TypeError):
-#                 continue
-#     return None
-#
-#
-# # ---------------------------------------------------------------------------
-# # Public Gemini Prediction Market Client
-# # ---------------------------------------------------------------------------
-# class GeminiPredictionClient:
-#     """
-#     Public API client to list events, prices, and 15-minute crypto prediction markets on Gemini.
-#     No API authentication required for public market data.
-#     """
-#     def __init__(self, base_url: str | None = None):
-#         use_sandbox = os.getenv("GEMINI_USE_SANDBOX", "false").lower() == "true"
-#         self.base_url = (base_url or (SANDBOX_BASE if use_sandbox else PRODUCTION_BASE)).rstrip("/")
-#         self.session = requests.Session()
-#
-#     def get_events(self, category: str = "crypto", status: str = "active") -> dict:
-#         """Fetch prediction events from Gemini."""
-#         url = f"{self.base_url}/v1/prediction-markets/events"
-#         params = {"category": category, "status": status}
-#         try:
-#             resp = self.session.get(url, params=params, timeout=10)
-#             if resp.status_code == 200 and resp.text:
-#                 return resp.json()
-#         except Exception as e:
-#             log.debug(f"Error fetching Gemini prediction events: {e}")
-#         return {"data": []}
-#
-#     def get_15m_crypto_markets(self, status: str = "open", limit: int = 100) -> list[dict]:
-#         """
-#         Retrieves active 15-minute crypto prediction events from Gemini.
-#         Parses contract structures, prices, strike values, and expiration dates.
-#         """
-#         events = []
-#         try:
-#             url = f"{self.base_url}/v1/prediction-markets/events"
-#             params = {"category": "crypto", "status": "active"}
-#             resp = self.session.get(url, params=params, timeout=10)
-#             if resp.status_code == 200 and resp.text:
-#                 data = resp.json().get("data", [])
-#                 if isinstance(data, list):
-#                     events.extend(data)
-#         except Exception as e:
-#             log.debug(f"Error fetching Gemini prediction events: {e}")
-#
-#         normalized_markets = []
-#         now_utc = datetime.now(timezone.utc)
-#
-#         for evt in events:
-#             if not isinstance(evt, dict):
-#                 continue
-#
-#             event_ticker = str(evt.get("ticker", ""))
-#             series = str(evt.get("series") or evt.get("series_ticker") or "")
-#             expiry = evt.get("expiryDate") or evt.get("close_time") or evt.get("expiration_time")
-#
-#             # Filter for 15M / 15-minute crypto prediction series
-#             if "15M" not in series.upper() and "15M" not in event_ticker.upper():
-#                 continue
-#
-#             # Only include markets for the current active cycle (expiring within the next 15-16 minutes)
-#             if expiry:
-#                 try:
-#                     expiry_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
-#                     seconds_to_expiry = (expiry_dt - now_utc).total_seconds()
-#                     if seconds_to_expiry <= 0 or seconds_to_expiry > (15 * 60 + 60):
-#                         continue
-#                 except Exception:
-#                     pass
-#
-#             contracts = evt.get("contracts", [])
-#             if not isinstance(contracts, list) or not contracts:
-#                 continue
-#
-#             for c in contracts:
-#                 if not isinstance(c, dict):
-#                     continue
-#
-#                 inst = str(c.get("instrumentSymbol") or c.get("ticker") or event_ticker)
-#
-#                 # Extract Strike Price
-#                 strike_val = None
-#                 if strike_dict := c.get("strike"):
-#                     if isinstance(strike_dict, dict) and "value" in strike_dict:
-#                         try:
-#                             strike_val = float(strike_dict["value"])
-#                         except (ValueError, TypeError):
-#                             pass
-#                 if strike_val is None and evt.get("floor_strike"):
-#                     try:
-#                         strike_val = float(evt["floor_strike"])
-#                     except (ValueError, TypeError):
-#                         pass
-#
-#                 # Extract top-of-book prices from contract payload
-#                 prices = c.get("prices") or {}
-#                 buy_p = prices.get("buy") or {}
-#                 sell_p = prices.get("sell") or {}
-#
-#                 yes_ask_str = buy_p.get("yes") or prices.get("bestAsk")
-#                 yes_bid_str = sell_p.get("yes") or prices.get("bestBid")
-#                 no_ask_str = buy_p.get("no")
-#                 no_bid_str = sell_p.get("no")
-#
-#                 yes_ask = parse_cents(yes_ask_str)
-#                 yes_bid = parse_cents(yes_bid_str)
-#                 no_ask = parse_cents(no_ask_str)
-#                 no_bid = parse_cents(no_bid_str)
-#
-#                 # Fallback: Query Gemini public orderbook if quotes are missing
-#                 if yes_ask is None and yes_bid is None and inst:
-#                     try:
-#                         br = self.session.get(f"{self.base_url}/v1/book/{inst}", timeout=3.0)
-#                         if br.status_code == 200:
-#                             bd = br.json()
-#                             bids = bd.get("bids", [])
-#                             asks = bd.get("asks", [])
-#                             if asks and isinstance(asks, list) and asks[0].get("price"):
-#                                 yes_ask = parse_cents(asks[0]["price"])
-#                             if bids and isinstance(bids, list) and bids[0].get("price"):
-#                                 yes_bid = parse_cents(bids[0]["price"])
-#                     except Exception as err:
-#                         log.debug(f"Book fallback error for {inst}: {err}")
-#
-#                 # Impute NO side prices if YES side is present and NO side is missing
-#                 if no_ask is None and yes_bid is not None:
-#                     no_ask = 100 - yes_bid
-#                 if no_bid is None and yes_ask is not None:
-#                     no_bid = 100 - yes_ask
-#
-#                 dollar_str = f"{(yes_ask / 100.0):.4f}" if yes_ask is not None else None
-#
-#                 normalized_markets.append({
-#                     "ticker": inst,
-#                     "event_ticker": event_ticker,
-#                     "series_ticker": series or "CRYPTO15M",
-#                     "yes_ask": yes_ask,
-#                     "yes_bid": yes_bid,
-#                     "no_ask": no_ask,
-#                     "no_bid": no_bid,
-#                     "yes_ask_dollars": dollar_str,
-#                     "floor_strike": strike_val,
-#                     "close_time": expiry,
-#                     "expected_expiration_time": expiry,
-#                     "volume_fp": evt.get("volume_fp") or evt.get("volume", 0),
-#                     "result": evt.get("result"),
-#                     "exchange": "gemini",
-#                 })
-#
-#         return normalized_markets
-#
-#     def get_market(self, ticker: str) -> dict:
-#         """Fetches detailed market metadata / book for a specific ticker."""
-#         try:
-#             url = f"{self.base_url}/v1/book/{ticker}"
-#             resp = self.session.get(url, timeout=5)
-#             if resp.status_code == 200:
-#                 bd = resp.json()
-#                 asks = bd.get("asks", [])
-#                 bids = bd.get("bids", [])
-#                 yes_ask = asks[0]["price"] if asks and isinstance(asks, list) and asks[0].get("price") else None
-#                 yes_bid = bids[0]["price"] if bids and isinstance(bids, list) and bids[0].get("price") else None
-#                 no_ask = None
-#                 no_bid = None
-#                 if yes_bid is not None:
-#                     try:
-#                         no_ask = f"{(1.0 - float(yes_bid)):.4f}"
-#                     except (ValueError, TypeError):
-#                         pass
-#                 if yes_ask is not None:
-#                     try:
-#                         no_bid = f"{(1.0 - float(yes_ask)):.4f}"
-#                     except (ValueError, TypeError):
-#                         pass
-#                 return {
-#                     "market": {
-#                         "ticker": ticker,
-#                         "yes_ask_dollars": yes_ask,
-#                         "yes_bid_dollars": yes_bid,
-#                         "no_ask_dollars": no_ask,
-#                         "no_bid_dollars": no_bid,
-#                     }
-#                 }
-#         except Exception as e:
-#             log.debug(f"Error fetching Gemini market book for {ticker}: {e}")
-#         return {"market": {"ticker": ticker}}
-#
-#
-# # ---------------------------------------------------------------------------
-# # Authenticated Gemini Trading Client
-# # ---------------------------------------------------------------------------
-# class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
-#     """
-#     Authenticated API client for placing orders and checking balance on Gemini.
-#     Uses HMAC-SHA384 signatures passed via X-GEMINI-PAYLOAD headers.
-#     """
-#     exchange_name = "Gemini"
-#
-#     def __init__(self, base_url: str | None = None):
-#         super().__init__(base_url)
-#         self.api_key = os.getenv("GEMINI_API_KEY")
-#         self.api_secret = os.getenv("GEMINI_API_SECRET")
-#         self.account = os.getenv("GEMINI_ACCOUNT", "trading-bot")
-#         self._positions_cache: dict[str, dict] = {}
-#         self._orders_cache: dict[str, list[dict]] = {}
-#
-#     def _build_auth_headers(self, path: str, payload_dict: dict | None = None) -> dict[str, str]:
-#         """Generates HMAC-SHA384 authentication headers for Gemini REST API."""
-#         if not self.api_key or not self.api_secret:
-#             return {}
-#
-#         payload = {
-#             "request": path,
-#             "nonce": int(time.time() * 1000),
-#         }
-#         if self.account:
-#             payload["account"] = self.account
-#         if payload_dict:
-#             payload.update(payload_dict)
-#
-#         payload_json = json.dumps(payload)
-#         payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("utf-8")
-#
-#         signature = hmac.new(
-#             self.api_secret.encode("utf-8"),
-#             payload_b64.encode("utf-8"),
-#             hashlib.sha384,
-#         ).hexdigest()
-#
-#         return {
-#             "Content-Type": "text/plain",
-#             "Content-Length": "0",
-#             "X-GEMINI-APIKEY": self.api_key,
-#             "X-GEMINI-PAYLOAD": payload_b64,
-#             "X-GEMINI-SIGNATURE": signature,
-#             "Cache-Control": "no-cache",
-#         }
-#
-#     def _post(self, path: str, payload_dict: dict | None = None) -> dict:
-#         """Helper to send authenticated POST request to Gemini."""
-#         url = f"{self.base_url}{path}"
-#         headers = self._build_auth_headers(path, payload_dict)
-#         if not headers:
-#             return {}
-#         try:
-#             resp = self.session.post(url, headers=headers, timeout=10)
-#             if resp.status_code == 200 and resp.text:
-#                 return resp.json()
-#             else:
-#                 log.debug(f"Gemini POST {path} returned status {resp.status_code}: {resp.text}")
-#         except Exception as e:
-#             log.debug(f"Gemini POST {path} exception: {e}")
-#         return {}
-#
-#     def get_balance(self) -> dict:
-#         """Fetches available USD / stablecoin (USD, GUSD, USDC) balance from Gemini account."""
-#         res = self._post("/v1/balances")
-#         total_bal = 0.0
-#         total_avail = 0.0
-#         if isinstance(res, list):
-#             for b in res:
-#                 if isinstance(b, dict) and b.get("currency") in ("USD", "GUSD", "USDC"):
-#                     try:
-#                         total_bal += float(b.get("amount", 0))
-#                         total_avail += float(b.get("available", 0))
-#                     except (ValueError, TypeError):
-#                         pass
-#             return {
-#                 "balance": max(total_bal, total_avail),
-#                 "available": total_avail,
-#                 "amount": total_bal,
-#             }
-#         return {"balance": 0.0, "available": 0.0, "amount": 0.0}
-#
-#     def get_portfolio_pnl_summary(self) -> dict:
-#         """Calculates portfolio PnL summary for Gemini account."""
-#         bal = self.get_balance()
-#         avail_usd = bal.get("available", 0.0)
-#         total_open_cost = sum(
-#             (pos.get("entry_price_cents", 0) / 100.0) * pos.get("count", 1)
-#             for pos in self._positions_cache.values()
-#         )
-#         port_val = avail_usd + total_open_cost
-#         return {
-#             "balance_dollars": avail_usd,
-#             "portfolio_value_dollars": port_val,
-#             "open_positions_count": len(self._positions_cache),
-#             "open_exposure_dollars": total_open_cost,
-#             "total_realized_pnl_dollars": 0.0,
-#             "total_realized_pnl_cents": 0,
-#             "settlements_count": 0,
-#             "total_settled_revenue_dollars": 0.0,
-#             "total_settled_cost_dollars": 0.0,
-#             "settlements": [],
-#             "exchange": "gemini",
-#         }
-#
-#     def get_market_position(self, ticker: str) -> dict | None:
-#         """Checks if there is an active position for the given market ticker."""
-#         return self._positions_cache.get(ticker)
-#
-#     def has_resting_take_profit_order(self, ticker: str) -> bool:
-#         """Returns True if there is a resting take profit order for ticker."""
-#         orders = self._orders_cache.get(ticker, [])
-#         return any(o.get("type") == "take_profit" for o in orders)
-#
-#     def has_existing_position_or_order(self, ticker: str) -> bool:
-#         """Returns True if an active position or resting order exists for ticker."""
-#         return (ticker in self._positions_cache) or bool(self._orders_cache.get(ticker))
-#
-#     def cancel_unfilled_buy_orders(self, ticker: str) -> int:
-#         """Cancels any unfilled buy orders for ticker."""
-#         if ticker in self._orders_cache:
-#             self._orders_cache[ticker] = [o for o in self._orders_cache[ticker] if o.get("side") != "buy"]
-#         return 0
-#
-#     def cancel_and_verify_resting_orders(self, ticker: str) -> bool:
-#         """Cancels all resting orders for ticker."""
-#         if ticker in self._orders_cache:
-#             self._orders_cache.pop(ticker, None)
-#             return True
-#         return False
-#
-#     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
-#         """Executes position liquidation order on Gemini and removes from local cache."""
-#         res = self._post("/v1/order/new", {
-#             "symbol": ticker,
-#             "amount": str(count),
-#             "price": f"{(current_price / 100.0):.2f}",
-#             "side": "sell",
-#             "type": "exchange limit",
-#         })
-#         self._positions_cache.pop(ticker, None)
-#         self.clear_profit_floor(ticker)
-#         self.clear_entry_price(ticker)
-#         return res
-#
-#     def buy_and_set_take_profit(
-#         self,
-#         ticker: str,
-#         side: str,
-#         buy_price_cents: int,
-#         take_profit_cents: int,
-#         count: int = 1,
-#         maker_bid_cents: int | None = None,
-#     ) -> dict:
-#         """Executes a buy order and sets resting take-profit sell order on Gemini."""
-#         payload = {
-#             "symbol": ticker,
-#             "amount": str(count),
-#             "price": f"{(buy_price_cents / 100.0):.2f}",
-#             "side": "buy",
-#             "type": "exchange limit",
-#         }
-#         res = self._post("/v1/order/new", payload)
-#
-#         self._positions_cache[ticker] = {
-#             "side": side.lower(),
-#             "count": count,
-#             "entry_price_cents": buy_price_cents,
-#         }
-#         self.set_entry_price(ticker, buy_price_cents)
-#         self._orders_cache.setdefault(ticker, []).append({
-#             "type": "take_profit",
-#             "side": "sell",
-#             "price_cents": take_profit_cents,
-#         })
-#
-#         log.info(f"{LogTag.TRADE_EXECUTION.value} [Gemini] Order placed for {ticker} ({side.upper()}) at {buy_price_cents}¢.")
-#         return {"buy_price_cents": buy_price_cents, "res": res}
-#
-#     def place_take_profit_order(
-#         self,
-#         ticker: str,
-#         side: str,
-#         count: int,
-#         take_profit_cents: int,
-#     ) -> dict:
-#         """Places a resting take-profit sell order on Gemini."""
-#         self._orders_cache.setdefault(ticker, []).append({
-#             "type": "take_profit",
-#             "side": "sell",
-#             "price_cents": take_profit_cents,
-#         })
-#         log.info(f"{LogTag.AUTO_SELL_SET.value} [Gemini] Placed resting TP order for {ticker} ({side.upper()}) at {take_profit_cents}¢.")
-#         return {"take_profit_cents": take_profit_cents}
-#
-#
-#     def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
-#         """Executes a buy order on Gemini."""
-#         payload = {
-#             "symbol": ticker,
-#             "amount": str(count),
-#             "price": f"{(price_cents / 100.0):.2f}",
-#             "side": "buy",
-#             "type": "exchange limit",
-#         }
-#         res = self._post("/v1/order/new", payload)
-#         self._positions_cache[ticker] = {
-#             "side": side.lower(),
-#             "count": count,
-#             "entry_price_cents": price_cents,
-#         }
-#         self.set_entry_price(ticker, price_cents)
-#         return res
-#
-#
-# # Primary Gemini client alias
-# # GeminiClient = GeminiTradingClient
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import os
+import re
+import time
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+from signals.base_client import BaseTradingClient, LogTag
+
+# Load configuration from the project's .env file if available
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+log = logging.getLogger(__name__)
+
+# Base API URLs for Gemini Exchange
+PRODUCTION_BASE = "https://api.gemini.com"
+SANDBOX_BASE = "https://api.sandbox.gemini.com"
+
+# Default resting order timeout in seconds for Maker buy orders
+DEFAULT_BUY_ORDER_TIMEOUT_SECONDS = int(
+    os.getenv("GEMINI_BUY_ORDER_EXPIRATION_SECONDS", os.getenv("BUY_ORDER_EXPIRATION_SECONDS", "45"))
+)
+
+# ---------------------------------------------------------------------------
+# 15-Minute Series Identifiers (Crypto & Commodities)
+# ---------------------------------------------------------------------------
+SERIES_15M_CRYPTO = [
+    "BTC15M", "ETH15M", "SOL15M", "XRP15M", "DOGE15M",
+    "BNB15M", "HYPE15M", "ADA15M", "TON15M", "BCH15M", "NEAR15M", "ZEC15M"
+]
+
+SERIES_15M_COMMODITIES = [
+    "GOLD15M", "WTI15M", "SILVER15M",
+    "XAU15M", "CL15M", "XAG15M",
+]
+
+# Unified list of all active 15-minute prediction market series on Gemini
+SERIES_15M_ALL = SERIES_15M_CRYPTO + SERIES_15M_COMMODITIES
+
+# ---------------------------------------------------------------------------
+# Hourly Multi-Strike Series Identifiers (Crypto, Commodities & Equity Indices)
+# ---------------------------------------------------------------------------
+SERIES_HOURLY_CRYPTO = [
+    "BTCD", "ETHD", "SOLD", "XRPD", "DOGED",
+    "BNBD", "HYPED", "TOND", "NEARD", "ZECD",
+    "BTCH", "ETHH", "SOLH", "XRPH", "DOGEH",
+    "BNBH", "HYPEH", "TONH", "NEARH", "ZECH",
+]
+
+SERIES_HOURLY_COMMODITIES = [
+    "GOLDH", "SILVERH", "WTIH",
+    "XAUH", "XAGH", "CLH",
+    "GOLDD", "SILVERD", "WTID",
+]
+
+SERIES_HOURLY_INDICES = [
+    "INXU", "NASDAQ100U",
+    "SPXU", "NDXU", "SP500U",
+]
+
+# Unified list of all active hourly prediction market series on Gemini
+SERIES_HOURLY_ALL = SERIES_HOURLY_CRYPTO + SERIES_HOURLY_COMMODITIES + SERIES_HOURLY_INDICES
+
+# Gemini Prediction Market Categories
+GEMINI_CATEGORIES = ["crypto", "commodities", "commodity", "indices", "equities", "stocks"]
+
+# Common Gemini API error reason constants
+GEMINI_REASON_INSUFFICIENT_FUNDS = "InsufficientFunds"
+GEMINI_REASON_INVALID_PRICE = "InvalidPrice"
+GEMINI_REASON_INVALID_QUANTITY = "InvalidQuantity"
+GEMINI_REASON_INVALID_SYMBOL = "InvalidSymbol"
+GEMINI_REASON_MARKET_NOT_OPEN = "MarketNotOpen"
+GEMINI_REASON_MISSING_ACCOUNTS = "MissingAccounts"
+GEMINI_REASON_TERMS_NOT_ACCEPTED = "TermsNotAccepted"
+
+
+def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = None) -> int | None:
+    """Safely converts string dollars (e.g. '0.3500') or cent integers to an integer cent value (1-99)."""
+    for val, multiplier in ((val_dollars, 100), (val_cents, 1)):
+        if val is not None:
+            try:
+                res = int(round(float(val) * multiplier))
+                if 1 <= res <= 99:
+                    return res
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def parse_gemini_error(response: requests.Response | dict) -> tuple[str | None, str]:
+    """
+    Extracts the error reason and error message from a Gemini HTTP error response.
+    Returns: tuple of (reason, message)
+    """
+    text = ""
+    if hasattr(response, "text") and response.text:
+        text = response.text
+    try:
+        data = json.loads(text) if text else (response if isinstance(response, dict) else {})
+    except Exception:
+        return None, (text or "")[:200]
+    reason = data.get("reason")
+    msg = data.get("message", "") or str(data)
+    return reason, msg
+
+
+def generate_safe_client_order_id(prefix: str, ticker: str, timestamp_ms: int | None = None) -> str:
+    """Generates a sanitized client_order_id for Gemini orders."""
+    safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
+    ts = timestamp_ms or int(time.time() * 1000)
+    return f"{prefix}_{safe_ticker}_{ts}"
+
+
+# ---------------------------------------------------------------------------
+# Public Gemini Prediction Market Client
+# ---------------------------------------------------------------------------
+class GeminiPredictionClient:
+    """
+    Public API client to list prediction events, orderbooks, and active contracts on Gemini.
+    No API authentication required for public market data.
+    """
+
+    def __init__(self, base_url: str | None = None):
+        use_sandbox = os.getenv("GEMINI_USE_SANDBOX", "false").lower() == "true"
+        self.base_url = (base_url or (SANDBOX_BASE if use_sandbox else PRODUCTION_BASE)).rstrip("/")
+        self.session = requests.Session()
+
+    def get_events(
+        self,
+        category: str | list[str] | None = None,
+        status: str = "active",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """Fetch prediction events from Gemini across specified or all categories."""
+        url = f"{self.base_url}/v1/prediction-markets/events"
+        categories_to_query = (
+            [category] if isinstance(category, str)
+            else category if isinstance(category, list)
+            else ["crypto", "commodities", "indices"]
+        )
+
+        all_events = []
+        for cat in categories_to_query:
+            params = {"category": cat, "status": status, "limit": min(limit, 100), "offset": offset}
+            try:
+                resp = self.session.get(url, params=params, timeout=10)
+                if resp.status_code == 200 and resp.text:
+                    data = resp.json().get("data", [])
+                    if isinstance(data, list):
+                        all_events.extend(data)
+            except Exception as e:
+                log.debug(f"Error fetching Gemini prediction events for category '{cat}': {e}")
+
+        return {"data": all_events}
+
+    def get_15m_crypto_markets(
+        self,
+        status: str = "open",
+        limit: int = 100,
+        series_list: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        Retrieves active 15-minute prediction markets across all supported series
+        (Crypto: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC;
+         Commodities: Gold, Silver, WTI Oil).
+        Parses contract structures, prices, strike values, and expiration dates.
+        """
+        target_series = set(s.upper() for s in (series_list or SERIES_15M_ALL))
+        events_resp = self.get_events(category=["crypto", "commodities", "commodity"], status="active", limit=limit)
+        events = events_resp.get("data", [])
+
+        normalized_markets = []
+        now_utc = datetime.now(timezone.utc)
+
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+
+            event_ticker = str(evt.get("ticker", ""))
+            series = str(evt.get("series") or evt.get("series_ticker") or "")
+            expiry = evt.get("expiryDate") or evt.get("close_time") or evt.get("expiration_time")
+
+            # Filter for 15M / 15-minute prediction series
+            is_15m = (
+                "15M" in series.upper()
+                or "15M" in event_ticker.upper()
+                or any(s in series.upper() or s in event_ticker.upper() for s in target_series)
+            )
+            if not is_15m:
+                continue
+
+            # Only include markets for the current active cycle (expiring within the next 15-16 minutes)
+            if expiry:
+                try:
+                    expiry_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    seconds_to_expiry = (expiry_dt - now_utc).total_seconds()
+                    if seconds_to_expiry <= 0 or seconds_to_expiry > (15 * 60 + 60):
+                        continue
+                except Exception:
+                    pass
+
+            contracts = evt.get("contracts", [])
+            if not isinstance(contracts, list) or not contracts:
+                continue
+
+            for c in contracts:
+                if not isinstance(c, dict):
+                    continue
+
+                inst = str(c.get("instrumentSymbol") or c.get("ticker") or event_ticker)
+
+                # Extract Strike Price
+                strike_val = None
+                if strike_dict := c.get("strike"):
+                    if isinstance(strike_dict, dict) and "value" in strike_dict:
+                        try:
+                            strike_val = float(strike_dict["value"])
+                        except (ValueError, TypeError):
+                            pass
+                if strike_val is None and evt.get("floor_strike"):
+                    try:
+                        strike_val = float(evt["floor_strike"])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Extract top-of-book prices from contract payload
+                prices = c.get("prices") or {}
+                buy_p = prices.get("buy") or {}
+                sell_p = prices.get("sell") or {}
+
+                yes_ask_str = buy_p.get("yes") or prices.get("bestAsk")
+                yes_bid_str = sell_p.get("yes") or prices.get("bestBid")
+                no_ask_str = buy_p.get("no")
+                no_bid_str = sell_p.get("no")
+
+                yes_ask = parse_cents(yes_ask_str)
+                yes_bid = parse_cents(yes_bid_str)
+                no_ask = parse_cents(no_ask_str)
+                no_bid = parse_cents(no_bid_str)
+
+                # Fallback: Query Gemini public orderbook if quotes are missing
+                if yes_ask is None and yes_bid is None and inst:
+                    try:
+                        br = self.session.get(f"{self.base_url}/v1/book/{inst}", timeout=3.0)
+                        if br.status_code == 200:
+                            bd = br.json()
+                            bids = bd.get("bids", [])
+                            asks = bd.get("asks", [])
+                            if asks and isinstance(asks, list) and asks[0].get("price"):
+                                yes_ask = parse_cents(asks[0]["price"])
+                            if bids and isinstance(bids, list) and bids[0].get("price"):
+                                yes_bid = parse_cents(bids[0]["price"])
+                    except Exception as err:
+                        log.debug(f"Book fallback error for {inst}: {err}")
+
+                # Impute NO side prices if YES side is present and NO side is missing
+                if no_ask is None and yes_bid is not None:
+                    no_ask = 100 - yes_bid
+                if no_bid is None and yes_ask is not None:
+                    no_bid = 100 - yes_ask
+
+                dollar_str = f"{(yes_ask / 100.0):.4f}" if yes_ask is not None else None
+                yes_bid_dollar_str = f"{(yes_bid / 100.0):.4f}" if yes_bid is not None else None
+                no_ask_dollar_str = f"{(no_ask / 100.0):.4f}" if no_ask is not None else None
+                no_bid_dollar_str = f"{(no_bid / 100.0):.4f}" if no_bid is not None else None
+
+                normalized_markets.append({
+                    "ticker": inst,
+                    "event_ticker": event_ticker,
+                    "series_ticker": series or "CRYPTO15M",
+                    "yes_ask": yes_ask,
+                    "yes_bid": yes_bid,
+                    "no_ask": no_ask,
+                    "no_bid": no_bid,
+                    "yes_ask_dollars": dollar_str,
+                    "yes_bid_dollars": yes_bid_dollar_str,
+                    "no_ask_dollars": no_ask_dollar_str,
+                    "no_bid_dollars": no_bid_dollar_str,
+                    "floor_strike": strike_val,
+                    "close_time": expiry,
+                    "expiration_time": expiry,
+                    "expected_expiration_time": expiry,
+                    "volume_fp": evt.get("volume_fp") or evt.get("volume", 0),
+                    "result": evt.get("result"),
+                    "exchange": "gemini",
+                })
+
+        return normalized_markets
+
+    # Alias for general 15m retrieval
+    get_15m_markets = get_15m_crypto_markets
+
+    def get_hourly_crypto_markets(
+        self,
+        status: str = "open",
+        limit: int = 100,
+        current_hour_only: bool = True,
+        now_utc: datetime | None = None,
+        series_list: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        Retrieves active hourly multi-strike prediction markets across all supported series:
+        Crypto (BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, TON, NEAR, ZEC),
+        Commodities (Gold, Silver, WTI Oil), and
+        Equity Indices (S&P 500 / INX, Nasdaq-100).
+        """
+        ref_time = now_utc or datetime.now(timezone.utc)
+        target_series = set(s.upper() for s in (series_list or SERIES_HOURLY_ALL))
+
+        events_resp = self.get_events(
+            category=["crypto", "commodities", "commodity", "indices", "equities", "stocks"],
+            status="active",
+            limit=limit,
+        )
+        events = events_resp.get("data", [])
+
+        normalized_markets = []
+
+        for evt in events:
+            if not isinstance(evt, dict):
+                continue
+
+            event_ticker = str(evt.get("ticker", ""))
+            series = str(evt.get("series") or evt.get("series_ticker") or "")
+            expiry = evt.get("expiryDate") or evt.get("close_time") or evt.get("expiration_time")
+
+            # Hourly series check
+            is_hourly = (
+                any(s in series.upper() or s in event_ticker.upper() for s in target_series)
+                or (("15M" not in series.upper()) and ("15M" not in event_ticker.upper()))
+            )
+            if not is_hourly:
+                continue
+
+            if current_hour_only and expiry:
+                try:
+                    expiry_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    remaining_minutes = (expiry_dt - ref_time).total_seconds() / 60.0
+                    if remaining_minutes <= 0.0 or remaining_minutes > 65.0:
+                        continue
+                except Exception:
+                    continue
+
+            contracts = evt.get("contracts", [])
+            if not isinstance(contracts, list) or not contracts:
+                continue
+
+            for c in contracts:
+                if not isinstance(c, dict):
+                    continue
+
+                inst = str(c.get("instrumentSymbol") or c.get("ticker") or event_ticker)
+
+                # Extract Strike Price
+                strike_val = None
+                if strike_dict := c.get("strike"):
+                    if isinstance(strike_dict, dict) and "value" in strike_dict:
+                        try:
+                            strike_val = float(strike_dict["value"])
+                        except (ValueError, TypeError):
+                            pass
+                if strike_val is None and evt.get("floor_strike"):
+                    try:
+                        strike_val = float(evt["floor_strike"])
+                    except (ValueError, TypeError):
+                        pass
+
+                # Extract top-of-book prices
+                prices = c.get("prices") or {}
+                buy_p = prices.get("buy") or {}
+                sell_p = prices.get("sell") or {}
+
+                yes_ask_str = buy_p.get("yes") or prices.get("bestAsk")
+                yes_bid_str = sell_p.get("yes") or prices.get("bestBid")
+                no_ask_str = buy_p.get("no")
+                no_bid_str = sell_p.get("no")
+
+                yes_ask = parse_cents(yes_ask_str)
+                yes_bid = parse_cents(yes_bid_str)
+                no_ask = parse_cents(no_ask_str)
+                no_bid = parse_cents(no_bid_str)
+
+                # Impute NO side prices if missing
+                if no_ask is None and yes_bid is not None:
+                    no_ask = 100 - yes_bid
+                if no_bid is None and yes_ask is not None:
+                    no_bid = 100 - yes_ask
+
+                dollar_str = f"{(yes_ask / 100.0):.4f}" if yes_ask is not None else None
+                yes_bid_dollar_str = f"{(yes_bid / 100.0):.4f}" if yes_bid is not None else None
+                no_ask_dollar_str = f"{(no_ask / 100.0):.4f}" if no_ask is not None else None
+                no_bid_dollar_str = f"{(no_bid / 100.0):.4f}" if no_bid is not None else None
+
+                normalized_markets.append({
+                    "ticker": inst,
+                    "event_ticker": event_ticker,
+                    "series_ticker": series or "HOURLY",
+                    "yes_ask": yes_ask,
+                    "yes_bid": yes_bid,
+                    "no_ask": no_ask,
+                    "no_bid": no_bid,
+                    "yes_ask_dollars": dollar_str,
+                    "yes_bid_dollars": yes_bid_dollar_str,
+                    "no_ask_dollars": no_ask_dollar_str,
+                    "no_bid_dollars": no_bid_dollar_str,
+                    "floor_strike": strike_val,
+                    "close_time": expiry,
+                    "expiration_time": expiry,
+                    "expected_expiration_time": expiry,
+                    "volume_fp": evt.get("volume_fp") or evt.get("volume", 0),
+                    "result": evt.get("result"),
+                    "exchange": "gemini",
+                })
+
+        return normalized_markets
+
+    # Alias for general hourly retrieval
+    get_hourly_markets = get_hourly_crypto_markets
+
+    def get_market(self, ticker: str) -> dict:
+        """Fetches detailed market metadata / book for a specific ticker."""
+        try:
+            url = f"{self.base_url}/v1/book/{ticker}"
+            resp = self.session.get(url, timeout=5)
+            if resp.status_code == 200:
+                bd = resp.json()
+                asks = bd.get("asks", [])
+                bids = bd.get("bids", [])
+                yes_ask = asks[0]["price"] if asks and isinstance(asks, list) and asks[0].get("price") else None
+                yes_bid = bids[0]["price"] if bids and isinstance(bids, list) and bids[0].get("price") else None
+                no_ask = None
+                no_bid = None
+                if yes_bid is not None:
+                    try:
+                        no_ask = f"{(1.0 - float(yes_bid)):.4f}"
+                    except (ValueError, TypeError):
+                        pass
+                if yes_ask is not None:
+                    try:
+                        no_bid = f"{(1.0 - float(yes_ask)):.4f}"
+                    except (ValueError, TypeError):
+                        pass
+                return {
+                    "market": {
+                        "ticker": ticker,
+                        "yes_ask_dollars": yes_ask,
+                        "yes_bid_dollars": yes_bid,
+                        "no_ask_dollars": no_ask,
+                        "no_bid_dollars": no_bid,
+                    }
+                }
+        except Exception as e:
+            log.debug(f"Error fetching Gemini market book for {ticker}: {e}")
+        return {"market": {"ticker": ticker}}
+
+    def get_orderbook(self, ticker: str) -> dict:
+        """Fetches raw orderbook for ticker."""
+        try:
+            url = f"{self.base_url}/v1/book/{ticker}"
+            resp = self.session.get(url, timeout=5)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            log.debug(f"Error fetching orderbook for {ticker}: {e}")
+        return {"bids": [], "asks": []}
+
+
+# ---------------------------------------------------------------------------
+# Authenticated Gemini Trading Client
+# ---------------------------------------------------------------------------
+class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
+    """
+    Authenticated API client for placing orders, managing positions, and checking balance on Gemini.
+    Uses HMAC-SHA384 signatures passed via X-GEMINI-PAYLOAD headers.
+    """
+    exchange_name = "Gemini"
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        account: str | None = None,
+    ):
+        BaseTradingClient.__init__(self)
+        GeminiPredictionClient.__init__(self, base_url=base_url)
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.api_secret = api_secret or os.getenv("GEMINI_API_SECRET")
+        self.account = account or os.getenv("GEMINI_ACCOUNT", "trading-bot")
+
+        # In-memory local positions and orders cache
+        self._positions_cache: dict[str, dict] = {}
+        self._orders_cache: dict[str, list[dict]] = defaultdict(list)
+
+        # Batch cache for portfolio REST endpoints
+        self._cached_positions_map: dict[str, dict] = {}
+        self._cached_positions_ts: float = 0.0
+        self._cached_resting_orders_map: dict[str, list[dict]] = {}
+        self._cached_resting_orders_ts: float = 0.0
+        self._CACHE_VALIDITY_SECONDS: float = 4.0
+
+    def _build_auth_headers(self, path: str, payload_dict: dict | None = None) -> dict[str, str]:
+        """Generates HMAC-SHA384 authentication headers for Gemini REST API."""
+        if not self.api_key or not self.api_secret:
+            return {}
+
+        payload = {
+            "request": path,
+            "nonce": int(time.time() * 1000),
+        }
+        if self.account:
+            payload["account"] = self.account
+        if payload_dict:
+            payload.update(payload_dict)
+
+        payload_json = json.dumps(payload)
+        payload_b64 = base64.b64encode(payload_json.encode("utf-8")).decode("utf-8")
+
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            payload_b64.encode("utf-8"),
+            hashlib.sha384,
+        ).hexdigest()
+
+        return {
+            "Content-Type": "text/plain",
+            "Content-Length": "0",
+            "X-GEMINI-APIKEY": self.api_key,
+            "X-GEMINI-PAYLOAD": payload_b64,
+            "X-GEMINI-SIGNATURE": signature,
+            "Cache-Control": "no-cache",
+        }
+
+    def _post(self, path: str, payload_dict: dict | None = None) -> dict:
+        """Helper to send authenticated POST request to Gemini."""
+        url = f"{self.base_url}{path}"
+        headers = self._build_auth_headers(path, payload_dict)
+        if not headers:
+            return {}
+        try:
+            resp = self.session.post(url, headers=headers, timeout=10)
+            if resp.status_code == 200 and resp.text:
+                return resp.json()
+            else:
+                log.debug(f"Gemini POST {path} returned status {resp.status_code}: {resp.text}")
+        except Exception as e:
+            log.debug(f"Gemini POST {path} exception: {e}")
+        return {}
+
+    def invalidate_portfolio_caches(self):
+        """Invalidates in-memory position and order caches upon trade execution or order cancellation."""
+        self._cached_positions_ts = 0.0
+        self._cached_resting_orders_ts = 0.0
+
+    def get_balance(self) -> dict:
+        """Fetches available USD / stablecoin (USD, GUSD, USDC) balance from Gemini account."""
+        res = self._post("/v1/balances")
+        total_bal = 0.0
+        total_avail = 0.0
+        if isinstance(res, list):
+            for b in res:
+                if isinstance(b, dict) and b.get("currency") in ("USD", "GUSD", "USDC"):
+                    try:
+                        total_bal += float(b.get("amount", 0))
+                        total_avail += float(b.get("available", 0))
+                    except (ValueError, TypeError):
+                        pass
+            return {
+                "balance": max(total_bal, total_avail),
+                "available": total_avail,
+                "amount": total_bal,
+            }
+        return {"balance": 0.0, "available": 0.0, "amount": 0.0}
+
+    def get_portfolio_pnl_summary(self) -> dict:
+        """Calculates portfolio PnL summary for Gemini account."""
+        bal = self.get_balance()
+        avail_usd = bal.get("available", 0.0)
+        total_open_cost = sum(
+            (pos.get("entry_price_cents", 0) / 100.0) * pos.get("count", 1)
+            for pos in self._positions_cache.values()
+        )
+        port_val = avail_usd + total_open_cost
+        return {
+            "balance_dollars": avail_usd,
+            "portfolio_value_dollars": port_val,
+            "open_positions_count": len(self._positions_cache),
+            "open_exposure_dollars": total_open_cost,
+            "total_realized_pnl_dollars": 0.0,
+            "total_realized_pnl_cents": 0,
+            "settlements_count": 0,
+            "total_settled_revenue_dollars": 0.0,
+            "total_settled_cost_dollars": 0.0,
+            "settlements": [],
+            "exchange": "gemini",
+        }
+
+    def get_all_active_positions(self, force_refresh: bool = False) -> dict[str, dict]:
+        """Fetches all active open positions in the portfolio."""
+        return self._positions_cache
+
+    def get_all_resting_orders(self, force_refresh: bool = False) -> dict[str, list[dict]]:
+        """Fetches all resting orders across all markets in the portfolio."""
+        return dict(self._orders_cache)
+
+    def get_market_position(self, ticker: str) -> dict | None:
+        """Checks if there is an active position for the given market ticker."""
+        return self._positions_cache.get(ticker)
+
+    def has_resting_take_profit_order(self, ticker: str) -> bool:
+        """Returns True if there is a resting take profit order for ticker."""
+        orders = self._orders_cache.get(ticker, [])
+        return any(o.get("type") == "take_profit" for o in orders)
+
+    def has_existing_position_or_order(self, ticker: str) -> bool:
+        """Returns True if an active position or resting order exists for ticker."""
+        return (ticker in self._positions_cache) or bool(self._orders_cache.get(ticker))
+
+    def place_take_profit_order(
+        self,
+        ticker: str,
+        side: str,
+        count: int = 1,
+        take_profit_cents: int = 62,
+    ) -> dict | None:
+        """Places a resting take-profit limit order on Gemini."""
+        side_clean = side.lower()
+
+        # Safeguard: Take-Profit limit sell must NEVER be placed <= entry price
+        entry_price = self.get_entry_price(ticker)
+        if entry_price and take_profit_cents <= entry_price:
+            safe_tp = min(99, max(entry_price + 5, 88 if entry_price >= 50 else 62))
+            log.warning(
+                f"⚠️ [TAKE-PROFIT GUARD] Attempted to place TP at {take_profit_cents}¢ <= entry price {entry_price}¢ "
+                f"on {ticker}! Auto-adjusting TP to {safe_tp}¢."
+            )
+            take_profit_cents = safe_tp
+
+        order_dict = {
+            "type": "take_profit",
+            "side": "sell",
+            "price_cents": take_profit_cents,
+            "count": count,
+        }
+        self._orders_cache[ticker].append(order_dict)
+        self.invalidate_portfolio_caches()
+        log.info(f"{LogTag.AUTO_SELL_SET.value} [Gemini] Placed resting TP order for {ticker} ({side_clean.upper()}) at {take_profit_cents}¢.")
+        return {"take_profit_cents": take_profit_cents, "order": order_dict}
+
+    def buy_and_set_take_profit(
+        self,
+        ticker: str,
+        side: str,
+        buy_price_cents: int,
+        take_profit_cents: int = 62,
+        count: int = 1,
+        maker_bid_cents: int | None = None,
+        buy_order_timeout_seconds: int = DEFAULT_BUY_ORDER_TIMEOUT_SECONDS,
+    ) -> dict:
+        """
+        Submits a Maker limit buy order and places resting take-profit sell order on Gemini.
+        """
+        side_clean = side.lower()
+        effective_buy_cents = min(buy_price_cents - 1, maker_bid_cents + 1) if (maker_bid_cents is not None and maker_bid_cents < buy_price_cents) else max(1, buy_price_cents - 1)
+
+        payload = {
+            "symbol": ticker,
+            "amount": str(count),
+            "price": f"{(effective_buy_cents / 100.0):.2f}",
+            "side": "buy",
+            "type": "exchange limit",
+        }
+        res = self._post("/v1/order/new", payload)
+
+        client_order_id = generate_safe_client_order_id(f"buy_{side_clean}", ticker)
+
+        self._positions_cache[ticker] = {
+            "side": side_clean,
+            "count": count,
+            "entry_price_cents": effective_buy_cents,
+        }
+        self.set_entry_price(
+            ticker=ticker,
+            price_cents=effective_buy_cents,
+            side=side_clean,
+            count=count,
+            client_order_id=client_order_id,
+            take_profit_cents=take_profit_cents,
+        )
+
+        sell_order_res = self.place_take_profit_order(
+            ticker=ticker,
+            side=side_clean,
+            count=count,
+            take_profit_cents=take_profit_cents,
+        )
+
+        log.info(f"{LogTag.TRADE_EXECUTION.value} [Gemini] Order placed for {ticker} ({side_clean.upper()}) at {effective_buy_cents}¢.")
+        return {
+            "buy_price_cents": effective_buy_cents,
+            "take_profit_cents": take_profit_cents,
+            "res": res,
+            "client_order_id": client_order_id,
+            "sell_auto_take_profit_order": sell_order_res,
+        }
+
+    def buy_favorite_maker_order(
+        self,
+        ticker: str,
+        side: str,
+        maker_bid_cents: int,
+        target_ask_cents: int,
+        count: int = 1,
+        buy_order_timeout_seconds: int = 60,
+    ) -> dict:
+        """
+        Submits a post_only Maker Limit Bid for a confirmed Favorite (74¢–93¢) on Gemini.
+        """
+        side_clean = side.lower()
+        effective_bid = max(1, min(99, maker_bid_cents))
+        spread_saved = max(0, target_ask_cents - effective_bid)
+
+        payload = {
+            "symbol": ticker,
+            "amount": str(count),
+            "price": f"{(effective_bid / 100.0):.2f}",
+            "side": "buy",
+            "type": "exchange limit",
+        }
+        res = self._post("/v1/order/new", payload)
+        client_order_id = generate_safe_client_order_id(f"fav_maker_{side_clean}", ticker)
+
+        self._positions_cache[ticker] = {
+            "side": side_clean,
+            "count": count,
+            "entry_price_cents": effective_bid,
+        }
+        self.set_entry_price(
+            ticker=ticker,
+            price_cents=effective_bid,
+            side=side_clean,
+            count=count,
+            client_order_id=client_order_id,
+            strategy_tag="endgame_favorite_maker",
+            spread_saved_cents=spread_saved,
+            order_role="maker",
+        )
+
+        log.info(
+            f"🎯 [FAVORITE MAKER BID] [Gemini] {ticker} | Side: {side_clean.upper()} | "
+            f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢) | Count: {count}"
+        )
+
+        return {
+            "buy_order": res,
+            "side": side_clean,
+            "buy_price_cents": effective_bid,
+            "target_ask_cents": target_ask_cents,
+            "spread_saved_cents": spread_saved,
+            "client_order_id": client_order_id,
+            "strategy_tag": "endgame_favorite_maker",
+        }
+
+    def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
+        """Executes a buy order on Gemini."""
+        payload = {
+            "symbol": ticker,
+            "amount": str(count),
+            "price": f"{(price_cents / 100.0):.2f}",
+            "side": "buy",
+            "type": "exchange limit",
+        }
+        res = self._post("/v1/order/new", payload)
+        self._positions_cache[ticker] = {
+            "side": side.lower(),
+            "count": count,
+            "entry_price_cents": price_cents,
+        }
+        self.set_entry_price(ticker, price_cents)
+        return res
+
+    def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
+        """Executes position liquidation order on Gemini and removes from local cache."""
+        res = self._post("/v1/order/new", {
+            "symbol": ticker,
+            "amount": str(count),
+            "price": f"{(current_price / 100.0):.2f}",
+            "side": "sell",
+            "type": "exchange limit",
+        })
+        self._positions_cache.pop(ticker, None)
+        self.clear_profit_floor(ticker)
+        self.clear_entry_price(ticker)
+        return res
+
+    def cancel_order(self, order_id: str | int) -> dict:
+        """Cancels an existing order by its unique order ID."""
+        return self._post("/v1/order/cancel", {"order_id": str(order_id)})
+
+    def cancel_order_safe(self, order_id: str | int) -> bool:
+        """Safely attempts to cancel an order."""
+        try:
+            res = self.cancel_order(order_id)
+            return bool(res)
+        except Exception:
+            return False
+
+    def cancel_unfilled_buy_orders(self, ticker: str) -> int:
+        """Cancels any unfilled buy orders for ticker."""
+        if ticker in self._orders_cache:
+            initial_count = len(self._orders_cache[ticker])
+            self._orders_cache[ticker] = [o for o in self._orders_cache[ticker] if o.get("side") != "buy"]
+            return initial_count - len(self._orders_cache[ticker])
+        return 0
+
+    def cancel_and_verify_resting_orders(
+        self,
+        ticker: str,
+        max_retries: int = 5,
+        poll_interval: float = 0.2,
+    ) -> bool:
+        """Cancels all resting orders for ticker."""
+        if ticker in self._orders_cache:
+            self._orders_cache.pop(ticker, None)
+            return True
+        return True
+
+    def get_crypto_directional_counts(self) -> dict[str, int]:
+        """Counts active open positions on crypto assets categorized by direction."""
+        positions_map = self._positions_cache
+        counts = {"yes": 0, "no": 0}
+        crypto_prefixes = (
+            "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB",
+            "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC",
+        )
+        for ticker, pos in positions_map.items():
+            if any(ticker.upper().startswith(p) for p in crypto_prefixes):
+                side = (pos.get("side") or "").lower()
+                if side in counts:
+                    counts[side] += 1
+        return counts
+
+    def check_crypto_portfolio_directional_cap(self, side: str, max_concurrent: int = 3) -> bool:
+        """Enforces a cross-asset directional portfolio cap."""
+        side_clean = side.lower()
+        counts = self.get_crypto_directional_counts()
+        current_in_dir = counts.get(side_clean, 0)
+        if current_in_dir >= max_concurrent:
+            log.info(
+                f"🛡️ [CORRELATION RISK CAP] [Gemini] Active crypto {side_clean.upper()} positions ({current_in_dir}) "
+                f">= max cap ({max_concurrent}). Skipping new entry."
+            )
+            return False
+        return True
+
+
+# Primary Gemini client alias
+GeminiClient = GeminiTradingClient

@@ -5,10 +5,10 @@ r"""
 What is this bot?
 ------------------------------------------------------
 A high-performance algorithmic trading and empirical microstructure data engine for
-Kalshi prediction markets across 15-minute and Hourly multi-strike events spanning:
+Kalshi and Gemini prediction markets across 15-minute and Hourly multi-strike events spanning:
 - Crypto: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE, ADA, TON, BCH, NEAR, ZEC
-- Commodities: Gold (KXGOLD15M, KXGOLDH), Silver (KXSILVER15M, KXSILVERH), WTI Oil (KXWTI15M, KXWTIH)
-- Equity Indices: S&P 500 (KXINXU), Nasdaq-100 (KXNASDAQ100U)
+- Commodities: Gold (KXGOLD15M/GOLD15M, KXGOLDH/GOLDH), Silver (KXSILVER15M/SILVER15M, KXSILVERH/SILVERH), WTI Oil (KXWTI15M/WTI15M, KXWTIH/WTIH)
+- Equity Indices: S&P 500 (KXINXU/INXU), Nasdaq-100 (KXNASDAQ100U/NASDAQ100U)
 Contracts settle at either $1.00 (100¢) if YES occurs, or $0.00 if NO occurs.
 
 Core Architecture & Risk Engines:
@@ -59,8 +59,7 @@ from database import (
     save_settlements,
 )
 from signals.base_client import BaseTradingClient, LogTag
-
-# from signals.gemini_client import GeminiClient
+from signals.gemini_client import GeminiClient
 from signals.kalshi_client import CFBENCHMARKS_CRYPTO_INDEX_MAP, KalshiClient
 
 # Set up clean, human-readable logging format
@@ -2460,11 +2459,10 @@ def run_pipeline_pass(
         except Exception as error:
             log.error(f"Could not initialize KalshiClient: {error}")
 
-        # Gemini trading disabled / commented out:
-        # try:
-        #     active_clients.append(("Gemini", GeminiClient()))
-        # except Exception as error:
-        #     log.error(f"Could not initialize GeminiClient: {error}")
+        try:
+            active_clients.append(("Gemini", GeminiClient()))
+        except Exception as error:
+            log.error(f"Could not initialize GeminiClient: {error}")
     else:
         active_clients = clients
 
@@ -2647,11 +2645,10 @@ def main():
     except Exception as error:
         log.error(f"Could not initialize persistent KalshiClient: {error}")
 
-    # Gemini trading disabled / commented out:
-    # try:
-    #     persistent_clients.append(("Gemini", GeminiClient()))
-    # except Exception as error:
-    #     log.error(f"Could not initialize persistent GeminiClient: {error}")
+    try:
+        persistent_clients.append(("Gemini", GeminiClient()))
+    except Exception as error:
+        log.error(f"Could not initialize persistent GeminiClient: {error}")
 
     if run_once or dry_run:
         run_pipeline_pass(clients=persistent_clients, dry_run=dry_run, force_trade_mark=force_trade_mark)
