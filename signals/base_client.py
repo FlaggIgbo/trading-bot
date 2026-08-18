@@ -143,6 +143,15 @@ class BaseTradingClient(ABC):
         pos = self.get_market_position(ticker)
         if pos is not None and pos.get("side", "").lower() != side_clean:
             return False
+        try:
+            from database import get_active_position_cost
+            db_pos = get_active_position_cost(ticker)
+            if db_pos is not None:
+                db_side = str(db_pos.get("side", "")).lower()
+                if db_side and db_side != side_clean:
+                    return False
+        except Exception:
+            pass
         return True
 
     def clear_traded_market(self, ticker: str) -> None:
@@ -236,6 +245,7 @@ class BaseTradingClient(ABC):
     ) -> None:
         """Records the exact entry price, strategy tag, and target TP in cents in memory and MongoDB Atlas."""
         self.entry_prices[ticker] = price_cents
+        self.record_traded_market(ticker, side)
         if take_profit_cents is not None:
             self.target_tps[ticker] = take_profit_cents
         if strategy_tag is not None:

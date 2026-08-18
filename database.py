@@ -451,10 +451,10 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "max_buy": 24 if is_compressed else 30,
                 "tp": 58 if is_compressed else 62,
                 "enable_favorite_maker": True,
-                "favorite_maker_min_buy": 74,
-                "favorite_maker_max_buy": 93,
-                "max_crypto_directional_concurrent": 3,
-                "max_lead_changes": 2,
+                "favorite_maker_min_buy": 85,
+                "favorite_maker_max_buy": 92,
+                "max_crypto_directional_concurrent": 2,
+                "max_lead_changes": 1,
                 "enable_momentum_buys": True,
                 "momentum_min_buy": 62,
                 "momentum_max_buy": 65 if is_compressed else 68,
@@ -477,7 +477,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "max_buy": 32 if is_compressed else 44,
             "tp": 58 if is_compressed else 62,
             "enable_favorite_maker": True,
-            "favorite_maker_min_buy": 74,
+            "favorite_maker_min_buy": 80,
             "favorite_maker_max_buy": 93,
             "max_crypto_directional_concurrent": 3,
             "max_lead_changes": 2,
@@ -504,6 +504,11 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "min_buy": 18,
                 "max_buy": 22 if is_compressed else 28,
                 "tp": 58 if is_compressed else 62,
+                "enable_favorite_maker": True,
+                "favorite_maker_min_buy": 85,
+                "favorite_maker_max_buy": 92,
+                "max_crypto_directional_concurrent": 2,
+                "max_lead_changes": 1,
                 "enable_momentum_buys": True,
                 "momentum_min_buy": 62,
                 "momentum_max_buy": 65 if is_compressed else 68,
@@ -520,13 +525,13 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "contracts_per_trade": 1,
                 "is_restricted": True,
             }
-        # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker 74¢–93¢, strict momentum, 1-contract sizing)
+        # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker 80¢–93¢, strict momentum, 1-contract sizing)
         return {
             "min_buy": 18,
             "max_buy": 24 if is_compressed else 30,
             "tp": 58 if is_compressed else 62,
             "enable_favorite_maker": True,
-            "favorite_maker_min_buy": 74,
+            "favorite_maker_min_buy": 80,
             "favorite_maker_max_buy": 93,
             "max_crypto_directional_concurrent": 3,
             "max_lead_changes": 2,
@@ -849,15 +854,15 @@ def calibrate_dynamic_price_map_from_db(
             settle_pnl_cents = sum(s.get("pnl_cents") or int(round((s.get("pnl_dollars") or 0) * 100)) for s in sym_settles)
             settle_wr = (settle_wins / settle_cnt) if settle_cnt > 0 else sym_win_rate
 
-            # Dynamic Loss Restriction Regime Detection:
-            # 1. WTI is restricted by baseline profile.
-            # 2. Any asset with >=3 settled trades and win rate < 35% or net negative PnL is restricted.
-            # 3. Heavy loss regime: >=4 settled trades and win rate < 20% -> disables momentum and clamps to deep discount.
-            is_restricted = (sym == "WTI") or (settle_cnt >= 3 and (settle_wr < 0.35 or settle_pnl_cents < 0))
-            is_heavy_loss = (settle_cnt >= 4 and settle_wr < 0.20)
+            # Dynamic Loss Restriction Regime Detection from MongoDB:
+            # 1. Heavy loss regime: >=3 settled trades and net PnL <= -100¢ or win rate < 60% -> strictly tightened corridors & 88¢+ favorite floor.
+            # 2. Restricted loss regime: WTI or any asset with net negative PnL or win rate < 75% -> tightened corridors & 85¢+ favorite floor.
+            # 3. Standard regime: Win rate >= 75% and positive PnL -> standard 80¢–93¢ favorite corridor.
+            is_heavy_loss = (settle_cnt >= 3 and settle_pnl_cents <= -100) or (settle_cnt >= 4 and settle_wr < 0.60)
+            is_restricted = (sym == "WTI") or is_heavy_loss or (settle_cnt >= 2 and settle_pnl_cents < 0) or (settle_cnt >= 3 and settle_wr < 0.75)
 
             # Dynamic Asset Classification & Stop-Loss Calibration
-            # Deep discount corridor with wide stop loss (25¢ loss threshold, 15¢ floor, 15¢ 5-min cut)
+            # Deep discount corridor with wide stop loss (20¢ loss threshold for restricted, 25¢ for standard)
             asset_sl_threshold = 20 if is_restricted else 25
             asset_sl_floor = 15
             asset_cut_5min = 15
@@ -867,7 +872,7 @@ def calibrate_dynamic_price_map_from_db(
             mid_trades = mid_zone_trades_by_sym.get(sym, [])
             mid_wins = sum(1 for t in mid_trades if t["won"])
             mid_win_rate = (mid_wins / len(mid_trades)) if len(mid_trades) >= 3 else 0.33
-            avoid_mid = (mid_win_rate < 0.40)  # Avoid middle band if win rate is under 40%
+            avoid_mid = (mid_win_rate < 0.40) or is_restricted  # Avoid middle band if win rate is under 40% or if restricted
 
             calibrated_map[sym] = {}
             for mark in ("00", "05"):
@@ -900,15 +905,29 @@ def calibrate_dynamic_price_map_from_db(
                     med_mom_buy = int(statistics.median(mom_wins))
                     base_mom_max = max(base_mom_min + 2, min(72, med_mom_buy + 3))
 
-                # Step 4: Runway Timing Enforcement (Bounds: 18¢–44¢ at :00, 18¢–30¢ at :05)
+                # Step 4: Runway Timing Enforcement & Dynamic Loss-Tightened Corridors
                 min_buy = 18
-                if mark == "05":
-                    max_buy = max(min_buy + 2, min(max_buy, 22 if is_restricted else 30))
-                else:
-                    max_buy = max(min_buy + 2, min(max_buy, 28 if is_restricted else 44))
-
                 if is_heavy_loss:
-                    max_buy = min(max_buy, 20)
+                    max_buy = min(max_buy, 18 if mark == "05" else 22)
+                    fav_min_buy = 88
+                    fav_max_buy = 91
+                    max_lead = 1
+                    max_concurrent = 1
+                elif is_restricted:
+                    max_buy = max(min_buy + 2, min(max_buy, 20 if mark == "05" else 25))
+                    fav_min_buy = 85
+                    fav_max_buy = 92
+                    max_lead = 1
+                    max_concurrent = 2
+                else:
+                    if mark == "05":
+                        max_buy = max(min_buy + 2, min(max_buy, 30))
+                    else:
+                        max_buy = max(min_buy + 2, min(max_buy, 44))
+                    fav_min_buy = 80
+                    fav_max_buy = 93
+                    max_lead = 2
+                    max_concurrent = 3
 
                 tp_price = max(max_buy + 12, min(tp_price, 65))
 
@@ -917,10 +936,10 @@ def calibrate_dynamic_price_map_from_db(
                     "max_buy": max_buy,
                     "tp": tp_price,
                     "enable_favorite_maker": True,
-                    "favorite_maker_min_buy": 74,
-                    "favorite_maker_max_buy": 93,
-                    "max_crypto_directional_concurrent": 3,
-                    "max_lead_changes": 2,
+                    "favorite_maker_min_buy": fav_min_buy,
+                    "favorite_maker_max_buy": fav_max_buy,
+                    "max_crypto_directional_concurrent": max_concurrent,
+                    "max_lead_changes": max_lead,
                     "enable_momentum_buys": False if is_heavy_loss else True,
                     "momentum_min_buy": base_mom_min,
                     "momentum_max_buy": base_mom_max,
@@ -1502,7 +1521,10 @@ def evaluate_ensemble_consensus(
     elif 56 <= price_cents <= 68:
         score += 0.20  # Momentum corridor
     elif 31 <= price_cents <= 61:
-        score -= 0.20  # Low EV coin-flip middle zone penalty
+        if bool(filters.get("is_exploration", False)) or not bool(filters.get("avoid_mid_zone", True)):
+            score += 0.10  # Exploration sampling approved
+        else:
+            score -= 0.20  # Low EV coin-flip middle zone penalty
 
     # Factor 4: Market Choppiness / Whipsaw Guard (Reddit Pondletter finding)
     max_lead_changes = int(filters.get("max_lead_changes", 2))

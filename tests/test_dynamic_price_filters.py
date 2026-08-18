@@ -15,6 +15,37 @@ from database import (
     should_refresh_dynamic_map,
 )
 from main import process_single_market
+from signals.base_client import BaseTradingClient
+
+
+class MockTradingClient(BaseTradingClient):
+    exchange_name = "Kalshi"
+
+    def __init__(self):
+        super().__init__()
+        self._positions_cache = {}
+
+    def get_market_position(self, ticker: str):
+        return self._positions_cache.get(ticker)
+
+    def has_existing_position_or_order(self, ticker: str) -> bool:
+        if ticker in self._positions_cache:
+            return True
+        if self.get_traded_market_side(ticker) is not None:
+            return True
+        return False
+
+    def cancel_unfilled_buy_orders(self, ticker: str):
+        return True
+
+    def cancel_and_verify_resting_orders(self, ticker: str):
+        return True
+
+    def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70):
+        return {"status": "ok"}
+
+    def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int):
+        return {"status": "ok"}
 
 
 @pytest.fixture(autouse=True)
@@ -406,10 +437,128 @@ def test_dynamic_loss_restriction_calibration_from_db(mock_get_coll):
     assert calibrated["BNB"]["00"]["contracts_per_trade"] == 1
     assert calibrated["BNB"]["00"]["max_buy"] <= 28
     assert calibrated["BNB"]["00"]["momentum_min_pct_dist"] == 0.20
+    assert calibrated["BNB"]["00"]["favorite_maker_min_buy"] >= 85
+    assert calibrated["BNB"]["00"]["max_lead_changes"] == 1
 
     # SOL should be healthy
     assert "SOL" in calibrated
     assert calibrated["SOL"]["00"]["is_restricted"] is False
     assert calibrated["SOL"]["00"]["contracts_per_trade"] == 3
+    assert calibrated["SOL"]["00"]["favorite_maker_min_buy"] == 80
+
+
+@patch("database.get_mongo_collection")
+def test_dynamic_heavy_loss_calibration_from_db(mock_get_coll):
+    """Verify that severe losses (>=3 losses, net PnL <= -100¢) trigger heavy loss tier with 88¢+ floor."""
+    snaps = [
+        {"sym": "WTI", "tick": "KXWTIH-T1", "m": 0, "pct": 0.05, "trd": {"buy": 30, "side": "yes"}},
+    ]
+    settles = [
+        {"ticker": "KXWTIH-T1", "market_result": "no", "pnl_cents": -75},
+        {"ticker": "KXWTIH-T2", "market_result": "no", "pnl_cents": -80},
+        {"ticker": "KXWTIH-T3", "market_result": "no", "pnl_cents": -70},
+    ]
+
+    def mock_coll(name):
+        data = snaps if name == "market_snapshots" else settles
+        mock = MagicMock()
+        mock.find.return_value.sort.return_value.limit.return_value = data
+        return mock
+
+    mock_get_coll.side_effect = mock_coll
+    calibrated = calibrate_dynamic_price_map_from_db()
+
+    assert "WTI" in calibrated
+    assert calibrated["WTI"]["00"]["is_restricted"] is True
+    assert calibrated["WTI"]["00"]["favorite_maker_min_buy"] >= 88
+    assert calibrated["WTI"]["00"]["max_buy"] <= 22
+    assert calibrated["WTI"]["00"]["enable_momentum_buys"] is False
+    assert calibrated["WTI"]["00"]["max_lead_changes"] == 1
+
+
+def test_strict_single_side_market_lock_prevents_hedging():
+    """Verify that client strictly rejects opposing side orders for the same ticker."""
+    client = MockTradingClient()
+    ticker = "KXWTIH-26AUG1810-T84.00"
+
+    # Step 1: No trades yet -> both sides allowed
+    assert client.is_side_allowed(ticker, "yes") is True
+    assert client.is_side_allowed(ticker, "no") is True
+
+    # Step 2: Record trade on YES
+    client.record_traded_market(ticker, "yes")
+    assert client.is_side_allowed(ticker, "yes") is True
+    assert client.is_side_allowed(ticker, "no") is False
+
+    # Step 3: has_existing_position_or_order detects existing trade
+    assert client.has_existing_position_or_order(ticker) is True
+
+
+def test_favorite_maker_spot_divergence_on_restricted_assets():
+    """Verify that restricted assets require spot confirmation for Favorite Maker entries."""
+    from main import evaluate_favorite_maker_opportunity
+    client = MockTradingClient()
+
+    market = {"ticker": "KXWTIH-26AUG1810-T84.00"}
+    quotes_yes = {"yes_ask": 86, "yes_bid": 82, "no_ask": 18, "no_bid": 14}
+    quotes_no = {"yes_ask": 18, "yes_bid": 14, "no_ask": 86, "no_bid": 82}
+
+    restricted_filters = {
+        "is_restricted": True,
+        "favorite_maker_min_buy": 85,
+        "favorite_maker_max_buy": 92,
+        "max_lead_changes": 1,
+    }
+
+    # YES Favorite with spot below target ($83.50 < $84.00) -> Rejected due to spot divergence
+    res_yes_bad = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_yes,
+        rem_mins=3.0,
+        dynamic_filters=restricted_filters,
+        client=client,
+        spot_price=83.50,
+        target_price=84.00,
+    )
+    assert res_yes_bad is None
+
+    # YES Favorite with spot above target ($84.50 >= $84.00) -> Accepted
+    res_yes_good = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_yes,
+        rem_mins=3.0,
+        dynamic_filters=restricted_filters,
+        client=client,
+        spot_price=84.50,
+        target_price=84.00,
+    )
+    assert res_yes_good is not None
+    assert res_yes_good["side"] == "yes"
+
+    # NO Favorite with spot above target ($84.50 > $84.00) -> Rejected
+    res_no_bad = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_no,
+        rem_mins=3.0,
+        dynamic_filters=restricted_filters,
+        client=client,
+        spot_price=84.50,
+        target_price=84.00,
+    )
+    assert res_no_bad is None
+
+    # NO Favorite with spot below target ($83.50 <= $84.00) -> Accepted
+    res_no_good = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_no,
+        rem_mins=3.0,
+        dynamic_filters=restricted_filters,
+        client=client,
+        spot_price=83.50,
+        target_price=84.00,
+    )
+    assert res_no_good is not None
+    assert res_no_good["side"] == "no"
+
 
 

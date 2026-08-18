@@ -1374,6 +1374,22 @@ class KalshiClient(BaseTradingClient):
             log.info(f"{LogTag.ORDER_EXISTS.value} Found {len(orders)} resting order(s) for {ticker}")
             return True
 
+        # Step 3: Check memory-tracked traded markets in this lifecycle
+        traded_side = self.get_traded_market_side(ticker)
+        if traded_side is not None:
+            log.info(f"{LogTag.POSITION_EXISTS.value} Ticker {ticker} already traded ({traded_side.upper()}) in current lifecycle.")
+            return True
+
+        # Step 4: Check persistent database active position store
+        try:
+            from database import get_active_position_cost
+            db_pos = get_active_position_cost(ticker)
+            if db_pos is not None and (db_pos.get("entry_price_cents") or 0) > 0:
+                log.info(f"{LogTag.POSITION_EXISTS.value} Found persisted active position in DB for {ticker}")
+                return True
+        except Exception:
+            pass
+
         return False
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:

@@ -804,21 +804,23 @@ def evaluate_favorite_maker_opportunity(
     rem_mins: float | None,
     dynamic_filters: dict,
     client: BaseTradingClient,
-    min_fav_price: int = 74,
+    min_fav_price: int = 80,
     max_fav_price: int = 93,
     min_rem_mins: float = 1.0,
     max_rem_mins: float = 6.0,
+    spot_price: float | None = None,
+    target_price: float | None = None,
 ) -> dict | None:
     """
     Identifies high-probability favorites in the endgame window and calculates
     an optimal resting maker bid inside the spread to capture the spread discount.
 
-    Rules (from Reddit findings):
-    - Confirmed favorite sits between 74¢ and 93¢ (crowd expects high win probability).
-    - Window: Final 1.0m to 6.0m of 15m lifecycle.
+    Rules:
+    - Confirmed favorite sits between effective_min_fav (default 80¢–88¢) and 93¢ (ensures positive EV).
+    - Window: Final 1.0m to 6.0m of 15m lifecycle (or up to 25.0m for 1h).
     - Maker Limit Bid: Places resting bid inside the spread (1¢-2¢ below ask, or 1¢ above bid).
     - Avoids crossing the spread (-6¢ taker friction) and captures zero maker fees on Kalshi crypto.
-    - Gated by choppiness filter (lead_changes <= 2) and portfolio directional cap (Comment p3ok6ft).
+    - Gated by choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation on restricted assets.
     """
     ticker = market.get("ticker", "")
     if rem_mins is not None and not (min_rem_mins <= rem_mins <= max_rem_mins):
@@ -831,22 +833,35 @@ def evaluate_favorite_maker_opportunity(
         log.info(f"⚠️ [CHOPPY MARKET SKIP] {ticker} has {lead_changes} lead changes (> {max_lead}). Skipping Favorite Maker entry.")
         return None
 
+    effective_min_fav = int(dynamic_filters.get("favorite_maker_min_buy", min_fav_price))
+    effective_max_fav = int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price))
+    is_restricted = bool(dynamic_filters.get("is_restricted", False)) or (dynamic_filters.get("recent_pnl_cents") or 0) < 0
+
     yes_bid = quotes.get("yes_bid")
     yes_ask = quotes.get("yes_ask")
     no_bid = quotes.get("no_bid")
     no_ask = quotes.get("no_ask")
 
-    # 1. Check YES as favorite (Ask between 74¢ and 93¢)
-    if yes_ask is not None and min_fav_price <= yes_ask <= max_fav_price:
+    # 1. Check YES as favorite
+    if yes_ask is not None and effective_min_fav <= yes_ask <= effective_max_fav:
         if not client.is_side_allowed(ticker, "yes"):
             return None
+        # On restricted / loss-heavy assets, require spot price confirmation (spot >= target)
+        if is_restricted and spot_price is not None and target_price is not None and target_price > 0:
+            if spot_price < target_price:
+                log.info(
+                    f"⚠️ [FAVORITE SPOT DIVERGENCE SKIP] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                    f"Spot (${spot_price}) is below strike target (${target_price}) on restricted asset."
+                )
+                return None
+
         max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
         if hasattr(client, "check_crypto_portfolio_directional_cap"):
             if not client.check_crypto_portfolio_directional_cap("yes", max_concurrent=max_conc):
                 return None
 
         maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
-        maker_bid = max(min_fav_price, min(yes_ask - 1, maker_bid))
+        maker_bid = max(effective_min_fav, min(yes_ask - 1, maker_bid))
         return {
             "side": "yes",
             "maker_bid": maker_bid,
@@ -855,17 +870,26 @@ def evaluate_favorite_maker_opportunity(
             "favorite_type": "heavy_favorite_yes",
         }
 
-    # 2. Check NO as favorite (Ask between 74¢ and 93¢ or YES Ask <= 26¢)
-    if no_ask is not None and min_fav_price <= no_ask <= max_fav_price:
+    # 2. Check NO as favorite
+    if no_ask is not None and effective_min_fav <= no_ask <= effective_max_fav:
         if not client.is_side_allowed(ticker, "no"):
             return None
+        # On restricted / loss-heavy assets, require spot price confirmation (spot <= target)
+        if is_restricted and spot_price is not None and target_price is not None and target_price > 0:
+            if spot_price > target_price:
+                log.info(
+                    f"⚠️ [FAVORITE SPOT DIVERGENCE SKIP] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                    f"Spot (${spot_price}) is above strike target (${target_price}) on restricted asset."
+                )
+                return None
+
         max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
         if hasattr(client, "check_crypto_portfolio_directional_cap"):
             if not client.check_crypto_portfolio_directional_cap("no", max_concurrent=max_conc):
                 return None
 
         maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
-        maker_bid = max(min_fav_price, min(no_ask - 1, maker_bid))
+        maker_bid = max(effective_min_fav, min(no_ask - 1, maker_bid))
         return {
             "side": "no",
             "maker_bid": maker_bid,
@@ -1220,8 +1244,10 @@ def process_single_market(
                 rem_mins=rem_mins,
                 dynamic_filters=dynamic_filters,
                 client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                spot_price=spot_price,
+                target_price=target_price,
             )
             if fav_opp is not None and dynamic_filters.get("enable_favorite_maker", True):
                 fav_side = fav_opp["side"]
@@ -1466,8 +1492,10 @@ def process_single_market(
                 rem_mins=rem_mins,
                 dynamic_filters=dynamic_filters,
                 client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                spot_price=spot_price,
+                target_price=target_price,
             )
             if fav_opp is not None:
                 fav_side_val = fav_opp["side"]
@@ -1803,10 +1831,12 @@ def process_hourly_market_group(
                     rem_mins=item["rem_mins"],
                     dynamic_filters=dynamic_filters,
                     client=client,
-                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
                     max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                     min_rem_mins=1.0,
                     max_rem_mins=25.0,
+                    spot_price=spot_price,
+                    target_price=item.get("target_price"),
                 )
                 if fav_opp is not None:
                     fav_opp_by_ticker[ticker] = fav_opp
@@ -2258,10 +2288,12 @@ def process_hourly_market_group(
                 rem_mins=item["rem_mins"],
                 dynamic_filters=dynamic_filters,
                 client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 74)),
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                 min_rem_mins=1.0,
                 max_rem_mins=25.0,
+                spot_price=spot_price,
+                target_price=item.get("target_price"),
             )
             if fav_opp is not None:
                 fav_opp_by_ticker[ticker] = fav_opp
