@@ -388,7 +388,10 @@ class KalshiClient(BaseTradingClient):
             response.raise_for_status()
         except requests.HTTPError as e:
             err_details = f"{e} | Response body: {response.text}"
-            log.error(f"Kalshi POST {endpoint} failed with {err_details}")
+            if "post only cross" in (response.text or "").lower():
+                log.debug(f"Kalshi POST {endpoint} post-only cross (book moved): {err_details}")
+            else:
+                log.error(f"Kalshi POST {endpoint} failed with {err_details}")
             raise requests.HTTPError(err_details, response=response) from e
 
         if response.text:
@@ -412,6 +415,10 @@ class KalshiClient(BaseTradingClient):
             response.raise_for_status()
         except requests.HTTPError as e:
             err_details = f"{e} | Response body: {response.text}"
+            resp_lower = (response.text or "").lower()
+            if allow_404 and (response.status_code == 404 or "not_found" in resp_lower or "order not found" in resp_lower):
+                log.debug(f"Kalshi DELETE {endpoint} order not found or already closed: {err_details}")
+                return {"status": "not_found"}
             log.error(f"Kalshi DELETE {endpoint} failed with {err_details}")
             raise requests.HTTPError(err_details, response=response) from e
 
@@ -1078,10 +1085,10 @@ class KalshiClient(BaseTradingClient):
                         effective_buy_cents = retry_price
                         log.info(f"🔄 [POST-ONLY RETRY] Successfully rested buy order 1¢ deeper at {effective_buy_cents}¢ on {ticker}.")
                     except Exception as retry_err:
-                        log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (orderbook moved): {retry_err}")
+                        log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                         return {"error": "post_only_cross", "ticker": ticker}
                 else:
-                    log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (orderbook moved).")
+                    log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                     return {"error": "post_only_cross", "ticker": ticker}
             else:
                 raise
@@ -1215,10 +1222,10 @@ class KalshiClient(BaseTradingClient):
                         spread_saved = max(0, target_ask_cents - effective_bid)
                         log.info(f"🔄 [POST-ONLY RETRY] Successfully rested maker bid 1¢ deeper at {effective_bid}¢ on {ticker}.")
                     except Exception as retry_err:
-                        log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (orderbook moved): {retry_err}")
+                        log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                         return {"error": "post_only_cross", "ticker": ticker}
                 else:
-                    log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (orderbook moved).")
+                    log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                     return {"error": "post_only_cross", "ticker": ticker}
             else:
                 raise
