@@ -116,7 +116,10 @@ def test_batch_fetch_crypto_spot_prices():
 @pytest.mark.parametrize("ts, expected", [
     (datetime(2026, 8, 15, 14, 0, 35, tzinfo=timezone.utc), 115.0),
     (datetime(2026, 8, 15, 14, 2, 35, tzinfo=timezone.utc), 145.0),
-    (datetime(2026, 8, 15, 14, 12, 35, tzinfo=timezone.utc), 175.0),
+    (datetime(2026, 8, 15, 14, 12, 35, tzinfo=timezone.utc), 85.0),
+    (datetime(2026, 8, 15, 14, 14, 5, tzinfo=timezone.utc), 85.0),
+    (datetime(2026, 8, 15, 14, 57, 35, tzinfo=timezone.utc), 85.0),
+    (datetime(2026, 8, 15, 14, 59, 5, tzinfo=timezone.utc), 85.0),
 ])
 def test_checkpoint_schedule_timing(ts, expected):
     with patch("main.datetime") as mock_dt:
@@ -131,6 +134,7 @@ def test_checkpoint_schedule_timing(ts, expected):
     (2, "buy_opened", "buy_and_set_take_profit"),
     (10, "winner_rolled_rebuy", "evaluate_and_execute_10min_strategy"),
     (12, "endgame_loss_cut", "evaluate_and_execute_12_5min_endgame_check"),
+    (14, "14min_crash_selloff_cut", "evaluate_and_execute_crash_detection"),
 ])
 def test_process_single_market_intervals(dummy_client, mock_filter, minute, expected_action, expected_trd_key):
     client = MagicMock(exchange_name="Kalshi")
@@ -553,6 +557,94 @@ def test_kalshi_get_markets_filters_5m_and_time_distance():
         mkts_1h = client.get_hourly_crypto_markets(series_list=["KXBTCD"], current_hour_only=True, now_utc=now_utc_1h)
         assert len(mkts_1h) == 1
         assert mkts_1h[0]["ticker"] == "KXBTCD-TEST"
+
+
+def test_dummy_client_crash_detection_lifecycle(dummy_client):
+    """Verify evaluate_and_execute_crash_detection handles crashes, losing positions, and holds winners."""
+    ticker = "KXBTC15M-CRASH"
+
+    # 1. No position -> returns triggered=False
+    res_none = dummy_client.evaluate_and_execute_crash_detection(ticker, 20, 80)
+    assert res_none == {"triggered": False}
+
+    # 2. Position losing on entry (entry 85¢, current 20¢ < 50¢ floor) -> liquidates immediately
+    dummy_client.execute_buy(ticker, "yes", 1, 85)
+    with patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=True), \
+         patch.object(dummy_client, "execute_liquidation") as mock_liq:
+        res_loss = dummy_client.evaluate_and_execute_crash_detection(
+            ticker, current_yes_price=20, current_no_price=80, dry_run=False, crash_floor_cents=50
+        )
+        assert res_loss["triggered"] is True
+        assert res_loss["action"] == "crash_selloff_cut"
+        assert res_loss["loss_cents"] == 65
+        assert res_loss["exit_price"] == 20
+        mock_liq.assert_called_once_with(ticker, "yes", 1, 20)
+
+    # 3. Position below crash floor despite modest gain (entry 20¢, current 35¢ < 50¢ floor) -> liquidates to bank profit before 0¢ settlement
+    dummy_client.execute_buy(ticker, "yes", 1, 20)
+    with patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=True), \
+         patch.object(dummy_client, "execute_liquidation") as mock_liq:
+        res_floor = dummy_client.evaluate_and_execute_crash_detection(
+            ticker, current_yes_price=35, current_no_price=65, dry_run=False, crash_floor_cents=50
+        )
+        assert res_floor["triggered"] is True
+        assert res_floor["exit_price"] == 35
+        assert res_floor["profit_locked_cents"] == 15
+        mock_liq.assert_called_once_with(ticker, "yes", 1, 35)
+
+    # 4. Position securely winning (entry 40¢, current 85¢ >= 50¢ floor) -> holds into settlement
+    dummy_client.execute_buy(ticker, "yes", 1, 40)
+    with patch.object(dummy_client, "execute_liquidation") as mock_liq:
+        res_win = dummy_client.evaluate_and_execute_crash_detection(
+            ticker, current_yes_price=85, current_no_price=15, dry_run=False, crash_floor_cents=50
+        )
+        assert res_win["triggered"] is False
+        assert res_win["action"] == "holding_winner"
+        mock_liq.assert_not_called()
+
+    # 5. Dry-run mode previews liquidation without placing real orders
+    dummy_client.execute_buy(ticker, "yes", 1, 85)
+    with patch.object(dummy_client, "execute_liquidation") as mock_liq:
+        res_dry = dummy_client.evaluate_and_execute_crash_detection(
+            ticker, current_yes_price=15, current_no_price=85, dry_run=True, crash_floor_cents=50
+        )
+        assert res_dry["triggered"] is True
+        assert res_dry["loss_cents"] == 70
+        assert res_dry["exit_price"] == 15
+        mock_liq.assert_not_called()
+
+
+def test_15m_14min_crash_detection_process_market(dummy_client, mock_filter):
+    """Verify that process_single_market at :14 executes crash detection and liquidates losing positions."""
+    ticker = "KXBTC15M-14TEST"
+    dummy_client.execute_buy(ticker, "yes", 1, 85)
+
+    market_loss = {
+        "ticker": ticker, "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.18", "yes_bid_dollars": "0.15",
+        "no_ask_dollars": "0.85", "no_bid_dollars": "0.82",
+        "floor_strike": 60000.0, "volume_24h": 1500,
+        "close_time": "2026-08-14T00:15:00Z",
+    }
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=True), \
+         patch.object(dummy_client, "execute_liquidation") as mock_liq:
+        snapshot = process_single_market(
+            market=market_loss,
+            is_trading_interval=False,
+            client=dummy_client,
+            now_utc=datetime(2026, 8, 14, 0, 14, 0, tzinfo=timezone.utc),
+            minute_past_hour=14,
+            spot_cache={"BTC": 59900.0},
+            dry_run=False,
+        )
+        assert snapshot["tick"] == ticker
+        assert snapshot["trd"] is not None
+        assert snapshot["trd"]["action"] == "14min_crash_selloff_cut"
+        assert snapshot["trd"]["exit_price"] == 15
+        assert snapshot["trd"]["loss_cents"] == 70
+        mock_liq.assert_called_once_with(ticker, "yes", 1, 15)
 
 
 

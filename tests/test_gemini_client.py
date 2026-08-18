@@ -11,6 +11,7 @@ Tests:
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 import pytest
@@ -519,5 +520,50 @@ def test_gemini_trading_client_order_rejection_on_5min_market(gemini_trading_cli
 
         # Ensure no HTTP requests were sent to the exchange
         mock_post.assert_not_called()
+
+
+def test_gemini_crash_detection_evaluation_and_liquidation(gemini_trading_client):
+    """Verify GeminiClient executes crash detection liquidations on crashing/losing positions."""
+    ticker = "BTC15M-CRASH-GEMI"
+
+    # Set up active position bought at 85¢
+    gemini_trading_client.set_entry_price(ticker, 85, side="yes", count=1)
+    gemini_trading_client._cached_positions_map = {ticker: {"ticker": ticker, "side": "yes", "count": 1, "entry_price_cents": 85}}
+    gemini_trading_client._cached_positions_ts = time.time()
+
+    # 1. Crash detected (current price 20¢ < 50¢ floor and in loss) -> executes Gemini sell order
+    with patch.object(gemini_trading_client, "cancel_and_verify_resting_orders", return_value=True), \
+         patch.object(gemini_trading_client, "execute_liquidation", return_value={"status": "accepted"}) as mock_liq:
+        res = gemini_trading_client.evaluate_and_execute_crash_detection(
+            ticker=ticker,
+            current_yes_price=20,
+            current_no_price=80,
+            dry_run=False,
+            crash_floor_cents=50,
+            action_name="14min_crash_selloff_cut",
+        )
+        assert res["triggered"] is True
+        assert res["action"] == "14min_crash_selloff_cut"
+        assert res["exit_price"] == 20
+        assert res["loss_cents"] == 65
+        mock_liq.assert_called_once_with(ticker, "yes", 1, 20)
+
+    # 2. Winning position (entry 30¢, current price 85¢ >= 50¢ floor) -> held to settlement
+    gemini_trading_client.set_entry_price(ticker, 30, side="yes", count=1)
+    gemini_trading_client._cached_positions_map = {ticker: {"ticker": ticker, "side": "yes", "count": 1, "entry_price_cents": 30}}
+    gemini_trading_client._cached_positions_ts = time.time()
+    with patch.object(gemini_trading_client, "execute_liquidation") as mock_liq:
+        res_win = gemini_trading_client.evaluate_and_execute_crash_detection(
+            ticker=ticker,
+            current_yes_price=85,
+            current_no_price=15,
+            dry_run=False,
+            crash_floor_cents=50,
+            action_name="14min_crash_selloff_cut",
+        )
+        assert res_win["triggered"] is False
+        assert res_win["action"] == "holding_winner"
+        mock_liq.assert_not_called()
+
 
 

@@ -89,6 +89,7 @@ def test_hourly_multi_strike_single_directional_opportunity(hourly_client):
     (50, ("KXBTCD-END", "yes"), 40, "KXBTCD-END", "50min_loss_cut"),
     (52, ("KXBTCD-CUT52", "yes"), 48, "KXBTCD-CUT52", "52_5min_loss_cut"),
     (57, ("KXBTCD-END57", "yes"), 40, "KXBTCD-END57", "57_5min_loss_cut"),
+    (59, ("KXBTCD-END59", "yes"), 85, "KXBTCD-END59", "59min_crash_selloff_cut"),
 ])
 def test_hourly_lifecycle_cut_losses(hourly_client, minute, init_pos, init_price, expected_liq, expected_action):
     ticker, side = init_pos
@@ -306,6 +307,43 @@ def test_hourly_skips_5min_markets(hourly_client):
 
     assert len(hourly_client.buys) == 0
     assert len(snaps) == 0
+
+
+def test_hourly_59min_crash_detection_and_winner_hold(hourly_client):
+    """Verify that hourly markets at :59 cut losses on dropping/crashing positions and hold securely winning positions."""
+    # 1. Losing position at minute 59 (entry 85¢, current price 10¢ < 50¢ floor) -> 59min_crash_selloff_cut
+    ticker_loser = "KXBTCD-LOSER59"
+    hourly_client._positions[ticker_loser] = {"ticker": ticker_loser, "side": "yes", "entry_price_cents": 85}
+    market_loser = {
+        "ticker": ticker_loser, "series_ticker": "KXBTCD", "floor_strike": 70000.0,
+        "yes_ask_dollars": "0.12", "yes_bid_dollars": "0.10", "no_ask_dollars": "0.90", "no_bid_dollars": "0.88",
+        "close_time": "2026-08-15T06:00:00Z",
+    }
+    snaps_loss = process_hourly_market_group(
+        "BTC", [market_loser], hourly_client,
+        datetime(2026, 8, 15, 5, 59, 0, tzinfo=timezone.utc), 59, {"BTC": 69000.0}, False
+    )
+    assert len(hourly_client.liquidations) == 1
+    assert hourly_client.liquidations[0]["ticker"] == ticker_loser
+    assert snaps_loss[0]["trd"]["action"] == "59min_crash_selloff_cut"
+    assert snaps_loss[0]["trd"]["exit_price"] == 10
+    assert snaps_loss[0]["trd"]["loss_cents"] == 75
+
+    # 2. Winning position at minute 59 (entry 40¢, current bid 85¢ >= 50¢ floor) -> held into settlement (no liquidation)
+    hourly_client.liquidations.clear()
+    hourly_client._positions.clear()
+    ticker_winner = "KXBTCD-WINNER59"
+    hourly_client._positions[ticker_winner] = {"ticker": ticker_winner, "side": "yes", "entry_price_cents": 40}
+    market_winner = {
+        "ticker": ticker_winner, "series_ticker": "KXBTCD", "floor_strike": 70000.0,
+        "yes_ask_dollars": "0.88", "yes_bid_dollars": "0.85", "no_ask_dollars": "0.15", "no_bid_dollars": "0.12",
+        "close_time": "2026-08-15T06:00:00Z",
+    }
+    snaps_win = process_hourly_market_group(
+        "BTC", [market_winner], hourly_client,
+        datetime(2026, 8, 15, 5, 59, 0, tzinfo=timezone.utc), 59, {"BTC": 71000.0}, False
+    )
+    assert len(hourly_client.liquidations) == 0  # Held to settlement
 
 
 

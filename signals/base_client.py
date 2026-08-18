@@ -237,6 +237,9 @@ class LogTag(str, Enum):
     ENDGAME_CHECK = "⏳ [12.5-MIN ENDGAME CHECK]"     # Inspecting 12.5m endgame position status (2.5m before expiration)
     ENDGAME_CUT_LOSS_TRIGGERED = "🛑 [12.5-MIN CUT-LOSS TRIGGERED]"  # Liquidating losing position at 12.5m mark
     DRY_RUN_ENDGAME_CUT_LOSS = "🛑 [DRY-RUN 12.5-MIN CUT-LOSS]"      # Preview 12.5m cut-loss liquidation in dry-run mode
+    CRASH_CHECK = "🚨 [LAST-MINUTE CRASH CHECK]"       # Inspecting :14/:59 last-minute crash / selloff status (1m before expiration)
+    CRASH_CUT_LOSS_TRIGGERED = "🚨 [CRASH SELLOFF TRIGGERED]"  # Liquidating crashing/losing position at :14/:59 mark
+    DRY_RUN_CRASH_CUT_LOSS = "🚨 [DRY-RUN CRASH SELLOFF]"      # Preview :14/:59 crash liquidation in dry-run mode
     WINNER_ROLLED = "💰 [WINNER PROFIT BANKED]"        # Selling winning position at 10m/40m to bank realized cash profit
     DRY_RUN_WINNER_ROLLED = "💰 [DRY-RUN WINNER PROFIT BANKED]"  # Preview 10m/40m winner profit banking in dry-run mode
     LET_IT_RUN = "🚀 [LET IT RUN TO 100¢]"             # Letting winner run to 100¢ settlement payout
@@ -871,5 +874,108 @@ class BaseTradingClient(ABC):
         log.info(
             f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
             f"Position is winning at {current_price}¢ ({pnl_label})! Holding into expiration for 100¢ ($1.00) settlement."
+        )
+        return {"triggered": False, "action": "holding_winner"}
+
+    def evaluate_and_execute_crash_detection(
+        self,
+        ticker: str,
+        current_yes_price: int | None,
+        current_no_price: int | None,
+        dry_run: bool = False,
+        crash_floor_cents: int = 50,
+        action_name: str = "crash_selloff_cut",
+    ) -> dict:
+        """
+        Evaluates active positions at the final 1-minute mark (:14 for 15-minute markets, :59 for hourly markets).
+        Protects against last-minute market dumps, flash crashes, or adverse price reversals that risk a full $1.00 wipeout.
+
+        Rules:
+        - If losing trailing entry price (loss_cents > 0) OR trading below the crash floor (< crash_floor_cents e.g. < 50¢),
+          verifies resting order cancellation and immediately liquidates the position at market Bid to salvage capital.
+        - If securely winning (current_price >= crash_floor_cents and loss_cents <= 0), holds into expiration for 100¢ settlement.
+        """
+        pos = self.get_market_position(ticker)
+        if pos is None:
+            if not dry_run:
+                self.cancel_and_verify_resting_orders(ticker)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
+            return {"triggered": False}
+
+        side = pos["side"]
+        position_count = pos.get("count", 1)
+        current_price = current_yes_price if side == "yes" else current_no_price
+
+        # Dynamic entry price resolution
+        entry_price = pos.get("entry_price_cents") or self.get_entry_price(ticker) or current_price or 50
+
+        if current_price is None:
+            log.warning(f"⚠️ Cannot evaluate crash detection / selloff check for {ticker}: current {side.upper()} price is unavailable.")
+            return {"triggered": False}
+
+        loss_cents = entry_price - current_price
+        profit_cents = current_price - entry_price
+        pnl_label = f"Gain: +{profit_cents}¢ (In Profit 🟢)" if profit_cents > 0 else f"Loss: -{loss_cents}¢ (In Loss 🔴)" if loss_cents > 0 else "Breakeven: 0¢ (Flat ⚪)"
+
+        log.info(
+            f"{LogTag.CRASH_CHECK.value} [{self.exchange_name}] Market: {ticker} | Side: {side.upper()} | "
+            f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Floor: {crash_floor_cents}¢ | Status: {pnl_label}"
+        )
+
+        # Crash & Selloff check: position is losing on entry (loss_cents > 0) OR dropped below crash floor (< crash_floor_cents)
+        is_crash = (loss_cents > 0) or (current_price < crash_floor_cents)
+        if is_crash:
+            reason = (
+                f"last-minute crash/selloff detected at 1m mark "
+                f"(Entry: ~{entry_price}¢, Current: {current_price}¢, Floor: {crash_floor_cents}¢, Loss: {loss_cents}¢)"
+            )
+            if dry_run:
+                log.info(
+                    f"{LogTag.DRY_RUN_CRASH_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
+                    f"WOULD LIQUIDATE IMMEDIATELY TO SALVAGE CAPITAL BEFORE EXPIRATION."
+                )
+                res = {
+                    "triggered": True,
+                    "side": side,
+                    "action": action_name,
+                    "loss_cents": loss_cents,
+                    "exit_price": current_price,
+                }
+                if profit_cents > 0:
+                    res["profit_locked_cents"] = profit_cents
+                return res
+
+            cleared = self.cancel_and_verify_resting_orders(ticker)
+            if not cleared:
+                log.error(
+                    f"❌ [{self.exchange_name}] Cannot execute crash liquidation for {ticker}: "
+                    f"Failed to clear resting orders. Aborting liquidation to avoid locked position errors."
+                )
+                return {"triggered": False, "error": "resting_orders_not_cleared"}
+
+            self.execute_liquidation(ticker, side, position_count, current_price)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
+            log.info(
+                f"{LogTag.CRASH_CUT_LOSS_TRIGGERED.value} [{self.exchange_name}] Liquidated crashing/losing position {ticker} "
+                f"({side.upper()}) at {current_price}¢ to prevent full loss at expiration ({reason})."
+            )
+            res = {
+                "triggered": True,
+                "side": side,
+                "action": action_name,
+                "loss_cents": loss_cents,
+                "exit_price": current_price,
+            }
+            if profit_cents > 0:
+                res["profit_locked_cents"] = profit_cents
+            return res
+
+        # Holding Winning Position (in profit into final 60 seconds)
+        log.info(
+            f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
+            f"Position is securely winning at {current_price}¢ (>= {crash_floor_cents}¢ floor, {pnl_label})! "
+            f"Holding into expiration for 100¢ ($1.00) settlement."
         )
         return {"triggered": False, "action": "holding_winner"}

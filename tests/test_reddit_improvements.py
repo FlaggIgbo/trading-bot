@@ -636,3 +636,37 @@ def test_hourly_market_favorite_maker_execution_during_endgame_marks():
     assert fav_strike["trd"]["action"] == "favorite_maker_opened"
 
 
+def test_favorite_maker_crashed_at_last_minute_liquidated():
+    """
+    Verify that a Favorite Maker position entered at high price (e.g. 85¢) that was held
+    at :12.5/:57.5 is liquidated if it crashes at :14/:59 (1 min before expiration),
+    saving capital and preventing losing almost a full dollar.
+    """
+    client = MockTradingClient()
+    ticker = "KXBTC15M-FAV-CRASH"
+
+    # Enter favorite maker at 85¢
+    client.buy_favorite_maker_order(ticker, "yes", maker_bid_cents=85, target_ask_cents=88)
+    assert client.get_entry_price(ticker) == 85
+    assert client.get_strategy_tag(ticker) == "endgame_favorite_maker"
+
+    # At minute 12.5: If price was still 80¢, favorite maker is held into settlement
+    eg_res = client.evaluate_and_execute_12_5min_endgame_check(
+        ticker, current_yes_price=80, current_no_price=20, dry_run=False, endgame_floor=15
+    )
+    assert eg_res["triggered"] is False
+    assert eg_res["action"] == "favorite_maker_holding_to_settle"
+
+    # At minute 14: Last-minute crash occurs! Price collapses to 15¢ (losing 70¢, < 50¢ floor)
+    crash_res = client.evaluate_and_execute_crash_detection(
+        ticker, current_yes_price=15, current_no_price=85, dry_run=False, crash_floor_cents=50,
+        action_name="14min_crash_selloff_cut"
+    )
+    # The crash detection at :14 cuts the position and liquidates at 15¢ to salvage 15¢ instead of expiring at 0¢!
+    assert crash_res["triggered"] is True
+    assert crash_res["action"] == "14min_crash_selloff_cut"
+    assert crash_res["exit_price"] == 15
+    assert crash_res["loss_cents"] == 70
+    assert client.get_market_position(ticker) is None
+
+

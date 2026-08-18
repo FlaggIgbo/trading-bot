@@ -236,6 +236,7 @@ def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, of
     - Minute :07:30, :22:30, :37:30, :52:30 (7.5m Mid-Candle Cut-Loss & Tight Entry)
     - Minute :10:00, :25:00, :40:00, :55:00 (10m Stop-Loss & Winner-Roll, exact timestamp without buffer)
     - Minute :12:30, :27:30, :42:30, :57:30 (12.5m Endgame Check: 2.5m before expiration)
+    - Minute :14:00, :29:00, :44:00, :59:00 (14m Crash Detection / Selloff Check: 1m before expiration)
 
     Hourly Multi-Strike Market Checkpoints (Every 10m past the hour + endgame checks):
     - Minute :00:30 (Open Multi-Strike Entry, +30s open delay)
@@ -247,6 +248,7 @@ def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, of
     - Minute :52:30 (52.5m Mid-Candle Cut-Loss: 7.5m before expiration)
     - Minute :55:00 (55m Winner-Bank & Stop-Loss Check, exact timestamp - 5m before expiration)
     - Minute :57:30 (57.5m Endgame Safety Check: 2.5m before expiration)
+    - Minute :59:00 (59m Crash Detection & Selloff Check: 1m before expiration)
     """
     if offset_seconds is not None:
         open_delay_seconds = offset_seconds
@@ -262,12 +264,14 @@ def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, of
         (7, 30),           # 15M :07:30
         (10, 0),           # 15M :10:00, 1H :10:00
         (12, 30),          # 15M :12:30
+        (14, 0),           # 15M :14:00 (14m Crash Detection / Selloff Check: 1m before expiration)
         (15, open_delay),  # 15M :15:30 open (+30s)
         (17, 30),          # 15M :17:30
         (20, 0),           # 15M :20:00, 1H :20:00
         (22, 30),          # 15M :22:30
         (25, 0),           # 15M :25:00
         (27, 30),          # 15M :27:30
+        (29, 0),           # 15M :29:00 (14m Crash Detection / Selloff Check: 1m before expiration)
         (30, 0),           # 1H :30:00 mid-hour check (exact timestamp, NO delay)
         (30, open_delay),  # 15M :30:30 open (+30s)
         (32, 30),          # 15M :32:30
@@ -275,12 +279,14 @@ def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, of
         (37, 30),          # 15M :37:30
         (40, 0),           # 15M :40:00, 1H :40:00
         (42, 30),          # 15M :42:30
+        (44, 0),           # 15M :44:00 (14m Crash Detection / Selloff Check: 1m before expiration)
         (45, open_delay),  # 15M :45:30 open (+30s)
         (47, 30),          # 15M :47:30
         (50, 0),           # 15M :50:00, 1H :50:00
         (52, 30),          # 15M :52:30
         (55, 0),           # 15M :55:00
         (57, 30),          # 15M :57:30
+        (59, 0),           # 15M :59:00 & 1H :59:00 (Crash Detection / Selloff Check: 1m before expiration)
     )
 
     candidates = []
@@ -1118,6 +1124,7 @@ def process_single_market(
     # Strategy Concept: Instead of hardcoded one-size-fits-all numbers, we ask
     # our in-memory engine for the optimal buy & sell targets for THIS specific coin and timing mark!
     minute_into_market = minute_past_hour % 15
+    is_14min_mark = (minute_into_market == 14)
     is_12_5min_mark = (minute_into_market == 12)
     is_stop_loss_interval = (minute_into_market == 10)
     is_7_5min_mark = (minute_into_market == 7)
@@ -1126,7 +1133,7 @@ def process_single_market(
     is_00_mark = (minute_into_market == 0)
 
     # :05 and :07.5 use tighter dynamic price filters (is_5min_mark=True); :00 and :02.5 use broad open filters
-    is_tight_corridor = (minute_into_market in (5, 7))
+    is_tight_corridor = (minute_into_market in (5, 7, 14))
     dynamic_filters = get_dynamic_filter_for_market(
         asset_symbol,
         is_5min_mark=is_tight_corridor,
@@ -1148,12 +1155,49 @@ def process_single_market(
     chosen_consensus = None
 
     # -----------------------------------------------------------------------
+    # Step 4A-0: 14-Minute Crash Detection & Selloff Check (:14 mark - 1m before expiration)
+    # At minute 14: Final safety net against last-minute market dumps, flash crashes, or adverse flips.
+    # If trailing entry (loss > 0) OR price < crash floor (e.g. < 50¢), liquidates immediately to salvage capital!
+    # If securely winning, holds into expiration for 100¢ ($1.00) settlement.
+    # -----------------------------------------------------------------------
+    if is_14min_mark:
+        sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
+        sellable_no_price = quotes["no_bid"] if quotes["no_bid"] is not None else no_price_cents
+        crash_floor = dynamic_filters.get("crash_floor_cents", 50)
+
+        crash_res = client.evaluate_and_execute_crash_detection(
+            ticker=ticker,
+            current_yes_price=sellable_yes_price,
+            current_no_price=sellable_no_price,
+            dry_run=dry_run,
+            crash_floor_cents=crash_floor,
+            action_name="14min_crash_selloff_cut",
+        )
+        if isinstance(crash_res, dict) and crash_res.get("triggered"):
+            trade_executed = True
+            c_side = crash_res.get("side", "yes")
+            ex_name = getattr(client, "exchange_name", "Exchange")
+            action_name = crash_res.get("action", "14min_crash_selloff_cut")
+            trade_details = {
+                "ex": ex_name.lower(),
+                "action": action_name,
+                "side": c_side,
+                "exit_price": crash_res.get("exit_price"),
+                "loss_cents": crash_res.get("loss_cents"),
+                "outcome": determine_counterfactual_outcome(
+                    c_side, action_name, spot_price, target_price, market.get("result")
+                ),
+            }
+            if "profit_locked_cents" in crash_res:
+                trade_details["profit_locked_cents"] = crash_res["profit_locked_cents"]
+
+    # -----------------------------------------------------------------------
     # Step 4A: 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration)
     # At minute 12.5: If we are losing (loss > 0 or price < dynamic endgame floor e.g. < 25¢),
     # liquidate immediately so we don't lose all capital gains or suffer a 0¢ expiration loss!
     # If winning, let it run to 100¢ ($1.00 settlement).
     # -----------------------------------------------------------------------
-    if is_12_5min_mark:
+    elif is_12_5min_mark:
         sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
         sellable_no_price = quotes["no_bid"] if quotes["no_bid"] is not None else no_price_cents
         endgame_floor = dynamic_filters.get("endgame_12_5_floor", 25)
@@ -1660,9 +1704,10 @@ def process_hourly_market_group(
     is_hourly_52_5min_cut_loss = (minute_past_hour == 52) and not force_trade_mark
     is_hourly_stop_loss_mark = (minute_past_hour in (40, 55)) and not force_trade_mark
     is_hourly_endgame_mark = (minute_past_hour in (50, 57)) and not force_trade_mark
+    is_hourly_59min_crash_mark = (minute_past_hour == 59) and not force_trade_mark
 
     # Dynamic filter parameters (20-min and 30-min use tighter filter, 00-min and 10-min use broad open filter)
-    is_tight_corridor = (minute_past_hour in (20, 30, 40, 50, 52, 55, 57))
+    is_tight_corridor = (minute_past_hour in (20, 30, 40, 50, 52, 55, 57, 59))
     dynamic_filters = get_dynamic_filter_for_market(
         symbol,
         is_5min_mark=is_tight_corridor,
@@ -1768,11 +1813,54 @@ def process_hourly_market_group(
             record_market_price_snapshot(item["ticker"], item["yes_price_cents"], timestamp=now_utc.timestamp())
 
     # -----------------------------------------------------------------------
+    # Step 0: Hourly 59-Minute Crash Detection & Selloff Check (:59 mark - 1m before expiration)
+    # At minute 59: Final safety net against last-minute market dumps, flash crashes, or adverse flips.
+    # If trailing entry (loss > 0) OR price < crash floor (e.g. < 50¢), liquidates immediately to salvage capital!
+    # If securely winning, holds into expiration for 100¢ ($1.00) settlement.
+    # -----------------------------------------------------------------------
+    if is_hourly_59min_crash_mark:
+        action_name = "59min_crash_selloff_cut"
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            pos = client.get_market_position(ticker)
+            if pos is not None:
+                quotes = item["quotes"]
+                sellable_yes = quotes["yes_bid"] if quotes["yes_bid"] is not None else item["yes_price_cents"]
+                sellable_no = quotes["no_bid"] if quotes["no_bid"] is not None else item["no_price_cents"]
+                crash_floor = dynamic_filters.get("crash_floor_cents", 50)
+
+                crash_res = client.evaluate_and_execute_crash_detection(
+                    ticker=ticker,
+                    current_yes_price=sellable_yes,
+                    current_no_price=sellable_no,
+                    dry_run=dry_run,
+                    crash_floor_cents=crash_floor,
+                    action_name=action_name,
+                )
+                if isinstance(crash_res, dict) and crash_res.get("triggered"):
+                    trade_executed_by_ticker[ticker] = {
+                        "ex": ex_name.lower(),
+                        "action": action_name,
+                        "side": crash_res.get("side", "yes"),
+                        "exit_price": crash_res.get("exit_price"),
+                        "loss_cents": crash_res.get("loss_cents"),
+                        "outcome": determine_counterfactual_outcome(
+                            crash_res.get("side", "yes"),
+                            action_name,
+                            spot_price,
+                            item["target_price"],
+                            item["market"].get("result"),
+                        ),
+                    }
+                    if "profit_locked_cents" in crash_res:
+                        trade_executed_by_ticker[ticker]["profit_locked_cents"] = crash_res["profit_locked_cents"]
+
+    # -----------------------------------------------------------------------
     # Step 1: Hourly Endgame Safety Check (:50 & :57.5 marks)
     # At minute 50 and minute 57.5 (:57): If losing (loss > 0 or price < endgame_floor),
     # liquidate immediately to salvage capital before 0¢ expiration! If winning, hold to 100¢ settlement.
     # -----------------------------------------------------------------------
-    if is_hourly_endgame_mark:
+    elif is_hourly_endgame_mark:
         action_name = "57_5min_loss_cut" if minute_past_hour == 57 else "50min_loss_cut"
         for item in parsed_markets:
             ticker = item["ticker"]
@@ -2524,6 +2612,7 @@ def run_pipeline_pass(
     is_15m_trading_interval = is_15m_open_ready or (minute_into_market_15m in (2, 5, 7)) or force_trade_mark
     is_15m_10min_interval = (minute_into_market_15m == 10) and not force_trade_mark
     is_15m_12_5min_interval = (minute_into_market_15m == 12) and not force_trade_mark
+    is_15m_14min_crash_interval = (minute_into_market_15m == 14) and not force_trade_mark
 
     is_hourly_00_or_10_entry = (current_minute in (0, 10)) or force_trade_mark
     is_hourly_20_or_30_mark = (current_minute in (20, 30)) and not force_trade_mark
@@ -2532,6 +2621,7 @@ def run_pipeline_pass(
     is_hourly_52_5_mark = (current_minute == 52) and not force_trade_mark
     is_hourly_55_mark = (current_minute == 55) and not force_trade_mark
     is_hourly_57_5_mark = (current_minute == 57) and not force_trade_mark
+    is_hourly_59_mark = (current_minute == 59) and not force_trade_mark
 
     # Human-readable interval descriptions
     intervals_active = []
@@ -2548,6 +2638,8 @@ def run_pipeline_pass(
         intervals_active.append("15M WINNER ROLL / SL")
     elif is_15m_12_5min_interval:
         intervals_active.append("15M ENDGAME SAFETY CHECK")
+    elif is_15m_14min_crash_interval:
+        intervals_active.append("15M :14 CRASH DETECTION & SELLOFF CHECK")
 
     if current_minute == 0 or force_trade_mark:
         intervals_active.append("HOURLY 00M MULTI-STRIKE ENTRY")
@@ -2567,6 +2659,8 @@ def run_pipeline_pass(
         intervals_active.append("HOURLY 55M WINNER BANK & SL")
     elif current_minute == 57:
         intervals_active.append("HOURLY 57.5M ENDGAME SAFETY CHECK")
+    elif current_minute == 59:
+        intervals_active.append("HOURLY 59M CRASH DETECTION & SELLOFF CHECK")
 
     interval_summary = " + ".join(intervals_active) if intervals_active else "DATA COLLECTION ONLY MARK"
 
@@ -2746,8 +2840,8 @@ def run_pipeline_pass(
                     log.error(f"❌ [{exchange_name}] Unhandled error processing hourly group for {sym}: {sym_err}", exc_info=True)
 
     # Save valid market snapshots to MongoDB Atlas
-    # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50, :52.5, :55, :57.5) OR whenever a trade occurs
-    is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12)) or (current_minute in (0, 10, 20, 30, 40, 50, 52, 55, 57))
+    # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :14, :20, :30, :40, :50, :52.5, :55, :57.5, :59) OR whenever a trade occurs
+    is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12, 14)) or (current_minute in (0, 10, 20, 30, 40, 50, 52, 55, 57, 59))
     valid_snapshots = [
         s for s in snapshots_to_save
         if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
@@ -2758,7 +2852,7 @@ def run_pipeline_pass(
     elif dry_run:
         log.info(f"\n{LogTag.DRY_RUN_PREVIEW.value} Skipped saving snapshots to MongoDB Atlas in Dry-Run mode.")
     elif not is_standard_save_mark:
-        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :20, :30, :40, :50, :52.5, :55, :57.5 marks).")
+        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :14, :20, :30, :40, :50, :52.5, :55, :57.5, :59 marks).")
     else:
         log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")
