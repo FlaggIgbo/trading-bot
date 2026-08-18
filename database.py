@@ -49,6 +49,119 @@ log = logging.getLogger(__name__)
 
 
 _GLOBAL_MONGO_CLIENT = None
+_INDEXES_INITIALIZED = False
+
+
+def ensure_database_indexes(db=None) -> bool:
+    """
+    Ensures optimal query performance and automated TTL retention indexes are configured.
+    - market_snapshots: TTL index on 'created_at' (expiring records older than SNAPSHOT_RETENTION_HOURS, default: 48h).
+    - market_snapshots: Compound index on [('ts', -1)] and [('sym', 1), ('tf', 1), ('ts', -1)].
+    - settlements: Indexes on [('ts', -1)] and [('ticker', 1)].
+    - portfolio_pnl: Index on [('ts', -1)].
+
+    Also runs an initial prune of legacy unindexed snapshots.
+    """
+    global _INDEXES_INITIALIZED
+    if _INDEXES_INITIALIZED:
+        return True
+
+    try:
+        import pymongo
+
+        if db is None:
+            if _GLOBAL_MONGO_CLIENT is None:
+                return False
+            db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
+
+        retention_hours = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "48"))
+        retention_seconds = retention_hours * 3600
+
+        # 1. market_snapshots TTL & Performance Indexes
+        snap_col = db.get_collection("market_snapshots")
+        try:
+            snap_col.create_index(
+                [("created_at", pymongo.ASCENDING)],
+                expireAfterSeconds=retention_seconds,
+                name="idx_market_snapshots_ttl_created_at",
+                background=True,
+            )
+        except Exception as ttl_err:
+            log.debug(f"TTL index setup notice on market_snapshots: {ttl_err}")
+
+        try:
+            snap_col.create_index([("ts", pymongo.DESCENDING)], name="idx_market_snapshots_ts", background=True)
+            snap_col.create_index(
+                [("sym", pymongo.ASCENDING), ("tf", pymongo.ASCENDING), ("ts", pymongo.DESCENDING)],
+                name="idx_market_snapshots_sym_tf_ts",
+                background=True,
+            )
+        except Exception as idx_err:
+            log.debug(f"Query index notice on market_snapshots: {idx_err}")
+
+        # 2. settlements Indexes
+        settle_col = db.get_collection("settlements")
+        try:
+            settle_col.create_index([("ts", pymongo.DESCENDING)], name="idx_settlements_ts", background=True)
+            settle_col.create_index([("ticker", pymongo.ASCENDING)], name="idx_settlements_ticker", background=True)
+        except Exception as idx_err:
+            log.debug(f"Query index notice on settlements: {idx_err}")
+
+        # 3. portfolio_pnl Indexes
+        pnl_col = db.get_collection("portfolio_pnl")
+        try:
+            pnl_col.create_index([("ts", pymongo.DESCENDING)], name="idx_portfolio_pnl_ts", background=True)
+        except Exception as idx_err:
+            log.debug(f"Query index notice on portfolio_pnl: {idx_err}")
+
+        _INDEXES_INITIALIZED = True
+
+        # Prune legacy records beyond retention window on initial startup
+        prune_old_market_snapshots(retention_hours=retention_hours)
+        return True
+    except Exception as error:
+        log.warning(f"Could not initialize database indexes: {error}")
+        return False
+
+
+def prune_old_market_snapshots(retention_hours: int | None = None) -> int:
+    """
+    Prunes snapshot documents from 'market_snapshots' older than the retention cutoff.
+    Matches by integer timestamp 'ts' or BSON Date 'created_at'.
+
+    Args:
+        retention_hours: Cutoff age in hours (defaults to SNAPSHOT_RETENTION_HOURS or 48h).
+
+    Returns:
+        int: Number of deleted documents.
+    """
+    if retention_hours is None:
+        retention_hours = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "48"))
+
+    try:
+        if _GLOBAL_MONGO_CLIENT is None:
+            return 0
+        db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
+        snap_col = db.get_collection("market_snapshots")
+
+        now_ts = int(time.time())
+        cutoff_ts = now_ts - (retention_hours * 3600)
+        cutoff_dt = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc)
+
+        res = snap_col.delete_many({
+            "$or": [
+                {"ts": {"$lt": cutoff_ts}},
+                {"created_at": {"$lt": cutoff_dt}},
+            ]
+        })
+        if res.deleted_count > 0:
+            log.info(
+                f"🧹 Pruned {res.deleted_count:,} legacy market snapshot(s) older than {retention_hours}h from MongoDB Atlas."
+            )
+        return res.deleted_count
+    except Exception as error:
+        log.error(f"Failed to prune old market snapshots: {error}")
+        return 0
 
 
 def get_mongo_collection(collection_name: str = "market_snapshots"):
@@ -95,6 +208,7 @@ def get_mongo_collection(collection_name: str = "market_snapshots"):
 
         # Access database 'trading_bot_db' and requested collection
         db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
+        ensure_database_indexes(db)
         return db.get_collection(collection_name)
     except Exception as error:
         log.error(f"Could not connect to MongoDB Atlas: {error}")
@@ -114,7 +228,7 @@ def detect_market_timeframe(ticker: str) -> str:
 def save_market_snapshots(snapshots: list[dict]) -> bool:
     """
     Saves a list of ultra-compact market snapshot documents into MongoDB 'market_snapshots' collection.
-    Every document is explicitly tagged with 'tf' ('15m' or '1h') to distinguish timeframes.
+    Every document is explicitly tagged with 'tf' ('15m' or '1h') and 'created_at' BSON Date for TTL index.
     """
     if not snapshots:
         log.info("No snapshots to save.")
@@ -124,10 +238,21 @@ def save_market_snapshots(snapshots: list[dict]) -> bool:
     if collection is None:
         return False
 
-    # Ensure tf is explicitly set on each snapshot document
+    now_utc = datetime.now(timezone.utc)
+
+    # Ensure tf and created_at are explicitly set on each snapshot document
     for s in snapshots:
         if "tf" not in s or not s["tf"]:
             s["tf"] = detect_market_timeframe(s.get("tick", ""))
+        if "created_at" not in s:
+            # Set BSON Date for automated MongoDB Atlas TTL index
+            if "ts" in s and isinstance(s["ts"], (int, float)) and s["ts"] > 0:
+                try:
+                    s["created_at"] = datetime.fromtimestamp(s["ts"], tz=timezone.utc)
+                except Exception:
+                    s["created_at"] = now_utc
+            else:
+                s["created_at"] = now_utc
 
     try:
         result = collection.insert_many(snapshots)
