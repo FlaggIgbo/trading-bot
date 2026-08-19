@@ -587,17 +587,24 @@ class BaseTradingClient(ABC):
         )
 
         # 1. Favorite Maker EV-Preservation Guard (Reddit Empirical Finding):
-        # Dipped favorites recover 70%+ of the time. Cutting dipped favorites costs ~20¢ of EV.
-        # Positions entered under the Favorite Maker strategy (entry_price >= 70¢ or strategy_tag == 'endgame_favorite_maker')
-        # are held through to 100¢ settlement rather than being cut prematurely at depressed bids.
+        # Dipped favorites recover 70%+ of the time, so we allow reasonable fluctuations.
+        # However, if a favorite severely breaks down (bid_price < 35¢ or loss > 40¢),
+        # we trigger a hard stop-loss to prevent a total 100% loss at 0¢ settlement.
         is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
         if is_favorite_maker:
-            log.info(
-                f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
-                f"Holding favorite position into settlement (entry: {entry_price}¢, bid: {bid_price}¢). "
-                f"Bypassing intermediate panic stop-loss / early profit banking to capture full 100¢ payout."
-            )
-            return {"triggered": False, "action": "favorite_maker_holding"}
+            if bid_price >= 35 and loss_cents <= 40:
+                log.info(
+                    f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Holding viable favorite position into settlement (entry: {entry_price}¢, bid: {bid_price}¢). "
+                    f"Bypassing intermediate noise to capture full 100¢ payout."
+                )
+                return {"triggered": False, "action": "favorite_maker_holding"}
+            else:
+                log.warning(
+                    f"⚠️ [FAVORITE HARD STOP] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Favorite entered at {entry_price}¢ has severely collapsed to {bid_price}¢ (loss: -{loss_cents}¢). "
+                    f"Executing hard stop-loss liquidation to salvage capital!"
+                )
 
         # 2. Winning Position Profit Bank: If position reached >= 70¢ or profit >= 15¢
         # Sell at Bid to bank realized profit in cash. Keep the cash in balance (DO NOT re-buy at 85¢-98¢ into negative EV).
@@ -749,12 +756,19 @@ class BaseTradingClient(ABC):
 
         is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
         if is_favorite_maker:
-            log.info(
-                f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
-                f"Favorite maker holding (entry: {entry_price}¢, price: {current_price}¢). "
-                f"Bypassing early cut-loss to preserve positive EV into expiration."
-            )
-            return {"triggered": False, "action": "favorite_maker_holding"}
+            if current_price >= 35 and loss_cents <= 40:
+                log.info(
+                    f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Favorite maker holding (entry: {entry_price}¢, price: {current_price}¢). "
+                    f"Bypassing early cut-loss to preserve positive EV into expiration."
+                )
+                return {"triggered": False, "action": "favorite_maker_holding"}
+            else:
+                log.warning(
+                    f"⚠️ [FAVORITE HARD STOP] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Favorite entered at {entry_price}¢ has broken down to {current_price}¢ (loss: -{loss_cents}¢). "
+                    f"Cutting collapsed position early!"
+                )
 
         if current_price < min_price_threshold:
             reason = f"Current price {current_price}¢ is below safety cut threshold ({min_price_threshold}¢)"
@@ -911,7 +925,7 @@ class BaseTradingClient(ABC):
         current_yes_price: int | None,
         current_no_price: int | None,
         dry_run: bool = False,
-        crash_floor_cents: int = 50,
+        crash_floor_cents: int = 35,
         action_name: str = "crash_selloff_cut",
     ) -> dict:
         """
@@ -919,9 +933,9 @@ class BaseTradingClient(ABC):
         Protects against last-minute market dumps, flash crashes, or adverse price reversals that risk a full $1.00 wipeout.
 
         Rules:
-        - If losing trailing entry price (loss_cents > 0) OR trading below the crash floor (< crash_floor_cents e.g. < 50¢),
+        - If severely broken down below crash floor (< crash_floor_cents e.g. < 35¢) AND deeply losing (loss_cents >= 20),
           verifies resting order cancellation and immediately liquidates the position at market Bid to salvage capital.
-        - If securely winning (current_price >= crash_floor_cents and loss_cents <= 0), holds into expiration for 100¢ settlement.
+        - If securely winning or in minor normal fluctuation (current_price >= crash_floor_cents), holds into expiration for 100¢ settlement.
         """
         pos = self.get_market_position(ticker)
         if pos is None:
@@ -951,12 +965,17 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Floor: {crash_floor_cents}¢ | Status: {pnl_label}"
         )
 
-        # Crash & Selloff check: position is losing on entry (loss_cents > 0) OR dropped below crash floor (< crash_floor_cents)
-        is_crash = (loss_cents > 0) or (current_price < crash_floor_cents)
+        # Crash & Selloff check:
+        # 1. Severe Breakdown: Deep loss (loss_cents >= 20) AND dropped below crash floor (< crash_floor_cents)
+        is_severe_crash = (current_price < crash_floor_cents) and (loss_cents >= 20)
+        # 2. Speculative Profit Lock: Low-price entry with profit (profit_cents >= 10) but still under crash floor
+        is_speculative_profit_lock = (entry_price < crash_floor_cents) and (profit_cents >= 10) and (current_price < crash_floor_cents)
+
+        is_crash = is_severe_crash or is_speculative_profit_lock
         if is_crash:
             reason = (
                 f"last-minute crash/selloff detected at 1m mark "
-                f"(Entry: ~{entry_price}¢, Current: {current_price}¢, Floor: {crash_floor_cents}¢, Loss: {loss_cents}¢)"
+                f"(Entry: ~{entry_price}¢, Current: {current_price}¢, Floor: {crash_floor_cents}¢, PnL: {pnl_label})"
             )
             if dry_run:
                 log.info(

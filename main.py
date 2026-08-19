@@ -1226,7 +1226,7 @@ def process_single_market(
     if is_14min_mark:
         sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
         sellable_no_price = quotes["no_bid"] if quotes["no_bid"] is not None else no_price_cents
-        crash_floor = dynamic_filters.get("crash_floor_cents", 50)
+        crash_floor = dynamic_filters.get("crash_floor_cents", 35)
 
         crash_res = client.evaluate_and_execute_crash_detection(
             ticker=ticker,
@@ -1898,7 +1898,7 @@ def process_hourly_market_group(
                 quotes = item["quotes"]
                 sellable_yes = quotes["yes_bid"] if quotes["yes_bid"] is not None else item["yes_price_cents"]
                 sellable_no = quotes["no_bid"] if quotes["no_bid"] is not None else item["no_price_cents"]
-                crash_floor = dynamic_filters.get("crash_floor_cents", 50)
+                crash_floor = dynamic_filters.get("crash_floor_cents", 35)
 
                 crash_res = client.evaluate_and_execute_crash_detection(
                     ticker=ticker,

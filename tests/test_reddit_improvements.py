@@ -272,11 +272,11 @@ def test_ev_preservation_favorite_holding_bypasses_stop_losses():
     assert res_10m["triggered"] is False
     assert client.get_market_position(ticker) is not None  # Position retained!
 
-    # 2. 5-Minute Early Cut Loss Check when price dips to 20¢
+    # 2. 5-Minute Early Cut Loss Check when price dips to 50¢ (normal dip) -> Holds for positive EV
     res_5m = client.evaluate_and_execute_5min_cut_loss(
         ticker=ticker,
-        current_yes_price=20,
-        current_no_price=75,
+        current_yes_price=50,
+        current_no_price=45,
         min_price_threshold=35,
         dry_run=False,
     )
@@ -664,5 +664,120 @@ def test_favorite_maker_crashed_at_last_minute_liquidated():
     assert crash_res["exit_price"] == 15
     assert crash_res["loss_cents"] == 70
     assert client.get_market_position(ticker) is None
+
+
+def test_kalshi_execute_liquidation_no_price_calculation():
+    """Verify KalshiClient.execute_liquidation computes correct (100 - no_price) YES limit price."""
+    client = KalshiClient(api_key_id="k", private_key=MagicMock())
+    ticker = "KXSOL15M-TEST-LIQ"
+
+    with patch.object(client, "post") as mock_post:
+        mock_post.return_value = {"order": {"order_id": "test-oid"}}
+
+        # Liquidate NO position when current NO bid is 45¢
+        client.execute_liquidation(ticker, side="no", count=2, current_price=45)
+
+        assert mock_post.called
+        call_args = mock_post.call_args
+        payload = call_args[1]["payload"]
+
+        # For NO liquidation at 45¢:
+        # Must submit side="bid" with YES price = 100 - 45 = 55¢ ("0.5500"), NEVER 0.9900!
+        assert payload["ticker"] == ticker
+        assert payload["side"] == "bid"
+        assert payload["price"] == "0.5500"
+        assert payload["count"] == "2"
+        assert payload["time_in_force"] == "immediate_or_cancel"
+
+
+def test_kalshi_execute_liquidation_yes_price_calculation():
+    """Verify KalshiClient.execute_liquidation computes correct YES ask limit price."""
+    client = KalshiClient(api_key_id="k", private_key=MagicMock())
+    ticker = "KXSOL15M-TEST-LIQ-YES"
+
+    with patch.object(client, "post") as mock_post:
+        mock_post.return_value = {"order": {"order_id": "test-oid"}}
+
+        # Liquidate YES position when current YES bid is 35¢
+        client.execute_liquidation(ticker, side="yes", count=1, current_price=35)
+
+        assert mock_post.called
+        call_args = mock_post.call_args
+        payload = call_args[1]["payload"]
+
+        # For YES liquidation at 35¢:
+        # Must submit side="ask" with YES price = 35¢ ("0.3500")
+        assert payload["ticker"] == ticker
+        assert payload["side"] == "ask"
+        assert payload["price"] == "0.3500"
+        assert payload["count"] == "1"
+        assert payload["time_in_force"] == "immediate_or_cancel"
+
+
+def test_favorite_hard_stop_loss_triggered_when_collapsed():
+    """Verify that a favorite that collapses below 40¢ triggers a hard stop-loss instead of holding."""
+    client = MockTradingClient()
+    ticker = "KXBTC15M-COLLAPSED-FAV"
+
+    # Enter favorite maker at 85¢
+    client.buy_favorite_maker_order(ticker, "yes", maker_bid_cents=85, target_ask_cents=88)
+    assert client.get_entry_price(ticker) == 85
+
+    # 10-minute check: Price has collapsed to 30¢ (loss = 55¢, bid <= 40¢)
+    res_10m = client.evaluate_and_execute_10min_strategy(
+        ticker=ticker,
+        current_yes_bid=30,
+        current_yes_ask=32,
+        current_no_bid=68,
+        current_no_ask=70,
+        dry_run=False,
+    )
+    # Hard stop-loss triggers to cut the collapsed position!
+    assert res_10m["triggered"] is True
+    assert res_10m["action"] == "stop_loss_sold"
+    assert res_10m["exit_price"] == 30
+    assert client.get_market_position(ticker) is None
+
+
+def test_favorite_held_when_healthy_or_minor_dip():
+    """Verify that a favorite with minor drawdown (e.g. entered at 85¢, now 75¢) is held for positive EV."""
+    client = MockTradingClient()
+    ticker = "KXBTC15M-HEALTHY-FAV"
+
+    # Enter favorite maker at 85¢
+    client.buy_favorite_maker_order(ticker, "yes", maker_bid_cents=85, target_ask_cents=88)
+
+    # 10-minute check: Price is 75¢ (loss = 10¢ < 35¢, bid = 75¢ > 40¢)
+    res_10m = client.evaluate_and_execute_10min_strategy(
+        ticker=ticker,
+        current_yes_bid=75,
+        current_yes_ask=77,
+        current_no_bid=23,
+        current_no_ask=25,
+        dry_run=False,
+    )
+    assert res_10m["triggered"] is False
+    assert res_10m["action"] == "favorite_maker_holding"
+
+
+def test_crash_detection_holds_viable_positions():
+    """Verify that 1m crash check holds viable positions (>=35¢, loss < 20¢) into settlement."""
+    client = MockTradingClient()
+    ticker = "KXBTC15M-VIABLE"
+
+    # Enter at 85¢
+    client.buy_favorite_maker_order(ticker, "yes", maker_bid_cents=85, target_ask_cents=88)
+
+    # At minute 14: Price is 72¢ (loss = 13¢ < 20¢, price = 72¢ >= 35¢ floor)
+    res_14m = client.evaluate_and_execute_crash_detection(
+        ticker=ticker,
+        current_yes_price=72,
+        current_no_price=28,
+        dry_run=False,
+        crash_floor_cents=35,
+    )
+    # Holds for full 100¢ settlement payout!
+    assert res_14m["triggered"] is False
+
 
 

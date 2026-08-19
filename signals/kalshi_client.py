@@ -1506,29 +1506,43 @@ class KalshiClient(BaseTradingClient):
         side_clean = side.lower()
 
         if side_clean == "yes":
+            # Selling YES -> Event Ask on YES at current_price (or 1¢ floor)
+            sell_price_cents = max(1, min(99, current_price))
             sell_payload = {
                 "ticker": ticker,
                 "client_order_id": generate_safe_client_order_id("liq_yes", ticker, now_ms),
                 "side": "ask",
                 "count": str(count),
-                "price": "0.0100",
+                "price": f"0.{sell_price_cents:02d}00",
                 "time_in_force": "immediate_or_cancel",
                 "self_trade_prevention_type": "taker_at_cross",
             }
         else:
+            # Selling NO -> Event Bid on YES at (100 - current_no_price).
+            # For example: if NO is at 40¢, we Bid on YES at 60¢ (100 - 40).
+            # This guarantees we sell NO for at least 40¢ and prevents buying YES at 99¢!
+            no_sell_cents = max(1, min(99, current_price))
+            yes_equiv_price = 100 - no_sell_cents
             sell_payload = {
                 "ticker": ticker,
                 "client_order_id": generate_safe_client_order_id("liq_no", ticker, now_ms),
                 "side": "bid",
                 "count": str(count),
-                "price": "0.9900",
+                "price": f"0.{yes_equiv_price:02d}00",
                 "time_in_force": "immediate_or_cancel",
                 "self_trade_prevention_type": "taker_at_cross",
             }
 
         try:
             res = self.post("/portfolio/events/orders", payload=sell_payload)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
             self.invalidate_portfolio_caches()
+            try:
+                from database import remove_active_position_cost
+                remove_active_position_cost(ticker, "kalshi")
+            except Exception:
+                pass
             log.info(f"✅ Executed immediate taker liquidation for {ticker} ({side_clean.upper()} x{count}): {res}")
             return res
         except Exception as error:
@@ -1540,17 +1554,24 @@ class KalshiClient(BaseTradingClient):
 
                 if side_clean == "yes":
                     top_bid = parse_cents(mkt_detail.get("yes_bid_dollars"), mkt_detail.get("yes_bid")) or 1
-                    sell_payload["price"] = f"0.{max(1, top_bid):02d}00"
+                    sell_payload["price"] = f"0.{max(1, min(99, top_bid)):02d}00"
                     sell_payload["client_order_id"] = generate_safe_client_order_id("liq_retry_yes", ticker, retry_ms)
                 else:
                     top_no_bid = parse_cents(mkt_detail.get("no_bid_dollars"), mkt_detail.get("no_bid")) or 1
-                    yes_equiv = min(99, max(1, 100 - top_no_bid))
+                    yes_equiv = 100 - max(1, min(99, top_no_bid))
                     sell_payload["price"] = f"0.{yes_equiv:02d}00"
                     sell_payload["client_order_id"] = generate_safe_client_order_id("liq_retry_no", ticker, retry_ms)
 
                 sell_payload["time_in_force"] = "immediate_or_cancel"
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
                 self.invalidate_portfolio_caches()
+                try:
+                    from database import remove_active_position_cost
+                    remove_active_position_cost(ticker, "kalshi")
+                except Exception:
+                    pass
                 log.info(f"✅ Executed secondary IOC taker liquidation for {ticker}: {res}")
                 return res
             except Exception as err2:
