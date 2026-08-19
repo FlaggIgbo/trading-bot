@@ -769,6 +769,16 @@ def _execute_buy_flow(
         except Exception as error:
             log.error(f"❌ [{ex_name}] Failed to execute {side_upper} trade on {ticker}: {error}")
             return False, None
+    else:
+        if getattr(client, "record_paper_position", None) is not None:
+            client.record_paper_position(
+                ticker=ticker,
+                side=side_lower,
+                count=count,
+                entry_price_cents=price_cents,
+                target_tp_cents=take_profit_cents,
+                strategy_tag=corridor_mode,
+            )
 
     trade_details = {
         **({"dry_run": True} if dry_run else {}),
@@ -1055,6 +1065,16 @@ def _execute_favorite_maker_flow(
         except Exception as error:
             log.error(f"❌ [{ex_name}] Failed to execute Favorite Maker trade on {ticker}: {error}")
             return False, None
+    else:
+        if getattr(client, "record_paper_position", None) is not None:
+            client.record_paper_position(
+                ticker=ticker,
+                side=side_lower,
+                count=count,
+                entry_price_cents=maker_bid,
+                target_tp_cents=100,
+                strategy_tag="endgame_favorite_maker",
+            )
 
     trade_details = {
         **({"dry_run": True} if dry_run else {}),
@@ -3045,11 +3065,9 @@ def run_pipeline_pass(
         s for s in snapshots_to_save
         if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
     ]
-    if valid_snapshots and not dry_run:
-        log.info("\nSaving ultra-compact market snapshot data to MongoDB Atlas...")
+    if valid_snapshots:
+        log.info(f"\nSaving {len(valid_snapshots)} ultra-compact market snapshot(s) to MongoDB Atlas...")
         save_market_snapshots(valid_snapshots)
-    elif dry_run:
-        log.info(f"\n{LogTag.DRY_RUN_PREVIEW.value} Skipped saving snapshots to MongoDB Atlas in Dry-Run mode.")
     elif not is_standard_save_mark:
         log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :14, :20, :30, :40, :50, :52.5, :55, :57.5, :59 marks).")
     else:
@@ -3060,23 +3078,41 @@ def run_pipeline_pass(
 def main():
     """Main continuous background worker loop."""
     args = sys.argv[1:]
-    dry_run = "--dry-run" in args or "-d" in args
+    live_flag = "--live" in args or "-l" in args
+    live_env = (
+        os.getenv("ENABLE_LIVE_ORDERS", "false").lower() == "true"
+        or os.getenv("LIVE_TRADING", "false").lower() == "true"
+    )
+    allow_live_orders = live_flag or live_env
+    # Default to dry_run (Paper Trading) unless live orders are explicitly enabled
+    dry_run = "--dry-run" in args or "-d" in args or (not allow_live_orders)
     force_trade_mark = "--force-trade" in args or "-f" in args
     run_once = "--once" in args or "-o" in args
+
+    if not allow_live_orders:
+        log.info(
+            "🛡️ [PAPER TRADING / SAFETY MODE ACTIVE] Real money orders are DISABLED on Kalshi and Gemini. "
+            "All buy/sell decisions, prices, and timestamps will be logged and tracked in paper trading simulation."
+        )
+    else:
+        log.warning(
+            "⚠️ [LIVE TRADING ACTIVE] Real money orders are ENABLED on Kalshi and Gemini. "
+            "Real capital will be used for execution."
+        )
 
     # Initialize long-lived persistent exchange clients ONCE at startup
     persistent_clients = []
     try:
-        persistent_clients.append(("Kalshi", KalshiClient()))
+        persistent_clients.append(("Kalshi", KalshiClient(allow_live_orders=allow_live_orders)))
     except Exception as error:
         log.error(f"Could not initialize persistent KalshiClient: {error}")
 
     try:
-        persistent_clients.append(("Gemini", GeminiClient()))
+        persistent_clients.append(("Gemini", GeminiClient(allow_live_orders=allow_live_orders)))
     except Exception as error:
         log.error(f"Could not initialize persistent GeminiClient: {error}")
 
-    if run_once or dry_run:
+    if run_once:
         run_pipeline_pass(clients=persistent_clients, dry_run=dry_run, force_trade_mark=force_trade_mark)
         return
 

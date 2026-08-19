@@ -1769,6 +1769,150 @@ def evaluate_ensemble_consensus(
 
 
 # ===========================================================================
+# Price Ladder & Timing Matrix Modeling Integration
+# ===========================================================================
+
+def fetch_market_snapshot_series(
+    timeframe: str = "15m",
+    symbol: str | None = None,
+    limit_markets: int = 1000,
+    max_history_days: int = 30,
+) -> list[dict]:
+    """
+    Fetches snapshot time series for distinct market lifecycles along with their settlement results.
+
+    Returns:
+        List of market dictionaries with 'tick', 'sym', 'tf', 'result', and 'snapshots' list.
+    """
+    snap_col = get_mongo_collection("market_snapshots")
+    settle_col = get_mongo_collection("settlements")
+    if snap_col is None:
+        return []
+
+    cutoff_ts = int(time.time()) - (max_history_days * 86400)
+    query: dict[str, Any] = {"ts": {"$gte": cutoff_ts}}
+    if timeframe:
+        query["tf"] = timeframe
+    if symbol:
+        query["sym"] = symbol.upper()
+
+    try:
+        snapshots = list(
+            snap_col.find(query)
+            .sort("ts", 1)
+            .limit(limit_markets * 20)
+        )
+    except Exception as err:
+        log.error(f"Failed to fetch snapshots from MongoDB: {err}")
+        return []
+
+    # Fetch settlements
+    settle_map: dict[str, str] = {}
+    if settle_col is not None:
+        try:
+            settlements = list(settle_col.find({}, {"ticker": 1, "market_result": 1, "result": 1}))
+            for s in settlements:
+                t = s.get("ticker")
+                res = s.get("market_result") or s.get("result")
+                if t and res:
+                    settle_map[t] = str(res).lower()
+        except Exception as err:
+            log.warning(f"Could not load settlements: {err}")
+
+    # Group snapshots by ticker
+    by_ticker: dict[str, list[dict]] = defaultdict(list)
+    for s in snapshots:
+        t = s.get("tick")
+        if t:
+            by_ticker[t].append(s)
+
+    markets_data = []
+    for ticker, snaps in by_ticker.items():
+        first_snap = snaps[0]
+        sym = first_snap.get("sym", "BTC")
+        tf = first_snap.get("tf", timeframe)
+
+        # Determine settlement result
+        result = settle_map.get(ticker)
+        if not result:
+            # Fallback: check if last snapshot contains terminal pricing
+            last_snap = snaps[-1]
+            y = last_snap.get("y")
+            n = last_snap.get("n")
+            if y is not None and y >= 95:
+                result = "yes"
+            elif n is not None and n >= 95:
+                result = "no"
+            elif y is not None and y <= 5:
+                result = "no"
+            elif n is not None and n <= 5:
+                result = "yes"
+
+        if result:
+            markets_data.append({
+                "tick": ticker,
+                "sym": sym,
+                "tf": tf,
+                "result": result,
+                "snapshots": snaps,
+            })
+
+    return markets_data
+
+
+def run_price_ladder_modeling_from_db(
+    timeframe: str = "15m",
+    symbol: str | None = None,
+    min_price_cents: int = 1,
+    max_price_cents: int = 99,
+    price_step: int = 1,
+    fill_mode: str = "maker",
+    json_output_path: str | None = None,
+    csv_output_path: str | None = None,
+) -> dict:
+    """
+    Executes the empirical price ladder modeling engine against historical MongoDB Atlas market data.
+    Simulates entering at every price X in [1¢, 99¢] at every checkpoint minute T.
+    """
+    from models.price_ladder_model import (
+        export_matrix_to_csv,
+        export_matrix_to_json,
+        find_profitable_patterns,
+        format_price_matrix_report,
+        model_price_ladder_matrix,
+    )
+
+    markets = fetch_market_snapshot_series(timeframe=timeframe, symbol=symbol)
+    if not markets:
+        log.warning("No settled market snapshot series found in MongoDB Atlas.")
+        return {"error": "no_data", "report": "No settled market data found in MongoDB Atlas."}
+
+    matrix = model_price_ladder_matrix(
+        markets_data=markets,
+        min_price_cents=min_price_cents,
+        max_price_cents=max_price_cents,
+        price_step=price_step,
+        timeframe=timeframe,
+        fill_mode=fill_mode,
+    )
+
+    patterns = find_profitable_patterns(matrix)
+    report = format_price_matrix_report(matrix, timeframe=timeframe, symbol=symbol)
+
+    if json_output_path:
+        export_matrix_to_json(matrix, json_output_path)
+    if csv_output_path:
+        export_matrix_to_csv(matrix, csv_output_path)
+
+    return {
+        "matrix": matrix,
+        "patterns": patterns,
+        "report": report,
+        "markets_analyzed": len(markets),
+    }
+
+
+# ===========================================================================
 # ROADMAP & ARCHITECTURAL EXTENSIONS (TODO 2 & TODO 3)
 # ===========================================================================
 

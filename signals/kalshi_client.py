@@ -299,6 +299,7 @@ class KalshiClient(BaseTradingClient):
         api_key_id: str | None = None,
         private_key=None,
         base_url: str | None = None,
+        allow_live_orders: bool | None = None,
     ):
         """
         Initializes the Kalshi API client.
@@ -307,8 +308,9 @@ class KalshiClient(BaseTradingClient):
             api_key_id: Your Kalshi API key ID (UUID format).
             private_key: Loaded RSA private key object (optional; loaded automatically if None).
             base_url: Overriding API base URL (optional; defaults to Demo or Production).
+            allow_live_orders: Whether to allow live order placement (defaults to False for safety unless ENABLE_LIVE_ORDERS=true).
         """
-        super().__init__()
+        super().__init__(allow_live_orders=allow_live_orders)
         self.api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID")
         self.private_key = private_key or _load_private_key()
 
@@ -884,8 +886,21 @@ class KalshiClient(BaseTradingClient):
         }
         if expiration_ts is not None and time_in_force != "immediate_or_cancel":
             order_payload["expiration_ts"] = int(expiration_ts)
-
         order_payload.update(kwargs)
+
+        if not self.allow_live_orders:
+            log.info(
+                f"🛡️ [SAFETY MODE] [Kalshi] Live orders disabled. Simulated {action_clean.upper()} order for {ticker} ({count} contracts @ {clamped_cents}¢)."
+            )
+            return {
+                "order_id": f"sim_k_{now_ms}",
+                "client_order_id": order_payload.get("client_order_id"),
+                "status": "simulated",
+                "ticker": ticker,
+                "side": event_side,
+                "price": order_payload.get("price"),
+                "count": count,
+            }
 
         return self.post("/portfolio/events/orders", payload=order_payload)
 
@@ -901,52 +916,48 @@ class KalshiClient(BaseTradingClient):
         and prevent 429 Too Many Requests rate limit errors on multi-strike scans.
         """
         now = time.time()
-        if not force_refresh and (now - self._cached_positions_ts) < self._CACHE_VALIDITY_SECONDS:
+        if not force_refresh and (now - self._cached_positions_ts < self._CACHE_VALIDITY_SECONDS):
             return self._cached_positions_map
 
-        positions_map: dict[str, dict] = {}
         try:
-            pos_resp = self.get_positions()
-            positions = pos_resp.get("market_positions") or []
-            for p in positions:
+            raw_positions = self.get_positions(limit=200).get("market_positions", [])
+            positions_map = {}
+            for p in raw_positions:
                 ticker = p.get("ticker")
                 if not ticker:
                     continue
-                fp = float(p.get("position_fp") or p.get("position") or 0)
-                if abs(fp) > 0:
-                    side = "yes" if fp > 0 else "no"
-                    count = int(round(abs(fp)))
-                    exposure = float(p.get("market_exposure_dollars") or 0)
-                    entry_price = int(round((exposure / count) * 100)) if (count > 0 and exposure > 0) else None
+                pos_count = float(p.get("position_fp") or p.get("position") or 0)
+                if abs(pos_count) > 0:
+                    side = "yes" if pos_count > 0 else "no"
+                    count = int(round(abs(pos_count)))
+                    entry_p = parse_cents(p.get("market_exposure_dollars"), p.get("market_exposure"))
                     positions_map[ticker] = {
                         "ticker": ticker,
                         "side": side,
                         "count": count,
-                        "position_fp": fp,
-                        "entry_price_cents": entry_price,
-                        "exposure_dollars": exposure,
+                        "position_fp": pos_count,
+                        "entry_price_cents": entry_p,
                     }
             self._cached_positions_map = positions_map
             self._cached_positions_ts = now
         except Exception as error:
-            log.warning(f"Could not batch-fetch active market positions: {error}")
+            log.warning(f"Could not batch-fetch open positions: {error}")
 
         return self._cached_positions_map
 
     def get_all_resting_orders(self, force_refresh: bool = False) -> dict[str, list[dict]]:
         """
-        Fetches all resting orders across all markets in the portfolio in a single batch REST call.
-        Caches results for 4.0 seconds to prevent 429 Too Many Requests rate limit errors.
+        Fetches all resting orders across all markets in a single batch REST call.
+        Caches results for 4.0 seconds to eliminate hundreds of per-market order queries.
         """
         now = time.time()
-        if not force_refresh and (now - self._cached_resting_orders_ts) < self._CACHE_VALIDITY_SECONDS:
+        if not force_refresh and (now - self._cached_resting_orders_ts < self._CACHE_VALIDITY_SECONDS):
             return self._cached_resting_orders_map
 
-        orders_map: dict[str, list[dict]] = defaultdict(list)
         try:
-            orders_resp = self.get_orders(status="resting")
-            orders = orders_resp.get("orders") or []
-            for o in orders:
+            raw_orders = self.get_orders(status="resting", limit=200).get("orders", [])
+            orders_map = defaultdict(list)
+            for o in raw_orders:
                 ticker = o.get("ticker")
                 if ticker:
                     orders_map[ticker].append(o)
@@ -960,8 +971,11 @@ class KalshiClient(BaseTradingClient):
     def get_market_position(self, ticker: str) -> dict | None:
         """
         Retrieves active position details for `ticker`.
-        Uses batch-cached positions map to prevent 429 rate limit errors on multi-strike scans.
+        Checks in-memory paper positions first, then batch-cached positions map.
         """
+        pos = self.get_paper_position(ticker)
+        if pos is not None:
+            return pos
         return self.get_all_active_positions().get(ticker)
 
     def has_resting_take_profit_order(self, ticker: str) -> bool:
@@ -1014,6 +1028,19 @@ class KalshiClient(BaseTradingClient):
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
+
+        if not self.allow_live_orders:
+            log.info(
+                f"{LogTag.AUTO_SELL_SET.value} [SAFETY MODE] [Kalshi] Simulated resting Take-Profit order for {side_clean.upper()} "
+                f"(exit at {take_profit_cents}¢) on {ticker}"
+            )
+            return {
+                "order_id": f"sim_tp_{now_ms}",
+                "client_order_id": sell_payload["client_order_id"],
+                "status": "simulated",
+                "ticker": ticker,
+                "take_profit_cents": take_profit_cents,
+            }
 
         try:
             res = self.post("/portfolio/events/orders", payload=sell_payload)
@@ -1091,6 +1118,29 @@ class KalshiClient(BaseTradingClient):
         }
         if buy_order_timeout_seconds > 0:
             buy_payload["expiration_ts"] = now_sec + buy_order_timeout_seconds
+
+        if not self.allow_live_orders:
+            log.info(
+                f"🛡️ [SAFETY MODE] [Kalshi] Live orders disabled. Simulated Maker Buy for {ticker} "
+                f"({side_clean.upper()} x{count} @ {effective_buy_cents}¢, TP: {take_profit_cents}¢)."
+            )
+            self.record_paper_position(
+                ticker=ticker,
+                side=side_clean,
+                count=count,
+                entry_price_cents=effective_buy_cents,
+                target_tp_cents=take_profit_cents,
+                strategy_tag="maker_buy",
+                entry_ts=now_sec,
+            )
+            return {
+                "buy_order": {"status": "simulated", "client_order_id": buy_payload["client_order_id"]},
+                "buy_price_cents": effective_buy_cents,
+                "client_order_id": buy_payload["client_order_id"],
+                "order_id": f"sim_k_buy_{now_ms}",
+                "tp_order_id": f"sim_k_tp_{now_ms}",
+                "take_profit_order": {"status": "simulated", "take_profit_cents": take_profit_cents},
+            }
 
         try:
             buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
@@ -1232,6 +1282,27 @@ class KalshiClient(BaseTradingClient):
             f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢) | Count: {count}"
         )
 
+        if not self.allow_live_orders:
+            log.info(
+                f"🛡️ [SAFETY MODE] [Kalshi] Live orders disabled. Simulated Favorite Maker Buy for {ticker} "
+                f"({side_clean.upper()} x{count} @ {effective_bid}¢)."
+            )
+            self.record_paper_position(
+                ticker=ticker,
+                side=side_clean,
+                count=count,
+                entry_price_cents=effective_bid,
+                target_tp_cents=100,
+                strategy_tag="endgame_favorite_maker",
+                entry_ts=now_sec,
+            )
+            return {
+                "buy_order": {"status": "simulated", "client_order_id": buy_payload["client_order_id"]},
+                "buy_price_cents": effective_bid,
+                "client_order_id": buy_payload["client_order_id"],
+                "order_id": f"sim_fav_k_{now_ms}",
+            }
+
         try:
             buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
         except requests.HTTPError as err:
@@ -1329,6 +1400,8 @@ class KalshiClient(BaseTradingClient):
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancels an existing order by its unique order ID using Kalshi V2 endpoint."""
+        if not self.allow_live_orders:
+            return {"status": "simulated_canceled", "order_id": str(order_id)}
         return self.delete(f"/portfolio/events/orders/{order_id}", allow_404=True)
 
     def cancel_order_safe(self, order_id: str) -> bool:
@@ -1336,6 +1409,8 @@ class KalshiClient(BaseTradingClient):
         Safely attempts to cancel an order. Returns True if canceled or already filled/closed (404),
         or False if unexpected error occurs.
         """
+        if not self.allow_live_orders:
+            return True
         try:
             res = self.cancel_order(order_id)
             if isinstance(res, dict) and res.get("status") == "not_found":
@@ -1376,6 +1451,8 @@ class KalshiClient(BaseTradingClient):
             bool: True if all resting orders were successfully canceled and confirmed cleared,
                   False if resting orders remain after retries.
         """
+        if not self.allow_live_orders:
+            return True
         for attempt in range(1, max_retries + 1):
             try:
                 orders_resp = self.get_orders(ticker=ticker, status="resting")
@@ -1505,6 +1582,14 @@ class KalshiClient(BaseTradingClient):
         now_ms = int(time.time() * 1000)
         side_clean = side.lower()
 
+        if not self.allow_live_orders:
+            log.info(f"🛡️ [SAFETY MODE] [Kalshi] Simulated liquidation for {ticker} ({side_clean.upper()} x{count} @ {current_price}¢).")
+            self.remove_paper_position(ticker)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
+            self.clear_strategy_tag(ticker)
+            return {"status": "simulated_liquidated", "ticker": ticker, "price": current_price, "count": count}
+
         if side_clean == "yes":
             # Selling YES -> Event Ask on YES at current_price (or 1¢ floor)
             sell_price_cents = max(1, min(99, current_price))
@@ -1591,6 +1676,11 @@ class KalshiClient(BaseTradingClient):
         side_clean = side.lower()
         now_ms = int(time.time() * 1000)
         clamped_cents = max(1, min(99, price_cents))
+
+        if not self.allow_live_orders:
+            log.info(f"🛡️ [SAFETY MODE] [Kalshi] Simulated buy for {ticker} ({side_clean.upper()} x{count} @ {clamped_cents}¢).")
+            self.record_paper_position(ticker, side_clean, count, clamped_cents)
+            return {"status": "simulated_bought", "ticker": ticker, "price": clamped_cents, "count": count}
 
         if side_clean == "yes":
             event_side = "bid"

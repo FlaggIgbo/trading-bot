@@ -20,6 +20,7 @@ Key Robustness & Safety Engines:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
@@ -276,8 +277,15 @@ class BaseTradingClient(ABC):
 
     exchange_name: str = "Exchange"
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, allow_live_orders: bool | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        if allow_live_orders is not None:
+            self.allow_live_orders = allow_live_orders
+        else:
+            self.allow_live_orders = (
+                os.getenv("ENABLE_LIVE_ORDERS", "true").lower() == "true"
+                or os.getenv("LIVE_TRADING", "true").lower() == "true"
+            )
         # Keeps track of armed trailing profit floors in memory (e.g. floor at 62¢ for a position winning at 72¢)
         self._profit_floors: dict[str, int] = {}
         # Keeps track of the exact price we paid when entering a contract (e.g. 52¢)
@@ -288,6 +296,127 @@ class BaseTradingClient(ABC):
         self._strategy_tags: dict[str, str] = {}
         # Strict Single-Side Market Lock: Maps ticker -> side ('yes' or 'no') to prevent dual buys
         self._traded_markets: dict[str, str] = {}
+        # Paper Trading / Simulated Active Positions Map: Maps ticker -> position dict
+        self._paper_positions: dict[str, dict] = {}
+
+    @property
+    def paper_positions(self) -> dict[str, dict]:
+        if not hasattr(self, "_paper_positions") or self._paper_positions is None:
+            self._paper_positions = {}
+        return self._paper_positions
+
+    def record_paper_position(
+        self,
+        ticker: str,
+        side: str,
+        count: int,
+        entry_price_cents: int,
+        target_tp_cents: int | None = None,
+        strategy_tag: str | None = None,
+        entry_ts: int | None = None,
+        expiration_ts: int | None = None,
+    ) -> dict:
+        """
+        Records a simulated active position for paper trading / dry-run execution.
+        Enables tracking what we would have bought, following its price lifecycle,
+        and evaluating what we would have sold at subsequent checkpoints.
+        """
+        side_clean = side.lower()
+        now_ts = entry_ts or int(datetime.now(timezone.utc).timestamp())
+        pos = {
+            "ticker": ticker,
+            "side": side_clean,
+            "count": count,
+            "entry_price_cents": entry_price_cents,
+            "target_tp_cents": target_tp_cents,
+            "strategy_tag": strategy_tag,
+            "entry_ts": now_ts,
+            "expiration_ts": expiration_ts,
+            "is_paper": True,
+        }
+        self.paper_positions[ticker] = pos
+        self.set_entry_price(ticker, entry_price_cents)
+        if target_tp_cents is not None:
+            self.set_target_tp(ticker, target_tp_cents)
+        if strategy_tag is not None:
+            self.set_strategy_tag(ticker, strategy_tag)
+        self.record_traded_market(ticker, side_clean)
+        return pos
+
+    def get_paper_position(self, ticker: str) -> dict | None:
+        """Returns the active paper position for ticker, or None."""
+        return self.paper_positions.get(ticker)
+
+    def remove_paper_position(self, ticker: str) -> dict | None:
+        """Removes and returns active paper position for ticker."""
+        return self.paper_positions.pop(ticker, None)
+
+    def get_all_paper_positions(self) -> dict[str, dict]:
+        """Returns a copy of all active paper positions."""
+        return dict(self.paper_positions)
+
+    def clear_expired_paper_positions(self, now_utc: datetime | None = None) -> int:
+        """Prunes paper positions whose expiration time has passed."""
+        now = now_utc or datetime.now(timezone.utc)
+        now_ts = int(now.timestamp())
+        expired = []
+        for ticker, pos in list(self.paper_positions.items()):
+            exp_ts = pos.get("expiration_ts")
+            if exp_ts and now_ts >= exp_ts:
+                expired.append(ticker)
+        for ticker in expired:
+            self.remove_paper_position(ticker)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
+            self.clear_strategy_tag(ticker)
+        return len(expired)
+
+    def check_simulated_take_profit_fill(
+        self,
+        ticker: str,
+        current_yes_bid: int | None,
+        current_no_bid: int | None,
+        current_yes_ask: int | None = None,
+        current_no_ask: int | None = None,
+    ) -> dict | None:
+        """
+        Checks if an active paper position's resting take-profit limit order would have filled.
+        For YES: If current_yes_bid >= target_tp or current_yes_ask >= target_tp.
+        For NO: If current_no_bid >= target_tp or current_no_ask >= target_tp.
+        """
+        pos = self.get_paper_position(ticker)
+        if pos is None:
+            return None
+
+        side = pos["side"]
+        entry_price = pos.get("entry_price_cents", 50)
+        target_tp = pos.get("target_tp_cents") or self.get_target_tp(ticker)
+        if target_tp is None:
+            return None
+
+        bid_p = current_yes_bid if side == "yes" else current_no_bid
+        ask_p = current_yes_ask if side == "yes" else current_no_ask
+        market_p = ask_p or bid_p
+
+        if market_p is not None and market_p >= target_tp:
+            profit_cents = target_tp - entry_price
+            log.info(
+                f"💰 [DRY-RUN TAKE-PROFIT FILLED] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                f"Market price reached {market_p}¢ (>= {target_tp}¢ TP target). "
+                f"WOULD SELL AT {target_tp}¢ (+{profit_cents}¢ PROFIT BANKED IN CASH)."
+            )
+            self.remove_paper_position(ticker)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
+            return {
+                "triggered": True,
+                "side": side,
+                "action": "take_profit_sold",
+                "exit_price": target_tp,
+                "profit_locked_cents": profit_cents,
+            }
+
+        return None
 
     @property
     def strategy_tags(self) -> dict[str, str]:
@@ -614,6 +743,10 @@ class BaseTradingClient(ABC):
                     f"{LogTag.DRY_RUN_WINNER_ROLLED.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
                     f"WOULD SELL AT {bid_price}¢ (BANK +{profit_cents}¢ PROFIT IN CASH). Keeping profit safely in balance."
                 )
+                self.remove_paper_position(ticker)
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
+                self.clear_strategy_tag(ticker)
                 return {
                     "triggered": True,
                     "side": side,
@@ -661,6 +794,10 @@ class BaseTradingClient(ABC):
                     f"{LogTag.DRY_RUN_STOP_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}) {reason}. "
                     f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY."
                 )
+                self.remove_paper_position(ticker)
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
+                self.clear_strategy_tag(ticker)
                 return {
                     "triggered": True,
                     "side": side,
@@ -778,6 +915,10 @@ class BaseTradingClient(ABC):
                     f"{LogTag.DRY_RUN_EARLY_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
                     f"WOULD CANCEL RESTING ORDERS & SELL POSITION IMMEDIATELY TO CUT LOSSES."
                 )
+                self.remove_paper_position(ticker)
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
+                self.clear_strategy_tag(ticker)
                 return {
                     "triggered": True,
                     "side": side,
@@ -881,6 +1022,10 @@ class BaseTradingClient(ABC):
                     f"{LogTag.DRY_RUN_ENDGAME_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
                     f"WOULD LIQUIDATE IMMEDIATELY TO SALVAGE CAPITAL BEFORE EXPIRATION."
                 )
+                self.remove_paper_position(ticker)
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
+                self.clear_strategy_tag(ticker)
                 return {
                     "triggered": True,
                     "side": side,
@@ -982,6 +1127,10 @@ class BaseTradingClient(ABC):
                     f"{LogTag.DRY_RUN_CRASH_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
                     f"WOULD LIQUIDATE IMMEDIATELY TO SALVAGE CAPITAL BEFORE EXPIRATION."
                 )
+                self.remove_paper_position(ticker)
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
+                self.clear_strategy_tag(ticker)
                 res = {
                     "triggered": True,
                     "side": side,

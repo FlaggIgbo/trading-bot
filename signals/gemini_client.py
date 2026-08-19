@@ -562,8 +562,9 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         api_key: str | None = None,
         api_secret: str | None = None,
         account: str | None = None,
+        allow_live_orders: bool | None = None,
     ):
-        BaseTradingClient.__init__(self)
+        BaseTradingClient.__init__(self, allow_live_orders=allow_live_orders)
         GeminiPredictionClient.__init__(self, base_url=base_url)
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.api_secret = api_secret or os.getenv("GEMINI_API_SECRET")
@@ -744,7 +745,13 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         return self._cached_resting_orders_map
 
     def get_market_position(self, ticker: str) -> dict | None:
-        """Checks if there is an active position for the given market ticker."""
+        """
+        Checks if there is an active position for the given market ticker.
+        Checks in-memory paper positions first, then batch-cached positions map.
+        """
+        pos = self.get_paper_position(ticker)
+        if pos is not None:
+            return pos
         return self.get_all_active_positions().get(ticker)
 
     def has_resting_take_profit_order(self, ticker: str) -> bool:
@@ -801,6 +808,10 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             )
             take_profit_cents = safe_tp
 
+        if not self.allow_live_orders:
+            log.info(f"{LogTag.AUTO_SELL_SET.value} [SAFETY MODE] [Gemini] Simulated resting TP order for {ticker} ({side_clean.upper()}) at {take_profit_cents}¢.")
+            return {"take_profit_cents": take_profit_cents, "status": "simulated", "order": {"orderId": f"sim_g_tp_{int(time.time()*1000)}"}}
+
         payload = {
             "symbol": ticker,
             "side": "sell",
@@ -834,6 +845,28 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
         side_clean = side.lower()
         effective_buy_cents = min(buy_price_cents - 1, maker_bid_cents + 1) if (maker_bid_cents is not None and maker_bid_cents < buy_price_cents) else max(1, buy_price_cents - 1)
+
+        if not self.allow_live_orders:
+            client_order_id = generate_safe_client_order_id(f"buy_{side_clean}", ticker)
+            log.info(f"🛡️ [SAFETY MODE] [Gemini] Live orders disabled. Simulated Maker Buy for {ticker} ({side_clean.upper()} x{count} @ {effective_buy_cents}¢, TP: {take_profit_cents}¢).")
+            self.record_paper_position(
+                ticker=ticker,
+                side=side_clean,
+                count=count,
+                entry_price_cents=effective_buy_cents,
+                target_tp_cents=take_profit_cents,
+                strategy_tag="maker_buy",
+                entry_ts=int(time.time()),
+            )
+            return {
+                "buy_price_cents": effective_buy_cents,
+                "take_profit_cents": take_profit_cents,
+                "res": {"orderId": f"sim_g_buy_{int(time.time()*1000)}", "status": "simulated"},
+                "client_order_id": client_order_id,
+                "order_id": f"sim_g_buy_{int(time.time()*1000)}",
+                "tp_order_id": f"sim_g_tp_{int(time.time()*1000)}",
+                "sell_auto_take_profit_order": {"take_profit_cents": take_profit_cents, "status": "simulated"},
+            }
 
         payload = {
             "symbol": ticker,
@@ -902,13 +935,36 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
         if effective_bid < 1 or (target_ask_cents and target_ask_cents <= 1):
             log.warning(
-                f"⚠️ [POST-ONLY CROSS SKIPPED] [Gemini] Favorite Maker bid on {ticker} ({side_clean.upper()}) "
+                f"⚠️ [POST-ONLY CROSS SKIPPED] [Gemini] Favorite Maker bid on {ticker} ({side_clean.upper()} "
                 f"would cross ask ({target_ask_cents}¢) or produce <1¢ price. Skipping to avoid taker fill."
             )
             return {"error": "post_only_cross", "reason": "target_ask_too_low"}
 
         effective_bid = max(1, min(99, effective_bid))
         spread_saved = max(0, target_ask_cents - effective_bid)
+
+        if not self.allow_live_orders:
+            client_order_id = generate_safe_client_order_id(f"fav_maker_{side_clean}", ticker)
+            log.info(f"🛡️ [SAFETY MODE] [Gemini] Live orders disabled. Simulated Favorite Maker Buy for {ticker} ({side_clean.upper()} x{count} @ {effective_bid}¢).")
+            self.record_paper_position(
+                ticker=ticker,
+                side=side_clean,
+                count=count,
+                entry_price_cents=effective_bid,
+                target_tp_cents=100,
+                strategy_tag="endgame_favorite_maker",
+                entry_ts=int(time.time()),
+            )
+            return {
+                "buy_order": {"orderId": f"sim_g_fav_{int(time.time()*1000)}", "status": "simulated"},
+                "side": side_clean,
+                "buy_price_cents": effective_bid,
+                "target_ask_cents": target_ask_cents,
+                "spread_saved_cents": spread_saved,
+                "client_order_id": client_order_id,
+                "order_id": f"sim_g_fav_{int(time.time()*1000)}",
+                "strategy_tag": "endgame_favorite_maker",
+            }
 
         payload = {
             "symbol": ticker,
@@ -962,6 +1018,11 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             return {"error": "5min_market_rejected", "ticker": ticker}
 
         side_clean = side.lower()
+        if not self.allow_live_orders:
+            log.info(f"🛡️ [SAFETY MODE] [Gemini] Simulated buy for {ticker} ({side_clean.upper()} x{count} @ {price_cents}¢).")
+            self.record_paper_position(ticker, side_clean, count, price_cents)
+            return {"status": "simulated_bought", "ticker": ticker, "price": price_cents, "count": count}
+
         payload = {
             "symbol": ticker,
             "side": "buy",
@@ -980,6 +1041,14 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
         """Executes position liquidation sell order on Gemini and clears local entry price."""
         side_clean = side.lower()
+        if not self.allow_live_orders:
+            log.info(f"🛡️ [SAFETY MODE] [Gemini] Simulated liquidation for {ticker} ({side_clean.upper()} x{count} @ {current_price}¢).")
+            self.remove_paper_position(ticker)
+            self.clear_profit_floor(ticker)
+            self.clear_entry_price(ticker)
+            self.clear_strategy_tag(ticker)
+            return {"status": "simulated_liquidated", "ticker": ticker, "price": current_price, "count": count}
+
         payload = {
             "symbol": ticker,
             "side": "sell",
@@ -997,11 +1066,15 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
     def cancel_order(self, order_id: str | int) -> dict:
         """Cancels an existing order by its unique order ID."""
+        if not self.allow_live_orders:
+            return {"status": "simulated_canceled", "orderId": order_id}
         order_val = int(order_id) if str(order_id).isdigit() else order_id
         return self._post("/v1/prediction-markets/order/cancel", {"orderId": order_val})
 
     def cancel_order_safe(self, order_id: str | int) -> bool:
         """Safely attempts to cancel an order."""
+        if not self.allow_live_orders:
+            return True
         try:
             res = self.cancel_order(order_id)
             return bool(res)
@@ -1010,6 +1083,8 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
     def cancel_unfilled_buy_orders(self, ticker: str) -> int:
         """Cancels any unfilled buy orders for ticker."""
+        if not self.allow_live_orders:
+            return 0
         orders = self.get_all_resting_orders(force_refresh=True).get(ticker, [])
         cancelled = 0
         for o in orders:
@@ -1028,6 +1103,8 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         poll_interval: float = 0.2,
     ) -> bool:
         """Cancels all resting orders for ticker and verifies they are cleared."""
+        if not self.allow_live_orders:
+            return True
         orders = self.get_all_resting_orders(force_refresh=True).get(ticker, [])
         for o in orders:
             oid = o.get("orderId")
