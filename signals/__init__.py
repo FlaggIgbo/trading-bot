@@ -5,6 +5,7 @@ from signals.base_client import (  # noqa: F401
     BaseTradingClient,
     LogTag,
     is_5min_market,
+    is_15m_market,
     parse_market_close_datetime,
     validate_market_closure_time,
 )

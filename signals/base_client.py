@@ -42,6 +42,16 @@ def is_5min_market(text: str | None) -> bool:
     return bool(re.search(r"(?:05M|(?<![0-9])5M|05MIN|5MIN|05-MIN|5-MIN|5_MIN|05_MIN|5MINUTE|05MINUTE)", str(text), re.IGNORECASE))
 
 
+def is_15m_market(text: str | None) -> bool:
+    """
+    Returns True if the given ticker, series, or instrument symbol indicates a 15-minute prediction market.
+    Matches '15M', '15MIN', '15-MIN', '15_MIN', '15MINUTE'.
+    """
+    if not text:
+        return False
+    return bool(re.search(r"(?:15M|15MIN|15-MIN|15_MIN|15MINUTE)", str(text), re.IGNORECASE))
+
+
 def parse_market_close_datetime(
     close_time_raw: str | int | float | datetime | None,
     ticker: str | None = None,
@@ -484,6 +494,23 @@ class BaseTradingClient(ABC):
             except Exception:
                 pass
         return None
+
+    def get_all_active_positions(self, force_refresh: bool = False) -> dict[str, dict]:
+        """
+        Fetches/returns all active open positions in the portfolio: {ticker: position_dict}.
+        Subclasses (KalshiClient, GeminiClient) implement optimized batch caching.
+        """
+        if hasattr(self, "_cached_positions_map") and self._cached_positions_map:
+            return self._cached_positions_map
+        if hasattr(self, "_positions_cache"):
+            return self._positions_cache
+        if hasattr(self, "_positions"):
+            return self._positions
+        return {}
+
+    def get_market(self, ticker: str) -> dict:
+        """Fetches detailed market metadata for a single ticker."""
+        return {"market": {"ticker": ticker}}
 
     @abstractmethod
     def get_market_position(self, ticker: str) -> dict | None:

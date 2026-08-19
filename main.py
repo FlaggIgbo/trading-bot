@@ -62,6 +62,7 @@ from signals.base_client import (
     BaseTradingClient,
     LogTag,
     is_5min_market,
+    is_15m_market,
     validate_market_closure_time,
 )
 from signals.gemini_client import GeminiClient
@@ -2658,9 +2659,231 @@ def process_hourly_market_group(
     return snapshots
 
 
-# Session Trading Loss Circuit Breaker ($5.00 max trading loss, immune to cash withdrawals)
-_SESSION_INITIAL_REALIZED_PNL: float | None = None
+# Session Trading Loss Circuit Breaker ($5.00 max trading loss per exchange, immune to cash withdrawals)
+_SESSION_INITIAL_REALIZED_PNL: dict[str, float] = {}
 MAX_SESSION_LOSS_DOLLARS: float = 5.00
+
+
+def _process_exchange_pipeline(
+    exchange_name: str,
+    client: BaseTradingClient,
+    now_utc: datetime,
+    current_minute: int,
+    minute_into_market_15m: int,
+    is_15m_trading_interval: bool,
+    force_trade_mark: bool,
+    spot_price_cache: dict[str, float | None],
+    dry_run: bool,
+) -> list[dict]:
+    """
+    Executes the full prediction market pipeline (15-Minute & Hourly multi-strike)
+    for a single exchange client (Kalshi or Gemini).
+    Designed to run concurrently in parallel threads via ThreadPoolExecutor.
+    """
+    snapshots_to_save: list[dict] = []
+    log.info(f"\n--- [{exchange_name.upper()} EXCHANGE PIPELINE (PARALLEL)] ---")
+
+    # Fetch real-time Portfolio PnL & Balance
+    circuit_breaker_tripped = False
+    try:
+        pnl = client.get_portfolio_pnl_summary()
+        pnl["ts"] = int(now_utc.timestamp())
+        pnl["exchange"] = exchange_name.lower()
+        sign = "+" if pnl.get("total_realized_pnl_dollars", 0) >= 0 else ""
+
+        # Circuit Breaker Evaluation (Trading loss >= $5.00 limit, immune to cash withdrawals)
+        current_realized_pnl = float(pnl.get("total_realized_pnl_dollars") or 0.0)
+        ex_key = exchange_name.lower()
+        if ex_key not in _SESSION_INITIAL_REALIZED_PNL:
+            _SESSION_INITIAL_REALIZED_PNL[ex_key] = current_realized_pnl
+
+        session_trading_loss = round(_SESSION_INITIAL_REALIZED_PNL[ex_key] - current_realized_pnl, 2)
+        circuit_breaker_tripped = (session_trading_loss >= MAX_SESSION_LOSS_DOLLARS)
+
+        log.info(
+            f"{LogTag.PORTFOLIO_PNL.value} [{exchange_name}] Cash: ${pnl.get('balance_dollars', 0.0):.2f} | "
+            f"Port Value: ${pnl.get('portfolio_value_dollars', 0.0):.2f} | "
+            f"Settled PnL: {sign}${pnl.get('total_realized_pnl_dollars', 0.0):.2f} "
+            f"({sign}{pnl.get('total_realized_pnl_cents', 0)}¢ across {pnl.get('settlements_count', 0)} mkts) | "
+            f"Active: {pnl.get('open_positions_count', 0)} pos (${pnl.get('open_exposure_dollars', 0.0):.2f})"
+        )
+
+        if circuit_breaker_tripped and not force_trade_mark:
+            log.warning(
+                f"🛑 [{exchange_name.upper()} LOSS CIRCUIT BREAKER ACTIVE] Session trading loss is -${session_trading_loss:.2f} "
+                f"(exceeds ${MAX_SESSION_LOSS_DOLLARS:.2f} limit). New buy entries are halted on {exchange_name} to preserve capital."
+            )
+            is_15m_trading_interval = False
+
+        if not dry_run:
+            save_portfolio_pnl(pnl)
+            if pnl.get("settlements"):
+                save_settlements(pnl["settlements"])
+    except Exception as err:
+        log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
+
+    # -------------------------------------------------------------------
+    # 1. 15-Minute Markets Pipeline (Crypto & Commodities)
+    # -------------------------------------------------------------------
+    is_15m_14min_selloff = (minute_into_market_15m == 14) and not force_trade_mark
+
+    if is_15m_14min_selloff:
+        # Final selloff check at :14 mark - only check contracts we are holding to speed up execution
+        active_positions = client.get_all_active_positions()
+        held_15m_tickers = [
+            t for t, p in active_positions.items()
+            if is_15m_market(t) or str(p.get("timeframe", "")).lower() == "15m"
+        ]
+        if not held_15m_tickers:
+            log.info(
+                f"[{exchange_name}] 15M final selloff check (:14 mark): No active open positions held. "
+                f"Skipping full market scan."
+            )
+            markets_15m = []
+        else:
+            log.info(
+                f"[{exchange_name}] 15M final selloff check (:14 mark): Fast-scanning {len(held_15m_tickers)} "
+                f"held contract(s): {', '.join(held_15m_tickers)}"
+            )
+            markets_15m = []
+            for ticker in held_15m_tickers:
+                try:
+                    mkt_resp = client.get_market(ticker)
+                    mkt_data = mkt_resp.get("market", mkt_resp) if isinstance(mkt_resp, dict) else {}
+                    if isinstance(mkt_data, dict):
+                        if not mkt_data.get("ticker"):
+                            mkt_data["ticker"] = ticker
+                        markets_15m.append(mkt_data)
+                except Exception as err:
+                    log.warning(f"Could not fetch held market details for {ticker}: {err}")
+    else:
+        log.info(f"Fetching active 15-minute markets from {exchange_name}...")
+        try:
+            markets_15m = client.get_15m_crypto_markets(status="open")
+            log.info(f"Retrieved {len(markets_15m)} active 15-minute markets from {exchange_name}.")
+        except Exception as error:
+            log.error(f"Failed to fetch 15-minute markets from {exchange_name}: {error}")
+            markets_15m = []
+
+    for market in markets_15m:
+        tick = market.get("ticker", "UNKNOWN")
+        try:
+            snapshot = process_single_market(
+                market,
+                is_15m_trading_interval,
+                client,
+                now_utc,
+                current_minute,
+                spot_cache=spot_price_cache,
+                dry_run=dry_run,
+            )
+            snapshot["ex"] = exchange_name.lower()
+            snapshots_to_save.append(snapshot)
+
+            diff_val = snapshot.get("diff")
+            diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
+            log.info(
+                f"  • [{exchange_name}] [15M] [{snapshot['sym']} | {snapshot['tick']}] -> "
+                f"YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
+                f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
+            )
+        except Exception as mkt_err:
+            log.error(f"❌ [{exchange_name}] Unhandled error processing 15M market {tick}: {mkt_err}", exc_info=True)
+
+    # -------------------------------------------------------------------
+    # 2. Hourly Multi-Strike Markets Pipeline (Crypto, Commodities, Equity Indices)
+    # -------------------------------------------------------------------
+    if hasattr(client, "get_hourly_crypto_markets"):
+        is_hourly_59min_selloff = (current_minute == 59) and not force_trade_mark
+
+        if is_hourly_59min_selloff:
+            # Final selloff check at :59 mark - only check contracts we are holding to speed up execution
+            active_positions = client.get_all_active_positions()
+            held_1h_tickers = [
+                t for t, p in active_positions.items()
+                if not is_15m_market(t) and not is_5min_market(t)
+            ]
+            if not held_1h_tickers:
+                log.info(
+                    f"[{exchange_name}] Hourly final selloff check (:59 mark): No active open hourly positions held. "
+                    f"Skipping full strike scan."
+                )
+                markets_1h = []
+            else:
+                log.info(
+                    f"[{exchange_name}] Hourly final selloff check (:59 mark): Fast-scanning {len(held_1h_tickers)} "
+                    f"held contract(s): {', '.join(held_1h_tickers)}"
+                )
+                markets_1h = []
+                for ticker in held_1h_tickers:
+                    try:
+                        mkt_resp = client.get_market(ticker)
+                        mkt_data = mkt_resp.get("market", mkt_resp) if isinstance(mkt_resp, dict) else {}
+                        if isinstance(mkt_data, dict):
+                            if not mkt_data.get("ticker"):
+                                mkt_data["ticker"] = ticker
+                            markets_1h.append(mkt_data)
+                    except Exception as err:
+                        log.warning(f"Could not fetch held hourly market details for {ticker}: {err}")
+        else:
+            log.info(f"Fetching active hourly multi-strike markets from {exchange_name}...")
+            try:
+                markets_1h = client.get_hourly_crypto_markets(
+                    status="open", current_hour_only=True, now_utc=now_utc
+                )
+                log.info(f"Retrieved {len(markets_1h)} active hourly strike markets from {exchange_name}.")
+            except Exception as error:
+                log.error(f"Failed to fetch hourly markets from {exchange_name}: {error}")
+                markets_1h = []
+
+        # Group hourly markets by symbol (e.g. BTC, GOLD, WTI, INX, NASDAQ100, etc.)
+        hourly_by_symbol = defaultdict(list)
+        for m in markets_1h:
+            series_tick = m.get("series_ticker", "UNKNOWN")
+            tick = m.get("ticker", "UNKNOWN")
+            sym = extract_asset_symbol(series_tick, tick)
+            hourly_by_symbol[sym].append(m)
+
+        for sym, sym_markets in hourly_by_symbol.items():
+            try:
+                hourly_snapshots = process_hourly_market_group(
+                    symbol=sym,
+                    markets=sym_markets,
+                    client=client,
+                    now_utc=now_utc,
+                    minute_past_hour=current_minute,
+                    spot_cache=spot_price_cache,
+                    dry_run=dry_run,
+                    force_trade_mark=force_trade_mark,
+                    circuit_breaker_tripped=circuit_breaker_tripped,
+                )
+                for s in hourly_snapshots:
+                    s["ex"] = exchange_name.lower()
+                    snapshots_to_save.append(s)
+
+                    # Render Log Optimization:
+                    # Only console.log strikes where YES or NO is in the broad tradeable corridor (20¢ - 80¢)
+                    # or where a trade action occurred. This eliminates 300+ lines of out-of-the-money 1¢ strikes.
+                    y_val = s.get("y")
+                    n_val = s.get("n")
+                    has_trade = s.get("trd") is not None
+                    in_broad_corridor = (
+                        (y_val is not None and 20 <= y_val <= 80)
+                        or (n_val is not None and 20 <= n_val <= 80)
+                    )
+
+                    if has_trade or in_broad_corridor:
+                        diff_val = s.get("diff")
+                        diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
+                        log.info(
+                            f"  • [{exchange_name}] [1H] [{s['sym']} | {s['tick']}] -> "
+                            f"YES: {s['y']}¢ | NO: {s['n']}¢ | "
+                            f"Price: ${s.get('p')} | Target: ${s.get('tgt')} | Diff: {diff_str}"
+                        )
+            except Exception as sym_err:
+                log.error(f"❌ [{exchange_name}] Unhandled error processing hourly group for {sym}: {sym_err}", exc_info=True)
+
+    return snapshots_to_save
 
 
 def run_pipeline_pass(
@@ -2672,9 +2895,8 @@ def run_pipeline_pass(
     Executes a single market processing & trading pass across all active exchanges
     for BOTH 15-minute and Hourly multi-strike crypto prediction markets.
     Accepts long-lived exchange clients to prevent socket leaks and connection overhead.
+    Runs all active exchange clients concurrently in parallel via ThreadPoolExecutor.
     """
-    global _SESSION_INITIAL_REALIZED_PNL
-
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
 
@@ -2771,144 +2993,50 @@ def run_pipeline_pass(
     # Batch-fetch all underlying spot prices across Crypto, Commodities (Pyth), and Indices (Yahoo)
     spot_price_cache = batch_fetch_spot_prices(SUPPORTED_SYMBOLS)
 
+    # Concurrently execute exchange pipelines in parallel across ThreadPoolExecutor
     snapshots_to_save = []
-    for exchange_name, client in active_clients:
-        log.info(f"\n--- [{exchange_name.upper()} EXCHANGE PIPELINE] ---")
-
-        # Fetch real-time Portfolio PnL & Balance
-        circuit_breaker_tripped = False
+    if len(active_clients) == 1:
+        ex_name, client = active_clients[0]
         try:
-            pnl = client.get_portfolio_pnl_summary()
-            pnl["ts"] = int(now_utc.timestamp())
-            pnl["exchange"] = exchange_name.lower()
-            sign = "+" if pnl.get("total_realized_pnl_dollars", 0) >= 0 else ""
-
-            # Circuit Breaker Evaluation (Trading loss >= $5.00 limit, immune to cash withdrawals)
-            current_realized_pnl = float(pnl.get("total_realized_pnl_dollars") or 0.0)
-            if _SESSION_INITIAL_REALIZED_PNL is None:
-                _SESSION_INITIAL_REALIZED_PNL = current_realized_pnl
-
-            session_trading_loss = round(_SESSION_INITIAL_REALIZED_PNL - current_realized_pnl, 2)
-            circuit_breaker_tripped = (session_trading_loss >= MAX_SESSION_LOSS_DOLLARS)
-
-            log.info(
-                f"{LogTag.PORTFOLIO_PNL.value} [{exchange_name}] Cash: ${pnl.get('balance_dollars', 0.0):.2f} | "
-                f"Port Value: ${pnl.get('portfolio_value_dollars', 0.0):.2f} | "
-                f"Settled PnL: {sign}${pnl.get('total_realized_pnl_dollars', 0.0):.2f} "
-                f"({sign}{pnl.get('total_realized_pnl_cents', 0)}¢ across {pnl.get('settlements_count', 0)} mkts) | "
-                f"Active: {pnl.get('open_positions_count', 0)} pos (${pnl.get('open_exposure_dollars', 0.0):.2f})"
-            )
-
-            if circuit_breaker_tripped and not force_trade_mark:
-                log.warning(
-                    f"🛑 [LOSS CIRCUIT BREAKER ACTIVE] Session trading loss is -${session_trading_loss:.2f} "
-                    f"(exceeds ${MAX_SESSION_LOSS_DOLLARS:.2f} limit). New buy entries are halted to preserve capital."
-                )
-                is_15m_trading_interval = False
-
-            if not dry_run:
-                save_portfolio_pnl(pnl)
-                if pnl.get("settlements"):
-                    save_settlements(pnl["settlements"])
-        except Exception as err:
-            log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
-
-        # -------------------------------------------------------------------
-        # 1. 15-Minute Markets Pipeline (Crypto & Commodities)
-        # -------------------------------------------------------------------
-        log.info(f"Fetching active 15-minute markets from {exchange_name}...")
-        try:
-            markets_15m = client.get_15m_crypto_markets(status="open")
-            log.info(f"Retrieved {len(markets_15m)} active 15-minute markets from {exchange_name}.")
-        except Exception as error:
-            log.error(f"Failed to fetch 15-minute markets from {exchange_name}: {error}")
-            markets_15m = []
-
-        for market in markets_15m:
-            tick = market.get("ticker", "UNKNOWN")
-            try:
-                snapshot = process_single_market(
-                    market,
-                    is_15m_trading_interval,
-                    client,
-                    now_utc,
-                    current_minute,
-                    spot_cache=spot_price_cache,
+            snapshots_to_save.extend(
+                _process_exchange_pipeline(
+                    exchange_name=ex_name,
+                    client=client,
+                    now_utc=now_utc,
+                    current_minute=current_minute,
+                    minute_into_market_15m=minute_into_market_15m,
+                    is_15m_trading_interval=is_15m_trading_interval,
+                    force_trade_mark=force_trade_mark,
+                    spot_price_cache=spot_price_cache,
                     dry_run=dry_run,
                 )
-                snapshot["ex"] = exchange_name.lower()
-                snapshots_to_save.append(snapshot)
+            )
+        except Exception as exc:
+            log.error(f"❌ Unhandled error in {ex_name} pipeline: {exc}", exc_info=True)
+    else:
+        with ThreadPoolExecutor(max_workers=len(active_clients)) as executor:
+            future_to_exchange = {
+                executor.submit(
+                    _process_exchange_pipeline,
+                    exchange_name=ex_name,
+                    client=client,
+                    now_utc=now_utc,
+                    current_minute=current_minute,
+                    minute_into_market_15m=minute_into_market_15m,
+                    is_15m_trading_interval=is_15m_trading_interval,
+                    force_trade_mark=force_trade_mark,
+                    spot_price_cache=spot_price_cache,
+                    dry_run=dry_run,
+                ): ex_name
+                for ex_name, client in active_clients
+            }
 
-                diff_val = snapshot.get("diff")
-                diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
-                log.info(
-                    f"  • [{exchange_name}] [15M] [{snapshot['sym']} | {snapshot['tick']}] -> "
-                    f"YES: {snapshot['y']}¢ | NO: {snapshot['n']}¢ | "
-                    f"Price: ${snapshot.get('p')} | Target: ${snapshot.get('tgt')} | Diff: {diff_str}"
-                )
-            except Exception as mkt_err:
-                log.error(f"❌ [{exchange_name}] Unhandled error processing 15M market {tick}: {mkt_err}", exc_info=True)
-
-        # -------------------------------------------------------------------
-        # 2. Hourly Multi-Strike Markets Pipeline (Crypto, Commodities, Equity Indices)
-        # -------------------------------------------------------------------
-        if hasattr(client, "get_hourly_crypto_markets"):
-            log.info(f"Fetching active hourly multi-strike markets from {exchange_name}...")
-            try:
-                markets_1h = client.get_hourly_crypto_markets(
-                    status="open", current_hour_only=True, now_utc=now_utc
-                )
-                log.info(f"Retrieved {len(markets_1h)} active hourly strike markets from {exchange_name}.")
-            except Exception as error:
-                log.error(f"Failed to fetch hourly markets from {exchange_name}: {error}")
-                markets_1h = []
-
-            # Group hourly markets by symbol (e.g. BTC, GOLD, WTI, INX, NASDAQ100, etc.)
-            hourly_by_symbol = defaultdict(list)
-            for m in markets_1h:
-                series_tick = m.get("series_ticker", "UNKNOWN")
-                tick = m.get("ticker", "UNKNOWN")
-                sym = extract_asset_symbol(series_tick, tick)
-                hourly_by_symbol[sym].append(m)
-
-            for sym, sym_markets in hourly_by_symbol.items():
+            for future in as_completed(future_to_exchange):
+                ex_name = future_to_exchange[future]
                 try:
-                    hourly_snapshots = process_hourly_market_group(
-                        symbol=sym,
-                        markets=sym_markets,
-                        client=client,
-                        now_utc=now_utc,
-                        minute_past_hour=current_minute,
-                        spot_cache=spot_price_cache,
-                        dry_run=dry_run,
-                        force_trade_mark=force_trade_mark,
-                        circuit_breaker_tripped=circuit_breaker_tripped,
-                    )
-                    for s in hourly_snapshots:
-                        s["ex"] = exchange_name.lower()
-                        snapshots_to_save.append(s)
-
-                        # Render Log Optimization:
-                        # Only console.log strikes where YES or NO is in the broad tradeable corridor (20¢ - 80¢)
-                        # or where a trade action occurred. This eliminates 300+ lines of out-of-the-money 1¢ strikes.
-                        y_val = s.get("y")
-                        n_val = s.get("n")
-                        has_trade = s.get("trd") is not None
-                        in_broad_corridor = (
-                            (y_val is not None and 20 <= y_val <= 80)
-                            or (n_val is not None and 20 <= n_val <= 80)
-                        )
-
-                        if has_trade or in_broad_corridor:
-                            diff_val = s.get("diff")
-                            diff_str = f"+{diff_val}" if (diff_val is not None and diff_val > 0) else str(diff_val)
-                            log.info(
-                                f"  • [{exchange_name}] [1H] [{s['sym']} | {s['tick']}] -> "
-                                f"YES: {s['y']}¢ | NO: {s['n']}¢ | "
-                                f"Price: ${s.get('p')} | Target: ${s.get('tgt')} | Diff: {diff_str}"
-                            )
-                except Exception as sym_err:
-                    log.error(f"❌ [{exchange_name}] Unhandled error processing hourly group for {sym}: {sym_err}", exc_info=True)
+                    snapshots_to_save.extend(future.result())
+                except Exception as exc:
+                    log.error(f"❌ Unhandled error in {ex_name} parallel pipeline: {exc}", exc_info=True)
 
     # Save valid market snapshots to MongoDB Atlas
     # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :14, :20, :30, :40, :50, :52.5, :55, :57.5, :59) OR whenever a trade occurs

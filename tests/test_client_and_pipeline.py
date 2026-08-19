@@ -26,12 +26,24 @@ class DummyTradingClient(BaseTradingClient):
         self._positions_cache = {}
         self._orders_cache = {}
 
+    def get_all_active_positions(self, force_refresh: bool = False):
+        return self._positions_cache
+
+    def get_market(self, ticker: str) -> dict:
+        return {"market": {"ticker": ticker}}
+
     def get_market_position(self, ticker: str):
         return self._positions_cache.get(ticker)
 
     def cancel_and_verify_resting_orders(self, ticker: str):
         self._orders_cache.pop(ticker, None)
         return True
+
+    def cancel_unfilled_buy_orders(self, ticker: str):
+        return True
+
+    def has_existing_position_or_order(self, ticker: str) -> bool:
+        return ticker in self._positions_cache or ticker in self._orders_cache
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int):
         self._positions_cache.pop(ticker, None)
@@ -43,6 +55,12 @@ class DummyTradingClient(BaseTradingClient):
         self._positions_cache[ticker] = {"side": side.lower(), "count": count, "entry_price_cents": price_cents}
         self.set_entry_price(ticker, price_cents)
         return {"status": "bought", "price": price_cents, "fill_count": count}
+
+    def buy_and_set_take_profit(self, ticker: str, side: str, buy_price_cents: int, take_profit_cents: int = 82, count: int = 1, maker_bid_cents: int = None, **kw):
+        effective = min(buy_price_cents, (maker_bid_cents + 1) if maker_bid_cents else buy_price_cents)
+        self._positions_cache[ticker] = {"side": side.lower(), "count": count, "entry_price_cents": effective}
+        self.set_entry_price(ticker, effective)
+        return {"buy_price_cents": effective, "order_id": f"buy_{ticker}", "tp_order_id": f"tp_{ticker}"}
 
 
 @pytest.fixture
@@ -631,6 +649,278 @@ def test_15m_14min_crash_detection_process_market(dummy_client, mock_filter):
         assert snapshot["trd"]["exit_price"] == 15
         assert snapshot["trd"]["loss_cents"] == 70
         mock_liq.assert_called_once_with(ticker, "yes", 1, 15)
+
+
+def test_process_exchange_pipeline(dummy_client, mock_filter):
+    """Verify _process_exchange_pipeline processes 15M and hourly markets and returns snapshots."""
+    from main import _process_exchange_pipeline
+
+    dummy_client.get_15m_crypto_markets = MagicMock(return_value=[
+        {
+            "ticker": "KXBTC15M-PIPE-TEST",
+            "series_ticker": "KXBTC15M",
+            "yes_ask_dollars": "0.40",
+            "yes_bid_dollars": "0.38",
+            "no_ask_dollars": "0.62",
+            "no_bid_dollars": "0.60",
+            "floor_strike": 60000.0,
+            "volume_24h": 1500,
+        }
+    ])
+    dummy_client.get_hourly_crypto_markets = MagicMock(return_value=[])
+    dummy_client.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 100.0,
+        "portfolio_value_dollars": 100.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value={"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}):
+        snaps = _process_exchange_pipeline(
+            exchange_name="Kalshi",
+            client=dummy_client,
+            now_utc=datetime(2026, 8, 14, 0, 0, 30, tzinfo=timezone.utc),
+            current_minute=0,
+            minute_into_market_15m=0,
+            is_15m_trading_interval=True,
+            force_trade_mark=False,
+            spot_price_cache={"BTC": 60100.0},
+            dry_run=True,
+        )
+
+        assert len(snaps) == 1
+        assert snaps[0]["ex"] == "kalshi"
+        assert snaps[0]["tick"] == "KXBTC15M-PIPE-TEST"
+
+
+def test_run_pipeline_pass_parallel_execution(mock_filter):
+    """Verify run_pipeline_pass runs multiple exchange clients concurrently and aggregates snapshots."""
+    from main import run_pipeline_pass
+
+    client1 = DummyTradingClient()
+    client1.exchange_name = "Kalshi"
+    client1.get_15m_crypto_markets = MagicMock(return_value=[
+        {
+            "ticker": "KXBTC15M-PAR-1",
+            "series_ticker": "KXBTC15M",
+            "yes_ask_dollars": "0.40",
+            "yes_bid_dollars": "0.38",
+            "no_ask_dollars": "0.62",
+            "no_bid_dollars": "0.60",
+            "floor_strike": 60000.0,
+        }
+    ])
+    client1.get_hourly_crypto_markets = MagicMock(return_value=[])
+    client1.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 100.0,
+        "portfolio_value_dollars": 100.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    client2 = DummyTradingClient()
+    client2.exchange_name = "Gemini"
+    client2.get_15m_crypto_markets = MagicMock(return_value=[
+        {
+            "ticker": "GEMI-BTC15M-PAR-2",
+            "series_ticker": "BTC15M",
+            "yes_ask_dollars": "0.42",
+            "yes_bid_dollars": "0.39",
+            "no_ask_dollars": "0.60",
+            "no_bid_dollars": "0.58",
+            "floor_strike": 60000.0,
+        }
+    ])
+    client2.get_hourly_crypto_markets = MagicMock(return_value=[])
+    client2.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 50.0,
+        "portfolio_value_dollars": 50.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value={"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}), \
+         patch("main.batch_fetch_spot_prices", return_value={"BTC": 60100.0}), \
+         patch("main.save_market_snapshots") as mock_save:
+
+        run_pipeline_pass(
+            clients=[("Kalshi", client1), ("Gemini", client2)],
+            dry_run=False,
+            force_trade_mark=True,
+        )
+
+        assert mock_save.called
+        saved_snaps = mock_save.call_args[0][0]
+        exchanges_saved = {s.get("ex") for s in saved_snaps}
+        assert "kalshi" in exchanges_saved
+        assert "gemini" in exchanges_saved
+
+
+def test_process_exchange_pipeline_14min_selloff_no_positions(dummy_client, mock_filter):
+    """Verify that at :14 mark with no held positions, 15M full market scan is bypassed."""
+    from main import _process_exchange_pipeline
+
+    dummy_client.get_15m_crypto_markets = MagicMock()
+    dummy_client.get_hourly_crypto_markets = MagicMock()
+    dummy_client.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 100.0,
+        "portfolio_value_dollars": 100.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value={"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}):
+        snaps = _process_exchange_pipeline(
+            exchange_name="Kalshi",
+            client=dummy_client,
+            now_utc=datetime(2026, 8, 14, 0, 14, 0, tzinfo=timezone.utc),
+            current_minute=14,
+            minute_into_market_15m=14,
+            is_15m_trading_interval=False,
+            force_trade_mark=False,
+            spot_price_cache={"BTC": 60100.0},
+            dry_run=True,
+        )
+
+        # Full market scans should be completely bypassed
+        dummy_client.get_15m_crypto_markets.assert_not_called()
+        assert len(snaps) == 0
+
+
+def test_process_exchange_pipeline_14min_selloff_with_held_position(dummy_client, mock_filter):
+    """Verify that at :14 mark, only held 15M contracts are fetched and checked."""
+    from main import _process_exchange_pipeline
+
+    ticker = "KXBTC15M-HELD14"
+    dummy_client.execute_buy(ticker, "yes", 1, 85)
+
+    market_held = {
+        "ticker": ticker,
+        "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.20",
+        "yes_bid_dollars": "0.15",
+        "no_ask_dollars": "0.85",
+        "no_bid_dollars": "0.80",
+        "floor_strike": 60000.0,
+        "close_time": "2026-08-14T00:15:00Z",
+    }
+
+    dummy_client.get_market = MagicMock(return_value={"market": market_held})
+    dummy_client.get_15m_crypto_markets = MagicMock()
+    dummy_client.get_hourly_crypto_markets = MagicMock()
+    dummy_client.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 100.0,
+        "portfolio_value_dollars": 100.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value={"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}), \
+         patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=True), \
+         patch.object(dummy_client, "execute_liquidation") as mock_liq:
+
+        snaps = _process_exchange_pipeline(
+            exchange_name="Kalshi",
+            client=dummy_client,
+            now_utc=datetime(2026, 8, 14, 0, 14, 0, tzinfo=timezone.utc),
+            current_minute=14,
+            minute_into_market_15m=14,
+            is_15m_trading_interval=False,
+            force_trade_mark=False,
+            spot_price_cache={"BTC": 59900.0},
+            dry_run=False,
+        )
+
+        dummy_client.get_15m_crypto_markets.assert_not_called()
+        dummy_client.get_market.assert_called_once_with(ticker)
+        assert len(snaps) == 1
+        assert snaps[0]["tick"] == ticker
+        assert snaps[0]["trd"]["action"] == "14min_crash_selloff_cut"
+        mock_liq.assert_called_once_with(ticker, "yes", 1, 15)
+
+
+def test_process_exchange_pipeline_59min_selloff_no_positions(dummy_client, mock_filter):
+    """Verify that at :59 mark with no held positions, hourly strike scan is bypassed."""
+    from main import _process_exchange_pipeline
+
+    dummy_client.get_15m_crypto_markets = MagicMock()
+    dummy_client.get_hourly_crypto_markets = MagicMock()
+    dummy_client.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 100.0,
+        "portfolio_value_dollars": 100.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value={"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}):
+        snaps = _process_exchange_pipeline(
+            exchange_name="Kalshi",
+            client=dummy_client,
+            now_utc=datetime(2026, 8, 14, 0, 59, 0, tzinfo=timezone.utc),
+            current_minute=59,
+            minute_into_market_15m=14,
+            is_15m_trading_interval=False,
+            force_trade_mark=False,
+            spot_price_cache={"BTC": 60100.0},
+            dry_run=True,
+        )
+
+        dummy_client.get_15m_crypto_markets.assert_not_called()
+        dummy_client.get_hourly_crypto_markets.assert_not_called()
+        assert len(snaps) == 0
+
+
+def test_process_exchange_pipeline_59min_selloff_with_held_position(dummy_client, mock_filter):
+    """Verify that at :59 mark, only held hourly contracts are fetched and checked."""
+    from main import _process_exchange_pipeline
+
+    ticker = "KXBTCD-HELD59"
+    dummy_client.execute_buy(ticker, "yes", 1, 80)
+
+    market_held = {
+        "ticker": ticker,
+        "series_ticker": "KXBTCD",
+        "yes_ask_dollars": "0.15",
+        "yes_bid_dollars": "0.10",
+        "no_ask_dollars": "0.90",
+        "no_bid_dollars": "0.85",
+        "floor_strike": 70000.0,
+        "close_time": "2026-08-14T01:00:00Z",
+    }
+
+    dummy_client.get_market = MagicMock(return_value={"market": market_held})
+    dummy_client.get_15m_crypto_markets = MagicMock()
+    dummy_client.get_hourly_crypto_markets = MagicMock()
+    dummy_client.get_portfolio_pnl_summary = MagicMock(return_value={
+        "balance_dollars": 100.0,
+        "portfolio_value_dollars": 100.0,
+        "total_realized_pnl_dollars": 0.0,
+    })
+
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value={"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}), \
+         patch.object(dummy_client, "cancel_and_verify_resting_orders", return_value=True), \
+         patch.object(dummy_client, "execute_liquidation") as mock_liq:
+
+        snaps = _process_exchange_pipeline(
+            exchange_name="Kalshi",
+            client=dummy_client,
+            now_utc=datetime(2026, 8, 14, 0, 59, 0, tzinfo=timezone.utc),
+            current_minute=59,
+            minute_into_market_15m=14,
+            is_15m_trading_interval=False,
+            force_trade_mark=False,
+            spot_price_cache={"BTC": 69000.0},
+            dry_run=False,
+        )
+
+        dummy_client.get_hourly_crypto_markets.assert_not_called()
+        dummy_client.get_market.assert_called_once_with(ticker)
+        assert len(snaps) == 1
+        assert snaps[0]["tick"] == ticker
+        assert snaps[0]["trd"]["action"] == "59min_crash_selloff_cut"
+        mock_liq.assert_called_once_with(ticker, "yes", 1, 10)
+
+
 
 
 
