@@ -671,5 +671,86 @@ def test_evaluate_favorite_maker_disabled_guard():
     assert res is None
 
 
+def test_calculate_dynamic_contracts_count_high_win_rate_scaling():
+    from database import calculate_dynamic_contracts_count
+
+    # Baseline 1 contract when restricted
+    assert calculate_dynamic_contracts_count(balance_cents=5000, buy_price_cents=84, base_count=1, is_restricted=True, recent_win_rate=0.95) == 1
+
+    # Scaled to 3 contracts when recent_win_rate >= 0.85 (e.g. BTC/SOL/ETH) and balance >= $20 (20% of $50 = $10 / 84¢ = 11 -> capped at 3)
+    assert calculate_dynamic_contracts_count(balance_cents=5000, buy_price_cents=84, base_count=1, is_restricted=False, recent_win_rate=0.88) == 3
+
+    # Scaled to 4 contracts when recent_win_rate >= 0.90 (e.g. Gold at 95.5% WR)
+    assert calculate_dynamic_contracts_count(balance_cents=5000, buy_price_cents=84, base_count=1, is_restricted=False, recent_win_rate=0.95) == 4
+
+    # Small balance (< $10) strictly sized at 1 contract
+    assert calculate_dynamic_contracts_count(balance_cents=800, buy_price_cents=84, base_count=1, is_restricted=False, recent_win_rate=0.95) == 1
+
+
+def test_tiered_maker_pricing_and_sizing_in_favorite_maker():
+    from main import evaluate_favorite_maker_opportunity
+    client = MockTradingClient()
+    client.get_balance_cents = lambda: 5000  # $50 balance
+
+    market = {"ticker": "KXGOLDH-TEST"}
+    # Spread is 8¢ wide (Bid: 80¢, Ask: 88¢)
+    quotes = {"yes_ask": 88, "yes_bid": 80, "no_ask": 20, "no_bid": 12}
+    gold_filter = {
+        "enable_favorite_maker": True,
+        "favorite_maker_min_buy": 80,
+        "favorite_maker_max_buy": 93,
+        "recent_win_rate": 0.95,  # 95.5% Gold win rate
+        "contracts_per_trade": 1,
+    }
+
+    # 1. Early in runway (rem_mins = 5.0m): Places deep maker bid at min(bid + 2, ask - 2) = 82¢ (captures 6¢ spread)
+    res_early = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes,
+        rem_mins=5.0,
+        dynamic_filters=gold_filter,
+        client=client,
+        spot_price=4350.0,
+        target_price=4340.0,
+    )
+    assert res_early is not None
+    assert res_early["maker_bid"] == 82
+    assert res_early["spread_saved"] == 6
+    assert res_early["count"] == 4  # Scaled to 4 contracts for Gold
+
+    # 2. Final expiration minutes (rem_mins = 2.0m): Places top-of-queue bid at max(bid + 1, ask - 2) = 86¢ for guaranteed fill
+    res_late = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes,
+        rem_mins=2.0,
+        dynamic_filters=gold_filter,
+        client=client,
+        spot_price=4350.0,
+        target_price=4340.0,
+    )
+    assert res_late is not None
+    assert res_late["maker_bid"] == 86
+    assert res_late["spread_saved"] == 2
+
+
+def test_evaluate_ensemble_consensus_recommended_contracts():
+    from database import evaluate_ensemble_consensus
+    # High conviction setup (matching 3x streak, strong spot lead)
+    streak_data = {"streak_side": "yes", "streak_length": 3, "regime": "confirmed_streak", "sample_size": 20}
+    cons_high = evaluate_ensemble_consensus(
+        symbol="BTC",
+        proposed_side="yes",
+        price_cents=30,
+        spot_price=60200.0,
+        target_price=60000.0,
+        timeframe="15m",
+        dynamic_filters={"min_buy": 18, "max_buy": 35},
+        streak_data=streak_data,
+    )
+    assert cons_high["is_approved"] is True
+    assert cons_high["recommended_contracts"] >= 2
+
+
+
 
 

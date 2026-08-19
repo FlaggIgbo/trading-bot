@@ -680,28 +680,38 @@ def calculate_dynamic_contracts_count(
     balance_cents: int | float | None,
     buy_price_cents: int,
     base_count: int = 1,
-    max_bankroll_pct: float = 0.15,
+    max_bankroll_pct: float = 0.20,
     is_restricted: bool = False,
+    recent_win_rate: float | None = None,
 ) -> int:
     """
-    Calculates safe, dynamic contract quantity based on available cash balance and contract price.
-    Prevents catastrophic drawdown by sizing down when cash balance is depleted or when market is restricted.
+    Calculates safe, dynamic contract quantity based on available cash balance, contract price, and asset win rate.
+    Prevents catastrophic drawdown while dynamically scaling position sizes on high-EV proven winners.
 
     Rules:
-    - If is_restricted is True: Clamped to at most 1 contract.
+    - If is_restricted is True: Clamped strictly to 1 contract.
     - If balance is None or non-numeric (e.g. mock test / dry-run): Returns base_count (or 1 if restricted).
     - If balance cannot afford 1 contract (balance_cents < buy_price_cents): Returns 0.
-    - If balance is small (< 1000 cents / $10.00): Returns 1 contract.
-    - Fractional bankroll sizing: Allocates at most max_bankroll_pct (default 15%) of available cash.
-    - Contract count is clamped to at most base_count.
+    - Small bankroll protection: under $10.00 (< 1000 cents), size strictly at 1 contract.
+    - High-Win-Rate Multiplier (>=85% win rate e.g. Gold, BTC, ETH):
+      If account balance >= 2000 cents ($20.00), allows scaling up to 3 contracts (or 4 if >= 90% WR).
+    - Fractional bankroll sizing: Allocates at most max_bankroll_pct (default 20%) of available cash.
+    - Contract count is clamped to at most effective_max.
     """
     if buy_price_cents <= 0:
         return 0
 
     effective_max = 1 if is_restricted else max(1, base_count)
+    if not is_restricted and recent_win_rate is not None:
+        if recent_win_rate >= 0.90:
+            effective_max = max(effective_max, 4)
+        elif recent_win_rate >= 0.85:
+            effective_max = max(effective_max, 3)
+        elif recent_win_rate >= 0.75:
+            effective_max = max(effective_max, 2)
 
     if balance_cents is None or not isinstance(balance_cents, (int, float)):
-        return effective_max
+        return 1 if is_restricted else base_count
 
     balance_int = int(balance_cents)
     if balance_int < buy_price_cents:
@@ -1738,12 +1748,21 @@ def evaluate_ensemble_consensus(
         else f"Ensemble consensus score ({score:.2f}) below threshold (0.20)"
     )
 
+    # High-Conviction Sizing Multiplier (scales position sizing on proven high-conviction streaks)
+    if is_approved and score >= 0.65 and streak_side == prop_side and streak_len >= 2:
+        recommended_contracts = 3  # High conviction: strong spot momentum & confirmed historical streak
+    elif is_approved and score >= 0.50 and streak_side == prop_side and streak_len >= 1:
+        recommended_contracts = 2  # Moderate conviction: solid alignment
+    else:
+        recommended_contracts = 1  # Standard base sizing
+
     return {
         "is_approved": is_approved,
         "confidence": round(confidence, 2),
         "consensus_score": round(score, 3),
         "streak_side": streak_side,
         "streak_length": streak_len,
+        "recommended_contracts": recommended_contracts,
         "regime": regime_desc,
         "reason": reason,
     }

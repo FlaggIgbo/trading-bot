@@ -896,14 +896,45 @@ def evaluate_favorite_maker_opportunity(
             if not client.check_crypto_portfolio_directional_cap("yes", max_concurrent=max_conc):
                 return None
 
-        maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
+        # Tiered Maker Pricing:
+        # If wide spread (>= 3¢) and runway is early (rem_mins >= 4.0m), place a deeper bid to capture higher margin.
+        # Otherwise, place at top of book (max(yes_bid + 1, yes_ask - 2)) for guaranteed queue fill before expiration.
+        is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
+        spread_cents = (yes_ask - yes_bid) if (yes_ask is not None and yes_bid is not None) else 0
+        if is_early_endgame and spread_cents >= 3 and yes_bid is not None:
+            maker_bid = min(yes_bid + 2, yes_ask - 2)
+        else:
+            maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
         maker_bid = min(yes_ask - 1, max(1, maker_bid))
+
+        # Dynamic Sizing & Bankroll Compounding:
+        balance_cents = None
+        if hasattr(client, "get_balance_cents"):
+            try:
+                b_val = client.get_balance_cents()
+                if isinstance(b_val, (int, float)):
+                    balance_cents = int(b_val)
+            except Exception:
+                pass
+
+        recent_wr = dynamic_filters.get("recent_win_rate")
+        base_contracts = int(dynamic_filters.get("contracts_per_trade", 1))
+        contracts_count = calculate_dynamic_contracts_count(
+            balance_cents=balance_cents,
+            buy_price_cents=maker_bid,
+            base_count=base_contracts,
+            is_restricted=is_restricted,
+            recent_win_rate=recent_wr,
+        )
+        contracts_to_buy = max(1, contracts_count)
+
         return {
             "side": "yes",
             "maker_bid": maker_bid,
             "target_ask": yes_ask,
             "spread_saved": max(1, yes_ask - maker_bid),
             "favorite_type": "heavy_favorite_yes",
+            "count": contracts_to_buy,
         }
 
     # 2. Check NO as favorite
@@ -924,14 +955,41 @@ def evaluate_favorite_maker_opportunity(
             if not client.check_crypto_portfolio_directional_cap("no", max_concurrent=max_conc):
                 return None
 
-        maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
+        is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
+        spread_cents = (no_ask - no_bid) if (no_ask is not None and no_bid is not None) else 0
+        if is_early_endgame and spread_cents >= 3 and no_bid is not None:
+            maker_bid = min(no_bid + 2, no_ask - 2)
+        else:
+            maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
         maker_bid = min(no_ask - 1, max(1, maker_bid))
+
+        balance_cents = None
+        if hasattr(client, "get_balance_cents"):
+            try:
+                b_val = client.get_balance_cents()
+                if isinstance(b_val, (int, float)):
+                    balance_cents = int(b_val)
+            except Exception:
+                pass
+
+        recent_wr = dynamic_filters.get("recent_win_rate")
+        base_contracts = int(dynamic_filters.get("contracts_per_trade", 1))
+        contracts_count = calculate_dynamic_contracts_count(
+            balance_cents=balance_cents,
+            buy_price_cents=maker_bid,
+            base_count=base_contracts,
+            is_restricted=is_restricted,
+            recent_win_rate=recent_wr,
+        )
+        contracts_to_buy = max(1, contracts_count)
+
         return {
             "side": "no",
             "maker_bid": maker_bid,
             "target_ask": no_ask,
             "spread_saved": max(1, no_ask - maker_bid),
             "favorite_type": "heavy_favorite_no",
+            "count": contracts_to_buy,
         }
 
     return None
@@ -1366,6 +1424,7 @@ def process_single_market(
                 fav_side = fav_opp["side"]
                 fav_maker_bid = fav_opp["maker_bid"]
                 fav_target_ask = fav_opp["target_ask"]
+                fav_count = fav_opp.get("count", 1)
                 trade_executed, trade_details = _execute_favorite_maker_flow(
                     ticker=ticker,
                     side=fav_side,
@@ -1376,7 +1435,7 @@ def process_single_market(
                     market_result=market.get("result"),
                     client=client,
                     dry_run=dry_run,
-                    count=1,
+                    count=fav_count,
                 )
 
             # Priority 2: Screen for candidates across General Corridors if Favorite Maker not triggered
@@ -1547,11 +1606,17 @@ def process_single_market(
                             except Exception:
                                 pass
 
+                        rec_contracts = chosen_consensus.get("recommended_contracts", 1) if chosen_consensus else 1
+                        if not is_restricted and rec_contracts > 1:
+                            base_contracts = max(base_contracts, rec_contracts)
+                        recent_wr = dynamic_filters.get("recent_win_rate")
+
                         contracts_count = calculate_dynamic_contracts_count(
                             balance_cents=balance_cents,
                             buy_price_cents=chosen_price,
                             base_count=base_contracts,
                             is_restricted=is_restricted,
+                            recent_win_rate=recent_wr,
                         )
 
                         if is_restricted:
@@ -1614,6 +1679,7 @@ def process_single_market(
                 fav_side_val = fav_opp["side"]
                 fav_maker_bid = fav_opp["maker_bid"]
                 fav_target_ask = fav_opp["target_ask"]
+                fav_count = fav_opp.get("count", 1)
                 trade_executed, trade_details = _execute_favorite_maker_flow(
                     ticker=ticker,
                     side=fav_side_val,
@@ -1624,7 +1690,7 @@ def process_single_market(
                     market_result=market.get("result"),
                     client=client,
                     dry_run=dry_run,
-                    count=1,
+                    count=fav_count,
                 )
 
     # 5. Build Compact Snapshot Document
@@ -2059,6 +2125,7 @@ def process_hourly_market_group(
             if fav_opp_by_ticker:
                 best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
                 best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
+                fav_count = best_fav.get("count", 1)
                 fav_executed, fav_details = _execute_favorite_maker_flow(
                     ticker=best_fav_ticker,
                     side=best_fav["side"],
@@ -2069,7 +2136,7 @@ def process_hourly_market_group(
                     market_result=best_item["market"].get("result"),
                     client=client,
                     dry_run=dry_run,
-                    count=1,
+                    count=fav_count,
                 )
                 if fav_executed and fav_details:
                     trade_executed_by_ticker[best_fav_ticker] = fav_details
@@ -2516,6 +2583,7 @@ def process_hourly_market_group(
         if fav_opp_by_ticker:
             best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
             best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
+            fav_count = best_fav.get("count", 1)
             fav_executed, fav_details = _execute_favorite_maker_flow(
                 ticker=best_fav_ticker,
                 side=best_fav["side"],
@@ -2526,7 +2594,7 @@ def process_hourly_market_group(
                 market_result=best_item["market"].get("result"),
                 client=client,
                 dry_run=dry_run,
-                count=1,
+                count=fav_count,
             )
             if fav_executed and fav_details:
                 trade_executed_by_ticker[best_fav_ticker] = fav_details
