@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: trading-bot
+    env: python
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    buildFilter:
+      paths:
+        - "main.py"
+        - "database.py"
+        - "signals/**"
+        - "requirements.txt"
+        - "pyproject.toml"
+      ignoredPaths:
+        - "tests/**"
+        - ".github/**"
+        - ".githooks/**"
+        - "scripts/**"
+        - "README.md"
+        - ".gitignore"
