@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
-import pytest
 
 from database import (
     get_active_position_cost,
@@ -12,10 +11,7 @@ from database import (
     save_active_position_cost,
 )
 from main import (
-    _execute_favorite_maker_flow,
     evaluate_favorite_maker_opportunity,
-    get_crypto_spot_price,
-    get_kalshi_cfbenchmarks_spot_price,
     get_market_lead_changes,
     get_market_settlement_source,
     is_market_choppy,

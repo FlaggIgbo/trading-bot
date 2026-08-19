@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+
 import pytest
 
 from main import extract_asset_symbol, extract_target_strike, process_hourly_market_group
@@ -94,14 +95,14 @@ def test_hourly_multi_strike_single_directional_opportunity(hourly_client):
 def test_hourly_lifecycle_cut_losses(hourly_client, minute, init_pos, init_price, expected_liq, expected_action):
     ticker, side = init_pos
     hourly_client._positions[ticker] = {"ticker": ticker, "side": side, "entry_price_cents": init_price}
-    
+
     markets = [{
         "ticker": ticker, "series_ticker": "KXBTCD", "floor_strike": 70000.0,
         "yes_ask_dollars": "0.08", "yes_bid_dollars": "0.06", "no_ask_dollars": "0.94", "no_bid_dollars": "0.92"
     }]
-    
+
     snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, minute, 0, tzinfo=timezone.utc), minute, {"BTC": 71000.0}, False)
-    
+
     assert len(hourly_client.liquidations) == 1
     assert hourly_client.liquidations[0]["ticker"] == expected_liq
     assert snaps[0]["trd"]["action"] == expected_action

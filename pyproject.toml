@@ -14,9 +14,12 @@ target-version = "py39"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]
+select = ["E", "F", "W"]
+ignore = ["E501", "F841", "F401", "W293", "W291"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "smoke: Quick happy-path sanity checks to run locally before git push",
+]

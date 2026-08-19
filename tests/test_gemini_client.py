@@ -14,10 +14,10 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from signals.gemini_client import (
-    GEMINI_CATEGORIES,
     SERIES_15M_ALL,
     SERIES_15M_COMMODITIES,
     SERIES_15M_CRYPTO,
@@ -25,15 +25,10 @@ from signals.gemini_client import (
     SERIES_HOURLY_COMMODITIES,
     SERIES_HOURLY_CRYPTO,
     SERIES_HOURLY_INDICES,
-    GeminiClient,
     GeminiPredictionClient,
     GeminiTradingClient,
     parse_cents,
     parse_gemini_error,
-)
-from signals.kalshi_client import (
-    SERIES_15M_ALL as KALSHI_SERIES_15M_ALL,
-    SERIES_HOURLY_ALL as KALSHI_SERIES_HOURLY_ALL,
 )
 
 

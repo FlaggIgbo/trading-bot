@@ -1109,7 +1109,7 @@ class KalshiClient(BaseTradingClient):
                         buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
                         effective_buy_cents = retry_price
                         log.info(f"🔄 [POST-ONLY RETRY] Successfully rested buy order 1¢ deeper at {effective_buy_cents}¢ on {ticker}.")
-                    except Exception as retry_err:
+                    except Exception:
                         log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                         return {"error": "post_only_cross", "ticker": ticker}
                 else:
@@ -1250,7 +1250,7 @@ class KalshiClient(BaseTradingClient):
                         effective_bid = retry_bid
                         spread_saved = max(0, target_ask_cents - effective_bid)
                         log.info(f"🔄 [POST-ONLY RETRY] Successfully rested maker bid 1¢ deeper at {effective_bid}¢ on {ticker}.")
-                    except Exception as retry_err:
+                    except Exception:
                         log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                         return {"error": "post_only_cross", "ticker": ticker}
                 else:

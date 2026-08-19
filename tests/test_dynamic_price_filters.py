@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from database import (
     DEFAULT_DYNAMIC_PRICE_MAP,
-    DEFAULT_DYNAMIC_PRICE_MAP_1H,
     calculate_dynamic_contracts_count,
     calibrate_dynamic_price_map_from_db,
     get_dynamic_filter_for_market,
@@ -132,13 +132,13 @@ def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
     client = MagicMock(exchange_name="Kalshi")
     client.get_market_position.return_value = None
     client.has_existing_position_or_order.return_value = False
-    
+
     market = {
         "ticker": "KXBTC15M-TEST", "series_ticker": "KXBTC15M",
         "yes_ask_dollars": f"{ask/100:.4f}", "yes_bid_dollars": f"{(ask-2)/100:.4f}",
         "floor_strike": 60000.0, "exchange": "kalshi",
     }
-    
+
     snap = process_single_market(
         market=market,
         is_trading_interval=True,
@@ -235,11 +235,11 @@ def test_market_screening_mid_zone_allowed_during_exploration():
 
 def test_exploration_trade_cap_enforcement():
     from main import (
+        MAX_EXPLORATION_TRADES_PER_SESSION,
         can_execute_exploration_trade,
+        get_exploration_trades_count,
         record_exploration_trade_executed,
         reset_exploration_trades_count,
-        get_exploration_trades_count,
-        MAX_EXPLORATION_TRADES_PER_SESSION,
     )
     reset_exploration_trades_count()
     dt = datetime(2026, 8, 15, 5, 5, 0, tzinfo=timezone.utc)
@@ -566,8 +566,8 @@ def test_favorite_maker_spot_divergence_on_restricted_assets():
 
 def test_get_active_position_doc_and_field_helpers():
     from database import (
-        get_active_position_doc,
         get_active_position_cost,
+        get_active_position_doc,
         get_active_position_strategy_tag,
         get_active_position_target_tp,
     )

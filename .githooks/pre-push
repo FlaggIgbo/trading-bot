@@ -1,0 +1,24 @@
+#!/bin/bash
+# Pre-push git hook: Runs fast happy-path smoke tests (< 1.5s) before pushing to remote.
+# To bypass in emergencies: git push --no-verify
+
+echo "🚀 [Pre-Push Hook] Running fast happy-path smoke tests..."
+
+# Use virtualenv python/pytest if present, otherwise system pytest
+if [ -f ".venv/bin/pytest" ]; then
+    PYTEST_BIN=".venv/bin/pytest"
+else
+    PYTEST_BIN="pytest"
+fi
+
+$PYTEST_BIN tests/test_smoke.py -q --disable-warnings
+
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "❌ [Pre-Push Hook] Smoke tests failed! Push aborted."
+    echo "💡 Fix the failures above or run: git push --no-verify"
+    exit 1
+fi
+
+echo "✅ [Pre-Push Hook] Happy-path smoke tests passed. Proceeding with push."
+exit 0

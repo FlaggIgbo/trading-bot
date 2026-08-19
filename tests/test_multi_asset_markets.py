@@ -2,22 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 from database import DEFAULT_DYNAMIC_PRICE_MAP
 from main import (
     PYTH_COMMODITY_FEEDS,
-    INDEX_TICKER_MAP,
     SUPPORTED_SYMBOLS,
     batch_fetch_spot_prices,
     extract_asset_symbol,
     extract_target_strike,
     get_index_spot_price,
     get_pyth_commodity_spot_prices,
-    get_spot_price,
     is_spot_momentum_aligned,
     process_hourly_market_group,
-    process_single_market,
 )
 from signals.base_client import BaseTradingClient
 from signals.kalshi_client import (
@@ -26,7 +24,6 @@ from signals.kalshi_client import (
     SERIES_HOURLY_ALL,
     SERIES_HOURLY_COMMODITIES,
     SERIES_HOURLY_INDICES,
-    KalshiClient,
 )
 
 

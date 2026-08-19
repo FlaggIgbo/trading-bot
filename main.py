@@ -65,7 +65,7 @@ from signals.base_client import (
     validate_market_closure_time,
 )
 from signals.gemini_client import GeminiClient
-from signals.kalshi_client import CFBENCHMARKS_CRYPTO_INDEX_MAP, KalshiClient
+from signals.kalshi_client import KalshiClient
 
 # Set up clean, human-readable logging format
 logging.basicConfig(
@@ -2280,7 +2280,6 @@ def process_hourly_market_group(
                                         "min_buy": mom_min,
                                         "max_buy": mom_max,
                                         "mode": "momentum",
-                                        "pct_dist": pct_dist,
                                     })
                                 else:
                                     log.info(
@@ -2675,7 +2674,7 @@ def run_pipeline_pass(
     Accepts long-lived exchange clients to prevent socket leaks and connection overhead.
     """
     global _SESSION_INITIAL_REALIZED_PNL
-    
+
     now_utc = datetime.now(timezone.utc)
     current_minute = now_utc.minute
 

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
-import pytest
 
 from database import (
     evaluate_ensemble_consensus,

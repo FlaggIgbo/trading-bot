@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+
 import pytest
 
-from database import save_portfolio_pnl
 from main import (
     batch_fetch_crypto_spot_prices,
-    calculate_seconds_until_next_5min_mark,
-    calculate_seconds_until_next_checkpoint,
     extract_asset_symbol,
     extract_price_cents,
     is_spot_momentum_aligned,
@@ -126,7 +124,7 @@ def test_process_single_market_intervals(dummy_client, mock_filter, minute, expe
     client = MagicMock(exchange_name="Kalshi")
     client.get_market_position.return_value = None
     client.has_existing_position_or_order.return_value = False
-    
+
     if expected_trd_key:
         getattr(client, expected_trd_key).return_value = {
             "triggered": True, "action": expected_action, "side": "yes", "buy_price_cents": 34
@@ -191,7 +189,7 @@ def test_kalshi_client_caching_and_order_limits():
 
     with patch.object(client, "get_positions", return_value=positions_resp) as m_pos, \
          patch.object(client, "get_orders", return_value=orders_resp) as m_ord:
-        
+
         for _ in range(5):  # Reduced from 50 iterations to verify caching without runtime hit
             assert client.get_market_position("KXBTC15M-MISSING") is None
             assert not client.has_resting_take_profit_order("KXBTC15M-MISSING")
