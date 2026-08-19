@@ -420,10 +420,10 @@ def save_active_position_cost(
         return False
 
 
-def get_active_position_cost(ticker: str, ex: str = "kalshi") -> int | None:
+def get_active_position_doc(ticker: str, ex: str = "kalshi") -> dict | None:
     """
-    Retrieves the persisted entry price for a ticker from MongoDB Atlas upon worker restart.
-    Returns integer cents (1-99) or None if not found / MongoDB unavailable.
+    Retrieves the full persisted active position document for a ticker from MongoDB Atlas.
+    Returns dict (containing side, count, entry_price_cents, strategy_tag, etc.) or None if not found / MongoDB unavailable.
     """
     if not ticker:
         return None
@@ -435,11 +435,25 @@ def get_active_position_cost(ticker: str, ex: str = "kalshi") -> int | None:
     ex_name = str(ex or "kalshi").lower()
     try:
         doc = col.find_one({"ticker": ticker, "ex": ex_name})
-        if doc and "entry_price_cents" in doc:
-            return int(doc["entry_price_cents"])
+        if doc and isinstance(doc, dict):
+            doc_copy = dict(doc)
+            if "_id" in doc_copy:
+                doc_copy["_id"] = str(doc_copy["_id"])
+            return doc_copy
     except Exception as err:
-        log.debug(f"Could not retrieve active position cost for {ticker} from MongoDB: {err}")
+        log.debug(f"Could not retrieve active position document for {ticker} from MongoDB: {err}")
 
+    return None
+
+
+def get_active_position_cost(ticker: str, ex: str = "kalshi") -> int | None:
+    """
+    Retrieves the persisted entry price for a ticker from MongoDB Atlas upon worker restart.
+    Returns integer cents (1-99) or None if not found / MongoDB unavailable.
+    """
+    doc = get_active_position_doc(ticker, ex=ex)
+    if doc and "entry_price_cents" in doc and doc["entry_price_cents"] is not None:
+        return int(doc["entry_price_cents"])
     return None
 
 
@@ -448,21 +462,9 @@ def get_active_position_strategy_tag(ticker: str, ex: str = "kalshi") -> str | N
     Retrieves the persisted strategy tag for a ticker from MongoDB Atlas upon worker restart.
     Returns string tag (e.g. 'endgame_favorite_maker') or None if not found / MongoDB unavailable.
     """
-    if not ticker:
-        return None
-
-    col = get_mongo_collection("active_positions")
-    if col is None:
-        return None
-
-    ex_name = str(ex or "kalshi").lower()
-    try:
-        doc = col.find_one({"ticker": ticker, "ex": ex_name})
-        if doc and "strategy_tag" in doc:
-            return str(doc["strategy_tag"])
-    except Exception as err:
-        log.debug(f"Could not retrieve strategy tag for {ticker} from MongoDB: {err}")
-
+    doc = get_active_position_doc(ticker, ex=ex)
+    if doc and "strategy_tag" in doc and doc["strategy_tag"] is not None:
+        return str(doc["strategy_tag"])
     return None
 
 
@@ -471,21 +473,9 @@ def get_active_position_target_tp(ticker: str, ex: str = "kalshi") -> int | None
     Retrieves the persisted target take-profit price for a ticker from MongoDB Atlas upon worker restart.
     Returns integer cents (1-99) or None if not found / MongoDB unavailable.
     """
-    if not ticker:
-        return None
-
-    col = get_mongo_collection("active_positions")
-    if col is None:
-        return None
-
-    ex_name = str(ex or "kalshi").lower()
-    try:
-        doc = col.find_one({"ticker": ticker, "ex": ex_name})
-        if doc and "target_tp_cents" in doc:
-            return int(doc["target_tp_cents"])
-    except Exception as err:
-        log.debug(f"Could not retrieve target TP for {ticker} from MongoDB: {err}")
-
+    doc = get_active_position_doc(ticker, ex=ex)
+    if doc and "target_tp_cents" in doc and doc["target_tp_cents"] is not None:
+        return int(doc["target_tp_cents"])
     return None
 
 
@@ -749,7 +739,7 @@ DEFAULT_DYNAMIC_PRICE_MAP_1H: dict[str, dict[str, dict[str, int | float | bool]]
 # In-memory global cache variables (so the bot doesn't slow down by querying Mongo every 5 seconds)
 _DYNAMIC_PRICE_MAP_CACHE: dict[str, dict[str, dict[str, int | float | bool]]] | None = None
 _LAST_MAP_REFRESH_TIME: float = 0.0
-_CACHE_TTL_SECONDS: float = 6 * 3600.0  # 6 hours = 21,600 seconds
+_CACHE_TTL_SECONDS: float = 1 * 3600.0  # 1 hour = 3,600 seconds
 
 
 def is_default_exploration_window(now_utc: datetime | None = None) -> bool:
@@ -783,10 +773,10 @@ def should_refresh_dynamic_map(
     Decides whether it's time to pull fresh trading data from MongoDB.
 
     Rule 1 (Cold Start): If memory is empty (bot just booted up), refresh immediately!
-    Rule 2 (6-Hour Expiry): If more than 6 hours passed since last refresh, refresh!
+    Rule 2 (1-Hour Expiry): If more than 1 hour passed since last refresh, refresh!
     Rule 3 (05:15 UTC Post-Exploration Anchor): Immediately after exiting the 05:00-05:15 UTC discovery window,
             force a fresh recalibration at 05:15-05:25 UTC to lock in calibrated parameters.
-    Rule 4 (Clock Markers): If current UTC time hits 00:00, 05:00, 07:00, 12:00, or 18:00 UTC and haven't refreshed this hour.
+    Rule 4 (Hourly Clock Markers): If haven't refreshed in the current hour and near top of the hour.
     """
     if cache_is_empty is None:
         cache_is_empty = (_DYNAMIC_PRICE_MAP_CACHE is None)
@@ -802,7 +792,7 @@ def should_refresh_dynamic_map(
     current_ts = now.timestamp()
     elapsed = current_ts - last_refresh_time
 
-    # 1. Check if 6 full hours (21,600 seconds) have passed
+    # 1. Check if 1 full hour (3,600 seconds) has passed
     if elapsed >= _CACHE_TTL_SECONDS:
         return True
 
@@ -812,8 +802,8 @@ def should_refresh_dynamic_map(
         if last_refresh_time < window_end_ts:
             return True
 
-    # 3. Check standard clock marks (00:00, 05:00, 07:00, 12:00, 18:00 UTC) and haven't refreshed this hour
-    if now.hour in (0, 5, 7, 12, 18) and now.minute < 10:
+    # 3. Check hourly top-of-the-hour mark (minute < 10) if not refreshed yet this hour
+    if now.minute < 10:
         hour_start_ts = now.replace(minute=0, second=0, microsecond=0).timestamp()
         if last_refresh_time < hour_start_ts:
             return True
@@ -1042,16 +1032,19 @@ def calibrate_dynamic_price_map_from_db(
                 min_buy = 18
                 if is_heavy_loss:
                     max_buy = min(max_buy, 18 if mark == "05" else 22)
-                    fav_min_buy = 88
-                    fav_max_buy = 91
+                    fav_min_buy = 90
+                    fav_max_buy = 92
+                    enable_fav_maker = False  # Heavy loss regime: disable favorite maker to halt drawdown
                     max_lead = 1
                     max_concurrent = 1
                 elif is_restricted:
                     max_buy = max(min_buy + 2, min(max_buy, 20 if mark == "05" else 25))
-                    fav_min_buy = 85
+                    fav_min_buy = 88
                     fav_max_buy = 92
+                    # If win rate is under 65% on restricted asset with multiple settled trades, disable favorite maker
+                    enable_fav_maker = False if (settle_cnt >= 2 and settle_wr < 0.65) else True
                     max_lead = 1
-                    max_concurrent = 2
+                    max_concurrent = 1
                 else:
                     if mark == "05":
                         max_buy = max(min_buy + 2, min(max_buy, 30))
@@ -1059,6 +1052,7 @@ def calibrate_dynamic_price_map_from_db(
                         max_buy = max(min_buy + 2, min(max_buy, 44))
                     fav_min_buy = 80
                     fav_max_buy = 93
+                    enable_fav_maker = True
                     max_lead = 2
                     max_concurrent = 3
 
@@ -1068,7 +1062,7 @@ def calibrate_dynamic_price_map_from_db(
                     "min_buy": min_buy,
                     "max_buy": max_buy,
                     "tp": tp_price,
-                    "enable_favorite_maker": True,
+                    "enable_favorite_maker": enable_fav_maker,
                     "favorite_maker_min_buy": fav_min_buy,
                     "favorite_maker_max_buy": fav_max_buy,
                     "max_crypto_directional_concurrent": max_concurrent,

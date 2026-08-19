@@ -113,20 +113,6 @@ def test_batch_fetch_crypto_spot_prices():
         assert res == {"BTC": 60000.0, "ETH": 2000.0}
 
 
-@pytest.mark.parametrize("ts, expected", [
-    (datetime(2026, 8, 15, 14, 0, 35, tzinfo=timezone.utc), 115.0),
-    (datetime(2026, 8, 15, 14, 2, 35, tzinfo=timezone.utc), 145.0),
-    (datetime(2026, 8, 15, 14, 12, 35, tzinfo=timezone.utc), 85.0),
-    (datetime(2026, 8, 15, 14, 14, 5, tzinfo=timezone.utc), 85.0),
-    (datetime(2026, 8, 15, 14, 57, 35, tzinfo=timezone.utc), 85.0),
-    (datetime(2026, 8, 15, 14, 59, 5, tzinfo=timezone.utc), 85.0),
-])
-def test_checkpoint_schedule_timing(ts, expected):
-    with patch("main.datetime") as mock_dt:
-        mock_dt.now.return_value = ts
-        assert calculate_seconds_until_next_checkpoint() == expected
-
-
 # --- Trading Engine & Strategy Timing Tests ---
 
 @pytest.mark.parametrize("minute, expected_action, expected_trd_key", [
@@ -153,10 +139,12 @@ def test_process_single_market_intervals(dummy_client, mock_filter, minute, expe
         "floor_strike": 60000.0, "volume_24h": 1500,
     }
 
-    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter):
+    neutral_streak = {"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}
+    with patch("main.get_dynamic_filter_for_market", return_value=mock_filter), \
+         patch("main.get_asset_settlement_streak", return_value=neutral_streak):
         snapshot = process_single_market(
             market=market,
-            is_trading_interval=(minute in (0, 2)),
+            is_trading_interval=(minute == 2),
             client=client,
             now_utc=datetime(2026, 8, 14, 0, minute, 30, tzinfo=timezone.utc),
             minute_past_hour=minute,

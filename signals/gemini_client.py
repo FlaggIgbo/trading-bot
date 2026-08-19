@@ -769,6 +769,16 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             )
             return True
 
+        # Check persistent database active position store
+        try:
+            from database import get_active_position_doc
+            db_pos = get_active_position_doc(ticker, "gemini")
+            if db_pos is not None and (db_pos.get("entry_price_cents") or 0) > 0:
+                log.info(f"{LogTag.POSITION_EXISTS.value} [Gemini] Found persisted active position in DB for {ticker} (side: {db_pos.get('side', '').upper()})")
+                return True
+        except Exception:
+            pass
+
         return False
 
     def place_take_profit_order(

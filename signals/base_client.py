@@ -335,8 +335,9 @@ class BaseTradingClient(ABC):
         if pos is not None and pos.get("side", "").lower() != side_clean:
             return False
         try:
-            from database import get_active_position_cost
-            db_pos = get_active_position_cost(ticker)
+            from database import get_active_position_doc
+            ex_name = getattr(self, "exchange_name", "kalshi")
+            db_pos = get_active_position_doc(ticker, str(ex_name).lower())
             if db_pos is not None:
                 db_side = str(db_pos.get("side", "")).lower()
                 if db_side and db_side != side_clean:

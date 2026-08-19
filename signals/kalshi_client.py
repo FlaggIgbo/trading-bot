@@ -1470,10 +1470,10 @@ class KalshiClient(BaseTradingClient):
 
         # Step 4: Check persistent database active position store
         try:
-            from database import get_active_position_cost
-            db_pos = get_active_position_cost(ticker)
+            from database import get_active_position_doc
+            db_pos = get_active_position_doc(ticker, "kalshi")
             if db_pos is not None and (db_pos.get("entry_price_cents") or 0) > 0:
-                log.info(f"{LogTag.POSITION_EXISTS.value} Found persisted active position in DB for {ticker}")
+                log.info(f"{LogTag.POSITION_EXISTS.value} Found persisted active position in DB for {ticker} (side: {db_pos.get('side', '').upper()})")
                 return True
         except Exception:
             pass

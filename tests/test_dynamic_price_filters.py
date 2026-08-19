@@ -53,7 +53,10 @@ def reset_db_cache():
     import database
     database._DYNAMIC_PRICE_MAP_CACHE = dict(database.DEFAULT_DYNAMIC_PRICE_MAP)
     database._LAST_MAP_REFRESH_TIME = time.time()
-    yield
+    neutral_streak = {"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}
+    with patch("main.get_asset_settlement_streak", return_value=neutral_streak), \
+         patch("database.get_asset_settlement_streak", return_value=neutral_streak):
+        yield
     database._DYNAMIC_PRICE_MAP_CACHE = None
     database._LAST_MAP_REFRESH_TIME = 0.0
 
@@ -81,11 +84,11 @@ def test_default_price_map_and_sl_defaults():
 
 
 @pytest.mark.parametrize("now, last_refresh_delta_hrs, cache_empty, expected", [
-    (datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc), 0, True, True),
-    (datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc), 1, False, False),
-    (datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc), 7, False, True),
+    (datetime(2026, 8, 14, 10, 30, tzinfo=timezone.utc), 0, True, True),
+    (datetime(2026, 8, 14, 10, 30, tzinfo=timezone.utc), 0.4, False, False),
+    (datetime(2026, 8, 14, 10, 30, tzinfo=timezone.utc), 1.2, False, True),  # 1-hour TTL expiry
     (datetime(2026, 8, 14, 5, 16, tzinfo=timezone.utc), 0.5, False, True),  # 05:15 UTC post-exploration anchor
-    (datetime(2026, 8, 14, 7, 2, tzinfo=timezone.utc), 0.5, False, True),  # 07:00 UTC clock anchor
+    (datetime(2026, 8, 14, 7, 2, tzinfo=timezone.utc), 0.5, False, True),  # Top of the hour clock anchor
 ])
 def test_should_refresh_rules(now, last_refresh_delta_hrs, cache_empty, expected):
     last_ts = (now - timedelta(hours=last_refresh_delta_hrs)).timestamp()
@@ -559,6 +562,114 @@ def test_favorite_maker_spot_divergence_on_restricted_assets():
     )
     assert res_no_good is not None
     assert res_no_good["side"] == "no"
+
+
+def test_get_active_position_doc_and_field_helpers():
+    from database import (
+        get_active_position_doc,
+        get_active_position_cost,
+        get_active_position_strategy_tag,
+        get_active_position_target_tp,
+    )
+    mock_doc = {
+        "_id": "mock_id_123",
+        "ticker": "KXSILVERH-TEST",
+        "ex": "kalshi",
+        "side": "yes",
+        "count": 1,
+        "entry_price_cents": 85,
+        "strategy_tag": "endgame_favorite_maker",
+        "target_tp_cents": 99,
+    }
+    with patch("database.get_mongo_collection") as mock_col_getter:
+        mock_col = MagicMock()
+        mock_col.find_one.return_value = mock_doc
+        mock_col_getter.return_value = mock_col
+
+        doc = get_active_position_doc("KXSILVERH-TEST", "kalshi")
+        assert doc is not None
+        assert doc["side"] == "yes"
+        assert doc["entry_price_cents"] == 85
+        assert doc["strategy_tag"] == "endgame_favorite_maker"
+
+        cost = get_active_position_cost("KXSILVERH-TEST", "kalshi")
+        assert cost == 85
+
+        tag = get_active_position_strategy_tag("KXSILVERH-TEST", "kalshi")
+        assert tag == "endgame_favorite_maker"
+
+        tp = get_active_position_target_tp("KXSILVERH-TEST", "kalshi")
+        assert tp == 99
+
+
+def test_is_side_allowed_prevents_opposing_db_position():
+    client = MockTradingClient()
+    mock_doc = {
+        "ticker": "KXWTIH-TEST",
+        "ex": "kalshi",
+        "side": "yes",
+        "entry_price_cents": 84,
+    }
+    with patch("database.get_mongo_collection") as mock_col_getter:
+        mock_col = MagicMock()
+        mock_col.find_one.return_value = mock_doc
+        mock_col_getter.return_value = mock_col
+
+        # Same side allowed
+        assert client.is_side_allowed("KXWTIH-TEST", "yes") is True
+        # Conflicting side strictly blocked to prevent self-hedging
+        assert client.is_side_allowed("KXWTIH-TEST", "no") is False
+
+
+def test_heavy_loss_regime_disables_favorite_maker():
+    from database import calibrate_dynamic_price_map_from_db
+    mock_settles = [
+        {"ticker": "KXWTIH-1", "market_result": "no", "pnl_cents": -80, "ts": 100},
+        {"ticker": "KXWTIH-2", "market_result": "no", "pnl_cents": -85, "ts": 200},
+        {"ticker": "KXWTIH-3", "market_result": "no", "pnl_cents": -90, "ts": 300},
+    ]
+    with patch("database.get_mongo_collection") as mock_col_getter:
+        mock_snap = MagicMock()
+        mock_snap.find.return_value.sort.return_value.limit.return_value = [
+            {"sym": "WTI", "pct": 0.12, "ts": 100, "m": 0, "tick": "KXWTIH-1"}
+        ]
+        mock_settle = MagicMock()
+        mock_settle.find.return_value.sort.return_value.limit.return_value = mock_settles
+
+        def get_col(name):
+            return mock_snap if name == "market_snapshots" else mock_settle
+
+        mock_col_getter.side_effect = get_col
+
+        calibrated = calibrate_dynamic_price_map_from_db(max_history_hours=48)
+        assert "WTI" in calibrated
+        wti_filter = calibrated["WTI"]["00"]
+        assert wti_filter["enable_favorite_maker"] is False
+        assert wti_filter["enable_momentum_buys"] is False
+        assert wti_filter["contracts_per_trade"] == 1
+
+
+def test_evaluate_favorite_maker_disabled_guard():
+    from main import evaluate_favorite_maker_opportunity
+    client = MockTradingClient()
+    market = {"ticker": "KXSILVERH-TEST"}
+    quotes = {"yes_ask": 88, "yes_bid": 84, "no_ask": 16, "no_bid": 12}
+    disabled_filter = {
+        "enable_favorite_maker": False,
+        "favorite_maker_min_buy": 80,
+        "favorite_maker_max_buy": 93,
+    }
+    res = evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes,
+        rem_mins=3.0,
+        dynamic_filters=disabled_filter,
+        client=client,
+        spot_price=64.0,
+        target_price=63.5,
+    )
+    assert res is None
+
 
 
 

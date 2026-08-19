@@ -855,6 +855,10 @@ def evaluate_favorite_maker_opportunity(
     - Gated by choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation on restricted assets.
     """
     ticker = market.get("ticker", "")
+    if not dynamic_filters.get("enable_favorite_maker", True):
+        log.info(f"🛑 [FAVORITE MAKER DISABLED] Favorite maker buys disabled by dynamic filter for {ticker} (loss/restricted regime).")
+        return None
+
     if rem_mins is not None and not (min_rem_mins <= rem_mins <= max_rem_mins):
         return None
 
