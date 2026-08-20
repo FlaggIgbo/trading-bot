@@ -170,3 +170,71 @@ def test_main_snapshot_filtering_logic():
         assert "KXBTCH-26AUG2012-T60000" in saved_ticks
         assert "KXBTCH-26AUG2012-T52000" in saved_ticks
         assert "KXBTCH-26AUG2012-T50000" not in saved_ticks
+
+
+def test_save_settlements_enrichment_from_active_positions():
+    """Verify save_settlements enriches settlement records with entry-time metadata from active_positions."""
+    from database import save_settlements, save_active_position_cost
+
+    mock_settle_col = MagicMock()
+    mock_active_col = MagicMock()
+
+    # Mock active_positions find_one returning entry metadata
+    mock_active_col.find_one.return_value = {
+        "ticker": "KXBTC15M-TEST-SETTLE",
+        "ex": "kalshi",
+        "tf": "15m",
+        "sym": "BTC",
+        "side": "yes",
+        "count": 2,
+        "entry_price_cents": 35,
+        "spot_price_at_entry": 60500.0,
+        "target_strike_price": 60000.0,
+        "strike_distance_diff": 500.0,
+        "strike_distance_pct": 0.8333,
+        "minute_into_candle": 2,
+        "hour_utc": 14,
+        "day_of_week": "Thursday",
+        "market_session": "us_nyse_session",
+        "strategy_tag": "discount_corridor",
+        "order_role": "maker",
+        "spread_cents_at_entry": 1,
+    }
+
+    def mock_get_col(col_name):
+        return mock_settle_col if col_name == "settlements" else mock_active_col
+
+    with patch("database.get_mongo_collection", side_effect=mock_get_col):
+        settlements_input = [
+            {
+                "ticker": "KXBTC15M-TEST-SETTLE",
+                "settled_time": "2026-08-20T14:15:00Z",
+                "market_result": "yes",
+                "cost_dollars": 0.70,
+                "revenue_dollars": 2.00,
+                "pnl_dollars": 1.30,
+                "yes_count": 2,
+                "no_count": 0,
+            }
+        ]
+
+        saved = save_settlements(settlements_input)
+        assert saved == 1
+        assert mock_settle_col.update_one.called
+        update_call = mock_settle_col.update_one.call_args
+        filter_q = update_call[0][0]
+        set_doc = update_call[0][1]["$set"]
+
+        assert filter_q["ticker"] == "KXBTC15M-TEST-SETTLE"
+        assert set_doc["entry_price_cents"] == 35
+        assert set_doc["spot_price_at_entry"] == 60500.0
+        assert set_doc["target_strike_price"] == 60000.0
+        assert set_doc["strategy_tag"] == "discount_corridor"
+        assert set_doc["order_role"] == "maker"
+        assert set_doc["market_session"] == "us_nyse_session"
+        assert set_doc["trade_won"] is True
+        assert set_doc["entered_side"] == "yes"
+
+        # Verify active_positions cleaned up after settlement
+        assert mock_active_col.delete_one.called
+        assert mock_active_col.delete_one.call_args[0][0]["ticker"] == "KXBTC15M-TEST-SETTLE"

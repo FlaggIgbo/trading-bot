@@ -807,6 +807,30 @@ def _execute_buy_flow(
         if is_exploration or corridor_mode == "mid_zone":
             record_exploration_trade_executed()
 
+    # Persist rich entry-time metadata for permanent EV analysis upon settlement
+    if getattr(client, "set_entry_price", None) is not None:
+        try:
+            diff_val = round(spot_price - target_price, 4) if (spot_price is not None and target_price is not None) else None
+            pct_val = round(((spot_price - target_price) / target_price) * 100.0, 4) if (spot_price is not None and target_price and target_price > 0) else None
+            client.set_entry_price(
+                ticker=ticker,
+                price_cents=effective_buy,
+                side=side_lower,
+                count=count,
+                client_order_id=trade_details.get("client_order_id"),
+                tp_order_id=trade_details.get("tp_order_id"),
+                take_profit_cents=take_profit_cents,
+                strategy_tag=corridor_mode,
+                order_role="maker",
+                spot_price_at_entry=spot_price,
+                target_strike_price=target_price,
+                strike_distance_diff=diff_val,
+                strike_distance_pct=pct_val,
+                regime="default_window" if is_exploration else "calibrated",
+            )
+        except Exception as err:
+            log.debug(f"Could not persist enriched entry details for {ticker}: {err}")
+
     # Record traded market on client to strictly enforce single-side lock per lifecycle
     if getattr(client, "record_traded_market", None) is not None:
         client.record_traded_market(ticker, side_lower)
@@ -1100,6 +1124,31 @@ def _execute_favorite_maker_flow(
             trade_details["client_order_id"] = cid
         if oid := buy_res.get("order_id"):
             trade_details["order_id"] = oid
+
+    # Persist rich entry-time metadata for permanent EV analysis upon settlement
+    if getattr(client, "set_entry_price", None) is not None:
+        try:
+            diff_val = round(spot_price - target_price, 4) if (spot_price is not None and target_price is not None) else None
+            pct_val = round(((spot_price - target_price) / target_price) * 100.0, 4) if (spot_price is not None and target_price and target_price > 0) else None
+            client.set_entry_price(
+                ticker=ticker,
+                price_cents=effective_buy,
+                side=side_lower,
+                count=count,
+                client_order_id=trade_details.get("client_order_id"),
+                take_profit_cents=100,
+                strategy_tag="endgame_favorite_maker",
+                spread_saved_cents=spread_saved,
+                order_role="maker",
+                spot_price_at_entry=spot_price,
+                target_strike_price=target_price,
+                strike_distance_diff=diff_val,
+                strike_distance_pct=pct_val,
+                seconds_remaining=round(rem_mins * 60.0, 1),
+                regime="favorite_maker",
+            )
+        except Exception as err:
+            log.debug(f"Could not persist enriched favorite maker entry details for {ticker}: {err}")
 
     if getattr(client, "record_traded_market", None) is not None:
         client.record_traded_market(ticker, side_lower)

@@ -573,6 +573,16 @@ class BaseTradingClient(ABC):
         strategy_tag: str | None = None,
         spread_saved_cents: int | None = None,
         order_role: str | None = None,
+        spot_price_at_entry: float | None = None,
+        target_strike_price: float | None = None,
+        strike_distance_diff: float | None = None,
+        strike_distance_pct: float | None = None,
+        minute_into_candle: int | None = None,
+        seconds_remaining: float | None = None,
+        spread_cents_at_entry: int | None = None,
+        sym: str | None = None,
+        tf: str | None = None,
+        regime: str | None = None,
     ) -> None:
         """Records the exact entry price, strategy tag, and target TP in cents in memory and MongoDB Atlas."""
         self.entry_prices[ticker] = price_cents
@@ -589,12 +599,22 @@ class BaseTradingClient(ABC):
                 count=count,
                 entry_price_cents=price_cents,
                 ex=getattr(self, "exchange_name", "kalshi"),
+                tf=tf,
                 client_order_id=client_order_id,
                 tp_order_id=tp_order_id,
                 target_tp_cents=take_profit_cents,
                 strategy_tag=strategy_tag,
                 spread_saved_cents=spread_saved_cents,
                 order_role=order_role,
+                spot_price_at_entry=spot_price_at_entry,
+                target_strike_price=target_strike_price,
+                strike_distance_diff=strike_distance_diff,
+                strike_distance_pct=strike_distance_pct,
+                minute_into_candle=minute_into_candle,
+                seconds_remaining=seconds_remaining,
+                spread_cents_at_entry=spread_cents_at_entry,
+                sym=sym,
+                regime=regime,
             )
         except Exception as err:
             log.debug(f"Could not persist entry price for {ticker} to DB: {err}")

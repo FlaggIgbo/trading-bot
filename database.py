@@ -312,11 +312,34 @@ def save_portfolio_pnl(pnl_summary: dict) -> bool:
         return False
 
 
+def get_market_session(hour_utc: int) -> str:
+    """Returns the primary global trading session for a given UTC hour."""
+    if 0 <= hour_utc < 8:
+        return "asia_session"
+    elif 8 <= hour_utc < 13:
+        return "london_session"
+    elif 13 <= hour_utc < 20:
+        return "us_nyse_session"
+    else:
+        return "us_after_hours"
+
+
+def detect_asset_symbol(ticker: str) -> str:
+    """Extracts the base asset symbol (e.g. 'BTC', 'ETH', 'GOLD', 'WTI', 'INX') from ticker string."""
+    t = (ticker or "").upper()
+    for s in ["BTC", "ETH", "SOL", "XRP", "GOLD", "WTI", "SILVER", "INX", "NASDAQ100", "NDX", "SPX"]:
+        if s in t:
+            return s
+    return "UNKNOWN"
+
+
 def save_settlements(settlements: list[dict]) -> int:
     """
     Saves individual settled market PnL records into MongoDB 'settlements' collection.
-    Tagging with 'tf' ('15m' vs '1h') ensures distinct performance reporting per timeframe.
-    Prevents duplicate entries by keying on (ticker, ex, settled_time).
+    Automatically enriches settlement records with entry-time metadata from 'active_positions'
+    (e.g., entry price, spot at entry, strike distance %, minute of candle, order role, strategy tag)
+    to enable permanent, high-resolution Expected Value (EV) and win-rate analysis across Price, Asset, and Time.
+    Cleans up settled positions from 'active_positions' after enrichment.
     """
     if not settlements:
         return 0
@@ -325,6 +348,7 @@ def save_settlements(settlements: list[dict]) -> int:
     if collection is None:
         return 0
 
+    active_col = get_mongo_collection("active_positions")
     saved_count = 0
     try:
         for s in settlements:
@@ -339,7 +363,45 @@ def save_settlements(settlements: list[dict]) -> int:
                 filter_query["settled_time"] = settled_time
 
             s_tf = s.get("tf") or detect_market_timeframe(ticker)
-            s_doc = {**s, "ex": ex_name, "tf": s_tf}
+            s_sym = s.get("sym") or detect_asset_symbol(ticker)
+            s_doc = {**s, "ex": ex_name, "tf": s_tf, "sym": s_sym}
+
+            # Enrich from active_positions if trade was tracked
+            active_doc = None
+            if active_col is not None:
+                try:
+                    active_doc = active_col.find_one({"ticker": ticker, "ex": ex_name})
+                except Exception:
+                    pass
+
+            if active_doc:
+                # Merge entry-time metrics
+                if "entry_price_cents" in active_doc and "entry_price_cents" not in s_doc:
+                    s_doc["entry_price_cents"] = active_doc["entry_price_cents"]
+                if "side" in active_doc and "entered_side" not in s_doc:
+                    s_doc["entered_side"] = active_doc["side"]
+                for fld in [
+                    "spot_price_at_entry", "target_strike_price", "strike_distance_diff",
+                    "strike_distance_pct", "minute_into_candle", "seconds_remaining",
+                    "hour_utc", "day_of_week", "market_session", "strategy_tag",
+                    "order_role", "spread_cents_at_entry", "spread_saved_cents",
+                    "regime", "entry_ts"
+                ]:
+                    if fld in active_doc and fld not in s_doc:
+                        s_doc[fld] = active_doc[fld]
+
+            # Compute trade outcome alignment if entered side is known
+            market_res = str(s_doc.get("market_result") or s_doc.get("result") or "").lower().strip()
+            entered_side = str(s_doc.get("entered_side") or (
+                "yes" if (s_doc.get("yes_count", 0) > 0 and s_doc.get("no_count", 0) == 0)
+                else "no" if (s_doc.get("no_count", 0) > 0 and s_doc.get("yes_count", 0) == 0)
+                else ""
+            )).lower().strip()
+
+            if entered_side in ("yes", "no") and market_res in ("yes", "no"):
+                s_doc["entered_side"] = entered_side
+                s_doc["trade_won"] = (entered_side == market_res)
+
             collection.update_one(
                 filter_query,
                 {"$set": s_doc},
@@ -347,8 +409,15 @@ def save_settlements(settlements: list[dict]) -> int:
             )
             saved_count += 1
 
+            # Clean up settled position from active_positions
+            if active_col is not None and active_doc is not None:
+                try:
+                    active_col.delete_one({"ticker": ticker, "ex": ex_name})
+                except Exception:
+                    pass
+
         if saved_count > 0:
-            log.info(f"📊 Saved/updated {saved_count} settlement PnL record(s) in MongoDB Atlas!")
+            log.info(f"📊 Saved/updated {saved_count} enriched settlement PnL record(s) in MongoDB Atlas!")
         return saved_count
     except Exception as error:
         log.error(f"Failed to upsert settlements to MongoDB: {error}")
@@ -356,7 +425,7 @@ def save_settlements(settlements: list[dict]) -> int:
 
 
 # ===========================================================================
-# Active Position Cost-Basis Persistence (Crash & Restart Resilience)
+# Active Position Cost-Basis & Entry Context Persistence
 # ===========================================================================
 
 def save_active_position_cost(
@@ -372,11 +441,20 @@ def save_active_position_cost(
     strategy_tag: str | None = None,
     spread_saved_cents: int | None = None,
     order_role: str | None = None,
+    spot_price_at_entry: float | None = None,
+    target_strike_price: float | None = None,
+    strike_distance_diff: float | None = None,
+    strike_distance_pct: float | None = None,
+    minute_into_candle: int | None = None,
+    seconds_remaining: float | None = None,
+    spread_cents_at_entry: int | None = None,
+    sym: str | None = None,
+    regime: str | None = None,
 ) -> bool:
     """
-    Persists an active trade cost-basis into MongoDB Atlas 'active_positions' collection.
-    Tagged with 'tf' ('15m' or '1h') and 'strategy_tag' (e.g. 'endgame_favorite_maker').
-    Ensures that if the Render worker restarts/redeploys, exact entry price, strategy tag, and intended TP are preserved.
+    Persists an active trade cost-basis and rich entry-time market context into MongoDB 'active_positions'.
+    Captures exact entry price, spot price, distance to strike, candle minute, order role, and strategy tag.
+    These metrics are merged into 'settlements' upon expiration to ensure permanent EV analytics.
     """
     if not ticker or entry_price_cents <= 0:
         return False
@@ -387,16 +465,32 @@ def save_active_position_cost(
 
     ex_name = str(ex or "kalshi").lower()
     timeframe = tf or detect_market_timeframe(ticker)
+    symbol = sym or detect_asset_symbol(ticker)
+    now_ts = int(time.time())
+    now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+
+    # Compute distance metrics if spot and strike are provided
+    if spot_price_at_entry is not None and target_strike_price is not None and target_strike_price > 0:
+        if strike_distance_diff is None:
+            strike_distance_diff = round(spot_price_at_entry - target_strike_price, 4)
+        if strike_distance_pct is None:
+            strike_distance_pct = round(((spot_price_at_entry - target_strike_price) / target_strike_price) * 100.0, 4)
+
     try:
         set_doc = {
             "ticker": ticker,
             "ex": ex_name,
             "tf": timeframe,
+            "sym": symbol,
             "side": side.lower(),
             "count": count,
             "entry_price_cents": entry_price_cents,
             "total_cost_dollars": round((entry_price_cents * count) / 100.0, 4),
-            "updated_at": int(time.time()),
+            "updated_at": now_ts,
+            "entry_ts": now_ts,
+            "hour_utc": now_dt.hour,
+            "day_of_week": now_dt.strftime("%A"),
+            "market_session": get_market_session(now_dt.hour),
         }
         if client_order_id:
             set_doc["client_order_id"] = client_order_id
@@ -410,6 +504,22 @@ def save_active_position_cost(
             set_doc["spread_saved_cents"] = spread_saved_cents
         if order_role is not None:
             set_doc["order_role"] = order_role
+        if spot_price_at_entry is not None:
+            set_doc["spot_price_at_entry"] = spot_price_at_entry
+        if target_strike_price is not None:
+            set_doc["target_strike_price"] = target_strike_price
+        if strike_distance_diff is not None:
+            set_doc["strike_distance_diff"] = strike_distance_diff
+        if strike_distance_pct is not None:
+            set_doc["strike_distance_pct"] = strike_distance_pct
+        if minute_into_candle is not None:
+            set_doc["minute_into_candle"] = minute_into_candle
+        if seconds_remaining is not None:
+            set_doc["seconds_remaining"] = seconds_remaining
+        if spread_cents_at_entry is not None:
+            set_doc["spread_cents_at_entry"] = spread_cents_at_entry
+        if regime is not None:
+            set_doc["regime"] = regime
 
         col.update_one(
             {"ticker": ticker, "ex": ex_name},
