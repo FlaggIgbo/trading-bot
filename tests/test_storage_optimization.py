@@ -246,3 +246,52 @@ def test_save_settlements_enrichment_from_active_positions():
         # Verify active_positions cleaned up after settlement
         assert mock_active_col.delete_one.called
         assert mock_active_col.delete_one.call_args[0][0]["ticker"] == "KXBTC15M-TEST-SETTLE"
+
+
+def test_daily_asset_loss_gating_midnight_et_reset():
+    """Verify is_asset_loss_gated calculates losses since midnight ET and correctly gates/resets."""
+    from datetime import datetime, timezone, timedelta
+    from database import get_midnight_et_cutoff, get_asset_realized_pnl_dollars, is_asset_loss_gated
+
+    # 1. Verify get_midnight_et_cutoff produces correct UTC timestamp and ISO string
+    # For a fixed UTC datetime: 2026-08-20 18:00:00 UTC (which is 14:00:00 EDT)
+    fixed_now_utc = datetime(2026, 8, 20, 18, 0, 0, tzinfo=timezone.utc)
+    midnight_iso, midnight_ts = get_midnight_et_cutoff(now_utc=fixed_now_utc)
+    # Midnight ET on Aug 20 in EDT (UTC-4) is 2026-08-20 04:00:00 UTC
+    assert midnight_iso == "2026-08-20T04:00:00Z"
+    assert midnight_ts == datetime(2026, 8, 20, 4, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    # 2. Test get_asset_realized_pnl_dollars with mocked MongoDB collection
+    mock_settle_col = MagicMock()
+    
+    # Mock aggregate returning a loss of -$1.50 today
+    mock_settle_col.aggregate.return_value = [{"_id": None, "total_pnl": -1.50}]
+
+    with patch("database.get_mongo_collection", return_value=mock_settle_col):
+        pnl = get_asset_realized_pnl_dollars("SILVER", timeframe="1h", since_midnight_et=True, now_utc=fixed_now_utc)
+        assert pnl == -1.50
+        assert mock_settle_col.aggregate.called
+
+        # Check match query passed to aggregation pipeline
+        pipeline = mock_settle_col.aggregate.call_args[0][0]
+        match_stage = pipeline[0]["$match"]
+        assert "$and" in match_stage
+        
+        # Verify is_asset_loss_gated gates when loss >= $1.00 ($1.50 loss)
+        is_gated, loss_val = is_asset_loss_gated("SILVER", timeframe="1h", max_loss_dollars=1.0, now_utc=fixed_now_utc)
+        assert is_gated is True
+        assert loss_val == -1.50
+
+    # 3. Mock aggregate returning no loss today ($0.00 PnL, e.g. empty results or small gain)
+    mock_settle_col.aggregate.return_value = []
+    with patch("database.get_mongo_collection", return_value=mock_settle_col):
+        is_gated, loss_val = is_asset_loss_gated("SILVER", timeframe="1h", max_loss_dollars=1.0, now_utc=fixed_now_utc)
+        assert is_gated is False
+        assert loss_val == 0.0
+
+    # 4. Mock aggregate returning -$0.50 (under $1.00 limit -> not gated)
+    mock_settle_col.aggregate.return_value = [{"_id": None, "total_pnl": -0.50}]
+    with patch("database.get_mongo_collection", return_value=mock_settle_col):
+        is_gated, loss_val = is_asset_loss_gated("BTC", timeframe="15m", max_loss_dollars=1.0, now_utc=fixed_now_utc)
+        assert is_gated is False
+        assert loss_val == -0.50

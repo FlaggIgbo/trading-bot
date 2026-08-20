@@ -38,7 +38,11 @@ import re
 import statistics
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+try:
+    import zoneinfo
+except ImportError:
+    zoneinfo = None
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -639,62 +643,101 @@ def load_all_active_positions(ex: str = "kalshi") -> dict[str, int]:
 # Empirical Expected Value (EV) Entry Validation & Asset Loss Gating Engine
 # ===========================================================================
 
-def get_asset_realized_pnl_dollars(symbol: str, timeframe: str | None = None, db=None) -> float:
+def get_midnight_et_cutoff(now_utc: datetime | None = None) -> tuple[str, float]:
+    """
+    Computes midnight Eastern Time (00:00:00 US/Eastern) for the current day.
+    Returns:
+        tuple[str, float]: (midnight_iso_utc, midnight_timestamp_utc)
+    """
+    if zoneinfo is not None:
+        try:
+            et_tz = zoneinfo.ZoneInfo("America/New_York")
+        except Exception:
+            et_tz = timezone(timedelta(hours=-4))
+    else:
+        et_tz = timezone(timedelta(hours=-4))
+
+    now = now_utc or datetime.now(timezone.utc)
+    now_et = now.astimezone(et_tz)
+    midnight_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_utc = midnight_et.astimezone(timezone.utc)
+    midnight_iso = midnight_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    midnight_ts = midnight_utc.timestamp()
+    return midnight_iso, midnight_ts
+
+
+def get_asset_realized_pnl_dollars(
+    symbol: str,
+    timeframe: str | None = None,
+    since_midnight_et: bool = True,
+    since_iso: str | None = None,
+    since_ts: float | None = None,
+    now_utc: datetime | None = None,
+    db=None,
+) -> float:
     """
     Queries MongoDB Atlas settlements collection and sums the net realized PnL in dollars
-    for a specific (symbol, timeframe) case, or the asset across all timeframes if timeframe is None.
+    for a specific (symbol, timeframe) contract since midnight ET of the current day (or custom cutoff).
+
+    If since_midnight_et is True (default), only trades settled on or after 00:00 ET of the current day
+    are included, enforcing an automatic daily loss reset at midnight ET every day.
     """
     col = get_mongo_collection("settlements")
     if col is None:
         return 0.0
     sym_upper = str(symbol or "").upper()
     try:
-        if not timeframe:
-            match_query = {
-                "$or": [
-                    {"sym": sym_upper},
-                    {"ticker": {"$regex": sym_upper, "$options": "i"}},
-                ]
-            }
-        else:
+        conditions = []
+
+        # 1. Symbol match
+        conditions.append({
+            "$or": [
+                {"sym": sym_upper},
+                {"ticker": {"$regex": sym_upper, "$options": "i"}},
+            ]
+        })
+
+        # 2. Timeframe match
+        if timeframe:
             tf_lower = str(timeframe).lower()
             if tf_lower in ("15m", "5m"):
-                match_query = {
-                    "$and": [
-                        {
-                            "$or": [
-                                {"sym": sym_upper},
-                                {"ticker": {"$regex": sym_upper, "$options": "i"}},
-                            ]
-                        },
-                        {
-                            "$or": [
-                                {"tf": {"$in": ["15m", "5m"]}},
-                                {"ticker": {"$regex": "15M|05M", "$options": "i"}},
-                            ]
-                        }
+                conditions.append({
+                    "$or": [
+                        {"tf": {"$in": ["15m", "5m"]}},
+                        {"ticker": {"$regex": "15M|05M", "$options": "i"}},
                     ]
-                }
+                })
             else:  # 1h / hourly
-                match_query = {
-                    "$and": [
-                        {
-                            "$or": [
-                                {"sym": sym_upper},
-                                {"ticker": {"$regex": sym_upper, "$options": "i"}},
-                            ]
-                        },
-                        {
-                            "$or": [
-                                {"tf": {"$in": ["1h", "hourly", "daily"]}},
-                                {"ticker": {"$regex": "H-|D-|1H", "$options": "i"}},
-                            ]
-                        },
-                        {
-                            "ticker": {"$not": {"$regex": "15M|05M", "$options": "i"}}
-                        }
+                conditions.append({
+                    "$or": [
+                        {"tf": {"$in": ["1h", "hourly", "daily"]}},
+                        {"ticker": {"$regex": "H-|D-|1H", "$options": "i"}},
                     ]
-                }
+                })
+                conditions.append({
+                    "ticker": {"$not": {"$regex": "15M|05M", "$options": "i"}}
+                })
+
+        # 3. Time filter (since midnight ET by default, resetting daily at 00:00 ET)
+        if since_midnight_et or since_iso or since_ts is not None:
+            if not since_iso and since_ts is None:
+                iso_cutoff, ts_cutoff = get_midnight_et_cutoff(now_utc=now_utc)
+            else:
+                iso_cutoff = since_iso or ""
+                ts_cutoff = since_ts if since_ts is not None else 0.0
+
+            time_or_clauses = []
+            if iso_cutoff:
+                time_or_clauses.append({"settled_time": {"$gte": iso_cutoff}})
+                time_or_clauses.append({"settled_time": {"$gte": iso_cutoff.rstrip("Z")}})
+            if ts_cutoff > 0:
+                time_or_clauses.append({"ts": {"$gte": ts_cutoff}})
+                time_or_clauses.append({"settled_time_ts": {"$gte": ts_cutoff}})
+
+            if time_or_clauses:
+                conditions.append({"$or": time_or_clauses})
+
+        match_query = {"$and": conditions} if len(conditions) > 1 else conditions[0]
 
         pipeline = [
             {"$match": match_query},
@@ -706,19 +749,33 @@ def get_asset_realized_pnl_dollars(symbol: str, timeframe: str | None = None, db
             }
         ]
         res = list(col.aggregate(pipeline))
-        if res and "total_pnl" in res[0]:
+        if res and "total_pnl" in res[0] and res[0]["total_pnl"] is not None:
             return float(res[0]["total_pnl"])
     except Exception as err:
         log.debug(f"Could not calculate realized PnL for asset {symbol} [{timeframe}]: {err}")
     return 0.0
 
 
-def is_asset_loss_gated(symbol: str, timeframe: str | None = None, max_loss_dollars: float = 1.0, db=None) -> tuple[bool, float]:
+def is_asset_loss_gated(
+    symbol: str,
+    timeframe: str | None = None,
+    max_loss_dollars: float = 1.0,
+    since_midnight_et: bool = True,
+    now_utc: datetime | None = None,
+    db=None,
+) -> tuple[bool, float]:
     """
-    Checks if a specific (symbol, timeframe) case's realized live losses exceed the threshold (default: $1.00).
-    If PnL <= -$1.00, returns (True, pnl_dollars) indicating live trading is gated for that specific case.
+    Checks if a specific (symbol, timeframe) contract's realized losses since midnight ET exceed the threshold (default: $1.00).
+    If daily realized PnL <= -$1.00, returns (True, pnl_dollars) indicating live trading is gated for that specific contract for today.
+    Resets at midnight ET every day.
     """
-    pnl = get_asset_realized_pnl_dollars(symbol, timeframe=timeframe, db=db)
+    pnl = get_asset_realized_pnl_dollars(
+        symbol,
+        timeframe=timeframe,
+        since_midnight_et=since_midnight_et,
+        now_utc=now_utc,
+        db=db,
+    )
     is_gated = (pnl <= -abs(max_loss_dollars))
     return is_gated, pnl
 
