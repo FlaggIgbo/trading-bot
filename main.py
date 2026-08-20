@@ -54,6 +54,7 @@ from database import (
     get_dynamic_price_filter_map,
     is_default_exploration_window,
     is_mid_zone_exploration_window,
+    prune_old_market_snapshots,
     save_market_snapshots,
     save_portfolio_pnl,
     save_settlements,
@@ -3059,12 +3060,33 @@ def run_pipeline_pass(
                     log.error(f"❌ Unhandled error in {ex_name} parallel pipeline: {exc}", exc_info=True)
 
     # Save valid market snapshots to MongoDB Atlas
-    # We save snapshots on regular checkpoints (:00, :02.5, :05, :07.5, :10, :12.5, :14, :20, :30, :40, :50, :52.5, :55, :57.5, :59) OR whenever a trade occurs
+    # Storage Optimization Policy:
+    # 1. Always save snapshots where a trade or order action occurred ('trd' is not None).
+    # 2. Always save 15M / 5M market snapshots at standard checkpoints.
+    # 3. For Hourly multi-strike markets, filter out untradeable 1¢/99¢ extreme strikes with 0 volume.
+    #    Retain strikes in the tradeable corridor (5¢ - 95¢) or with active trading volume (vol > 0).
     is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12, 14)) or (current_minute in (0, 10, 20, 30, 40, 50, 52, 55, 57, 59))
-    valid_snapshots = [
-        s for s in snapshots_to_save
-        if (s.get("y") is not None or s.get("n") is not None) and (is_standard_save_mark or s.get("trd") is not None)
-    ]
+
+    def _is_retained_snapshot(s: dict) -> bool:
+        if s.get("trd") is not None:
+            return True
+        if not is_standard_save_mark:
+            return False
+        y_val = s.get("y")
+        n_val = s.get("n")
+        if y_val is None and n_val is None:
+            return False
+        tf = str(s.get("tf", "")).lower()
+        if tf in ("15m", "5m"):
+            return True
+        vol = s.get("vol") or 0
+        in_tradeable_corridor = (
+            (y_val is not None and 5 <= y_val <= 95)
+            or (n_val is not None and 5 <= n_val <= 95)
+        )
+        return (in_tradeable_corridor or vol > 0)
+
+    valid_snapshots = [s for s in snapshots_to_save if _is_retained_snapshot(s)]
     if valid_snapshots:
         log.info(f"\nSaving {len(valid_snapshots)} ultra-compact market snapshot(s) to MongoDB Atlas...")
         save_market_snapshots(valid_snapshots)
@@ -3118,11 +3140,22 @@ def main():
 
     log.info("Starting Trading Bot in Continuous Render Background Worker Mode...")
 
+    last_prune_hour = -1
+
     while True:
         try:
             run_pipeline_pass(clients=persistent_clients, dry_run=dry_run, force_trade_mark=force_trade_mark)
         except Exception as error:
             log.error(f"Unexpected error in loop pass: {error}")
+
+        # Periodic automated MongoDB snapshot pruning (runs once per hour)
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour != last_prune_hour:
+            try:
+                prune_old_market_snapshots()
+                last_prune_hour = current_hour
+            except Exception as prune_err:
+                log.warning(f"Periodic snapshot pruning notice: {prune_err}")
 
         sleep_seconds = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
         target_utc = datetime.now(timezone.utc) + timedelta(seconds=sleep_seconds)

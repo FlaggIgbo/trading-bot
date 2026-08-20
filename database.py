@@ -56,7 +56,7 @@ _INDEXES_INITIALIZED = False
 def ensure_database_indexes(db=None) -> bool:
     """
     Ensures optimal query performance and automated TTL retention indexes are configured.
-    - market_snapshots: TTL index on 'created_at' (expiring records older than SNAPSHOT_RETENTION_HOURS, default: 48h).
+    - market_snapshots: TTL index on 'created_at' (expiring records older than SNAPSHOT_RETENTION_HOURS, default: 24h).
     - market_snapshots: Compound index on [('ts', -1)] and [('sym', 1), ('tf', 1), ('ts', -1)].
     - settlements: Indexes on [('ts', -1)] and [('ticker', 1)].
     - portfolio_pnl: Index on [('ts', -1)].
@@ -75,7 +75,7 @@ def ensure_database_indexes(db=None) -> bool:
                 return False
             db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
 
-        retention_hours = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "48"))
+        retention_hours = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "24"))
         retention_seconds = retention_hours * 3600
 
         # 1. market_snapshots TTL & Performance Indexes
@@ -127,17 +127,17 @@ def ensure_database_indexes(db=None) -> bool:
 
 def prune_old_market_snapshots(retention_hours: int | None = None) -> int:
     """
-    Prunes snapshot documents from 'market_snapshots' older than the retention cutoff.
-    Matches by integer timestamp 'ts' or BSON Date 'created_at'.
+    Prunes snapshot documents from 'market_snapshots' older than the retention cutoff
+    and cleans up any orphaned/legacy records missing a valid BSON Date 'created_at'.
 
     Args:
-        retention_hours: Cutoff age in hours (defaults to SNAPSHOT_RETENTION_HOURS or 48h).
+        retention_hours: Cutoff age in hours (defaults to SNAPSHOT_RETENTION_HOURS or 24h).
 
     Returns:
         int: Number of deleted documents.
     """
     if retention_hours is None:
-        retention_hours = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "48"))
+        retention_hours = int(os.getenv("SNAPSHOT_RETENTION_HOURS", "24"))
 
     try:
         if _GLOBAL_MONGO_CLIENT is None:
@@ -153,11 +153,13 @@ def prune_old_market_snapshots(retention_hours: int | None = None) -> int:
             "$or": [
                 {"ts": {"$lt": cutoff_ts}},
                 {"created_at": {"$lt": cutoff_dt}},
+                {"created_at": None},
+                {"created_at": {"$exists": False}},
             ]
         })
         if res.deleted_count > 0:
             log.info(
-                f"🧹 Pruned {res.deleted_count:,} legacy market snapshot(s) older than {retention_hours}h from MongoDB Atlas."
+                f"🧹 Pruned {res.deleted_count:,} legacy market snapshot(s) older than {retention_hours}h / orphaned from MongoDB Atlas."
             )
         return res.deleted_count
     except Exception as error:
@@ -248,7 +250,7 @@ def save_market_snapshots(snapshots: list[dict]) -> bool:
     for s in snapshots:
         if "tf" not in s or not s["tf"]:
             s["tf"] = detect_market_timeframe(s.get("tick", ""))
-        if "created_at" not in s:
+        if not isinstance(s.get("created_at"), datetime):
             # Set BSON Date for automated MongoDB Atlas TTL index
             if "ts" in s and isinstance(s["ts"], (int, float)) and s["ts"] > 0:
                 try:
