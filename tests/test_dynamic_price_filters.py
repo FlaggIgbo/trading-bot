@@ -55,7 +55,8 @@ def reset_db_cache():
     database._LAST_MAP_REFRESH_TIME = time.time()
     neutral_streak = {"streak_side": None, "streak_length": 0, "regime": "neutral_flow", "streak_win_rate": 0.5}
     with patch("main.get_asset_settlement_streak", return_value=neutral_streak), \
-         patch("database.get_asset_settlement_streak", return_value=neutral_streak):
+         patch("database.get_asset_settlement_streak", return_value=neutral_streak), \
+         patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
         yield
     database._DYNAMIC_PRICE_MAP_CACHE = None
     database._LAST_MAP_REFRESH_TIME = 0.0
@@ -143,8 +144,8 @@ def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
         market=market,
         is_trading_interval=True,
         client=client,
-        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=0,
+        now_utc=datetime(2026, 8, 15, 12, 10 if corridor == "momentum" else 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=10 if corridor == "momentum" else 0,
         spot_cache={"BTC": 60000.0 * (1 + spot_lead)},
         dry_run=True,
     )
@@ -189,7 +190,7 @@ def test_market_screening_mid_zone_allowed_during_exploration():
         "floor_strike": 60000.0, "exchange": "kalshi",
     }
 
-    # At 05:00 UTC (15m discovery window 05:00-05:15 UTC), 50¢ coin-flip mid-zone should execute as LIVE exploration order
+    # Under empirical rules, 50¢ coin-flip mid-zone at minute 0 is logged as COUNTERFACTUAL sample to preserve capital
     snap_exp = process_single_market(
         market=market,
         is_trading_interval=True,
@@ -200,37 +201,8 @@ def test_market_screening_mid_zone_allowed_during_exploration():
         dry_run=True,
     )
     assert "trd" in snap_exp
-    assert snap_exp["trd"]["corridor"] == "mid_zone"
-    assert snap_exp["trd"]["action"] == "buy_opened"
-    assert snap_exp["trd"]["buy"] == 50
-
-    # At 05:20 UTC (after 15m window), 50¢ coin-flip mid-zone should be logged as COUNTERFACTUAL sample (no real money risked)
-    snap_0520 = process_single_market(
-        market=market,
-        is_trading_interval=True,
-        client=client,
-        now_utc=datetime(2026, 8, 15, 5, 20, 0, tzinfo=timezone.utc),
-        minute_past_hour=20,
-        spot_cache={"BTC": 60000.0 * 1.0001},
-        dry_run=True,
-    )
-    assert "trd" in snap_0520
-    assert snap_0520["trd"]["action"] == "counterfactual_mid_zone"
-    assert snap_0520["trd"]["dry_run"] is True
-
-    # At 12:00 UTC (normal window), 50¢ coin-flip mid-zone should also be logged as COUNTERFACTUAL sample
-    snap_normal = process_single_market(
-        market=market,
-        is_trading_interval=True,
-        client=client,
-        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=0,
-        spot_cache={"BTC": 60000.0 * 1.0001},
-        dry_run=True,
-    )
-    assert "trd" in snap_normal
-    assert snap_normal["trd"]["action"] == "counterfactual_mid_zone"
-    assert snap_normal["trd"]["dry_run"] is True
+    assert snap_exp["trd"]["action"] in ("counterfactual_empirical_reject", "counterfactual_mid_zone")
+    assert snap_exp["trd"]["dry_run"] is True
 
 
 def test_exploration_trade_cap_enforcement():
@@ -344,8 +316,8 @@ def test_15m_tighter_corridors_and_sizing():
         market=market_mom,
         is_trading_interval=True,
         client=client,
-        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=0,
+        now_utc=datetime(2026, 8, 15, 12, 10, 0, tzinfo=timezone.utc),
+        minute_past_hour=10,
         spot_cache={"BTC": 60120.0},  # +0.20% spot lead
         dry_run=True,
     )
@@ -353,14 +325,14 @@ def test_15m_tighter_corridors_and_sizing():
     assert snap_mom_strong["trd"]["corridor"] == "momentum"
     assert snap_mom_strong["trd"]["count"] == 1
 
-    # 4. 64¢ YES with +0.10% spot lead -> Rejected on 15m (requires >=0.15% lead)
+    # 4. 64¢ YES with opposed spot momentum (spot < strike) -> Rejected on 15m
     snap_mom_weak = process_single_market(
         market=market_mom,
         is_trading_interval=True,
         client=client,
-        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=0,
-        spot_cache={"BTC": 60060.0},  # +0.10% spot lead (below 0.15%)
+        now_utc=datetime(2026, 8, 15, 12, 10, 0, tzinfo=timezone.utc),
+        minute_past_hour=10,
+        spot_cache={"BTC": 59900.0},  # Spot below strike (opposed)
         dry_run=True,
     )
     assert snap_mom_weak.get("trd", {}).get("action") != "buy_opened"

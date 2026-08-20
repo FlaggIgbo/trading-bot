@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
+import pytest
 
 from database import (
     get_active_position_cost,
@@ -90,6 +91,12 @@ class MockTradingClient(BaseTradingClient):
 
     def get_all_active_positions(self):
         return self._positions_cache
+
+
+@pytest.fixture(autouse=True)
+def mock_ungated_asset():
+    with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
+        yield
 
 
 # ---------------------------------------------------------------------------

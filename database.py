@@ -636,8 +636,135 @@ def load_all_active_positions(ex: str = "kalshi") -> dict[str, int]:
 
 
 # ===========================================================================
-# Dynamic Price Filters & 6-Hour In-Memory Calibration Engine
+# Empirical Expected Value (EV) Entry Validation & Asset Loss Gating Engine
 # ===========================================================================
+
+def get_asset_realized_pnl_dollars(symbol: str, timeframe: str | None = None, db=None) -> float:
+    """
+    Queries MongoDB Atlas settlements collection and sums the net realized PnL in dollars
+    for a specific (symbol, timeframe) case, or the asset across all timeframes if timeframe is None.
+    """
+    col = get_mongo_collection("settlements")
+    if col is None:
+        return 0.0
+    sym_upper = str(symbol or "").upper()
+    try:
+        if not timeframe:
+            match_query = {
+                "$or": [
+                    {"sym": sym_upper},
+                    {"ticker": {"$regex": sym_upper, "$options": "i"}},
+                ]
+            }
+        else:
+            tf_lower = str(timeframe).lower()
+            if tf_lower in ("15m", "5m"):
+                match_query = {
+                    "$and": [
+                        {
+                            "$or": [
+                                {"sym": sym_upper},
+                                {"ticker": {"$regex": sym_upper, "$options": "i"}},
+                            ]
+                        },
+                        {
+                            "$or": [
+                                {"tf": {"$in": ["15m", "5m"]}},
+                                {"ticker": {"$regex": "15M|05M", "$options": "i"}},
+                            ]
+                        }
+                    ]
+                }
+            else:  # 1h / hourly
+                match_query = {
+                    "$and": [
+                        {
+                            "$or": [
+                                {"sym": sym_upper},
+                                {"ticker": {"$regex": sym_upper, "$options": "i"}},
+                            ]
+                        },
+                        {
+                            "$or": [
+                                {"tf": {"$in": ["1h", "hourly", "daily"]}},
+                                {"ticker": {"$regex": "H-|D-|1H", "$options": "i"}},
+                            ]
+                        },
+                        {
+                            "ticker": {"$not": {"$regex": "15M|05M", "$options": "i"}}
+                        }
+                    ]
+                }
+
+        pipeline = [
+            {"$match": match_query},
+            {
+                "$group": {
+                    "_id": None,
+                    "total_pnl": {"$sum": "$pnl_dollars"},
+                }
+            }
+        ]
+        res = list(col.aggregate(pipeline))
+        if res and "total_pnl" in res[0]:
+            return float(res[0]["total_pnl"])
+    except Exception as err:
+        log.debug(f"Could not calculate realized PnL for asset {symbol} [{timeframe}]: {err}")
+    return 0.0
+
+
+def is_asset_loss_gated(symbol: str, timeframe: str | None = None, max_loss_dollars: float = 1.0, db=None) -> tuple[bool, float]:
+    """
+    Checks if a specific (symbol, timeframe) case's realized live losses exceed the threshold (default: $1.00).
+    If PnL <= -$1.00, returns (True, pnl_dollars) indicating live trading is gated for that specific case.
+    """
+    pnl = get_asset_realized_pnl_dollars(symbol, timeframe=timeframe, db=db)
+    is_gated = (pnl <= -abs(max_loss_dollars))
+    return is_gated, pnl
+
+
+def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> tuple[bool, str]:
+    """
+    Validates trade entry against empirical Expected Value (EV) findings:
+    
+    15-Minute Markets:
+    - m = 0, 1, 2 (Open): Accept 1¢ – 35¢ (Extreme / Value Discount)
+    - m = 9, 10, 11 (Late): Accept 51¢ – 99¢ (Late Trend Breakthrough)
+    - All other (price, minute) combinations are rejected.
+    
+    1-Hour Markets:
+    - m = 0 .. 10 (Open): Accept 1¢ – 35¢ (Discount / Asymmetric Value)
+    - m = 26 .. 40 (Mid): Accept 51¢ – 99¢ (Mid-Hour Trend Persistence)
+    - m = 41 .. 52 (Late): Accept 51¢ – 99¢ (Late Trend Expansion)
+    - m = 53 .. 59 (Endgame): Accept 51¢ – 80¢ (Endgame Momentum without Overpriced Favorites)
+    - All other (price, minute) combinations are rejected.
+    """
+    if price_cents < 1 or price_cents > 99:
+        return False, "invalid_price_bounds"
+        
+    tf = str(timeframe or "15m").lower()
+    
+    if tf == "15m":
+        m_mod = minute % 15
+        if 0 <= m_mod <= 2 and 1 <= price_cents <= 35:
+            return True, "15m_discount_open"
+        if 9 <= m_mod <= 11 and 51 <= price_cents <= 99:
+            return True, "15m_late_momentum"
+        return False, f"15m_disallowed_zone(p={price_cents}c,m={m_mod})"
+        
+    elif tf == "1h":
+        m_mod = minute % 60
+        if 0 <= m_mod <= 10 and 1 <= price_cents <= 35:
+            return True, "1h_discount_open"
+        if 26 <= m_mod <= 40 and 51 <= price_cents <= 99:
+            return True, "1h_mid_momentum"
+        if 41 <= m_mod <= 52 and 51 <= price_cents <= 99:
+            return True, "1h_late_momentum"
+        if 53 <= m_mod <= 59 and 51 <= price_cents <= 80:
+            return True, "1h_endgame_trend"
+        return False, f"1h_disallowed_zone(p={price_cents}c,m={m_mod})"
+        
+    return False, f"unsupported_timeframe({tf})"
 # Intuitive Core Concept:
 # ------------------------
 # Imagine you are shopping for sneakers to resell online:

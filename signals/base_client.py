@@ -868,6 +868,27 @@ class BaseTradingClient(ABC):
             price_floor=price_floor,
         )
 
+    def evaluate_and_execute_10min_stop_loss(
+        self,
+        ticker: str,
+        current_yes_price: int | None,
+        current_no_price: int | None,
+        dry_run: bool = False,
+        sl_threshold: int = 25,
+        sl_floor: int = 15,
+        winner_take_profit_cents: int = 82,
+    ) -> dict:
+        """Alias for 10-minute stop-loss strategy evaluation."""
+        return self.evaluate_and_execute_10min_strategy(
+            ticker=ticker,
+            current_yes_bid=current_yes_price,
+            current_no_bid=current_no_price,
+            dry_run=dry_run,
+            stop_loss_threshold_cents=sl_threshold,
+            price_floor=sl_floor,
+            win_threshold_cents=winner_take_profit_cents,
+        )
+
     def evaluate_and_execute_5min_cut_loss(
         self,
         ticker: str,

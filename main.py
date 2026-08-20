@@ -52,8 +52,10 @@ from database import (
     get_asset_settlement_streak,
     get_dynamic_filter_for_market,
     get_dynamic_price_filter_map,
+    is_asset_loss_gated,
     is_default_exploration_window,
     is_mid_zone_exploration_window,
+    is_valid_empirical_entry,
     prune_old_market_snapshots,
     save_market_snapshots,
     save_portfolio_pnl,
@@ -257,39 +259,17 @@ def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, of
 
     now = datetime.now(timezone.utc)
 
-    # Complete 60-minute scheduled checkpoints (minute, second)
+    # Complete 60-minute scheduled checkpoints (minute, second):
+    # Includes every 1-minute interval for dense Price(X) Asset(Y) Timestamp(Z) EV logging,
+    # plus high-precision 30s sub-minute marks for 15M/1H entry and exit intervals.
     open_delay = int(open_delay_seconds)
-    hourly_checkpoints = (
-        (0, open_delay),   # 15M :00 open (+30s), 1H :00 open (+30s)
-        (2, 30),           # 15M :02:30
-        (5, 0),            # 15M :05:00
-        (7, 30),           # 15M :07:30
-        (10, 0),           # 15M :10:00, 1H :10:00
-        (12, 30),          # 15M :12:30
-        (14, 0),           # 15M :14:00 (14m Crash Detection / Selloff Check: 1m before expiration)
-        (15, open_delay),  # 15M :15:30 open (+30s)
-        (17, 30),          # 15M :17:30
-        (20, 0),           # 15M :20:00, 1H :20:00
-        (22, 30),          # 15M :22:30
-        (25, 0),           # 15M :25:00
-        (27, 30),          # 15M :27:30
-        (29, 0),           # 15M :29:00 (14m Crash Detection / Selloff Check: 1m before expiration)
-        (30, 0),           # 1H :30:00 mid-hour check (exact timestamp, NO delay)
-        (30, open_delay),  # 15M :30:30 open (+30s)
-        (32, 30),          # 15M :32:30
-        (35, 0),           # 15M :35:00
-        (37, 30),          # 15M :37:30
-        (40, 0),           # 15M :40:00, 1H :40:00
-        (42, 30),          # 15M :42:30
-        (44, 0),           # 15M :44:00 (14m Crash Detection / Selloff Check: 1m before expiration)
-        (45, open_delay),  # 15M :45:30 open (+30s)
-        (47, 30),          # 15M :47:30
-        (50, 0),           # 15M :50:00, 1H :50:00
-        (52, 30),          # 15M :52:30
-        (55, 0),           # 15M :55:00
-        (57, 30),          # 15M :57:30
-        (59, 0),           # 15M :59:00 & 1H :59:00 (Crash Detection / Selloff Check: 1m before expiration)
-    )
+    half_minute_marks = {0, 2, 7, 12, 15, 17, 22, 27, 30, 32, 37, 42, 45, 47, 52, 57}
+    checkpoints_list = []
+    for m in range(60):
+        checkpoints_list.append((m, 0))
+        if m in half_minute_marks:
+            checkpoints_list.append((m, 30 if m not in (0, 15, 30, 45) else open_delay))
+    hourly_checkpoints = tuple(checkpoints_list)
 
     candidates = []
     # Generate candidate timestamps across current hour and next hour
@@ -1247,15 +1227,15 @@ def process_single_market(
         rem_mins = round(rem_mins_val, 1) if rem_mins_val is not None else None
 
     vol_count = None
-    if (vol_raw := (market.get("volume_fp") or market.get("volume_24h_fp"))) is not None:
-        try:
-            vol_count = int(round(float(vol_raw)))
-        except (ValueError, TypeError):
-            pass
+    for vol_key in ("volume_fp", "volume_24h_fp", "volume_24h", "volume"):
+        if vol_key in market and market[vol_key] is not None:
+            try:
+                vol_count = int(round(float(market[vol_key])))
+                break
+            except (ValueError, TypeError):
+                pass
 
     # 4. Strategy Rules & Dynamic Price Filter Lookup
-    # Strategy Concept: Instead of hardcoded one-size-fits-all numbers, we ask
-    # our in-memory engine for the optimal buy & sell targets for THIS specific coin and timing mark!
     minute_into_market = minute_past_hour % 15
     is_14min_mark = (minute_into_market == 14)
     is_12_5min_mark = (minute_into_market == 12)
@@ -1265,7 +1245,6 @@ def process_single_market(
     is_2_5min_mark = (minute_into_market == 2)
     is_00_mark = (minute_into_market == 0)
 
-    # :05 and :07.5 use tighter dynamic price filters (is_5min_mark=True); :00 and :02.5 use broad open filters
     is_tight_corridor = (minute_into_market in (5, 7, 14))
     dynamic_filters = get_dynamic_filter_for_market(
         asset_symbol,
@@ -1274,12 +1253,22 @@ def process_single_market(
         now_utc=now_utc,
     )
     streak_data = get_asset_settlement_streak(asset_symbol, timeframe="15m", now_utc=now_utc)
-    min_buy_price = dynamic_filters["min_buy"]
-    max_buy_price = dynamic_filters["max_buy"]
-    take_profit_cents = dynamic_filters["tp"]
+    take_profit_cents = int(dynamic_filters.get("tp", 82))
+    min_buy_price = int(dynamic_filters.get("min_buy", 1))
+    max_buy_price = int(dynamic_filters.get("max_buy", 35))
     is_exploration = dynamic_filters.get("is_exploration", False)
     is_restricted = dynamic_filters.get("is_restricted", False)
     base_contracts = int(dynamic_filters.get("contracts_per_trade", 1))
+
+    # Asset/Timeframe Loss Gating ($1.00 loss threshold): If cumulative realized losses for (asset, 15m) exceed $1.00, disable live trades
+    is_gated, asset_realized_pnl = is_asset_loss_gated(asset_symbol, timeframe="15m", max_loss_dollars=1.0)
+    effective_dry_run = dry_run or is_gated
+    ex_name = getattr(client, "exchange_name", "Exchange")
+    if is_gated and not dry_run:
+        log.info(
+            f"🛡️ [ASSET LOSS GATED] [{ex_name}] 15M {asset_symbol} cumulative realized loss (${abs(asset_realized_pnl):.2f}) "
+            f"exceeds $1.00 limit. Disabling live 15M order execution; running in DRY-RUN empirical logging mode."
+        )
 
     trade_executed = False
     trade_details = None
@@ -1289,9 +1278,6 @@ def process_single_market(
 
     # -----------------------------------------------------------------------
     # Step 4A-0: 14-Minute Crash Detection & Selloff Check (:14 mark - 1m before expiration)
-    # At minute 14: Final safety net against last-minute market dumps, flash crashes, or adverse flips.
-    # If trailing entry (loss > 0) OR price < crash floor (e.g. < 50¢), liquidates immediately to salvage capital!
-    # If securely winning, holds into expiration for 100¢ ($1.00) settlement.
     # -----------------------------------------------------------------------
     if is_14min_mark:
         sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
@@ -1302,14 +1288,13 @@ def process_single_market(
             ticker=ticker,
             current_yes_price=sellable_yes_price,
             current_no_price=sellable_no_price,
-            dry_run=dry_run,
+            dry_run=effective_dry_run,
             crash_floor_cents=crash_floor,
             action_name="14min_crash_selloff_cut",
         )
         if isinstance(crash_res, dict) and crash_res.get("triggered"):
             trade_executed = True
             c_side = crash_res.get("side", "yes")
-            ex_name = getattr(client, "exchange_name", "Exchange")
             action_name = crash_res.get("action", "14min_crash_selloff_cut")
             trade_details = {
                 "ex": ex_name.lower(),
@@ -1326,9 +1311,6 @@ def process_single_market(
 
     # -----------------------------------------------------------------------
     # Step 4A: 12.5-Minute Endgame Safety Check (:12.5 mark - 2.5m before expiration)
-    # At minute 12.5: If we are losing (loss > 0 or price < dynamic endgame floor e.g. < 25¢),
-    # liquidate immediately so we don't lose all capital gains or suffer a 0¢ expiration loss!
-    # If winning, let it run to 100¢ ($1.00 settlement).
     # -----------------------------------------------------------------------
     elif is_12_5min_mark:
         sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
@@ -1339,13 +1321,12 @@ def process_single_market(
             ticker=ticker,
             current_yes_price=sellable_yes_price,
             current_no_price=sellable_no_price,
-            dry_run=dry_run,
+            dry_run=effective_dry_run,
             endgame_floor=endgame_floor,
         )
         if isinstance(eg_res, dict) and eg_res.get("triggered"):
             trade_executed = True
             eg_side = eg_res.get("side", "yes")
-            ex_name = getattr(client, "exchange_name", "Exchange")
             action_name = eg_res.get("action", "endgame_loss_cut")
             trade_details = {
                 "ex": ex_name.lower(),
@@ -1361,106 +1342,45 @@ def process_single_market(
                 trade_details["profit_locked_cents"] = eg_res["profit_locked_cents"]
 
     # -----------------------------------------------------------------------
-    # Step 4B: 10-Minute Winner-Bank & Stop-Loss Evaluation (:10 mark)
-    # At minute 10:
-    # 1. Winning positions (>= 70¢ / in profit): SELL at Bid to bank realized profit directly in cash!
-    # 2. Losing positions: Execute immediate stop-loss liquidation.
+    # Step 4B: 10-Minute Hard Stop-Loss & Winner-Roll Check
     # -----------------------------------------------------------------------
     elif is_stop_loss_interval:
         sellable_yes_price = quotes["yes_bid"] if quotes["yes_bid"] is not None else yes_price_cents
         sellable_no_price = quotes["no_bid"] if quotes["no_bid"] is not None else no_price_cents
-
-        sl_threshold = dynamic_filters.get("sl_threshold", 10)
-        sl_floor = dynamic_filters.get("sl_floor", 30)
-
-        sl_res = client.evaluate_and_execute_10min_strategy(
+        sl_res = client.evaluate_and_execute_10min_stop_loss(
             ticker=ticker,
-            current_yes_bid=sellable_yes_price,
-            current_no_bid=sellable_no_price,
-            current_yes_ask=quotes.get("yes_ask"),
-            current_no_ask=quotes.get("no_ask"),
-            dry_run=dry_run,
-            stop_loss_threshold_cents=sl_threshold,
-            price_floor=sl_floor,
+            current_yes_price=sellable_yes_price,
+            current_no_price=sellable_no_price,
+            dry_run=effective_dry_run,
+            sl_threshold=dynamic_filters["sl_threshold"],
+            sl_floor=dynamic_filters["sl_floor"],
+            winner_take_profit_cents=dynamic_filters.get("tp", 82),
         )
         if isinstance(sl_res, dict) and sl_res.get("triggered"):
             trade_executed = True
             sl_side = sl_res.get("side", "yes")
-            ex_name = getattr(client, "exchange_name", "Exchange")
-            action_name = sl_res.get("action", "stop_loss_sold")
+            action_name = sl_res.get("action", "10min_stop_loss")
             trade_details = {
                 "ex": ex_name.lower(),
                 "action": action_name,
                 "side": sl_side,
                 "exit_price": sl_res.get("exit_price"),
+                "loss_cents": sl_res.get("loss_cents"),
                 "outcome": determine_counterfactual_outcome(
                     sl_side, action_name, spot_price, target_price, market.get("result")
                 ),
             }
-            if "loss_cents" in sl_res:
-                trade_details["loss_cents"] = sl_res["loss_cents"]
             if "profit_locked_cents" in sl_res:
                 trade_details["profit_locked_cents"] = sl_res["profit_locked_cents"]
-            if "rebuy_price_cents" in sl_res:
-                trade_details["rebuy_price_cents"] = sl_res["rebuy_price_cents"]
-
     # -----------------------------------------------------------------------
-    # Step 4C: Buy Strategy & Early Cut-Loss Check (:00, :02.5, :05, :07.5...)
-    # - :00 & :02.5: Deep discount buy entries (18¢-30¢) + :02.5 disaster cut-loss.
-    # - :05 & :07.5: Clamped discount entries (18¢-24¢) + early cut-loss checks (<15¢).
-    # Exclusively gated: We do NOT evaluate new buys if Stop-Loss just liquidated this market.
+    # Step 4E: Position Gates & Entry Evaluation
     # -----------------------------------------------------------------------
-    elif is_trading_interval:
-        if not dry_run:
-            client.cancel_unfilled_buy_orders(ticker)
-
-        cut_loss_executed = False
+    if not trade_executed:
         pos = client.get_market_position(ticker)
-
-        # Early Cut-Loss Check: Evaluate active positions at :02.5, :05, and :07.5 marks
-        if pos is not None and (is_2_5min_mark or is_5min_mark or is_7_5min_mark):
-            side = pos["side"]
-            if is_2_5min_mark:
-                cut_threshold = max(20, dynamic_filters.get("cut_5min", 40) - 5)
-                action_tag = "2_5min_loss_cut"
-            elif is_7_5min_mark:
-                cut_threshold = dynamic_filters.get("cut_5min", 40)
-                action_tag = "7_5min_loss_cut"
-            else:
-                cut_threshold = dynamic_filters.get("cut_5min", 40)
-                action_tag = "early_loss_cut"
-
-            cut_res = client.evaluate_and_execute_5min_cut_loss(
-                ticker=ticker,
-                current_yes_price=yes_price_cents,
-                current_no_price=no_price_cents,
-                min_price_threshold=cut_threshold,
-                dry_run=dry_run,
-            )
-            if isinstance(cut_res, dict) and cut_res.get("triggered"):
-                trade_executed = True
-                ex_name = getattr(client, "exchange_name", "Exchange")
-                trade_details = {
-                    "ex": ex_name.lower(),
-                    "action": action_tag,
-                    "side": side,
-                    "exit_price": cut_res.get("exit_price"),
-                    "loss_cents": cut_res.get("loss_cents"),
-                    "outcome": determine_counterfactual_outcome(
-                        side, action_tag, spot_price, target_price, market.get("result")
-                    ),
-                }
-                pos = None
-                cut_loss_executed = True
-
-        # Position Gates & Entry Evaluation
-        ex_name = getattr(client, "exchange_name", "Exchange")
         has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
-        if cut_loss_executed:
-            log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Early Cut-Loss executed for {ticker}. Skipping buy evaluation.")
-        elif pos is not None:
+        if pos is not None:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
-            if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
+            if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not effective_dry_run:
                 safe_tp = resolve_safe_take_profit_for_position(
                     ticker=ticker,
                     client=client,
@@ -1505,20 +1425,12 @@ def process_single_market(
                     target_price=target_price,
                     market_result=market.get("result"),
                     client=client,
-                    dry_run=dry_run,
+                    dry_run=effective_dry_run,
                     count=fav_count,
                 )
 
             # Priority 2: Screen for candidates across General Corridors if Favorite Maker not triggered
             if not trade_executed:
-                avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
-                mid_min = int(dynamic_filters.get("mid_zone_min", 31))
-                mid_max = int(dynamic_filters.get("mid_zone_max", 61))
-
-                pct_dist_val = 0.0
-                if spot_price and target_price and target_price > 0:
-                    pct_dist_val = ((spot_price - target_price) / target_price) * 100.0
-
                 candidate_sides = []
                 counterfactual_details = None
                 for side, p_cents, aligned in [
@@ -1535,26 +1447,32 @@ def process_single_market(
                         )
                         continue
 
-                    # Corridor 1: Deep Discount Corridor
-                    if min_buy_price <= p_cents <= max_buy_price:
+                    # Enforce Empirical 15M Rules: 1¢-35¢ at m=0-2, 51¢+ at m=9-11
+                    is_valid_entry, entry_reason = is_valid_empirical_entry(p_cents, minute_into_market, "15m")
+
+                    if is_valid_entry:
+                        tp_target = 88 if p_cents >= 51 else max(62, p_cents + 25)
+                        mode_tag = "momentum" if p_cents >= 51 else "discount"
+                        log.info(
+                            f"🎯 [EMPIRICAL +EV ENTRY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                            f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
+                        )
                         candidate_sides.append({
                             "side": side,
                             "price": p_cents,
-                            "tp": take_profit_cents,
-                            "min_buy": min_buy_price,
-                            "max_buy": max_buy_price,
-                            "mode": "discount",
+                            "tp": tp_target,
+                            "min_buy": 1 if p_cents <= 35 else 51,
+                            "max_buy": 35 if p_cents <= 35 else 99,
+                            "mode": mode_tag,
+                            "entry_reason": entry_reason,
                         })
-
-                    # Dead Coin-Flip Middle Zone
-                    elif mid_min <= p_cents <= mid_max:
-                        # Record counterfactual sample for empirical discovery in MongoDB without capital risk
+                    else:
                         counterfactual_details = {
                             "dry_run": True,
                             "ex": market.get("exchange", "kalshi"),
-                            "action": "counterfactual_mid_zone",
-                            "regime": "exploration_sim" if is_exploration else "empirical_tracking",
-                            "corridor": "mid_zone",
+                            "action": "counterfactual_empirical_reject",
+                            "regime": "empirical_tracking",
+                            "corridor": "disallowed_zone",
                             "side": side,
                             "buy": p_cents,
                             "tp": take_profit_cents,
@@ -1564,66 +1482,12 @@ def process_single_market(
                             "spot_at_entry": spot_price,
                             "target_at_entry": target_price,
                         }
-
-                        if avoid_mid_zone:
-                            log.info(
-                                f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢) "
-                                f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
-                            )
-                        elif not can_execute_exploration_trade(now_utc):
-                            log.info(
-                                f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                                f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
-                            )
-                        else:
-                            log.info(
-                                f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                                f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
-                            )
-                            candidate_sides.append({
-                                "side": side,
-                                "price": p_cents,
-                                "tp": take_profit_cents,
-                                "min_buy": mid_min,
-                                "max_buy": mid_max,
-                                "mode": "mid_zone",
-                            })
-
-                    # Corridor 2: Momentum / Trend Breakout Corridor
-                    elif dynamic_filters.get("enable_momentum_buys", False):
-                        mom_min = int(dynamic_filters.get("momentum_min_buy", 62))
-                        mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
-                        min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.15))
-                        has_breakout_lead = (pct_dist_val >= min_lead) if side == "yes" else (pct_dist_val <= -min_lead)
-
-                        if mom_min <= p_cents <= mom_max:
-                            if has_breakout_lead:
-                                mom_tp = int(dynamic_filters.get("momentum_tp", 88))
-                                log.info(
-                                    f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                                    f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
-                                )
-                                candidate_sides.append({
-                                    "side": side,
-                                    "price": p_cents,
-                                    "tp": mom_tp,
-                                    "min_buy": mom_min,
-                                    "max_buy": mom_max,
-                                    "mode": "momentum",
-                                })
-                            else:
-                                log.info(
-                                    f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                                    f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
-                                )
+                        log.info(
+                            f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                            f"Blocked by empirical rule [{entry_reason}]. Saved as counterfactual tracking snapshot."
+                        )
 
                 if candidate_sides:
-                    # -----------------------------------------------------------
-                    # Ensemble Consensus & Settlement Streak Filter Evaluation
-                    # (DeweyMarco Consensus Model + MongoDB Settlement Autocorrelation)
-                    # -----------------------------------------------------------
-                    # TODO (Improvement 2): Scan for intra-market synthetic arbitrage opportunities (yes_ask + no_ask <= 96¢)
-                    # TODO (Improvement 3): Check portfolio R-risk budget caps (daily -3R / weekly -8R) and break-even hibernation
                     streak_data = get_asset_settlement_streak(asset_symbol, timeframe="15m", now_utc=now_utc)
                     lead_changes_count = get_market_lead_changes(ticker)
 
@@ -1686,20 +1550,13 @@ def process_single_market(
                             balance_cents=balance_cents,
                             buy_price_cents=chosen_price,
                             base_count=base_contracts,
-                            is_restricted=is_restricted,
+                            is_restricted=is_restricted or is_gated,
                             recent_win_rate=recent_wr,
                         )
 
-                        if is_restricted:
-                            log.info(
-                                f"⚠️ [DYNAMIC LOSS RESTRICTION] [{ex_name}] {ticker}: Asset {asset_symbol} is in restricted regime. "
-                                f"Enforcing tight ceiling ({chosen_max}¢) and 1 contract sniper sizing."
-                            )
-
                         if contracts_count <= 0 and balance_cents is not None:
-                            log.info(
-                                f"⚠️ [INSUFFICIENT BALANCE] [{ex_name}] {ticker}: Available balance {balance_cents}¢ "
-                                f"is below contract price {chosen_price}¢. Skipping buy."
+                            log.warning(
+                                f"⚠️ [INSUFFICIENT BALANCE] [{ex_name}] Cash balance ({balance_cents}¢) cannot afford 1 contract of {ticker} @ {chosen_price}¢. Skipping buy."
                             )
                         else:
                             contracts_to_buy = max(1, contracts_count)
@@ -1715,7 +1572,7 @@ def process_single_market(
                                 target_price=target_price,
                                 market_result=market.get("result"),
                                 client=client,
-                                dry_run=dry_run,
+                                dry_run=effective_dry_run,
                                 is_exploration=is_exploration,
                                 corridor_mode=chosen_mode,
                                 count=contracts_to_buy,
@@ -1806,6 +1663,8 @@ def process_single_market(
         "strk_side": streak_data.get("streak_side") if streak_data else None,
         "c_score": chosen_consensus.get("consensus_score") if chosen_consensus else None,
         "c_regime": chosen_consensus.get("regime") if chosen_consensus else None,
+        "emp_valid_y": is_valid_empirical_entry(yes_price_cents, minute_into_market, "15m")[0] if yes_price_cents is not None else False,
+        "emp_valid_n": is_valid_empirical_entry(no_price_cents, minute_into_market, "15m")[0] if no_price_cents is not None else False,
     }
 
     if trade_executed and trade_details:
@@ -1863,6 +1722,15 @@ def process_hourly_market_group(
     avoid_mid_zone = dynamic_filters.get("avoid_mid_zone", True)
     is_restricted = dynamic_filters.get("is_restricted", False)
     base_contracts = int(dynamic_filters.get("contracts_per_trade", 1 if is_restricted else 3))
+
+    # Asset/Timeframe Loss Gating ($1.00 loss threshold): If cumulative realized losses for (symbol, 1h) exceed $1.00, disable live trades
+    is_gated, asset_realized_pnl = is_asset_loss_gated(symbol, timeframe="1h", max_loss_dollars=1.0)
+    effective_dry_run = dry_run or is_gated
+    if is_gated and not dry_run:
+        log.info(
+            f"🛡️ [ASSET LOSS GATED] [{ex_name}] 1H {symbol} cumulative realized loss (${abs(asset_realized_pnl):.2f}) "
+            f"exceeds $1.00 limit. Disabling live 1H order execution; running in DRY-RUN empirical logging mode."
+        )
 
     snapshots: list[dict] = []
     trade_executed_by_ticker: dict[str, dict] = {}
@@ -1927,11 +1795,13 @@ def process_hourly_market_group(
                 pass
 
         vol_count = None
-        if (vol_raw := (market.get("volume_fp") or market.get("volume_24h_fp"))) is not None:
-            try:
-                vol_count = int(round(float(vol_raw)))
-            except (ValueError, TypeError):
-                pass
+        for vol_key in ("volume_fp", "volume_24h_fp", "volume_24h", "volume"):
+            if vol_key in market and market[vol_key] is not None:
+                try:
+                    vol_count = int(round(float(market[vol_key])))
+                    break
+                except (ValueError, TypeError):
+                    pass
 
         parsed_markets.append({
             "market": market,
@@ -2256,222 +2126,102 @@ def process_hourly_market_group(
 
                 # Evaluate YES
                 yes_p = item["yes_price_cents"]
-                mid_min = int(dynamic_filters.get("mid_zone_min", 37))
-                mid_max = int(dynamic_filters.get("mid_zone_max", 55))
                 if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                     if is_spot_momentum_aligned("yes", spot_price, target_price):
-                        # 1. Discount Corridor (18¢ - 44¢)
-                        if min_buy_price <= yes_p <= max_buy_price:
-                            if avoid_mid_zone and (37 <= yes_p <= max_buy_price) and pct_dist_val < 0.08:
-                                log.info(
-                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                                    f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
-                                )
-                            else:
-                                valid_yes_candidates.append({
-                                    "item": item,
-                                    "ticker": ticker,
-                                    "side": "yes",
-                                    "price": yes_p,
-                                    "bid": quotes["yes_bid"],
-                                    "target_price": target_price,
-                                    "pct_dist": pct_dist,
-                                    "tp": take_profit_cents,
-                                    "min_buy": min_buy_price,
-                                    "max_buy": max_buy_price,
-                                    "mode": "discount",
-                                })
-                        # 2. Dead Coin-Flip Middle Zone
-                        elif mid_min <= yes_p <= mid_max:
-                            counterfactual_by_ticker[ticker] = {
-                                "dry_run": True,
-                                "ex": item["market"].get("exchange", "kalshi"),
-                                "action": "counterfactual_mid_zone",
-                                "regime": "exploration_sim" if is_exploration else "empirical_tracking",
-                                "corridor": "mid_zone",
+                        # Enforce Empirical 1H Rules (1¢-35¢ @ m=0-10, 51¢+ @ m=26-40, 51¢+ @ m=41-52, 51¢-80¢ @ m=53-59)
+                        is_valid_entry, entry_reason = is_valid_empirical_entry(yes_p, minute_past_hour, "1h")
+                        if is_valid_entry:
+                            tp_target = 88 if yes_p >= 51 else max(62, yes_p + 25)
+                            mode_tag = "momentum" if yes_p >= 51 else "discount"
+                            log.info(
+                                f"🎯 [EMPIRICAL +EV 1H ENTRY] [{ex_name}] {ticker} (YES @ {yes_p}¢, m={minute_past_hour}): "
+                                f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
+                            )
+                            valid_yes_candidates.append({
+                                "item": item,
+                                "ticker": ticker,
                                 "side": "yes",
-                                "buy": yes_p,
-                                "tp": take_profit_cents,
-                                "sl": 25,
-                                "outcome": determine_counterfactual_outcome("yes", "buy_opened", spot_price, target_price, item["market"].get("result")),
-                                "entry_ts": int(time.time()),
-                                "spot_at_entry": spot_price,
-                                "target_at_entry": target_price,
-                            }
-                            if avoid_mid_zone:
-                                log.info(
-                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢) "
-                                    f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
-                                )
-                            elif not can_execute_exploration_trade(now_utc):
-                                log.info(
-                                    f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                    f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
-                                )
-                            else:
-                                log.info(
-                                    f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                    f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
-                                )
-                                valid_yes_candidates.append({
-                                    "item": item,
-                                    "ticker": ticker,
+                                "price": yes_p,
+                                "bid": quotes["yes_bid"],
+                                "target_price": target_price,
+                                "pct_dist": pct_dist,
+                                "tp": tp_target,
+                                "min_buy": 1 if yes_p <= 35 else 51,
+                                "max_buy": 35 if yes_p <= 35 else (80 if minute_past_hour >= 53 else 99),
+                                "mode": mode_tag,
+                                "entry_reason": entry_reason,
+                            })
+                        else:
+                            item_vol = item.get("vol_count") or 0
+                            if (5 <= yes_p <= 95) or item_vol > 0:
+                                counterfactual_by_ticker[ticker] = {
+                                    "dry_run": True,
+                                    "ex": item["market"].get("exchange", "kalshi"),
+                                    "action": "counterfactual_empirical_reject",
+                                    "regime": "empirical_tracking",
+                                    "corridor": "disallowed_zone",
                                     "side": "yes",
-                                    "price": yes_p,
-                                    "bid": quotes["yes_bid"],
-                                    "target_price": target_price,
-                                    "pct_dist": pct_dist,
+                                    "buy": yes_p,
                                     "tp": take_profit_cents,
-                                    "min_buy": mid_min,
-                                    "max_buy": mid_max,
-                                    "mode": "mid_zone",
-                                })
-                        # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
-                        elif dynamic_filters.get("enable_momentum_buys", False):
-                            mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
-                            mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
-                            min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
-
-                            if mom_min <= yes_p <= mom_max:
-                                if pct_dist_val >= min_lead:
-                                    mom_tp = int(dynamic_filters.get("momentum_tp", 88))
-                                    log.info(
-                                        f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                        f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
-                                    )
-                                    valid_yes_candidates.append({
-                                        "item": item,
-                                        "ticker": ticker,
-                                        "side": "yes",
-                                        "price": yes_p,
-                                        "bid": quotes["yes_bid"],
-                                        "target_price": target_price,
-                                        "pct_dist": pct_dist,
-                                        "tp": mom_tp,
-                                        "min_buy": mom_min,
-                                        "max_buy": mom_max,
-                                        "mode": "momentum",
-                                    })
-                                else:
-                                    log.info(
-                                        f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                        f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
-                                    )
-                            else:
-                                max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
-                                if min_buy_price <= yes_p <= max_eval_price:
-                                    log.info(
-                                        f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (YES @ {yes_p}¢): "
-                                        f"Spot ${spot_price} < Target ${target_price} (Diff: {item['price_diff']}). Bearish spot momentum."
-                                    )
+                                    "sl": 25,
+                                    "outcome": determine_counterfactual_outcome("yes", "buy_opened", spot_price, target_price, item["market"].get("result")),
+                                    "entry_ts": int(time.time()),
+                                    "spot_at_entry": spot_price,
+                                    "target_at_entry": target_price,
+                                }
+                                log.info(
+                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (YES @ {yes_p}¢, m={minute_past_hour}): "
+                                    f"Blocked by empirical rule [{entry_reason}]. Saved as counterfactual tracking snapshot."
+                                )
 
                 # Evaluate NO
                 no_p = item["no_price_cents"]
                 if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                     if is_spot_momentum_aligned("no", spot_price, target_price):
-                        # 1. Discount Corridor (18¢ - 44¢)
-                        if min_buy_price <= no_p <= max_buy_price:
-                            if avoid_mid_zone and (37 <= no_p <= max_buy_price) and pct_dist_val > -0.08:
-                                log.info(
-                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                                    f"falls in conditional band (37¢-{max_buy_price}¢) without strong spot edge. Skipping."
-                                )
-                            else:
-                                valid_no_candidates.append({
-                                    "item": item,
-                                    "ticker": ticker,
-                                    "side": "no",
-                                    "price": no_p,
-                                    "bid": quotes["no_bid"],
-                                    "target_price": target_price,
-                                    "pct_dist": pct_dist,
-                                    "tp": take_profit_cents,
-                                    "min_buy": min_buy_price,
-                                    "max_buy": max_buy_price,
-                                    "mode": "discount",
-                                })
-                        # 2. Dead Coin-Flip Middle Zone
-                        elif mid_min <= no_p <= mid_max:
-                            counterfactual_by_ticker[ticker] = {
-                                "dry_run": True,
-                                "ex": item["market"].get("exchange", "kalshi"),
-                                "action": "counterfactual_mid_zone",
-                                "regime": "exploration_sim" if is_exploration else "empirical_tracking",
-                                "corridor": "mid_zone",
+                        # Enforce Empirical 1H Rules (1¢-35¢ @ m=0-10, 51¢+ @ m=26-40, 51¢+ @ m=41-52, 51¢-80¢ @ m=53-59)
+                        is_valid_entry, entry_reason = is_valid_empirical_entry(no_p, minute_past_hour, "1h")
+                        if is_valid_entry:
+                            tp_target = 88 if no_p >= 51 else max(62, no_p + 25)
+                            mode_tag = "momentum" if no_p >= 51 else "discount"
+                            log.info(
+                                f"🎯 [EMPIRICAL +EV 1H ENTRY] [{ex_name}] {ticker} (NO @ {no_p}¢, m={minute_past_hour}): "
+                                f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
+                            )
+                            valid_no_candidates.append({
+                                "item": item,
+                                "ticker": ticker,
                                 "side": "no",
-                                "buy": no_p,
-                                "tp": take_profit_cents,
-                                "sl": 25,
-                                "outcome": determine_counterfactual_outcome("no", "buy_opened", spot_price, target_price, item["market"].get("result")),
-                                "entry_ts": int(time.time()),
-                                "spot_at_entry": spot_price,
-                                "target_at_entry": target_price,
-                            }
-                            if avoid_mid_zone:
-                                log.info(
-                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢) "
-                                    f"falls in low-EV coin-flip middle zone ({mid_min}¢-{mid_max}¢). Skipping live order (saved as empirical snapshot)."
-                                )
-                            elif not can_execute_exploration_trade(now_utc):
-                                log.info(
-                                    f"🎯 [EXPLORATION CAP REACHED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                    f"Session exploration trade cap ({MAX_EXPLORATION_TRADES_PER_SESSION} trades) reached. Skipping live order (saved as empirical snapshot)."
-                                )
-                            else:
-                                log.info(
-                                    f"🎯 [MID-ZONE EXPLORATION] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                    f"Allowing coin-flip middle zone trade during discovery window (05:00-05:15 UTC, {get_exploration_trades_count()}/{MAX_EXPLORATION_TRADES_PER_SESSION} used) for empirical data collection."
-                                )
-                                valid_no_candidates.append({
-                                    "item": item,
-                                    "ticker": ticker,
-                                    "side": "no",
-                                    "price": no_p,
-                                    "bid": quotes["no_bid"],
-                                    "target_price": target_price,
-                                    "pct_dist": pct_dist,
-                                    "tp": take_profit_cents,
-                                    "min_buy": mid_min,
-                                    "max_buy": mid_max,
-                                    "mode": "mid_zone",
-                                })
-                        # 3. Momentum Breakout Corridor (56¢ - 68¢ at open, 56¢ - 65¢ at :20)
-                        elif dynamic_filters.get("enable_momentum_buys", False):
-                            mom_min = int(dynamic_filters.get("momentum_min_buy", 56))
-                            mom_max = int(dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65))
-                            min_lead = float(dynamic_filters.get("momentum_min_pct_dist", 0.10))
-
-                            if mom_min <= no_p <= mom_max:
-                                if pct_dist_val <= -min_lead:
-                                    mom_tp = int(dynamic_filters.get("momentum_tp", 88))
-                                    log.info(
-                                        f"🚀 [MOMENTUM BREAKOUT SIGNAL] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                        f"Spot lead {pct_dist_val:+.2f}% exceeds {min_lead}%. Targeting {mom_tp}¢ TP!"
-                                    )
-                                    valid_no_candidates.append({
-                                        "item": item,
-                                        "ticker": ticker,
-                                        "side": "no",
-                                        "price": no_p,
-                                        "bid": quotes["no_bid"],
-                                        "target_price": target_price,
-                                        "pct_dist": pct_dist,
-                                        "tp": mom_tp,
-                                        "min_buy": mom_min,
-                                        "max_buy": mom_max,
-                                        "mode": "momentum",
-                                    })
-                                else:
-                                    log.info(
-                                        f"🚫 [MOMENTUM LEAD REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                        f"Spot lead {pct_dist_val:+.2f}% is below required {min_lead}% breakout lead threshold. Skipping."
-                                    )
+                                "price": no_p,
+                                "bid": quotes["no_bid"],
+                                "target_price": target_price,
+                                "pct_dist": pct_dist,
+                                "tp": tp_target,
+                                "min_buy": 1 if no_p <= 35 else 51,
+                                "max_buy": 35 if no_p <= 35 else (80 if minute_past_hour >= 53 else 99),
+                                "mode": mode_tag,
+                                "entry_reason": entry_reason,
+                            })
                         else:
-                            max_eval_price = dynamic_filters.get("momentum_max_buy", 68 if not is_tight_corridor else 65) if dynamic_filters.get("enable_momentum_buys", False) else max_buy_price
-                            if min_buy_price <= no_p <= max_eval_price:
+                            item_vol = item.get("vol_count") or 0
+                            if (5 <= no_p <= 95) or item_vol > 0:
+                                counterfactual_by_ticker[ticker] = {
+                                    "dry_run": True,
+                                    "ex": item["market"].get("exchange", "kalshi"),
+                                    "action": "counterfactual_empirical_reject",
+                                    "regime": "empirical_tracking",
+                                    "corridor": "disallowed_zone",
+                                    "side": "no",
+                                    "buy": no_p,
+                                    "tp": take_profit_cents,
+                                    "sl": 25,
+                                    "outcome": determine_counterfactual_outcome("no", "buy_opened", spot_price, target_price, item["market"].get("result")),
+                                    "entry_ts": int(time.time()),
+                                    "spot_at_entry": spot_price,
+                                    "target_at_entry": target_price,
+                                }
                                 log.info(
-                                    f"🚫 [SPOT MOMENTUM REJECTED] [{ex_name}] {ticker} (NO @ {no_p}¢): "
-                                    f"Spot ${spot_price} >= Target ${target_price} (Diff: {item['price_diff']}). Bullish spot momentum."
+                                    f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} (NO @ {no_p}¢, m={minute_past_hour}): "
+                                    f"Blocked by empirical rule [{entry_reason}]. Saved as counterfactual tracking snapshot."
                                 )
 
         # Step 3D: Multi-Strike Selection & Tiebreaker Execution
@@ -2612,7 +2362,7 @@ def process_hourly_market_group(
                 target_price=cand["target_price"],
                 market_result=item["market"].get("result"),
                 client=client,
-                dry_run=dry_run,
+                dry_run=effective_dry_run,
                 is_exploration=is_exploration,
                 corridor_mode=cand.get("mode", "discount"),
                 count=contracts_to_buy,
@@ -2663,7 +2413,7 @@ def process_hourly_market_group(
                 target_price=best_item["target_price"],
                 market_result=best_item["market"].get("result"),
                 client=client,
-                dry_run=dry_run,
+                dry_run=effective_dry_run,
                 count=fav_count,
             )
             if fav_executed and fav_details:
@@ -2718,6 +2468,8 @@ def process_hourly_market_group(
             "strk_side": streak_data.get("streak_side") if streak_data else None,
             "c_score": trd_info.get("consensus_score"),
             "c_regime": trd_info.get("consensus_regime"),
+            "emp_valid_y": is_valid_empirical_entry(item["yes_price_cents"], minute_past_hour, "1h")[0] if item["yes_price_cents"] is not None else False,
+            "emp_valid_n": is_valid_empirical_entry(item["no_price_cents"], minute_past_hour, "1h")[0] if item["no_price_cents"] is not None else False,
         }
         if ticker in trade_executed_by_ticker:
             compact_doc["trd"] = trade_executed_by_ticker[ticker]
@@ -3112,15 +2864,9 @@ def run_pipeline_pass(
     # Storage Optimization Policy:
     # 1. Always save snapshots where a trade or order action occurred ('trd' is not None).
     # 2. Always save 15M / 5M market snapshots at standard checkpoints.
-    # 3. For Hourly multi-strike markets, filter out untradeable 1¢/99¢ extreme strikes with 0 volume.
-    #    Retain strikes in the tradeable corridor (5¢ - 95¢) or with active trading volume (vol > 0).
-    is_standard_save_mark = (minute_into_market_15m in (0, 2, 5, 7, 10, 12, 14)) or (current_minute in (0, 10, 20, 30, 40, 50, 52, 55, 57, 59))
-
     def _is_retained_snapshot(s: dict) -> bool:
         if s.get("trd") is not None:
             return True
-        if not is_standard_save_mark:
-            return False
         y_val = s.get("y")
         n_val = s.get("n")
         if y_val is None and n_val is None:
@@ -3139,8 +2885,6 @@ def run_pipeline_pass(
     if valid_snapshots:
         log.info(f"\nSaving {len(valid_snapshots)} ultra-compact market snapshot(s) to MongoDB Atlas...")
         save_market_snapshots(valid_snapshots)
-    elif not is_standard_save_mark:
-        log.info("\nInterim data-collection pass complete (compact storage policy: snapshots saved at :00, :02.5, :05, :07.5, :10, :12.5, :14, :20, :30, :40, :50, :52.5, :55, :57.5, :59 marks).")
     else:
         log.warning("\nNo valid price snapshots retrieved in this pass. Skipping MongoDB Atlas save.")
     log.info("Pass complete.")

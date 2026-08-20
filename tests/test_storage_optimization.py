@@ -58,6 +58,12 @@ def test_prune_old_market_snapshots_includes_orphans():
 from signals.base_client import BaseTradingClient
 
 
+@pytest.fixture(autouse=True)
+def mock_ungated_asset():
+    with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
+        yield
+
+
 def test_main_snapshot_filtering_logic():
     """Verify extreme 1¢/99¢ untradeable hourly strikes with 0 volume are filtered out."""
     from main import run_pipeline_pass
@@ -141,6 +147,8 @@ def test_main_snapshot_filtering_logic():
             return {"yes_bids": [], "no_bids": []}
         def execute_buy(self, ticker: str, side: str, count: int, price_cents: int):
             return {"status": "bought", "price": price_cents, "fill_count": count}
+        def buy_and_set_take_profit(self, ticker: str, side: str, buy_price_cents: int, maker_bid_cents: int = None, **kw):
+            return {"status": "bought", "buy_price_cents": buy_price_cents}
         def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int):
             return {"status": "liquidated", "price": current_price}
 

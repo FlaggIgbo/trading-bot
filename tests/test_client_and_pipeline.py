@@ -77,6 +77,12 @@ def mock_filter():
     }
 
 
+@pytest.fixture(autouse=True)
+def mock_ungated_asset():
+    with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
+        yield
+
+
 # --- Unit Tests: Helpers & Utility Functions ---
 
 @pytest.mark.parametrize("input_val, expected", [
@@ -134,7 +140,7 @@ def test_batch_fetch_crypto_spot_prices():
 @pytest.mark.parametrize("minute, expected_action, expected_trd_key", [
     (0, "snapshot_only", None),
     (2, "buy_opened", "buy_and_set_take_profit"),
-    (10, "winner_rolled_rebuy", "evaluate_and_execute_10min_strategy"),
+    (10, "10min_stop_loss", "evaluate_and_execute_10min_stop_loss"),
     (12, "endgame_loss_cut", "evaluate_and_execute_12_5min_endgame_check"),
     (14, "14min_crash_selloff_cut", "evaluate_and_execute_crash_detection"),
 ])
@@ -150,8 +156,8 @@ def test_process_single_market_intervals(dummy_client, mock_filter, minute, expe
 
     market = {
         "ticker": "KXBTC15M-TEST", "series_ticker": "KXBTC15M",
-        "yes_ask_dollars": "0.4200", "yes_bid_dollars": "0.4000",
-        "no_ask_dollars": "0.6000", "no_bid_dollars": "0.5800",
+        "yes_ask_dollars": "0.3400", "yes_bid_dollars": "0.3200",
+        "no_ask_dollars": "0.6800", "no_bid_dollars": "0.6600",
         "floor_strike": 60000.0, "volume_24h": 1500,
     }
 
@@ -172,7 +178,7 @@ def test_process_single_market_intervals(dummy_client, mock_filter, minute, expe
     if expected_action != "snapshot_only":
         assert snapshot["trd"]["action"] == expected_action
     else:
-        assert snapshot["y"] == 42
+        assert snapshot["y"] == 34
 
 
 # --- Kalshi Client Lifecycle & Order Payload Tests ---
