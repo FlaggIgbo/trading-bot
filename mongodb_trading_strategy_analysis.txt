@@ -1,0 +1,96 @@
+================================================================================
+MONGODB ATLAS 3D QUANTITATIVE EV SURFACE REPORT
+TRIPLE-DATASET DIFFERENTIATION: LIVE TRADING vs THEORETICAL vs COMBINED
+================================================================================
+Generated: 2026-08-21 03:52:55 UTC
+Database: trading_bot_db (MongoDB Atlas Cluster0)
+Data Sources: settlements (1,993 records), active_positions (2,458 records)
+
+Visualizations Generated (3 Distinct PNG Files):
+  1. Live Trading Results:      /Users/ogechukwuflagg-igbo/Documents/trading_bot_info/ev_analysis_live_plot.png
+  2. Theoretical 'What-If':     /Users/ogechukwuflagg-igbo/Documents/trading_bot_info/ev_analysis_theoretical_plot.png
+  3. Combined Master Plot:      /Users/ogechukwuflagg-igbo/Documents/trading_bot_info/ev_analysis_cartesian_plot.png
+
+================================================================================
+1. CORE DIFFERENTIATION: PURE LIVE RESULTS vs TOTAL TRADING EVENTS ('WHAT-IF')
+================================================================================
+NOTE ON PURE TRADING PnL CALCULATION:
+All Live Trading PnL and ROI figures below are computed strictly from pure trade execution
+arithmetic (Contract Payouts minus Entry Cost Basis) and ISOLATE ALL MANUAL CASH DEPOSITS,
+withdrawals, or manual balance adjustments made to Kalshi and Gemini accounts.
+
+SIDE-BY-SIDE PERFORMANCE MATRIX:
+----------------------------------------------------------------------------------------------------
+Dimension                    | (A) LIVE TRADING (Peak 3 Maker) | (B) TOTAL EVENTS (What-If Baseline) | Alpha Delta
+-----------------------------|---------------------------------|-------------------------------------|------------
+Total Trades Evaluated       | 378 Live Executions            | 1,993 Market Events               | Filtered
+Win Rate                     | 90.2%                         | 29.9%                               | +60.4%
+Realized / Model EV / Trade  | +6.76¢ (+$0.070/trade)         | -39.10¢ (-$0.39/trade)              | +45.86¢ (POSITIVE EV)
+Pure Strategy ROI on Cost    | +8.10% (POSITIVE ROI)          | -55.50% (Unfiltered Loss)           | +63.60%
+Net Pure Trading Realized PnL| $+25.56 Pure Trading Profit    | $-1,066.04 Aggregate All-Time        | Excludes Deposits
+Capital Wagered in Trades    | $315.44                           | $1,920.87                        | Strictly Trade Basis
+Gross Settlement Revenue     | $341.00                           | $832.86                             | Realized Payouts
+Execution Mechanism          | Passive Limit Maker (Saved Sprd)| Aggressive Market Taker             | 1¢–67¢ Spread Alpha
+Corridor Gating              | 80¢–95¢ Endgame ONLY            | 1¢–99¢ (Included Valleys of Death)  | Avoided -59¢ Traps
+
+ALL MATCHED LIVE TRADES COMBINED (Peak 3 + Momentum + Discount):
+----------------------------------------------------------------
+• Total Settled Live Trades:         439 trades
+• Combined Win Rate:                 81.5% (358 Wins / 81 Losses)
+• Combined Capital Wagered:          $345.43
+• Combined Gross Settlement Revenue: $358.00
+• Combined Pure Trading Net PnL:     $+12.57 (Pure Trading Gain, Excl. Deposits)
+• Combined Realized Strategy ROI:    +3.64%
+• Combined Average EV per Trade:     +2.86¢ per contract
+
+================================================================================
+2. WHAT-IF COUNTERFACTUAL SIMULATIONS ACROSS MONGODB DATASET
+================================================================================
+What would have happened if we traded specific regimes across the entire database?
+
+Counterfactual Regime / Corridor                  | Event Count (n) | Win Rate | Simulated EV / Contract | Regime Verdict
+--------------------------------------------------|-----------------|----------|-------------------------|---------------
+1. What-If: Traded Every Event Naively (All Data) |      1,990      |  29.0%   |        -39.1¢           | Valley of Death
+2. What-If: 15M Early Trend Trap (m0-5, 51-65¢)   |        244      |   0.0%   |        -59.6¢           | Catastrophic Trap
+3. What-If: 15M Mid-Zone Chop (m0-8, 36-50¢)      |        320      |  18.2%   |        -42.8¢           | Random Walk Chop
+4. What-If: 1H Open Value (m0-10, 21-35¢)         |         45      |  75.0%   |        +37.6¢           | Peak 1 Alpha
+5. What-If: 1H Trend Expansion (m41-59, 51-65¢)   |         38      | 100.0%   |        +44.0¢           | Peak 2 Alpha
+6. What-If: Endgame Fav Maker (Theoretical Model) |        378      |  92.5%   |        +12.2¢           | Peak 3 Alpha
+7. ACTUAL LIVE EXECUTION (Peak 3 Realized Maker)  |        378      |  90.2%   |         +6.8¢           | PROVEN POSITIVE EV
+
+================================================================================
+3. 3D CONTINUOUS EXPECTED VALUE SURFACE TOPOLOGY
+================================================================================
+We model Expected Value (EV) as a continuous 3-dimensional optimization surface:
+    EV = f(Price_Entry [X], Asset [Y], Time_Entered/Exited [Z])
+
+Parabolic Surface Topology Summary:
+-----------------------------------
+1. POSITIVE PARABOLIC PEAKS (Where alpha clusters):
+   - PEAK 1 (Asymmetric Discount): X=21¢–35¢, Y=BTC/ETH/SOL, Z=1H Open (m=0–10) -> EV = +37.6¢/contract (ROI +85.2%)
+   - PEAK 2 (Macro Trend Expansion): X=51¢–65¢, Y=BTC/ETH/GOLD, Z=1H Late (m=41–59) -> EV = +44.0¢/contract (ROI +68.8%)
+   - PEAK 3 (Endgame Favorite Maker): X=81¢–95¢, Y=All Assets, Z=Endgame (m=12–14 in 15M, m=53–59 in 1H) -> EV = +6.8¢ to +12.2¢ (Win Rate 90.2%)
+
+2. NEGATIVE DEATH VALLEYS (Strictly blacklisted):
+   - VALLEY 1 (15M Early Trend Trap): X=51¢–65¢, Z=15M Open/Early (m=0–5) -> EV = -59.6¢/contract (Win Rate 0.0%)
+   - VALLEY 2 (15M Coin-Flip Chop): X=36¢–50¢, Z=15M Open/Mid (m=0–8) -> EV = -42.8¢/contract (Win Rate 18.2%)
+
+================================================================================
+4. LIVE STRATEGY RULES & RISK GATING
+================================================================================
+1. EXECUTE STRICTLY ON POSITIVE PARABOLIC PEAKS:
+   - Peak 1: Buy 18¢–35¢ at Minute 0–2 (15M) and Minute 0–10 (1H).
+   - Peak 2: Buy 56¢–68¢ at Minute 26–55 in 1-Hour trending markets with >=0.10% spot lead.
+   - Peak 3: Rest Passive Maker limit bids at 80¢–95¢ in final 3 minutes (m=12–14 in 15M, m=53–59 in 1H).
+     * VERIFIED LIVE RESULT: 90.2% Win Rate, +8.10% Pure ROI, +6.76¢ EV per contract across 378 trades.
+
+2. ZERO CAPITAL ALLOCATION TO DEATH VALLEYS:
+   - Blacklist all 36¢–65¢ entries during Minute 0–8 in 15-Minute markets.
+
+3. DYNAMIC RISK GATING & CIRCUIT BREAKERS:
+   - If asset realized PnL drops <= -$1.00, gate trading on that (asset, timeframe) pair.
+   - Enforce 25¢ Stop Loss liquidation and minute 50/57.5 pre-expiry time cuts.
+
+================================================================================
+End of Updated Report
+================================================================================
