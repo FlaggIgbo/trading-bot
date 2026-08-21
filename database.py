@@ -785,15 +785,15 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
     Validates trade entry against empirical Expected Value (EV) findings:
     
     15-Minute Markets:
-    - m = 0, 1, 2 (Open): Accept 1¢ – 35¢ (Extreme / Value Discount)
-    - m = 9, 10, 11 (Late): Accept 51¢ – 99¢ (Late Trend Breakthrough)
+    - m = 0, 1, 2 (Open): Accept 1¢ – 35¢ (Discount / Value)
+    - m = 3, 4, 5 (Early): Accept 21¢ – 50¢ (Early Value Reversion)
+    - m = 12, 13, 14 (Endgame): Accept 66¢ – 80¢ (Endgame Momentum)
     - All other (price, minute) combinations are rejected.
     
     1-Hour Markets:
     - m = 0 .. 10 (Open): Accept 1¢ – 35¢ (Discount / Asymmetric Value)
-    - m = 26 .. 40 (Mid): Accept 51¢ – 99¢ (Mid-Hour Trend Persistence)
-    - m = 41 .. 52 (Late): Accept 51¢ – 99¢ (Late Trend Expansion)
-    - m = 53 .. 59 (Endgame): Accept 51¢ – 80¢ (Endgame Momentum without Overpriced Favorites)
+    - m = 26 .. 40 (Mid): Accept 36¢ – 50¢ (Mid-Hour Value) and 51¢ – 80¢ (Mid-Hour Momentum)
+    - m = 53 .. 59 (Endgame): Accept 51¢ – 80¢ (Endgame Trend Momentum)
     - All other (price, minute) combinations are rejected.
     """
     if price_cents < 1 or price_cents > 99:
@@ -805,18 +805,20 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
         m_mod = minute % 15
         if 0 <= m_mod <= 2 and 1 <= price_cents <= 35:
             return True, "15m_discount_open"
-        if 9 <= m_mod <= 11 and 51 <= price_cents <= 99:
-            return True, "15m_late_momentum"
+        if 3 <= m_mod <= 5 and 21 <= price_cents <= 50:
+            return True, "15m_early_value"
+        if 12 <= m_mod <= 14 and 66 <= price_cents <= 80:
+            return True, "15m_endgame_momentum"
         return False, f"15m_disallowed_zone(p={price_cents}c,m={m_mod})"
         
     elif tf == "1h":
         m_mod = minute % 60
         if 0 <= m_mod <= 10 and 1 <= price_cents <= 35:
             return True, "1h_discount_open"
-        if 26 <= m_mod <= 40 and 51 <= price_cents <= 99:
+        if 26 <= m_mod <= 40 and 36 <= price_cents <= 50:
+            return True, "1h_mid_value"
+        if 26 <= m_mod <= 40 and 51 <= price_cents <= 80:
             return True, "1h_mid_momentum"
-        if 41 <= m_mod <= 52 and 51 <= price_cents <= 99:
-            return True, "1h_late_momentum"
         if 53 <= m_mod <= 59 and 51 <= price_cents <= 80:
             return True, "1h_endgame_trend"
         return False, f"1h_disallowed_zone(p={price_cents}c,m={m_mod})"

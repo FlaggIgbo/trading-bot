@@ -129,3 +129,25 @@ def test_smoke_favorite_maker_evaluation():
     assert res["side"] == "yes"
     assert res["maker_bid"] == 86
     assert res["spread_saved"] == 2
+
+
+@pytest.mark.smoke
+def test_smoke_empirical_entry_rules():
+    from database import is_valid_empirical_entry
+
+    # 15-Minute Markets
+    assert is_valid_empirical_entry(25, 1, "15m")[0] is True
+    assert is_valid_empirical_entry(35, 3, "15m")[0] is True
+    assert is_valid_empirical_entry(75, 13, "15m")[0] is True
+    assert is_valid_empirical_entry(50, 1, "15m")[0] is False
+    assert is_valid_empirical_entry(60, 4, "15m")[0] is False
+    assert is_valid_empirical_entry(85, 13, "15m")[0] is False
+
+    # 1-Hour Markets
+    assert is_valid_empirical_entry(20, 5, "1h")[0] is True
+    assert is_valid_empirical_entry(45, 30, "1h")[0] is True
+    assert is_valid_empirical_entry(65, 35, "1h")[0] is True
+    assert is_valid_empirical_entry(70, 55, "1h")[0] is True
+    assert is_valid_empirical_entry(50, 15, "1h")[0] is False
+    assert is_valid_empirical_entry(85, 30, "1h")[0] is False
+    assert is_valid_empirical_entry(90, 55, "1h")[0] is False
