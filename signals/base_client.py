@@ -671,6 +671,13 @@ class BaseTradingClient(ABC):
         """Cancels resting orders for ticker and verifies that 0 resting orders remain."""
         pass
 
+    def cancel_all_stale_resting_buy_orders(self, max_age_seconds: int = 45) -> int:
+        """
+        Sweeps all resting orders across the portfolio and cancels any stale unfilled BUY orders.
+        Preserves resting Take-Profit SELL orders.
+        """
+        return 0
+
     @abstractmethod
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
         """Executes market/limit liquidation order for a position."""
@@ -1048,9 +1055,11 @@ class BaseTradingClient(ABC):
         is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
         if is_favorite_maker:
             if current_price >= 25:
+                if not dry_run:
+                    self.cancel_and_verify_resting_orders(ticker)
                 log.info(
                     f"🚀 [FAVORITE MAKER SETTLEMENT RUN] [{self.exchange_name}] {ticker} ({side.upper()}): "
-                    f"Favorite holding at {current_price}¢ (entry: ~{entry_price}¢). Holding into resolution for 100¢ settlement payout!"
+                    f"Favorite holding at {current_price}¢ (entry: ~{entry_price}¢). Cleared resting TP orders; holding into resolution for 100¢ settlement payout!"
                 )
                 return {"triggered": False, "action": "favorite_maker_holding_to_settle"}
 
@@ -1210,6 +1219,9 @@ class BaseTradingClient(ABC):
             return res
 
         # Holding Winning Position (in profit into final 60 seconds)
+        if not dry_run and current_price >= 75:
+            # Clear resting TP orders so high-probability winner resolves at 100¢ settlement
+            self.cancel_and_verify_resting_orders(ticker)
         log.info(
             f"{LogTag.HOLDING_POSITION.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
             f"Position is securely winning at {current_price}¢ (>= {crash_floor_cents}¢ floor, {pnl_label})! "

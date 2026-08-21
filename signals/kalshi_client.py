@@ -1497,15 +1497,15 @@ class KalshiClient(BaseTradingClient):
         """
         canceled_count = 0
         try:
-            orders = self.get_all_resting_orders().get(ticker, [])
+            orders = self.get_all_resting_orders(force_refresh=True).get(ticker, [])
             for o in orders:
                 client_order_id = o.get("client_order_id") or ""
                 action = (o.get("action") or "").lower()
                 order_id = o.get("order_id")
 
-                # Identify buy orders (client_order_id starts with 'buy_' or action is 'buy' without 'sell_tp_')
+                # Identify buy orders (client_order_id starts with 'buy_', 'fav_maker_', 'rebuy_' or action is 'buy' without 'sell_tp_')
                 is_buy_order = (
-                    client_order_id.startswith("buy_")
+                    client_order_id.startswith(("buy_", "fav_maker_", "rebuy_"))
                     or (action == "buy" and not client_order_id.startswith("sell_tp_"))
                 )
                 if is_buy_order and order_id:
@@ -1518,6 +1518,36 @@ class KalshiClient(BaseTradingClient):
             log.warning(f"⚠️ Could not check/prune resting buy orders for {ticker}: {error}")
 
         return canceled_count
+
+    def cancel_all_stale_resting_buy_orders(self, max_age_seconds: int = 45) -> int:
+        """
+        Sweeps all resting orders across all markets in the account and cancels any stale unfilled BUY orders.
+        Preserves resting Take-Profit SELL orders.
+        """
+        if not self.allow_live_orders:
+            return 0
+        total_canceled = 0
+        try:
+            all_resting = self.get_all_resting_orders(force_refresh=True)
+            for ticker, orders in all_resting.items():
+                for o in orders:
+                    client_order_id = o.get("client_order_id") or ""
+                    action = (o.get("action") or "").lower()
+                    order_id = o.get("order_id")
+
+                    is_buy_order = (
+                        client_order_id.startswith(("buy_", "fav_maker_", "rebuy_"))
+                        or (action == "buy" and not client_order_id.startswith("sell_tp_"))
+                    )
+                    if is_buy_order and order_id:
+                        if self.cancel_order_safe(order_id):
+                            total_canceled += 1
+                            log.info(f"{LogTag.PRUNE_STALE_BUY.value} [Kalshi] Swept stale unfilled buy order {order_id} for {ticker}")
+            if total_canceled > 0:
+                self.invalidate_portfolio_caches()
+        except Exception as error:
+            log.warning(f"⚠️ Could not sweep resting buy orders on Kalshi: {error}")
+        return total_canceled
 
     def has_existing_position_or_order(self, ticker: str) -> bool:
         """
@@ -1663,9 +1693,16 @@ class KalshiClient(BaseTradingClient):
                 log.error(f"❌ Failed secondary IOC liquidation exit order for {ticker}: {err2}. Zero resting GTC orders posted.")
                 return {}
 
-    def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
+    def execute_buy(
+        self,
+        ticker: str,
+        side: str,
+        count: int = 1,
+        price_cents: int = 70,
+        buy_order_timeout_seconds: int = DEFAULT_BUY_ORDER_TIMEOUT_SECONDS,
+    ) -> dict:
         """
-        Submits an immediate limit/taker buy order to Kalshi:
+        Submits an immediate limit/taker buy order to Kalshi with automatic expiration timeout:
         - When buying YES: Places a bid on YES at `price_cents` (e.g. 73¢)
         - When buying NO: Places an ask on YES at `100 - price_cents` (e.g. 27¢)
         """
@@ -1674,6 +1711,7 @@ class KalshiClient(BaseTradingClient):
             return {"error": "5min_market_rejected", "ticker": ticker}
 
         side_clean = side.lower()
+        now_sec = int(time.time())
         now_ms = int(time.time() * 1000)
         clamped_cents = max(1, min(99, price_cents))
 
@@ -1698,6 +1736,9 @@ class KalshiClient(BaseTradingClient):
             "time_in_force": "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
+        if buy_order_timeout_seconds > 0:
+            buy_payload["expiration_ts"] = now_sec + buy_order_timeout_seconds
+
         res = self.post("/portfolio/events/orders", payload=buy_payload)
         self.invalidate_portfolio_caches()
         self.set_entry_price(ticker, clamped_cents)

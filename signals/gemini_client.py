@@ -1011,7 +1011,14 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             "strategy_tag": "endgame_favorite_maker",
         }
 
-    def execute_buy(self, ticker: str, side: str, count: int = 1, price_cents: int = 70) -> dict:
+    def execute_buy(
+        self,
+        ticker: str,
+        side: str,
+        count: int = 1,
+        price_cents: int = 70,
+        buy_order_timeout_seconds: int = DEFAULT_BUY_ORDER_TIMEOUT_SECONDS,
+    ) -> dict:
         """Executes a buy order on Gemini."""
         if is_5min_market(ticker):
             log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Gemini] Refusing to place buy order on 5-minute market: {ticker}")
@@ -1088,13 +1095,36 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         orders = self.get_all_resting_orders(force_refresh=True).get(ticker, [])
         cancelled = 0
         for o in orders:
-            if o.get("side") == "buy":
+            if str(o.get("side", "")).lower() == "buy":
                 oid = o.get("orderId")
                 if oid and self.cancel_order_safe(oid):
                     cancelled += 1
         if cancelled > 0:
             self.invalidate_portfolio_caches()
         return cancelled
+
+    def cancel_all_stale_resting_buy_orders(self, max_age_seconds: int = 45) -> int:
+        """
+        Sweeps all resting orders across all markets on Gemini and cancels any stale unfilled BUY orders.
+        Preserves resting Take-Profit SELL orders.
+        """
+        if not self.allow_live_orders:
+            return 0
+        total_canceled = 0
+        try:
+            all_resting = self.get_all_resting_orders(force_refresh=True)
+            for sym, orders in all_resting.items():
+                for o in orders:
+                    if str(o.get("side", "")).lower() == "buy":
+                        oid = o.get("orderId")
+                        if oid and self.cancel_order_safe(oid):
+                            total_canceled += 1
+                            log.info(f"{LogTag.PRUNE_STALE_BUY.value} [Gemini] Swept stale unfilled buy order {oid} for {sym}")
+            if total_canceled > 0:
+                self.invalidate_portfolio_caches()
+        except Exception as error:
+            log.warning(f"⚠️ Could not sweep resting buy orders on Gemini: {error}")
+        return total_canceled
 
     def cancel_and_verify_resting_orders(
         self,

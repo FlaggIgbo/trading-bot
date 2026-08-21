@@ -2839,6 +2839,15 @@ def run_pipeline_pass(
         log.error("No active exchange clients initialized. Exiting pipeline pass.")
         return
 
+    # Sweep stale resting buy orders across all active exchange clients before running market pass
+    if not dry_run:
+        for ex_name, client in active_clients:
+            if hasattr(client, "cancel_all_stale_resting_buy_orders"):
+                try:
+                    client.cancel_all_stale_resting_buy_orders()
+                except Exception as sweep_err:
+                    log.warning(f"⚠️ [{ex_name}] Error during stale buy order sweep: {sweep_err}")
+
     # Batch-fetch all underlying spot prices across Crypto, Commodities (Pyth), and Indices (Yahoo)
     spot_price_cache = batch_fetch_spot_prices(SUPPORTED_SYMBOLS)
 
