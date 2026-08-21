@@ -298,6 +298,23 @@ def test_gemini_buy_favorite_maker_order(gemini_trading_client):
         assert gemini_trading_client.get_strategy_tag(ticker) == "endgame_favorite_maker"
 
 
+def test_gemini_buy_favorite_maker_order_clamped_to_81(gemini_trading_client):
+    """Verify Gemini favorite maker bids are strictly clamped to <= 81¢ ceiling."""
+    ticker = "ETH15M-FAVORITE-HIGH"
+    mock_res = {"orderId": 145828835378730799, "status": "accepted"}
+    with patch.object(gemini_trading_client, "_post", return_value=mock_res):
+        res = gemini_trading_client.buy_favorite_maker_order(
+            ticker=ticker,
+            side="yes",
+            maker_bid_cents=88,
+            target_ask_cents=92,
+            count=1,
+        )
+        assert res["buy_price_cents"] == 81  # Strictly clamped to 81¢ max ceiling
+        assert res["spread_saved_cents"] == 11
+        assert res["strategy_tag"] == "endgame_favorite_maker"
+
+
 def test_gemini_buy_favorite_maker_order_target_ask_too_low(gemini_trading_client):
     ticker = "ETH15M-FAVORITE-LOW"
     res = gemini_trading_client.buy_favorite_maker_order(

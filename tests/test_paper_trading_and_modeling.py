@@ -219,11 +219,11 @@ class TestExchangeClientsSafetyMode(unittest.TestCase):
         fav_res = client.buy_favorite_maker_order(
             ticker="ETH15M-TEST",
             side="no",
-            maker_bid_cents=82,
-            target_ask_cents=84,
+            maker_bid_cents=80,
+            target_ask_cents=82,
             count=1,
         )
-        self.assertEqual(fav_res["buy_price_cents"], 82)
+        self.assertEqual(fav_res["buy_price_cents"], 80)
         self.assertIsNotNone(client.get_paper_position("ETH15M-TEST"))
         client._post.assert_not_called()
 

@@ -929,9 +929,10 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             return {"error": "5min_market_rejected", "ticker": ticker}
 
         side_clean = side.lower()
-        effective_bid = max(1, min(99, maker_bid_cents))
+        # 4-Vector Rule: Clamp Gemini maker bids strictly to <= 81¢ ceiling
+        effective_bid = max(1, min(81, maker_bid_cents))
         if target_ask_cents and effective_bid >= target_ask_cents:
-            effective_bid = target_ask_cents - 1
+            effective_bid = min(81, target_ask_cents - 1)
 
         if effective_bid < 1 or (target_ask_cents and target_ask_cents <= 1):
             log.warning(
@@ -940,7 +941,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
             )
             return {"error": "post_only_cross", "reason": "target_ask_too_low"}
 
-        effective_bid = max(1, min(99, effective_bid))
+        effective_bid = max(1, min(81, effective_bid))
         spread_saved = max(0, target_ask_cents - effective_bid)
 
         if not self.allow_live_orders:

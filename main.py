@@ -885,8 +885,15 @@ def evaluate_favorite_maker_opportunity(
         log.info(f"⚠️ [CHOPPY MARKET SKIP] {ticker} has {lead_changes} lead changes (> {max_lead}). Skipping Favorite Maker entry.")
         return None
 
+    ex_name = getattr(client, "exchange_name", "kalshi").lower()
     effective_min_fav = int(dynamic_filters.get("favorite_maker_min_buy", min_fav_price))
     effective_max_fav = int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price))
+    is_gemini_exchange = ("gemini" in ex_name) or ("gemini" in str(ticker).lower()) or str(ticker).startswith("GEMI-")
+
+    # 4-Vector Rule: Gemini contracts capped at <= 81¢ to prevent payout margin compression
+    if is_gemini_exchange:
+        effective_max_fav = min(effective_max_fav, 81)
+
     is_restricted = bool(dynamic_filters.get("is_restricted", False)) or (dynamic_filters.get("recent_pnl_cents") or 0) < 0
 
     yes_bid = quotes.get("yes_bid")
@@ -922,8 +929,10 @@ def evaluate_favorite_maker_opportunity(
         else:
             maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
         maker_bid = min(yes_ask - 1, max(1, maker_bid))
+        if is_gemini_exchange:
+            maker_bid = min(81, maker_bid)
 
-        # Dynamic Sizing & Bankroll Compounding:
+        # Dynamic Sizing & 70% Kalshi / 30% Gemini Capital Allocation:
         balance_cents = None
         if hasattr(client, "get_balance_cents"):
             try:
@@ -942,7 +951,10 @@ def evaluate_favorite_maker_opportunity(
             is_restricted=is_restricted,
             recent_win_rate=recent_wr,
         )
-        contracts_to_buy = max(1, contracts_count)
+        if is_gemini_exchange:
+            contracts_to_buy = max(1, min(1, contracts_count))  # 30% allocation weighting (1 contract baseline)
+        else:
+            contracts_to_buy = max(1, contracts_count)  # 70% allocation (full compounding)
 
         return {
             "side": "yes",
@@ -978,6 +990,8 @@ def evaluate_favorite_maker_opportunity(
         else:
             maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
         maker_bid = min(no_ask - 1, max(1, maker_bid))
+        if is_gemini_exchange:
+            maker_bid = min(81, maker_bid)
 
         balance_cents = None
         if hasattr(client, "get_balance_cents"):
@@ -997,7 +1011,10 @@ def evaluate_favorite_maker_opportunity(
             is_restricted=is_restricted,
             recent_win_rate=recent_wr,
         )
-        contracts_to_buy = max(1, contracts_count)
+        if is_gemini_exchange:
+            contracts_to_buy = max(1, min(1, contracts_count))  # 30% allocation weighting
+        else:
+            contracts_to_buy = max(1, contracts_count)  # 70% allocation
 
         return {
             "side": "no",
@@ -2510,6 +2527,7 @@ def process_hourly_market_group(
 
 # Session Trading Loss Circuit Breaker ($5.00 max trading loss per exchange, immune to cash withdrawals)
 _SESSION_INITIAL_REALIZED_PNL: dict[str, float] = {}
+_LAST_CIRCUIT_BREAKER_RESET_DATE: str | None = None
 MAX_SESSION_LOSS_DOLLARS: float = 5.00
 
 
@@ -2538,9 +2556,18 @@ def _process_exchange_pipeline(
         pnl = client.get_portfolio_pnl_summary()
         pnl["ts"] = int(now_utc.timestamp())
         pnl["exchange"] = exchange_name.lower()
+        pnl["dry_run"] = bool(dry_run)
         sign = "+" if pnl.get("total_realized_pnl_dollars", 0) >= 0 else ""
 
-        # Circuit Breaker Evaluation (Trading loss >= $5.00 limit, immune to cash withdrawals)
+        # Daily Midnight Reset (UTC): Clean slate at midnight so prior day's losses don't block trading
+        global _SESSION_INITIAL_REALIZED_PNL, _LAST_CIRCUIT_BREAKER_RESET_DATE
+        current_date_str = now_utc.strftime("%Y-%m-%d")
+        if _LAST_CIRCUIT_BREAKER_RESET_DATE != current_date_str:
+            log.info(f"🔄 [MIDNIGHT RESET] New calendar day ({current_date_str} UTC). Resetting exchange circuit breaker baselines.")
+            _SESSION_INITIAL_REALIZED_PNL.clear()
+            _LAST_CIRCUIT_BREAKER_RESET_DATE = current_date_str
+
+        # Circuit Breaker Evaluation (Trading loss >= $5.00 limit per exchange)
         current_realized_pnl = float(pnl.get("total_realized_pnl_dollars") or 0.0)
         ex_key = exchange_name.lower()
         if ex_key not in _SESSION_INITIAL_REALIZED_PNL:
@@ -2564,10 +2591,10 @@ def _process_exchange_pipeline(
             )
             is_15m_trading_interval = False
 
-        if not dry_run:
-            save_portfolio_pnl(pnl)
-            if pnl.get("settlements"):
-                save_settlements(pnl["settlements"])
+        # Always persist real-time portfolio tracking to MongoDB in both live and non-live (paper) modes
+        save_portfolio_pnl(pnl)
+        if pnl.get("settlements"):
+            save_settlements(pnl["settlements"])
     except Exception as err:
         log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
 

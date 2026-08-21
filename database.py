@@ -803,22 +803,32 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
     
     if tf == "15m":
         m_mod = minute % 15
+        # Zero Capital Allocation to Death Valleys (Minute 0–8, 36¢–65¢)
+        if 0 <= m_mod <= 8 and 36 <= price_cents <= 65:
+            return False, f"15m_death_valley_trap(p={price_cents}c,m={m_mod})"
+        # Peak 1: Asymmetric Value at Open (1¢–35¢)
         if 0 <= m_mod <= 2 and 1 <= price_cents <= 35:
             return True, "15m_discount_open"
+        # Early Value Reversion (21¢–50¢)
         if 3 <= m_mod <= 5 and 21 <= price_cents <= 50:
             return True, "15m_early_value"
+        # Peak 3: Endgame Momentum (60¢–80¢)
         if 6 <= m_mod <= 14 and 60 <= price_cents <= 80:
             return True, "15m_endgame_momentum"
         return False, f"15m_disallowed_zone(p={price_cents}c,m={m_mod})"
         
     elif tf == "1h":
         m_mod = minute % 60
+        # Peak 1: 1H Open Value (1¢–35¢)
         if 0 <= m_mod <= 10 and 1 <= price_cents <= 35:
             return True, "1h_discount_open"
+        # Mid-Hour Value (36¢–50¢)
         if 26 <= m_mod <= 40 and 36 <= price_cents <= 50:
             return True, "1h_mid_value"
-        if 26 <= m_mod <= 40 and 51 <= price_cents <= 80:
+        # Peak 2: Mid-to-Late Trend Expansion (51¢–80¢)
+        if 26 <= m_mod <= 55 and 51 <= price_cents <= 80:
             return True, "1h_mid_momentum"
+        # Endgame Trend Momentum (51¢–80¢)
         if 53 <= m_mod <= 59 and 51 <= price_cents <= 80:
             return True, "1h_endgame_trend"
         return False, f"1h_disallowed_zone(p={price_cents}c,m={m_mod})"

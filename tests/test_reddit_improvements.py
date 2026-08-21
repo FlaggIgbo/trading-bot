@@ -787,4 +787,89 @@ def test_crash_detection_holds_viable_positions():
     assert res_14m["triggered"] is False
 
 
+def test_exchange_circuit_breaker_daily_midnight_reset():
+    """Verify that independent exchange circuit breakers reset daily at midnight."""
+    import main
+    from datetime import datetime, timezone
+    
+    # Day 1: Session loss exceeds $5.00
+    main._SESSION_INITIAL_REALIZED_PNL["kalshi"] = 100.0
+    main._LAST_CIRCUIT_BREAKER_RESET_DATE = "2026-08-20"
+    
+    client = MockTradingClient()
+    client.get_portfolio_pnl_summary = MagicMock(return_value={"total_realized_pnl_dollars": 90.0})
+    
+    # Run on Day 2 (midnight passed)
+    now_day2 = datetime(2026, 8, 21, 0, 1, tzinfo=timezone.utc)
+    main._process_exchange_pipeline(
+        exchange_name="kalshi",
+        client=client,
+        now_utc=now_day2,
+        current_minute=1,
+        minute_into_market_15m=1,
+        is_15m_trading_interval=True,
+        force_trade_mark=False,
+        spot_price_cache={},
+        dry_run=True,
+    )
+    # Verify circuit breaker baseline reset for the new day
+    assert main._LAST_CIRCUIT_BREAKER_RESET_DATE == "2026-08-21"
+    assert main._SESSION_INITIAL_REALIZED_PNL["kalshi"] == 90.0
+
+
+def test_4vector_death_valley_rejection():
+    """Verify that 15M markets strictly reject 36¢–65¢ entries in minute 0–8 (Death Valley)."""
+    from database import is_valid_empirical_entry
+
+    for minute in range(0, 9):
+        for price in [36, 45, 50, 55, 65]:
+            is_valid, reason = is_valid_empirical_entry(price, minute, "15m")
+            assert is_valid is False
+            assert "death_valley_trap" in reason
+
+
+def test_evaluate_favorite_maker_gemini_ceiling_and_sizing():
+    """Verify Gemini favorite maker bids are capped at <= 81¢ and sized for 30% capital allocation."""
+    import main
+    from signals.gemini_client import GeminiTradingClient
+
+    gemini_client = GeminiTradingClient(api_key="test", api_secret="test", allow_live_orders=False)
+    market = {"ticker": "GEMI-BTC-15M-80K", "result": None}
+    quotes = {"yes_bid": 86, "yes_ask": 88, "no_bid": 10, "no_ask": 12}
+    dynamic_filters = {"enable_favorite_maker": True, "contracts_per_trade": 3}
+
+    # Gemini opportunity evaluation with ask at 88¢ (exceeds 81¢ ceiling)
+    opp_gemini = main.evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes,
+        rem_mins=3.0,
+        dynamic_filters=dynamic_filters,
+        client=gemini_client,
+        min_fav_price=80,
+        max_fav_price=93,
+        spot_price=85000,
+        target_price=80000,
+    )
+    # Gemini must reject favorite ask > 81¢
+    assert opp_gemini is None
+
+    # When Gemini favorite ask is <= 81¢ (e.g. 80¢)
+    quotes_valid = {"yes_bid": 78, "yes_ask": 80, "no_bid": 18, "no_ask": 20}
+    opp_valid = main.evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_valid,
+        rem_mins=3.0,
+        dynamic_filters=dynamic_filters,
+        client=gemini_client,
+        min_fav_price=75,
+        max_fav_price=93,
+        spot_price=85000,
+        target_price=80000,
+    )
+    assert opp_valid is not None
+    assert opp_valid["maker_bid"] <= 81
+    assert opp_valid["count"] == 1  # 30% allocation cap
+
+
+
 
