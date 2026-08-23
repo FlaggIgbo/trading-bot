@@ -123,11 +123,11 @@ def test_dynamic_calibration_from_mock_db(mock_get_coll):
 
 
 @pytest.mark.parametrize("ask, spot_lead, should_buy, corridor", [
-    (40, 0.0001, False, None),          # Expensive above max_buy
-    (30, 0.0001, True, "discount"),     # Deep discount
-    (62, 0.0015, True, "momentum"),     # Strong momentum lead
-    (62, 0.0003, False, None),          # Weak momentum lead
-    (50, 0.0001, False, None),          # Coin-flip mid-zone
+    (30, 0.0001, True, "discount"),     # Peak 1: Deep discount at minute 0
+    (45, 0.0001, True, "momentum"),     # Peak 2: Early value reversion at minute 0
+    (62, 0.0015, False, None),          # Valley of Death: 62¢ strictly banned in 15M
+    (75, 0.0015, False, None),          # Valley of Death: 75¢ strictly banned in 15M
+    (55, 0.0001, False, None),          # Valley of Death: 55¢ strictly banned in 15M
 ])
 def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
     client = MagicMock(exchange_name="Kalshi")
@@ -144,8 +144,8 @@ def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
         market=market,
         is_trading_interval=True,
         client=client,
-        now_utc=datetime(2026, 8, 15, 12, 10 if corridor == "momentum" else 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=10 if corridor == "momentum" else 0,
+        now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
+        minute_past_hour=0,
         spot_cache={"BTC": 60000.0 * (1 + spot_lead)},
         dry_run=True,
     )
@@ -186,11 +186,11 @@ def test_market_screening_mid_zone_allowed_during_exploration():
 
     market = {
         "ticker": "KXBTC15M-TEST", "series_ticker": "KXBTC15M",
-        "yes_ask_dollars": "0.50", "yes_bid_dollars": "0.48",
+        "yes_ask_dollars": "0.65", "yes_bid_dollars": "0.63",
         "floor_strike": 60000.0, "exchange": "kalshi",
     }
 
-    # Under empirical rules, 50¢ coin-flip mid-zone at minute 0 is logged as COUNTERFACTUAL sample to preserve capital
+    # Under empirical rules, 65¢ Valley of Death in 15M is logged as COUNTERFACTUAL sample to preserve capital
     snap_exp = process_single_market(
         market=market,
         is_trading_interval=True,
@@ -265,12 +265,12 @@ def test_interim_data_collection_pass_non_trading_interval():
 
 
 def test_15m_tighter_corridors_and_sizing():
-    """Verify that 15m markets enforce tighter discount corridors (<=30¢), require >=0.15% spot lead for momentum, and size at 1 contract."""
+    """Verify that 15m markets enforce Peak 1 (<=35¢) and Peak 2 (36-50¢), strictly ban 51-80¢ Valley of Death, and size at 1 contract."""
     client = MagicMock(exchange_name="Kalshi")
     client.get_market_position.return_value = None
     client.has_existing_position_or_order.return_value = False
 
-    # 1. 28¢ YES (Deep Discount) -> Should BUY with count=1
+    # 1. 28¢ YES (Peak 1: Deep Discount) -> Should BUY with count=1
     market_discount = {
         "ticker": "KXBTC15M-TEST-28", "series_ticker": "KXBTC15M",
         "yes_ask_dollars": "0.28", "yes_bid_dollars": "0.26",
@@ -289,14 +289,14 @@ def test_15m_tighter_corridors_and_sizing():
     assert snap_discount["trd"]["corridor"] == "discount"
     assert snap_discount["trd"]["count"] == 1
 
-    # 2. 38¢ YES (Noise / Chop Band) -> Rejected on 15m because 38¢ falls in dead zone (31¢-61¢)
-    market_chop = {
-        "ticker": "KXBTC15M-TEST-38", "series_ticker": "KXBTC15M",
-        "yes_ask_dollars": "0.38", "yes_bid_dollars": "0.36",
+    # 2. 45¢ YES (Peak 2: Early Value Reversion at m=0) -> Should BUY with count=1
+    market_val = {
+        "ticker": "KXBTC15M-TEST-45", "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.45", "yes_bid_dollars": "0.43",
         "floor_strike": 60000.0, "exchange": "kalshi",
     }
-    snap_chop = process_single_market(
-        market=market_chop,
+    snap_val = process_single_market(
+        market=market_val,
         is_trading_interval=True,
         client=client,
         now_utc=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc),
@@ -304,9 +304,11 @@ def test_15m_tighter_corridors_and_sizing():
         spot_cache={"BTC": 60050.0},
         dry_run=True,
     )
-    assert snap_chop.get("trd", {}).get("action") != "buy_opened"
+    assert "trd" in snap_val
+    assert snap_val["trd"]["corridor"] == "momentum"
+    assert snap_val["trd"]["count"] == 1
 
-    # 3. 64¢ YES with +0.20% spot lead -> Enters momentum with count=1
+    # 3. 64¢ YES (Valley of Death) -> Strictly banned on 15m across all minutes
     market_mom = {
         "ticker": "KXBTC15M-TEST-64", "series_ticker": "KXBTC15M",
         "yes_ask_dollars": "0.64", "yes_bid_dollars": "0.62",
@@ -321,21 +323,7 @@ def test_15m_tighter_corridors_and_sizing():
         spot_cache={"BTC": 60120.0},  # +0.20% spot lead
         dry_run=True,
     )
-    assert "trd" in snap_mom_strong
-    assert snap_mom_strong["trd"]["corridor"] == "momentum"
-    assert snap_mom_strong["trd"]["count"] == 1
-
-    # 4. 64¢ YES with opposed spot momentum (spot < strike) -> Rejected on 15m
-    snap_mom_weak = process_single_market(
-        market=market_mom,
-        is_trading_interval=True,
-        client=client,
-        now_utc=datetime(2026, 8, 15, 12, 10, 0, tzinfo=timezone.utc),
-        minute_past_hour=10,
-        spot_cache={"BTC": 59900.0},  # Spot below strike (opposed)
-        dry_run=True,
-    )
-    assert snap_mom_weak.get("trd", {}).get("action") != "buy_opened"
+    assert snap_mom_strong.get("trd", {}).get("action") != "buy_opened"
 
 
 def test_wti_restricted_profile_defaults():

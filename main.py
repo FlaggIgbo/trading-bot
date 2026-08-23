@@ -1464,24 +1464,22 @@ def process_single_market(
                         )
                         continue
 
-                    # Enforce Empirical 15M Rules (1-35¢ @ m=0-2, 21-50¢ @ m=3-5, 66-80¢ @ m=12-14)
+                    # Enforce Empirical 15M Rules (Peak 1: 1-35¢ @ m=0-3, Peak 2: 36-50¢ @ m=0-5, 51-80¢ BANNED)
                     is_valid_entry, entry_reason = is_valid_empirical_entry(p_cents, minute_into_market, "15m")
 
                     if is_valid_entry:
-                        tp_target = 88 if p_cents >= 51 else max(62, p_cents + 25)
-                        mode_tag = "momentum" if p_cents >= 51 else "discount"
+                        tp_target = max(62, p_cents + 25)
+                        mode_tag = "momentum" if p_cents >= 36 else "discount"
                         log.info(
                             f"🎯 [EMPIRICAL +EV ENTRY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
                             f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
                         )
                         if "discount" in entry_reason:
                             min_b, max_b = 1, 35
-                        elif "early_value" in entry_reason:
-                            min_b, max_b = 21, 50
-                        elif "endgame" in entry_reason or "momentum" in entry_reason:
-                            min_b, max_b = 66, 80
+                        elif "early_value" in entry_reason or "value" in entry_reason:
+                            min_b, max_b = 36, 50
                         else:
-                            min_b, max_b = 1, 80
+                            min_b, max_b = 1, 50
 
                         candidate_sides.append({
                             "side": side,
@@ -2154,11 +2152,11 @@ def process_hourly_market_group(
                 yes_p = item["yes_price_cents"]
                 if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                     if is_spot_momentum_aligned("yes", spot_price, target_price):
-                        # Enforce Empirical 1H Rules (1-35¢ @ m=0-10, 36-50¢ @ m=26-40, 51-80¢ @ m=26-40, 51-80¢ @ m=53-59)
+                        # Enforce Empirical 1H Rules (Peak 1: 1-35¢ @ m=0-15, Peak 2: 36-50¢ / 51-65¢ @ m=25-45, Valley of Death BANNED)
                         is_valid_entry, entry_reason = is_valid_empirical_entry(yes_p, minute_past_hour, "1h")
                         if is_valid_entry:
                             tp_target = 88 if yes_p >= 51 else max(62, yes_p + 25)
-                            mode_tag = "momentum" if yes_p >= 51 else "discount"
+                            mode_tag = "momentum" if yes_p >= 36 else "discount"
                             log.info(
                                 f"🎯 [EMPIRICAL +EV 1H ENTRY] [{ex_name}] {ticker} (YES @ {yes_p}¢, m={minute_past_hour}): "
                                 f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
@@ -2167,10 +2165,10 @@ def process_hourly_market_group(
                                 min_b, max_b = 1, 35
                             elif "value" in entry_reason:
                                 min_b, max_b = 36, 50
-                            elif "momentum" in entry_reason or "trend" in entry_reason:
-                                min_b, max_b = 51, 80
+                            elif "momentum" in entry_reason:
+                                min_b, max_b = 51, 65
                             else:
-                                min_b, max_b = 1, 80
+                                min_b, max_b = 1, 65
 
                             valid_yes_candidates.append({
                                 "item": item,
@@ -2213,11 +2211,11 @@ def process_hourly_market_group(
                 no_p = item["no_price_cents"]
                 if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                     if is_spot_momentum_aligned("no", spot_price, target_price):
-                        # Enforce Empirical 1H Rules (1-35¢ @ m=0-10, 36-50¢ @ m=26-40, 51-80¢ @ m=26-40, 51-80¢ @ m=53-59)
+                        # Enforce Empirical 1H Rules (Peak 1: 1-35¢ @ m=0-15, Peak 2: 36-50¢ / 51-65¢ @ m=25-45, Valley of Death BANNED)
                         is_valid_entry, entry_reason = is_valid_empirical_entry(no_p, minute_past_hour, "1h")
                         if is_valid_entry:
                             tp_target = 88 if no_p >= 51 else max(62, no_p + 25)
-                            mode_tag = "momentum" if no_p >= 51 else "discount"
+                            mode_tag = "momentum" if no_p >= 36 else "discount"
                             log.info(
                                 f"🎯 [EMPIRICAL +EV 1H ENTRY] [{ex_name}] {ticker} (NO @ {no_p}¢, m={minute_past_hour}): "
                                 f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
@@ -2226,10 +2224,10 @@ def process_hourly_market_group(
                                 min_b, max_b = 1, 35
                             elif "value" in entry_reason:
                                 min_b, max_b = 36, 50
-                            elif "momentum" in entry_reason or "trend" in entry_reason:
-                                min_b, max_b = 51, 80
+                            elif "momentum" in entry_reason:
+                                min_b, max_b = 51, 65
                             else:
-                                min_b, max_b = 1, 80
+                                min_b, max_b = 1, 65
 
                             valid_no_candidates.append({
                                 "item": item,

@@ -818,14 +818,14 @@ def test_exchange_circuit_breaker_daily_midnight_reset():
 
 
 def test_4vector_death_valley_rejection():
-    """Verify that 15M markets strictly reject 36¢–65¢ entries in minute 0–8 (Death Valley)."""
+    """Verify that 15M markets strictly reject 51¢–80¢ entries across all minutes (Valley of Death)."""
     from database import is_valid_empirical_entry
 
-    for minute in range(0, 9):
-        for price in [36, 45, 50, 55, 65]:
+    for minute in range(0, 15):
+        for price in [51, 55, 60, 65, 70, 75, 80]:
             is_valid, reason = is_valid_empirical_entry(price, minute, "15m")
             assert is_valid is False
-            assert "death_valley_trap" in reason
+            assert "valley_of_death_banned" in reason
 
 
 def test_evaluate_favorite_maker_gemini_ceiling_and_sizing():
