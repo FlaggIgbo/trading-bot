@@ -27,6 +27,12 @@ from signals.kalshi_client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def mock_ungated_asset():
+    with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
+        yield
+
+
 class DummyMultiAssetClient(BaseTradingClient):
     exchange_name = "Kalshi"
 

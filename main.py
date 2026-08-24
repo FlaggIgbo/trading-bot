@@ -1448,8 +1448,10 @@ def process_single_market(
 
             # Priority 2: Screen for candidates across General Corridors if Favorite Maker not triggered
             if not trade_executed:
+                only_fav_maker = bool(dynamic_filters.get("only_favorite_maker", False))
                 candidate_sides = []
                 counterfactual_details = None
+
                 for side, p_cents, aligned in [
                     ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
                     ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
@@ -1470,26 +1472,49 @@ def process_single_market(
                     if is_valid_entry:
                         tp_target = max(62, p_cents + 25)
                         mode_tag = "momentum" if p_cents >= 36 else "discount"
-                        log.info(
-                            f"🎯 [EMPIRICAL +EV ENTRY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
-                            f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
-                        )
-                        if "discount" in entry_reason:
-                            min_b, max_b = 1, 35
-                        elif "early_value" in entry_reason or "value" in entry_reason:
-                            min_b, max_b = 36, 50
+                        if only_fav_maker:
+                            # In Favorite Maker Only mode, record empirical counterfactual tracking snapshot
+                            counterfactual_details = {
+                                "dry_run": True,
+                                "ex": market.get("exchange", "kalshi"),
+                                "action": "counterfactual_empirical_reject",
+                                "regime": "empirical_tracking",
+                                "corridor": mode_tag,
+                                "side": side,
+                                "buy": p_cents,
+                                "tp": tp_target,
+                                "sl": 25,
+                                "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
+                                "entry_ts": int(time.time()),
+                                "spot_at_entry": spot_price,
+                                "target_at_entry": target_price,
+                                "entry_reason": entry_reason,
+                            }
+                            log.info(
+                                f"🛡️ [FAVORITE MAKER ONLY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                                f"Empirical entry [{entry_reason}] active, but live orders restricted to Favorite Maker. Tracking counterfactually."
+                            )
                         else:
-                            min_b, max_b = 1, 50
+                            log.info(
+                                f"🎯 [EMPIRICAL +EV ENTRY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                                f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
+                            )
+                            if "discount" in entry_reason:
+                                min_b, max_b = 1, 35
+                            elif "early_value" in entry_reason or "value" in entry_reason:
+                                min_b, max_b = 36, 50
+                            else:
+                                min_b, max_b = 1, 50
 
-                        candidate_sides.append({
-                            "side": side,
-                            "price": p_cents,
-                            "tp": tp_target,
-                            "min_buy": min_b,
-                            "max_buy": max_b,
-                            "mode": mode_tag,
-                            "entry_reason": entry_reason,
-                        })
+                            candidate_sides.append({
+                                "side": side,
+                                "price": p_cents,
+                                "tp": tp_target,
+                                "min_buy": min_b,
+                                "max_buy": max_b,
+                                "mode": mode_tag,
+                                "entry_reason": entry_reason,
+                            })
                     else:
                         counterfactual_details = {
                             "dry_run": True,
@@ -2100,7 +2125,7 @@ def process_hourly_market_group(
                     target_price=best_item["target_price"],
                     market_result=best_item["market"].get("result"),
                     client=client,
-                    dry_run=dry_run,
+                    dry_run=effective_dry_run,
                     count=fav_count,
                 )
                 if fav_executed and fav_details:
@@ -2110,8 +2135,31 @@ def process_hourly_market_group(
         # Step 3C: Collect valid BUY_YES and BUY_NO candidates across all strike options (if Favorite Maker not executed)
         valid_yes_candidates = []
         valid_no_candidates = []
+        only_fav_maker = bool(dynamic_filters.get("only_favorite_maker", False))
 
-        if not favorite_maker_executed:
+        if not favorite_maker_executed and only_fav_maker:
+            for item in parsed_markets:
+                ticker = item["ticker"]
+                yes_p = item["yes_price_cents"]
+                no_p = item["no_price_cents"]
+                for s_val, p_val in [("yes", yes_p), ("no", no_p)]:
+                    if p_val is not None and (5 <= p_val <= 95):
+                        counterfactual_by_ticker[ticker] = {
+                            "dry_run": True,
+                            "ex": item["market"].get("exchange", "kalshi"),
+                            "action": "counterfactual_empirical_reject",
+                            "regime": "empirical_tracking",
+                            "corridor": "only_favorite_maker_active",
+                            "side": s_val,
+                            "buy": p_val,
+                            "tp": take_profit_cents,
+                            "sl": 25,
+                            "outcome": determine_counterfactual_outcome(s_val, "buy_opened", spot_price, item["target_price"], item["market"].get("result")),
+                            "entry_ts": int(time.time()),
+                            "spot_at_entry": spot_price,
+                            "target_at_entry": item["target_price"],
+                        }
+        elif not favorite_maker_executed:
             for item in parsed_markets:
                 ticker = item["ticker"]
                 target_price = item["target_price"]

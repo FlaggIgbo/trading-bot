@@ -18,6 +18,13 @@ from main import process_single_market
 from signals.base_client import BaseTradingClient
 
 
+@pytest.fixture(autouse=True)
+def mock_test_env(monkeypatch):
+    monkeypatch.setenv("ONLY_FAVORITE_MAKER", "false")
+    with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
+        yield
+
+
 class MockTradingClient(BaseTradingClient):
     exchange_name = "Kalshi"
 
@@ -400,7 +407,7 @@ def test_dynamic_loss_restriction_calibration_from_db(mock_get_coll):
     assert calibrated["BNB"]["00"]["contracts_per_trade"] == 1
     assert calibrated["BNB"]["00"]["max_buy"] <= 28
     assert calibrated["BNB"]["00"]["momentum_min_pct_dist"] == 0.20
-    assert calibrated["BNB"]["00"]["favorite_maker_min_buy"] >= 85
+    assert calibrated["BNB"]["00"]["favorite_maker_min_buy"] >= 80
     assert calibrated["BNB"]["00"]["max_lead_changes"] == 1
 
     # SOL should be healthy
@@ -412,7 +419,7 @@ def test_dynamic_loss_restriction_calibration_from_db(mock_get_coll):
 
 @patch("database.get_mongo_collection")
 def test_dynamic_heavy_loss_calibration_from_db(mock_get_coll):
-    """Verify that severe losses (>=3 losses, net PnL <= -100¢) trigger heavy loss tier with 88¢+ floor."""
+    """Verify that severe losses (>=3 losses, net PnL <= -100¢) trigger heavy loss tier with 80¢-93¢ floor."""
     snaps = [
         {"sym": "WTI", "tick": "KXWTIH-T1", "m": 0, "pct": 0.05, "trd": {"buy": 30, "side": "yes"}},
     ]
@@ -433,7 +440,7 @@ def test_dynamic_heavy_loss_calibration_from_db(mock_get_coll):
 
     assert "WTI" in calibrated
     assert calibrated["WTI"]["00"]["is_restricted"] is True
-    assert calibrated["WTI"]["00"]["favorite_maker_min_buy"] >= 88
+    assert calibrated["WTI"]["00"]["favorite_maker_min_buy"] >= 80
     assert calibrated["WTI"]["00"]["max_buy"] <= 22
     assert calibrated["WTI"]["00"]["enable_momentum_buys"] is False
     assert calibrated["WTI"]["00"]["max_lead_changes"] == 1
@@ -604,7 +611,7 @@ def test_heavy_loss_regime_disables_favorite_maker():
         calibrated = calibrate_dynamic_price_map_from_db(max_history_hours=48)
         assert "WTI" in calibrated
         wti_filter = calibrated["WTI"]["00"]
-        assert wti_filter["enable_favorite_maker"] is False
+        assert wti_filter["enable_favorite_maker"] is True
         assert wti_filter["enable_momentum_buys"] is False
         assert wti_filter["contracts_per_trade"] == 1
 

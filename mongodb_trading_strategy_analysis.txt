@@ -4,14 +4,14 @@ EVALUATION SCOPE: STRICTLY SINCE COMMIT a244cf4cff20fdd955b7d6b38ed7d72ea211a44b
 COMMIT TIMESTAMP: 2026-08-21 19:03:29 UTC (Fri Aug 21, 2026 15:03:29 EDT)
 PRICE (X) | ASSET (Y) | TIME (Z) | MARKET / EXCHANGE (M: KALSHI vs GEMINI)
 ================================================================================
-Generated: 2026-08-23 02:33:48 UTC
+Generated: 2026-08-24 21:20:45 UTC
 Database: trading_bot_db (MongoDB Atlas Cluster0)
-Post-Commit Records: 261 Settlements, 555 Active Positions, 3,962 Telemetry Snapshots
+Post-Commit Records: 305 Settlements, 776 Active Positions, 8,748 Telemetry Snapshots
 
 Post-Commit Wallet Balance Trajectory:
-  • KALSHI WALLET: Start = $11.75 -> Current = $3.01 (Net: $-8.74) | Port Val = $2.02 | Open Pos = 3
-  • GEMINI WALLET:  Start = $5.68 -> Current = $0.67 (Net: $-5.01) | Port Val = $0.67 | Open Pos = 0
-  • TOTAL WALLET CASH DRAWDOWN SINCE COMMIT: $-13.75
+  • KALSHI WALLET: Start = $11.75 -> Current = $0.06 (Net: $-11.69) | Port Val = $2.04 | Open Pos = 3
+  • GEMINI WALLET:  Start = $5.68 -> Current = $0.25 (Net: $-5.43) | Port Val = $0.24 | Open Pos = 0
+  • TOTAL WALLET CASH DRAWDOWN SINCE COMMIT: $-17.12
 
 Visualizations Generated (4 High-Resolution PNG Files across ~/Documents/trading_bot_info/ and ~/git/trading-bot/):
   1. Live Trading Results:      /Users/ogechukwuflagg-igbo/Documents/trading_bot_info/ev_analysis_live_plot.png
@@ -23,17 +23,17 @@ Visualizations Generated (4 High-Resolution PNG Files across ~/Documents/trading
 1. POST-COMMIT PERFORMANCE & WALLET DRAWDOWN FORENSIC AUDIT
 ================================================================================
 Between Aug 21 19:03 UTC and Aug 23 02:26 UTC (since commit a244cf4), the bot recorded:
-  • Total Settled Trades:     261
-  • Win Rate:                 72.8% (190 Wins / 71 Losses)
-  • Capital Wagered:          $248.35
-  • Gross Settlement Revenue: $236.66
-  • Net Realized Trading PnL: $-11.69 (-4.71% Realized ROI)
-  • Average EV per Contract:  -4.48¢ per trade
+  • Total Settled Trades:     305
+  • Win Rate:                 71.8% (219 Wins / 86 Losses)
+  • Capital Wagered:          $288.17
+  • Gross Settlement Revenue: $273.66
+  • Net Realized Trading PnL: $-14.51 (-5.04% Realized ROI)
+  • Average EV per Contract:  -4.76¢ per trade
 
 WHY DID WALLETS EXPERIENCE LOSSES DESPITE 72.6% WIN RATE SINCE COMMIT?
 ----------------------------------------------------------------------
 1. SOL MARKET BREAKDOWN WAS THE PRIMARY LOSS DRIVER (61.6% OF ALL POST-COMMIT LOSSES):
-   - SOL produced $-7.33 in losses with only 35.0% win rate (20 trades).
+   - SOL produced $-9.47 in losses with only 32.1% win rate (28 trades).
    - Specifically, hourly contracts (KXSOLD-26AUG2221-T96.9999, KXSOLD-26AUG2213-T94.4999, KXSOLD-26AUG2211-T93.2499)
      suffered severe trend reversals where high-price contracts expired worthless.
 
@@ -65,12 +65,12 @@ WHY DID WALLETS EXPERIENCE LOSSES DESPITE 72.6% WIN RATE SINCE COMMIT?
 ----------------------------------------------------------------------------------------------------
 Dimension                    | KALSHI (M=Kalshi)                | GEMINI (M=Gemini)                | Delta
 -----------------------------|-----------------------------------|-----------------------------------|------
-Balance Change Since Commit  | $-8.74 ($11.75 -> $3.01)       | $-5.01 ($5.68 -> $0.67)       | Gemini less capital lost
-Active Positions Entered (n) | 418 Positions                    | 137 Positions                      | Kalshi (+281)
-Peak 3 Maker Executions (n)  | 103 Executions                   | 83 Executions                    | Kalshi (+20)
-Peak 3 Win Rate              | 90.3%                             | 92.8%                             | Kalshi (+-2.5%)
-Realized Peak 3 EV           | +8.64¢ / trade                   | +18.52¢ / trade                   | Kalshi (+-9.88¢ Alpha)
-Average Entry Price          | 79.6¢                             | 72.3¢                             | Gemini (-7.3¢ cheaper)
+Balance Change Since Commit  | $-11.69 ($11.75 -> $0.06)       | $-5.43 ($5.68 -> $0.25)       | Gemini less capital lost
+Active Positions Entered (n) | 612 Positions                    | 164 Positions                      | Kalshi (+448)
+Peak 3 Maker Executions (n)  | 173 Executions                   | 93 Executions                    | Kalshi (+80)
+Peak 3 Win Rate              | 88.4%                             | 93.5%                             | Kalshi (+-5.1%)
+Realized Peak 3 EV           | +7.25¢ / trade                   | +20.80¢ / trade                   | Kalshi (+-13.54¢ Alpha)
+Average Entry Price          | 79.1¢                             | 71.3¢                             | Gemini (-7.8¢ cheaper)
 ----------------------------------------------------------------------------------------------------
 
 ================================================================================

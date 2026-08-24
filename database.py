@@ -897,6 +897,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "min_buy": 18,
                 "max_buy": 24 if is_compressed else 30,
                 "tp": 58 if is_compressed else 62,
+                "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
                 "enable_favorite_maker": True,
                 "favorite_maker_min_buy": 85,
                 "favorite_maker_max_buy": 92,
@@ -924,6 +925,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "min_buy": 18,
             "max_buy": 32 if is_compressed else 44,
             "tp": 58 if is_compressed else 62,
+            "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 80,
             "favorite_maker_max_buy": 93,
@@ -953,6 +955,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "min_buy": 18,
                 "max_buy": 22 if is_compressed else 28,
                 "tp": 58 if is_compressed else 62,
+                "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
                 "enable_favorite_maker": True,
                 "favorite_maker_min_buy": 85,
                 "favorite_maker_max_buy": 92,
@@ -980,6 +983,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "min_buy": 18,
             "max_buy": 24 if is_compressed else 30,
             "tp": 58 if is_compressed else 62,
+            "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 80,
             "favorite_maker_max_buy": 93,
@@ -1368,19 +1372,19 @@ def calibrate_dynamic_price_map_from_db(
 
                 # Step 4: Runway Timing Enforcement & Dynamic Loss-Tightened Corridors
                 min_buy = 18
+                only_fav_setting = os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes")
                 if is_heavy_loss:
                     max_buy = min(max_buy, 18 if mark == "05" else 22)
-                    fav_min_buy = 90
-                    fav_max_buy = 92
-                    enable_fav_maker = False  # Heavy loss regime: disable favorite maker to halt drawdown
+                    fav_min_buy = 80
+                    fav_max_buy = 93
+                    enable_fav_maker = True
                     max_lead = 1
                     max_concurrent = 1
                 elif is_restricted:
                     max_buy = max(min_buy + 2, min(max_buy, 20 if mark == "05" else 25))
-                    fav_min_buy = 88
-                    fav_max_buy = 92
-                    # If win rate is under 65% on restricted asset with multiple settled trades, disable favorite maker
-                    enable_fav_maker = False if (settle_cnt >= 2 and settle_wr < 0.65) else True
+                    fav_min_buy = 80
+                    fav_max_buy = 93
+                    enable_fav_maker = True
                     max_lead = 1
                     max_concurrent = 1
                 else:
@@ -1400,6 +1404,7 @@ def calibrate_dynamic_price_map_from_db(
                     "min_buy": min_buy,
                     "max_buy": max_buy,
                     "tp": tp_price,
+                    "only_favorite_maker": only_fav_setting,
                     "enable_favorite_maker": enable_fav_maker,
                     "favorite_maker_min_buy": fav_min_buy,
                     "favorite_maker_max_buy": fav_max_buy,
@@ -1737,8 +1742,10 @@ def get_dynamic_filter_for_market(
         "mid_zone_max": int(mark_filter.get("mid_zone_max", base_defaults["mid_zone_max"])),
         "contracts_per_trade": int(mark_filter.get("contracts_per_trade", base_defaults["contracts_per_trade"])),
         "is_restricted": bool(mark_filter.get("is_restricted", base_defaults.get("is_restricted", False))),
-        "recent_win_rate": mark_filter.get("recent_win_rate", base_defaults.get("recent_win_rate")),
-        "recent_pnl_cents": mark_filter.get("recent_pnl_cents", base_defaults.get("recent_pnl_cents")),
+        "only_favorite_maker": bool(mark_filter.get("only_favorite_maker", base_defaults.get("only_favorite_maker", True))) and (os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes")),
+        "enable_favorite_maker": bool(mark_filter.get("enable_favorite_maker", base_defaults.get("enable_favorite_maker", True))),
+        "favorite_maker_min_buy": int(mark_filter.get("favorite_maker_min_buy", base_defaults.get("favorite_maker_min_buy", 80))),
+        "favorite_maker_max_buy": int(mark_filter.get("favorite_maker_max_buy", base_defaults.get("favorite_maker_max_buy", 93))),
         "is_exploration": is_exploration,
     }
 

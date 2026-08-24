@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from unittest.mock import patch
 import pytest
 
 from main import extract_asset_symbol, extract_target_strike, process_hourly_market_group
 from signals.base_client import BaseTradingClient
+
+
+@pytest.fixture(autouse=True)
+def mock_ungated_asset():
+    with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
+        yield
 
 
 class DummyHourlyTradingClient(BaseTradingClient):
@@ -44,6 +51,12 @@ class DummyHourlyTradingClient(BaseTradingClient):
         self.buys.append(res)
         return res
 
+    def buy_favorite_maker_order(self, ticker: str, side: str, maker_bid_cents: int, count: int = 1, **kw):
+        self._positions[ticker] = {"ticker": ticker, "side": side, "count": count, "entry_price_cents": maker_bid_cents}
+        res = {"ticker": ticker, "side": side, "buy_price_cents": maker_bid_cents, "price": maker_bid_cents, "count": count, "strategy_tag": "endgame_favorite_maker"}
+        self.buys.append(res)
+        return res
+
 
 @pytest.fixture
 def hourly_client():
@@ -51,8 +64,8 @@ def hourly_client():
 
 
 @pytest.fixture(autouse=True)
-def mock_ungated_asset():
-    from unittest.mock import patch
+def mock_ungated_asset(monkeypatch):
+    monkeypatch.setenv("ONLY_FAVORITE_MAKER", "false")
     with patch("main.is_asset_loss_gated", return_value=(False, 0.0)):
         yield
 
