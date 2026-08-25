@@ -33,8 +33,8 @@ import pymongo
 DOCS_INFO_DIR = Path("/Users/ogechukwuflagg-igbo/Documents/trading_bot_info")
 DOCS_INFO_DIR.mkdir(parents=True, exist_ok=True)
 
-REPO_DIR = Path("/Users/ogechukwuflagg-igbo/git/trading-bot")
-BRAIN_DIR = Path("/Users/ogechukwuflagg-igbo/.gemini/antigravity-cli/brain/221d1490-5df6-4759-bd12-6cdfc8cb18f7")
+REPO_DIR = Path("/Users/ogechukwuflagg-igbo/Downloads/trading-bot")
+BRAIN_DIR = Path("/Users/ogechukwuflagg-igbo/.gemini/antigravity-cli/brain/97141b86-8b1b-499d-81aa-aa1247506929")
 BRAIN_DIR.mkdir(parents=True, exist_ok=True)
 
 # Database Connection
@@ -990,19 +990,20 @@ def generate_report_text(df_s, df_settle_valid, df_pos, df_live, df_theoretical,
         "================================================================================",
         "3. ACTIONABLE RISK FIXES (PREVENTING FURTHER POST-COMMIT BLEED)",
         "================================================================================",
-        "1. BLACKLIST SOL IMMEDIATELY (OR REQUIRE >=0.20% SPOT LEAD):",
-        "   - SOL was responsible for 61.6% of post-commit losses. Disable SOL until volatility dampens.",
+        "1. STRICT SAME-TICKER DUAL-SIDE HARD GATE (ELIMINATING -$7.61 SYNTHETIC LOSS):",
+        "   - Hard gate in main.py blocks order submission if ANY position or resting order exists on",
+        "     either side (YES or NO) for the market ticker, preventing guaranteed negative arbitrage.",
         "",
-        "2. HARD PRICE CEILING AT <= 74¢ (EXPAND WIN PAYOUT TO >= +26¢):",
-        "   - Banning all entries above 74¢ drops the required breakeven win rate to <= 74.0%, converting",
-        "     the current 72.6% win rate into immediate positive EV.",
+        "2. EXPANDED SPOT LEAD DISTANCE GATING (>= 0.30% LEAD WHEN LOSS > $0.50):",
+        "   - When an asset's realized loss exceeds $0.50, the bot requires >= 0.30% spot lead distance",
+        "     from strike before allowing entry, filtering out whipsawing volatile markets.",
         "",
-        "3. RESTRICT TRADING TO EXCLUSIVE TAGGED MAKER STRATEGIES:",
-        "   - Block all untagged/unspecified order generation; allow only Peak 3 Endgame Maker (+6.88¢ EV),",
-        "     Peak 2 Momentum (+1.06¢ EV), and Peak 1 Discount (+44.00¢ EV).",
+        "3. DAILY CIRCUIT BREAKER AT $1.00 LOSS (MIDNIGHT ET RESET):",
+        "   - Automatically halts live execution and runs in dry-run empirical logging mode when an",
+        "     asset reaches -$1.00 daily loss, protecting capital while continuing telemetry.",
         "",
-        "4. ENFORCE 25¢ HARD STOP LOSS & TIME-BASED PRE-EXPIRY CUTS:",
-        "   - Liquidate deteriorating contracts at 25¢ to prevent full -80¢ terminal losses.",
+        "4. EXCLUSIVE TAGGED MAKER STRATEGY EXECUTION:",
+        "   - Prioritizes Peak 3 Endgame Maker (+6.88¢ EV) resting limit orders to capture spread savings.",
         "",
         "================================================================================",
         "End of Post-Commit Analysis Report",

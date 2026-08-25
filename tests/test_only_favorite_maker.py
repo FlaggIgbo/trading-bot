@@ -268,3 +268,77 @@ def test_asset_loss_gated_blocks_live_trading_in_15m_and_1h():
         assert len(client.buys) == 0
         assert snaps_1h[0]["trd"]["dry_run"] is True  # Forced to dry-run mode
 
+
+def test_check_spot_lead_loss_gate_logic():
+    """Verify check_spot_lead_loss_gate enforces >= 0.30% spot lead when loss > $0.50."""
+    from database import check_spot_lead_loss_gate
+
+    # Case 1: Normal loss (-$0.20 <= $0.50 threshold) -> always allowed
+    allowed, lead, reason = check_spot_lead_loss_gate("yes", 100.0, 100.0, asset_realized_pnl=-0.20)
+    assert allowed is True
+
+    # Case 2: Elevated loss (-$0.60 > $0.50 threshold) with YES trade
+    # Spot = 100.20, Target = 100.00 -> lead = +0.20% (< 0.30%) -> rejected
+    allowed, lead, reason = check_spot_lead_loss_gate("yes", 100.20, 100.00, asset_realized_pnl=-0.60)
+    assert allowed is False
+    assert round(lead, 2) == 0.20
+
+    # Spot = 100.35, Target = 100.00 -> lead = +0.35% (>= 0.30%) -> permitted
+    allowed, lead, reason = check_spot_lead_loss_gate("yes", 100.35, 100.00, asset_realized_pnl=-0.60)
+    assert allowed is True
+    assert round(lead, 2) == 0.35
+
+    # Case 3: Elevated loss (-$0.75) with NO trade
+    # Spot = 99.85, Target = 100.00 -> lead = +0.15% (< 0.30%) -> rejected
+    allowed, lead, reason = check_spot_lead_loss_gate("no", 99.85, 100.00, asset_realized_pnl=-0.75)
+    assert allowed is False
+    assert round(lead, 2) == 0.15
+
+    # Spot = 99.60, Target = 100.00 -> lead = +0.40% (>= 0.30%) -> permitted
+    allowed, lead, reason = check_spot_lead_loss_gate("no", 99.60, 100.00, asset_realized_pnl=-0.75)
+    assert allowed is True
+    assert round(lead, 2) == 0.40
+
+
+def test_hard_position_gate_prevents_dual_sided_orders():
+    """Verify that _execute_favorite_maker_flow and _execute_buy_flow reject orders when has_existing_position_or_order is True."""
+    from main import _execute_favorite_maker_flow, _execute_buy_flow
+
+    client = MockOnlyFavClient()
+    client.has_existing_position_or_order = lambda ticker: True
+
+    # 1. Favorite maker flow blocked
+    success, details = _execute_favorite_maker_flow(
+        ticker="KXGOLDH-TEST",
+        side="yes",
+        maker_bid=85,
+        target_ask=88,
+        spot_price=4650.0,
+        target_price=4640.0,
+        market_result="yes",
+        client=client,
+        dry_run=False,
+    )
+    assert success is False
+    assert details is None
+    assert len(client.fav_buys) == 0
+
+    # 2. General buy flow blocked
+    success_buy, details_buy = _execute_buy_flow(
+        ticker="KXGOLDH-TEST",
+        side="no",
+        price_cents=30,
+        maker_bid=29,
+        min_buy=1,
+        max_buy=35,
+        take_profit_cents=65,
+        spot_price=4630.0,
+        target_price=4640.0,
+        market_result="no",
+        client=client,
+        dry_run=False,
+    )
+    assert success_buy is False
+    assert details_buy is None
+    assert len(client.buys) == 0
+

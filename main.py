@@ -48,6 +48,7 @@ import requests
 
 from database import (
     calculate_dynamic_contracts_count,
+    check_spot_lead_loss_gate,
     evaluate_ensemble_consensus,
     get_asset_settlement_streak,
     get_dynamic_filter_for_market,
@@ -714,6 +715,15 @@ def _execute_buy_flow(
     side_lower = side.lower()
     side_upper = side.upper()
     ex_name = getattr(client, "exchange_name", "Exchange")
+
+    # Hard position gate: strictly prevent any order if any position or order exists on either side (YES/NO)
+    if client.has_existing_position_or_order(ticker):
+        log.info(
+            f"🛡️ [HARD POSITION GATE] [{ex_name}] {ticker}: "
+            f"An active position or resting order already exists on either side (YES/NO). Strictly blocking Buy order submission."
+        )
+        return False, None
+
     momentum_label = "Bullish" if side_lower == "yes" else "Bearish"
     corridor_tag = ""
     if corridor_mode == "momentum":
@@ -858,6 +868,7 @@ def evaluate_favorite_maker_opportunity(
     max_rem_mins: float = 6.0,
     spot_price: float | None = None,
     target_price: float | None = None,
+    asset_realized_pnl: float | None = None,
 ) -> dict | None:
     """
     Identifies high-probability favorites in the endgame window and calculates
@@ -868,9 +879,13 @@ def evaluate_favorite_maker_opportunity(
     - Window: Final 1.0m to 6.0m of 15m lifecycle (or up to 25.0m for 1h).
     - Maker Limit Bid: Places resting bid inside the spread (1¢-2¢ below ask, or 1¢ above bid).
     - Avoids crossing the spread (-6¢ taker friction) and captures zero maker fees on Kalshi crypto.
-    - Gated by choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation on restricted assets.
+    - Gated by hard position check, choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation.
+    - Loss Regime Gate: If asset realized loss exceeds $0.50, requires >= 0.30% spot lead distance.
     """
     ticker = market.get("ticker", "")
+    if client.has_existing_position_or_order(ticker):
+        return None
+
     if not dynamic_filters.get("enable_favorite_maker", True):
         log.info(f"🛑 [FAVORITE MAKER DISABLED] Favorite maker buys disabled by dynamic filter for {ticker} (loss/restricted regime).")
         return None
@@ -911,6 +926,23 @@ def evaluate_favorite_maker_opportunity(
                 log.info(
                     f"⚠️ [FAVORITE SPOT DIVERGENCE SKIP] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
                     f"Spot (${spot_price:.4f}) is below strike target (${target_price:.4f}) (Dipping/crashing)."
+                )
+                return None
+
+        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+        if asset_realized_pnl is not None:
+            allowed, lead_pct, reason = check_spot_lead_loss_gate(
+                side="yes",
+                spot_price=spot_price,
+                target_price=target_price,
+                asset_realized_pnl=asset_realized_pnl,
+                loss_threshold_dollars=0.50,
+                min_lead_pct=0.30,
+            )
+            if not allowed:
+                log.info(
+                    f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason})."
                 )
                 return None
 
@@ -975,6 +1007,23 @@ def evaluate_favorite_maker_opportunity(
                 log.info(
                     f"⚠️ [FAVORITE SPOT DIVERGENCE SKIP] {ticker} NO Favorite @ {no_ask}¢ rejected: "
                     f"Spot (${spot_price:.4f}) is above strike target (${target_price:.4f}) (Surging against NO)."
+                )
+                return None
+
+        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+        if asset_realized_pnl is not None:
+            allowed, lead_pct, reason = check_spot_lead_loss_gate(
+                side="no",
+                spot_price=spot_price,
+                target_price=target_price,
+                asset_realized_pnl=asset_realized_pnl,
+                loss_threshold_dollars=0.50,
+                min_lead_pct=0.30,
+            )
+            if not allowed:
+                log.info(
+                    f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason})."
                 )
                 return None
 
@@ -1044,6 +1093,15 @@ def _execute_favorite_maker_flow(
     side_lower = side.lower()
     side_upper = side.upper()
     ex_name = getattr(client, "exchange_name", "Exchange")
+
+    # Hard position gate: strictly prevent any order if any position or order exists on either side (YES/NO)
+    if client.has_existing_position_or_order(ticker):
+        log.info(
+            f"🛡️ [HARD POSITION GATE] [{ex_name}] {ticker}: "
+            f"An active position or resting order already exists on either side (YES/NO). Strictly blocking Favorite Maker order submission."
+        )
+        return False, None
+
     spread_saved = max(0, target_ask - maker_bid)
 
     log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
@@ -1427,6 +1485,7 @@ def process_single_market(
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                 spot_price=spot_price,
                 target_price=target_price,
+                asset_realized_pnl=asset_realized_pnl,
             )
             if fav_opp is not None and dynamic_filters.get("enable_favorite_maker", True):
                 fav_side = fav_opp["side"]
@@ -1465,6 +1524,23 @@ def process_single_market(
                             f"Opposing side already traded for this contract lifecycle. Strictly blocking dual buy."
                         )
                         continue
+
+                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+                    if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                        allowed, lead_pct, reason = check_spot_lead_loss_gate(
+                            side=side,
+                            spot_price=spot_price,
+                            target_price=target_price,
+                            asset_realized_pnl=asset_realized_pnl,
+                            loss_threshold_dollars=0.50,
+                            min_lead_pct=0.30,
+                        )
+                        if not allowed:
+                            log.info(
+                                f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 15M {ticker} ({side.upper()} @ {p_cents}¢): "
+                                f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason}). Skipping trade."
+                            )
+                            continue
 
                     # Enforce Empirical 15M Rules (Peak 1: 1-35¢ @ m=0-3, Peak 2: 36-50¢ @ m=0-5, 51-80¢ BANNED)
                     is_valid_entry, entry_reason = is_valid_empirical_entry(p_cents, minute_into_market, "15m")
@@ -2108,6 +2184,7 @@ def process_hourly_market_group(
                     max_rem_mins=25.0,
                     spot_price=spot_price,
                     target_price=item.get("target_price"),
+                    asset_realized_pnl=asset_realized_pnl,
                 )
                 if fav_opp is not None:
                     fav_opp_by_ticker[ticker] = fav_opp
@@ -2200,6 +2277,23 @@ def process_hourly_market_group(
                 yes_p = item["yes_price_cents"]
                 if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                     if is_spot_momentum_aligned("yes", spot_price, target_price):
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+                        if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                            allowed, lead_pct, reason = check_spot_lead_loss_gate(
+                                side="yes",
+                                spot_price=spot_price,
+                                target_price=target_price,
+                                asset_realized_pnl=asset_realized_pnl,
+                                loss_threshold_dollars=0.50,
+                                min_lead_pct=0.30,
+                            )
+                            if not allowed:
+                                log.info(
+                                    f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 1H {ticker} (YES @ {yes_p}¢): "
+                                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason}). Skipping trade."
+                                )
+                                continue
+
                         # Enforce Empirical 1H Rules (Peak 1: 1-35¢ @ m=0-15, Peak 2: 36-50¢ / 51-65¢ @ m=25-45, Valley of Death BANNED)
                         is_valid_entry, entry_reason = is_valid_empirical_entry(yes_p, minute_past_hour, "1h")
                         if is_valid_entry:
@@ -2259,6 +2353,23 @@ def process_hourly_market_group(
                 no_p = item["no_price_cents"]
                 if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                     if is_spot_momentum_aligned("no", spot_price, target_price):
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+                        if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                            allowed, lead_pct, reason = check_spot_lead_loss_gate(
+                                side="no",
+                                spot_price=spot_price,
+                                target_price=target_price,
+                                asset_realized_pnl=asset_realized_pnl,
+                                loss_threshold_dollars=0.50,
+                                min_lead_pct=0.30,
+                            )
+                            if not allowed:
+                                log.info(
+                                    f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 1H {ticker} (NO @ {no_p}¢): "
+                                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason}). Skipping trade."
+                                )
+                                continue
+
                         # Enforce Empirical 1H Rules (Peak 1: 1-35¢ @ m=0-15, Peak 2: 36-50¢ / 51-65¢ @ m=25-45, Valley of Death BANNED)
                         is_valid_entry, entry_reason = is_valid_empirical_entry(no_p, minute_past_hour, "1h")
                         if is_valid_entry:

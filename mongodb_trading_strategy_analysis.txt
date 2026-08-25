@@ -4,14 +4,14 @@ EVALUATION SCOPE: STRICTLY SINCE COMMIT a244cf4cff20fdd955b7d6b38ed7d72ea211a44b
 COMMIT TIMESTAMP: 2026-08-21 19:03:29 UTC (Fri Aug 21, 2026 15:03:29 EDT)
 PRICE (X) | ASSET (Y) | TIME (Z) | MARKET / EXCHANGE (M: KALSHI vs GEMINI)
 ================================================================================
-Generated: 2026-08-24 21:20:45 UTC
+Generated: 2026-08-25 17:16:02 UTC
 Database: trading_bot_db (MongoDB Atlas Cluster0)
-Post-Commit Records: 305 Settlements, 776 Active Positions, 8,748 Telemetry Snapshots
+Post-Commit Records: 414 Settlements, 1,240 Active Positions, 11,072 Telemetry Snapshots
 
 Post-Commit Wallet Balance Trajectory:
-  • KALSHI WALLET: Start = $11.75 -> Current = $0.06 (Net: $-11.69) | Port Val = $2.04 | Open Pos = 3
-  • GEMINI WALLET:  Start = $5.68 -> Current = $0.25 (Net: $-5.43) | Port Val = $0.24 | Open Pos = 0
-  • TOTAL WALLET CASH DRAWDOWN SINCE COMMIT: $-17.12
+  • KALSHI WALLET: Start = $11.75 -> Current = $3.09 (Net: $-8.66) | Port Val = $2.05 | Open Pos = 3
+  • GEMINI WALLET:  Start = $5.68 -> Current = $0.54 (Net: $-5.14) | Port Val = $0.54 | Open Pos = 0
+  • TOTAL WALLET CASH DRAWDOWN SINCE COMMIT: $-13.80
 
 Visualizations Generated (4 High-Resolution PNG Files across ~/Documents/trading_bot_info/ and ~/git/trading-bot/):
   1. Live Trading Results:      /Users/ogechukwuflagg-igbo/Documents/trading_bot_info/ev_analysis_live_plot.png
@@ -23,17 +23,17 @@ Visualizations Generated (4 High-Resolution PNG Files across ~/Documents/trading
 1. POST-COMMIT PERFORMANCE & WALLET DRAWDOWN FORENSIC AUDIT
 ================================================================================
 Between Aug 21 19:03 UTC and Aug 23 02:26 UTC (since commit a244cf4), the bot recorded:
-  • Total Settled Trades:     305
-  • Win Rate:                 71.8% (219 Wins / 86 Losses)
-  • Capital Wagered:          $288.17
-  • Gross Settlement Revenue: $273.66
-  • Net Realized Trading PnL: $-14.51 (-5.04% Realized ROI)
-  • Average EV per Contract:  -4.76¢ per trade
+  • Total Settled Trades:     414
+  • Win Rate:                 73.4% (304 Wins / 110 Losses)
+  • Capital Wagered:          $390.72
+  • Gross Settlement Revenue: $369.67
+  • Net Realized Trading PnL: $-21.05 (-5.39% Realized ROI)
+  • Average EV per Contract:  -5.08¢ per trade
 
 WHY DID WALLETS EXPERIENCE LOSSES DESPITE 72.6% WIN RATE SINCE COMMIT?
 ----------------------------------------------------------------------
 1. SOL MARKET BREAKDOWN WAS THE PRIMARY LOSS DRIVER (61.6% OF ALL POST-COMMIT LOSSES):
-   - SOL produced $-9.47 in losses with only 32.1% win rate (28 trades).
+   - SOL produced $-8.62 in losses with only 44.4% win rate (36 trades).
    - Specifically, hourly contracts (KXSOLD-26AUG2221-T96.9999, KXSOLD-26AUG2213-T94.4999, KXSOLD-26AUG2211-T93.2499)
      suffered severe trend reversals where high-price contracts expired worthless.
 
@@ -65,30 +65,31 @@ WHY DID WALLETS EXPERIENCE LOSSES DESPITE 72.6% WIN RATE SINCE COMMIT?
 ----------------------------------------------------------------------------------------------------
 Dimension                    | KALSHI (M=Kalshi)                | GEMINI (M=Gemini)                | Delta
 -----------------------------|-----------------------------------|-----------------------------------|------
-Balance Change Since Commit  | $-11.69 ($11.75 -> $0.06)       | $-5.43 ($5.68 -> $0.25)       | Gemini less capital lost
-Active Positions Entered (n) | 612 Positions                    | 164 Positions                      | Kalshi (+448)
-Peak 3 Maker Executions (n)  | 173 Executions                   | 93 Executions                    | Kalshi (+80)
-Peak 3 Win Rate              | 88.4%                             | 93.5%                             | Kalshi (+-5.1%)
-Realized Peak 3 EV           | +7.25¢ / trade                   | +20.80¢ / trade                   | Kalshi (+-13.54¢ Alpha)
-Average Entry Price          | 79.1¢                             | 71.3¢                             | Gemini (-7.8¢ cheaper)
+Balance Change Since Commit  | $-8.66 ($11.75 -> $3.09)       | $-5.14 ($5.68 -> $0.54)       | Gemini less capital lost
+Active Positions Entered (n) | 1,023 Positions                    | 217 Positions                      | Kalshi (+806)
+Peak 3 Maker Executions (n)  | 485 Executions                   | 146 Executions                    | Kalshi (+339)
+Peak 3 Win Rate              | 88.9%                             | 92.5%                             | Kalshi (+-3.6%)
+Realized Peak 3 EV           | +14.94¢ / trade                   | +18.51¢ / trade                   | Kalshi (+-3.56¢ Alpha)
+Average Entry Price          | 76.1¢                             | 72.4¢                             | Gemini (-3.7¢ cheaper)
 ----------------------------------------------------------------------------------------------------
 
 ================================================================================
 3. ACTIONABLE RISK FIXES (PREVENTING FURTHER POST-COMMIT BLEED)
 ================================================================================
-1. BLACKLIST SOL IMMEDIATELY (OR REQUIRE >=0.20% SPOT LEAD):
-   - SOL was responsible for 61.6% of post-commit losses. Disable SOL until volatility dampens.
+1. STRICT SAME-TICKER DUAL-SIDE HARD GATE (ELIMINATING -$7.61 SYNTHETIC LOSS):
+   - Hard gate in main.py blocks order submission if ANY position or resting order exists on
+     either side (YES or NO) for the market ticker, preventing guaranteed negative arbitrage.
 
-2. HARD PRICE CEILING AT <= 74¢ (EXPAND WIN PAYOUT TO >= +26¢):
-   - Banning all entries above 74¢ drops the required breakeven win rate to <= 74.0%, converting
-     the current 72.6% win rate into immediate positive EV.
+2. EXPANDED SPOT LEAD DISTANCE GATING (>= 0.30% LEAD WHEN LOSS > $0.50):
+   - When an asset's realized loss exceeds $0.50, the bot requires >= 0.30% spot lead distance
+     from strike before allowing entry, filtering out whipsawing volatile markets.
 
-3. RESTRICT TRADING TO EXCLUSIVE TAGGED MAKER STRATEGIES:
-   - Block all untagged/unspecified order generation; allow only Peak 3 Endgame Maker (+6.88¢ EV),
-     Peak 2 Momentum (+1.06¢ EV), and Peak 1 Discount (+44.00¢ EV).
+3. DAILY CIRCUIT BREAKER AT $1.00 LOSS (MIDNIGHT ET RESET):
+   - Automatically halts live execution and runs in dry-run empirical logging mode when an
+     asset reaches -$1.00 daily loss, protecting capital while continuing telemetry.
 
-4. ENFORCE 25¢ HARD STOP LOSS & TIME-BASED PRE-EXPIRY CUTS:
-   - Liquidate deteriorating contracts at 25¢ to prevent full -80¢ terminal losses.
+4. EXCLUSIVE TAGGED MAKER STRATEGY EXECUTION:
+   - Prioritizes Peak 3 Endgame Maker (+6.88¢ EV) resting limit orders to capture spread savings.
 
 ================================================================================
 End of Post-Commit Analysis Report

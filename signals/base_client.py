@@ -671,6 +671,30 @@ class BaseTradingClient(ABC):
         """Cancels resting orders for ticker and verifies that 0 resting orders remain."""
         pass
 
+    def has_existing_position_or_order(self, ticker: str) -> bool:
+        """
+        Checks if we ALREADY hold an active position or resting order for the given market ticker on either side (YES or NO).
+        """
+        pos = self.get_market_position(ticker)
+        if pos is not None:
+            return True
+        if hasattr(self, "get_all_resting_orders"):
+            orders = self.get_all_resting_orders().get(ticker, [])
+            if len(orders) > 0:
+                return True
+        traded_side = self.get_traded_market_side(ticker)
+        if traded_side is not None:
+            return True
+        try:
+            from database import get_active_position_doc
+            ex_name = getattr(self, "exchange_name", "kalshi")
+            db_pos = get_active_position_doc(ticker, str(ex_name).lower())
+            if db_pos is not None and (db_pos.get("entry_price_cents") or 0) > 0:
+                return True
+        except Exception:
+            pass
+        return False
+
     def cancel_all_stale_resting_buy_orders(self, max_age_seconds: int = 45) -> int:
         """
         Sweeps all resting orders across the portfolio and cancels any stale unfilled BUY orders.

@@ -765,19 +765,66 @@ def is_asset_loss_gated(
     db=None,
 ) -> tuple[bool, float]:
     """
-    Checks if a specific (symbol, timeframe) contract's realized losses since midnight ET exceed the threshold (default: $1.00).
-    If daily realized PnL <= -$1.00, returns (True, pnl_dollars) indicating live trading is gated for that specific contract for today.
+    Checks if a specific (symbol, timeframe) contract or overall asset's realized losses since midnight ET exceed the threshold (default: $1.00).
+    Evaluates timeframe-specific realized losses and aggregate symbol losses.
+    If daily realized PnL <= -$1.00, returns (True, pnl_dollars) indicating live trading is gated for that asset today.
     Resets at midnight ET every day.
     """
-    pnl = get_asset_realized_pnl_dollars(
+    pnl_tf = get_asset_realized_pnl_dollars(
         symbol,
         timeframe=timeframe,
         since_midnight_et=since_midnight_et,
         now_utc=now_utc,
         db=db,
     )
+    pnl = pnl_tf
+    if timeframe is not None:
+        pnl_overall = get_asset_realized_pnl_dollars(
+            symbol,
+            timeframe=None,
+            since_midnight_et=since_midnight_et,
+            now_utc=now_utc,
+            db=db,
+        )
+        pnl = min(pnl_tf, pnl_overall)
+
     is_gated = (pnl <= -abs(max_loss_dollars))
     return is_gated, pnl
+
+
+def check_spot_lead_loss_gate(
+    side: str,
+    spot_price: float | None,
+    target_price: float | None,
+    asset_realized_pnl: float,
+    loss_threshold_dollars: float = 0.50,
+    min_lead_pct: float = 0.30,
+) -> tuple[bool, float | None, str]:
+    """
+    Evaluates whether a trade is permitted under elevated loss regimes.
+    If asset realized loss exceeds $0.50 (loss_threshold_dollars), requires >= 0.30% (min_lead_pct)
+    spot lead distance in the direction of the trade:
+    - For YES: spot must be >= target_price * (1 + min_lead_pct / 100)  [spot >= strike + 0.30%]
+    - For NO:  spot must be <= target_price * (1 - min_lead_pct / 100)  [spot <= strike - 0.30%]
+
+    Returns (allowed: bool, lead_pct: float | None, reason: str).
+    """
+    if asset_realized_pnl > -abs(loss_threshold_dollars):
+        return True, None, "loss_within_normal_limits"
+
+    if spot_price is None or target_price is None or target_price <= 0:
+        return False, None, "missing_spot_or_target_for_elevated_loss_check"
+
+    side_lower = str(side or "").lower()
+    if side_lower == "yes":
+        lead_pct = ((spot_price - target_price) / target_price) * 100.0
+    else:  # NO
+        lead_pct = ((target_price - spot_price) / target_price) * 100.0
+
+    if lead_pct < min_lead_pct:
+        return False, lead_pct, f"insufficient_spot_lead({lead_pct:.3f}% < {min_lead_pct:.2f}% under ${abs(asset_realized_pnl):.2f} loss)"
+
+    return True, lead_pct, f"sufficient_spot_lead({lead_pct:.3f}% >= {min_lead_pct:.2f}%)"
 
 
 def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> tuple[bool, str]:
