@@ -832,15 +832,17 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
     Validates trade entry against quantitative 4-Vector EV empirical topography:
     
     15-Minute Markets:
-    - Peak 1 (Asymmetric Discount): m = 0..3, Accept 1¢ – 35¢ (+39.3¢ EV, 100% win rate post-commit).
-    - Peak 2 (Early Value): m = 0..5, Accept 36¢ – 50¢ (+11.9¢ EV, 100% win rate post-commit).
-    - Valley of Death: 51¢ – 80¢ at ANY minute is STRICTLY BANNED (0% win rate / -$23.95 loss).
+    - Peak 1 (Asymmetric Discount): m = 0..3, Accept 1¢ – 35¢ (+35.5¢ to +70.3¢ EV, 100% win rate).
+    - Peak 2 (Early Value): m = 0..5, Accept 36¢ – 50¢ (+54.2¢ EV, 99% win rate, n=237).
+    - Peak 1b (Mid Discount): m = 6..8, Accept 1¢ – 35¢ (+51.8¢ to +80.0¢ EV, 80-100% win rate).
+    - Valley of Death: 51¢ – 80¢ at ANY minute is STRICTLY BANNED (0% win rate / severe loss drag).
     - Peak 3: 81¢ – 93¢ is executed exclusively via evaluate_favorite_maker_opportunity (maker limit orders only).
     - All other (price, minute) combinations are rejected.
     
     1-Hour Markets:
-    - Peak 1 (Open Discount): m = 0..15, Accept 1¢ – 35¢ (+37.0¢ EV).
-    - Peak 2 (Mid Value & Momentum): m = 25..45, Accept 36¢ – 50¢ (Value) and 51¢ – 65¢ (Momentum).
+    - Peak 1 (Open Discount): m = 0..15, Accept 1¢ – 35¢ (+12.9¢ to +72.5¢ EV).
+    - Peak 1b (Mid Discount): m = 25..45, Accept 1¢ – 35¢ (+63.7¢ to +80.0¢ EV).
+    - Peak 2 (Mid Value & Momentum): m = 25..45, Accept 36¢ – 50¢ (Value, +36.3¢ EV) and 51¢ – 65¢ (Momentum, +30.4¢ EV).
     - Valley of Death: price > 35¢ at m < 20, or 66¢ – 80¢ at m < 45 is STRICTLY BANNED.
     - Peak 3: 81¢ – 93¢ is executed exclusively via evaluate_favorite_maker_opportunity (maker limit orders only).
     - All other (price, minute) combinations are rejected.
@@ -857,15 +859,19 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
         if 51 <= price_cents <= 80:
             return False, f"15m_valley_of_death_banned(p={price_cents}c,m={m_mod})"
             
-        # 2. Peak 1: Asymmetric Deep Discount at Open (1¢–35¢ at m=0-3, +39.25¢ EV)
+        # 2. Peak 1: Asymmetric Deep Discount at Open (1¢–35¢ at m=0-3, +35.5¢ to +70.3¢ EV)
         if 0 <= m_mod <= 3 and 1 <= price_cents <= 35:
             return True, "15m_discount_open"
             
-        # 3. Peak 2: Early Value Reversion (36¢–50¢ at m=0-5, +11.86¢ EV)
+        # 3. Peak 2: Early Value Reversion (36¢–50¢ at m=0-5, +54.2¢ EV)
         if 0 <= m_mod <= 5 and 36 <= price_cents <= 50:
             return True, "15m_early_value"
+
+        # 4. Peak 1b: Mid-Window Asymmetric Discount (1¢–35¢ at m=6-8, +51.8¢ to +80.0¢ EV)
+        if 6 <= m_mod <= 8 and 1 <= price_cents <= 35:
+            return True, "15m_mid_discount"
             
-        # 4. Guard against high-basis taker buys (Peak 3 >= 81¢ is maker-only)
+        # 5. Guard against high-basis taker buys (Peak 3 >= 81¢ is maker-only)
         if price_cents >= 81:
             return False, f"15m_favorite_maker_only(p={price_cents}c,m={m_mod})"
             
@@ -874,27 +880,31 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
     elif tf == "1h":
         m_mod = minute % 60
         
-        # 1. Early Chop Valley of Death (>35¢ in first 20 minutes)
-        if m_mod < 20 and price_cents > 35:
+        # 1. Early Chop Valley of Death (>35¢ in first 25 minutes, m=0-24)
+        if m_mod < 25 and price_cents > 35:
             return False, f"1h_valley_of_death_early_chop(p={price_cents}c,m={m_mod})"
             
         # 2. Fake Favorite Valley of Death (66¢–80¢ before minute 45)
         if 66 <= price_cents <= 80 and m_mod < 45:
             return False, f"1h_valley_of_death_fake_favorite(p={price_cents}c,m={m_mod})"
             
-        # 3. Peak 1: 1H Open Asymmetric Value (1¢–35¢ at m=0-15, +37.0¢ EV)
+        # 3. Peak 1: 1H Open Asymmetric Value (1¢–35¢ at m=0-15, +12.9¢ to +72.5¢ EV)
         if 0 <= m_mod <= 15 and 1 <= price_cents <= 35:
             return True, "1h_discount_open"
+
+        # 4. Peak 1b: 1H Mid Asymmetric Discount (1¢–35¢ at m=25-45, +63.7¢ to +80.0¢ EV)
+        if 25 <= m_mod <= 45 and 1 <= price_cents <= 35:
+            return True, "1h_mid_discount"
             
-        # 4. Peak 2: Mid-Hour Value (36¢–50¢ at m=25-45)
+        # 5. Peak 2: Mid-Hour Value (36¢–50¢ at m=25-45, +36.3¢ EV)
         if 25 <= m_mod <= 45 and 36 <= price_cents <= 50:
             return True, "1h_mid_value"
             
-        # 5. Peak 2: Mid-Hour Momentum (51¢–65¢ at m=25-45)
+        # 6. Peak 2: Mid-Hour Momentum (51¢–65¢ at m=25-45, +30.4¢ EV)
         if 25 <= m_mod <= 45 and 51 <= price_cents <= 65:
             return True, "1h_mid_momentum"
             
-        # 6. Guard against high-basis taker buys (Peak 3 >= 66¢ is maker-only)
+        # 7. Guard against high-basis taker buys (Peak 3 >= 66¢ is maker-only)
         if price_cents >= 66:
             return False, f"1h_favorite_maker_only(p={price_cents}c,m={m_mod})"
             

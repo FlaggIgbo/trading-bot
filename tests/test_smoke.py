@@ -136,15 +136,17 @@ def test_smoke_empirical_entry_rules():
     from database import is_valid_empirical_entry
 
     # 15-Minute Markets
-    assert is_valid_empirical_entry(25, 1, "15m")[0] is True   # Peak 1: Discount
-    assert is_valid_empirical_entry(35, 3, "15m")[0] is True   # Peak 1: Discount
+    assert is_valid_empirical_entry(25, 1, "15m")[0] is True   # Peak 1: Open Discount
+    assert is_valid_empirical_entry(35, 3, "15m")[0] is True   # Peak 1: Open Discount
+    assert is_valid_empirical_entry(25, 7, "15m")[0] is True   # Peak 1b: Mid Discount
     assert is_valid_empirical_entry(45, 2, "15m")[0] is True   # Peak 2: Value Reversion
     assert is_valid_empirical_entry(60, 4, "15m")[0] is False  # Valley of Death Banned
     assert is_valid_empirical_entry(75, 13, "15m")[0] is False # Valley of Death Banned
     assert is_valid_empirical_entry(85, 13, "15m")[0] is False # Peak 3 Maker Only
 
     # 1-Hour Markets
-    assert is_valid_empirical_entry(20, 5, "1h")[0] is True    # Peak 1: Discount
+    assert is_valid_empirical_entry(20, 5, "1h")[0] is True    # Peak 1: Open Discount
+    assert is_valid_empirical_entry(25, 30, "1h")[0] is True   # Peak 1b: Mid Discount
     assert is_valid_empirical_entry(45, 30, "1h")[0] is True   # Peak 2: Mid-Hour Value
     assert is_valid_empirical_entry(60, 35, "1h")[0] is True   # Peak 2: Mid-Hour Momentum
     assert is_valid_empirical_entry(50, 15, "1h")[0] is False  # Valley of Death Early Chop
