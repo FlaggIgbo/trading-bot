@@ -393,6 +393,27 @@ def save_settlements(settlements: list[dict]) -> int:
                 ]:
                     if fld in active_doc and fld not in s_doc:
                         s_doc[fld] = active_doc[fld]
+            else:
+                # Fallback enrichment from recent market_snapshots if active position doc was cleaned up
+                try:
+                    snap_col = get_mongo_collection("market_snapshots")
+                    if snap_col is not None:
+                        snap_doc = snap_col.find_one(
+                            {"tick": ticker, "trd": {"$ne": None}},
+                            sort=[("ts", -1)]
+                        )
+                        if snap_doc and isinstance(snap_doc.get("trd"), dict):
+                            trd = snap_doc["trd"]
+                            if trd.get("strategy_tag") and "strategy_tag" not in s_doc:
+                                s_doc["strategy_tag"] = trd["strategy_tag"]
+                            if trd.get("order_role") and "order_role" not in s_doc:
+                                s_doc["order_role"] = trd["order_role"]
+                            if trd.get("buy") and "entry_price_cents" not in s_doc:
+                                s_doc["entry_price_cents"] = trd["buy"]
+                            if trd.get("side") and "entered_side" not in s_doc:
+                                s_doc["entered_side"] = trd["side"]
+                except Exception:
+                    pass
 
             # Compute trade outcome alignment if entered side is known
             market_res = str(s_doc.get("market_result") or s_doc.get("result") or "").lower().strip()
@@ -1106,8 +1127,8 @@ def calculate_dynamic_contracts_count(
     if balance_int < buy_price_cents:
         return 0
 
-    # Small bankroll protection: under $10.00, size strictly at 1 contract
-    if balance_int < 1000:
+    # Small bankroll protection: under $25.00, size strictly at 1 contract
+    if balance_int < 2500:
         return 1
 
     max_capital_cents = balance_int * max_bankroll_pct

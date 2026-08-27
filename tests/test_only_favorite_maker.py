@@ -342,3 +342,36 @@ def test_hard_position_gate_prevents_dual_sided_orders():
     assert details_buy is None
     assert len(client.buys) == 0
 
+
+def test_small_bankroll_strictly_caps_contracts_under_25_dollars():
+    """Verify that calculate_dynamic_contracts_count strictly caps contracts to 1 when balance < $25.00."""
+    from database import calculate_dynamic_contracts_count
+
+    # Case 1: Balance $15.00 (1500 cents) -> 1 contract max
+    assert calculate_dynamic_contracts_count(balance_cents=1500, buy_price_cents=75, base_count=3) == 1
+    assert calculate_dynamic_contracts_count(balance_cents=2499, buy_price_cents=75, base_count=3) == 1
+
+    # Case 2: Balance $30.00 (3000 cents) -> allows calculated scaling
+    assert calculate_dynamic_contracts_count(balance_cents=3000, buy_price_cents=75, base_count=3) >= 1
+
+
+def test_kalshi_liquidation_preserves_position_when_unfilled(monkeypatch):
+    """Verify KalshiClient.execute_liquidation does not clear entry price if IOC liquidation order has 0 fills."""
+    from signals.kalshi_client import KalshiClient
+
+    client = KalshiClient.__new__(KalshiClient)
+    client.allow_live_orders = True
+    client._entry_prices = {"KXTEST": 85}
+    client._target_tps = {"KXTEST": 99}
+    client._strategy_tags = {"KXTEST": "endgame_favorite_maker"}
+    client._profit_floors = {}
+    client.post = lambda endpoint, payload: {"order_id": "123", "fill_count": 0, "status": "canceled"}
+    client.invalidate_portfolio_caches = lambda: None
+
+    res = client.execute_liquidation("KXTEST", "yes", 1, 30)
+    assert res.get("order_id") == "123"
+    # Position should still be retained because 0 fills occurred
+    assert "KXTEST" in client.entry_prices
+    assert client.entry_prices["KXTEST"] == 85
+
+

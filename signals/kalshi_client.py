@@ -1063,6 +1063,8 @@ class KalshiClient(BaseTradingClient):
         count: int = 1,
         maker_bid_cents: int | None = None,
         buy_order_timeout_seconds: int = DEFAULT_BUY_ORDER_TIMEOUT_SECONDS,
+        strategy_tag: str | None = None,
+        order_role: str = "maker",
     ) -> dict:
         """
         Submits a Maker limit Buy order at (Bid + 1¢) with an automatic exchange-side expiration (e.g. 45s).
@@ -1216,6 +1218,8 @@ class KalshiClient(BaseTradingClient):
             client_order_id=client_order_id,
             tp_order_id=tp_order_id,
             take_profit_cents=take_profit_cents,
+            strategy_tag=strategy_tag or "maker_buy",
+            order_role=order_role,
         )
 
         return {
@@ -1650,15 +1654,23 @@ class KalshiClient(BaseTradingClient):
 
         try:
             res = self.post("/portfolio/events/orders", payload=sell_payload)
-            self.clear_profit_floor(ticker)
-            self.clear_entry_price(ticker)
+            fill_cnt = float(
+                (res.get("fill_count") if isinstance(res, dict) else 0)
+                or (res.get("order", {}).get("fill_count_fp") if isinstance(res, dict) else 0)
+                or (res.get("order", {}).get("fill_count") if isinstance(res, dict) else 0)
+                or 0
+            )
+            status = str((res.get("order", {}).get("status") if isinstance(res, dict) else "") or (res.get("status") if isinstance(res, dict) else "")).lower()
+            if fill_cnt > 0 or status in ("executed", "filled"):
+                self.clear_profit_floor(ticker)
+                self.clear_entry_price(ticker)
+                try:
+                    from database import remove_active_position_cost
+                    remove_active_position_cost(ticker, "kalshi")
+                except Exception:
+                    pass
             self.invalidate_portfolio_caches()
-            try:
-                from database import remove_active_position_cost
-                remove_active_position_cost(ticker, "kalshi")
-            except Exception:
-                pass
-            log.info(f"✅ Executed immediate taker liquidation for {ticker} ({side_clean.upper()} x{count}): {res}")
+            log.info(f"✅ Executed immediate taker liquidation for {ticker} ({side_clean.upper()} x{count}, filled: {fill_cnt}): {res}")
             return res
         except Exception as error:
             log.warning(f"⚠️ Primary IOC taker liquidation attempt for {ticker} had response/error: {error}. Re-attempting with fresh top-of-book quote...")
@@ -1679,15 +1691,23 @@ class KalshiClient(BaseTradingClient):
 
                 sell_payload["time_in_force"] = "immediate_or_cancel"
                 res = self.post("/portfolio/events/orders", payload=sell_payload)
-                self.clear_profit_floor(ticker)
-                self.clear_entry_price(ticker)
+                fill_cnt2 = float(
+                    (res.get("fill_count") if isinstance(res, dict) else 0)
+                    or (res.get("order", {}).get("fill_count_fp") if isinstance(res, dict) else 0)
+                    or (res.get("order", {}).get("fill_count") if isinstance(res, dict) else 0)
+                    or 0
+                )
+                status2 = str((res.get("order", {}).get("status") if isinstance(res, dict) else "") or (res.get("status") if isinstance(res, dict) else "")).lower()
+                if fill_cnt2 > 0 or status2 in ("executed", "filled"):
+                    self.clear_profit_floor(ticker)
+                    self.clear_entry_price(ticker)
+                    try:
+                        from database import remove_active_position_cost
+                        remove_active_position_cost(ticker, "kalshi")
+                    except Exception:
+                        pass
                 self.invalidate_portfolio_caches()
-                try:
-                    from database import remove_active_position_cost
-                    remove_active_position_cost(ticker, "kalshi")
-                except Exception:
-                    pass
-                log.info(f"✅ Executed secondary IOC taker liquidation for {ticker}: {res}")
+                log.info(f"✅ Executed secondary IOC taker liquidation for {ticker} (filled: {fill_cnt2}): {res}")
                 return res
             except Exception as err2:
                 log.error(f"❌ Failed secondary IOC liquidation exit order for {ticker}: {err2}. Zero resting GTC orders posted.")

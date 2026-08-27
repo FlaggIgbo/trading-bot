@@ -755,6 +755,8 @@ def _execute_buy_flow(
                 count=count,
                 maker_bid_cents=maker_bid,
                 buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
+                strategy_tag=corridor_mode,
+                order_role="maker",
             )
             effective_buy = buy_res.get("buy_price_cents", price_cents)
         except Exception as error:
@@ -2549,6 +2551,13 @@ def process_hourly_market_group(
                         f"({max_conc}) reached. Skipping hourly buy on {ticker}."
                     )
                     continue
+
+            if only_fav_maker:
+                log.info(
+                    f"🛡️ [FAVORITE MAKER ONLY] [{ex_name}] Hourly {ticker} ({side.upper()} @ {price_cents}¢): "
+                    f"Live orders restricted exclusively to Endgame Favorite Maker. Skipping live buy."
+                )
+                continue
 
             contracts_to_buy = max(1, contracts_count)
             executed, details = _execute_buy_flow(
