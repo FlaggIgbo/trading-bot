@@ -64,7 +64,7 @@ def test_dynamic_filter_reflects_only_favorite_maker_env(monkeypatch):
     filt = get_dynamic_filter_for_market("BTC", is_5min_mark=False, timeframe="15m")
     assert filt["only_favorite_maker"] is True
     assert filt["enable_favorite_maker"] is True
-    assert filt["favorite_maker_min_buy"] == 80
+    assert filt["favorite_maker_min_buy"] == 86
     assert filt["favorite_maker_max_buy"] == 93
 
 
@@ -105,16 +105,16 @@ def test_15m_market_skips_general_corridors_and_logs_counterfactual(monkeypatch)
 
 
 def test_15m_market_executes_endgame_favorite_maker_live(monkeypatch):
-    """When ONLY_FAVORITE_MAKER=true, confirmed endgame favorite (84¢) executes resting maker limit bid."""
+    """When ONLY_FAVORITE_MAKER=true, confirmed endgame favorite (88¢) executes resting maker limit bid."""
     monkeypatch.setenv("ONLY_FAVORITE_MAKER", "true")
     client = MockOnlyFavClient()
     market = {
         "ticker": "KXSOL15M-26AUG170200-00",
         "series_ticker": "KXSOL15M",
-        "yes_ask_dollars": "0.84",
-        "yes_bid_dollars": "0.80",
-        "no_ask_dollars": "0.20",
-        "no_bid_dollars": "0.16",
+        "yes_ask_dollars": "0.88",
+        "yes_bid_dollars": "0.84",
+        "no_ask_dollars": "0.16",
+        "no_bid_dollars": "0.12",
         "close_time": "2026-08-17T02:00:00Z",
         "floor_strike": 140.0,
         "exchange": "kalshi",
@@ -133,7 +133,7 @@ def test_15m_market_executes_endgame_favorite_maker_live(monkeypatch):
 
     assert len(client.fav_buys) == 1
     assert client.fav_buys[0]["strategy_tag"] == "endgame_favorite_maker"
-    assert client.fav_buys[0]["buy_price_cents"] == 82  # maker bid (1¢ above 80 bid, 2¢ below 84 ask)
+    assert client.fav_buys[0]["buy_price_cents"] == 86  # maker bid (1¢ above 84 bid, 2¢ below 88 ask)
     assert snap["fav_maker"] is True
 
 
@@ -215,10 +215,10 @@ def test_asset_loss_gated_blocks_live_trading_in_15m_and_1h():
     market_15m = {
         "ticker": "KXSOL15M-26AUG170200-00",
         "series_ticker": "KXSOL15M",
-        "yes_ask_dollars": "0.84",
-        "yes_bid_dollars": "0.80",
-        "no_ask_dollars": "0.20",
-        "no_bid_dollars": "0.16",
+        "yes_ask_dollars": "0.88",
+        "yes_bid_dollars": "0.84",
+        "no_ask_dollars": "0.16",
+        "no_bid_dollars": "0.12",
         "close_time": "2026-08-17T02:00:00Z",
         "floor_strike": 140.0,
         "exchange": "kalshi",

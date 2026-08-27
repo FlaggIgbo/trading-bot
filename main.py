@@ -49,6 +49,7 @@ import requests
 from database import (
     calculate_dynamic_contracts_count,
     check_spot_lead_loss_gate,
+    detect_asset_symbol,
     evaluate_ensemble_consensus,
     get_asset_settlement_streak,
     get_dynamic_filter_for_market,
@@ -879,7 +880,7 @@ def evaluate_favorite_maker_opportunity(
     rem_mins: float | None,
     dynamic_filters: dict,
     client: BaseTradingClient,
-    min_fav_price: int = 80,
+    min_fav_price: int = 86,
     max_fav_price: int = 93,
     min_rem_mins: float = 1.0,
     max_rem_mins: float = 6.0,
@@ -892,12 +893,13 @@ def evaluate_favorite_maker_opportunity(
     an optimal resting maker bid inside the spread to capture the spread discount.
 
     Rules:
-    - Confirmed favorite sits between effective_min_fav (default 80¢–88¢) and 93¢ (ensures positive EV).
+    - Confirmed favorite sits between effective_min_fav (default >= 86¢) and 93¢ (ensures positive EV).
     - Window: Final 1.0m to 6.0m of 15m lifecycle (or up to 25.0m for 1h).
     - Maker Limit Bid: Places resting bid inside the spread (1¢-2¢ below ask, or 1¢ above bid).
     - Avoids crossing the spread (-6¢ taker friction) and captures zero maker fees on Kalshi crypto.
     - Gated by hard position check, choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation.
-    - Loss Regime Gate: If asset realized loss exceeds $0.50, requires >= 0.30% spot lead distance.
+    - Stricter Spot Lead Gate for WTI and GOLD: Mandates >= 0.50% spot lead clearance (due to higher whipsaw variance).
+    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
     """
     ticker = market.get("ticker", "")
     if client.has_existing_position_or_order(ticker):
@@ -928,6 +930,12 @@ def evaluate_favorite_maker_opportunity(
 
     is_restricted = bool(dynamic_filters.get("is_restricted", False)) or (dynamic_filters.get("recent_pnl_cents") or 0) < 0
 
+    sym_name = detect_asset_symbol(ticker)
+    is_commodity_high_vol = sym_name in ("WTI", "GOLD")
+    # Stricter Spot Lead Gate for WTI and GOLD: Mandates >= 0.50% spot lead clearance (vs 0.30% standard)
+    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+    required_spot_lead = 0.50 if is_commodity_high_vol else 0.30
+
     yes_bid = quotes.get("yes_bid")
     yes_ask = quotes.get("yes_ask")
     no_bid = quotes.get("no_bid")
@@ -945,8 +953,16 @@ def evaluate_favorite_maker_opportunity(
                     f"Spot (${spot_price:.4f}) is below strike target (${target_price:.4f}) (Dipping/crashing)."
                 )
                 return None
+            if is_commodity_high_vol:
+                lead_pct = ((spot_price - target_price) / target_price) * 100.0
+                if lead_pct < required_spot_lead:
+                    log.info(
+                        f"🛡️ [COMMODITY SPOT LEAD GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                        f"{sym_name} requires >= {required_spot_lead:.2f}% spot lead (current: {lead_pct:.3f}%)."
+                    )
+                    return None
 
-        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance
         if asset_realized_pnl is not None:
             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                 side="yes",
@@ -954,12 +970,13 @@ def evaluate_favorite_maker_opportunity(
                 target_price=target_price,
                 asset_realized_pnl=asset_realized_pnl,
                 loss_threshold_dollars=0.50,
-                min_lead_pct=0.30,
+                min_lead_pct=required_spot_lead,
+                symbol=sym_name,
             )
             if not allowed:
                 log.info(
                     f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
-                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason})."
+                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {required_spot_lead:.2f}% spot lead ({reason})."
                 )
                 return None
 
@@ -1026,8 +1043,16 @@ def evaluate_favorite_maker_opportunity(
                     f"Spot (${spot_price:.4f}) is above strike target (${target_price:.4f}) (Surging against NO)."
                 )
                 return None
+            if is_commodity_high_vol:
+                lead_pct = ((target_price - spot_price) / target_price) * 100.0
+                if lead_pct < required_spot_lead:
+                    log.info(
+                        f"🛡️ [COMMODITY SPOT LEAD GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                        f"{sym_name} requires >= {required_spot_lead:.2f}% spot lead (current: {lead_pct:.3f}%)."
+                    )
+                    return None
 
-        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance
         if asset_realized_pnl is not None:
             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                 side="no",
@@ -1035,12 +1060,13 @@ def evaluate_favorite_maker_opportunity(
                 target_price=target_price,
                 asset_realized_pnl=asset_realized_pnl,
                 loss_threshold_dollars=0.50,
-                min_lead_pct=0.30,
+                min_lead_pct=required_spot_lead,
+                symbol=sym_name,
             )
             if not allowed:
                 log.info(
                     f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
-                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason})."
+                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {required_spot_lead:.2f}% spot lead ({reason})."
                 )
                 return None
 
@@ -1491,14 +1517,14 @@ def process_single_market(
             if yes_price_cents is not None:
                 record_market_price_snapshot(ticker, yes_price_cents, timestamp=now_utc.timestamp())
 
-            # Priority 1: Endgame Favorite Maker Strategy (74¢–93¢ resting maker bid)
+            # Priority 1: Endgame Favorite Maker Strategy (>= 86¢ resting maker bid)
             fav_opp = evaluate_favorite_maker_opportunity(
                 market=market,
                 quotes=quotes,
                 rem_mins=rem_mins,
                 dynamic_filters=dynamic_filters,
                 client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                 spot_price=spot_price,
                 target_price=target_price,
@@ -1542,20 +1568,23 @@ def process_single_market(
                         )
                         continue
 
-                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for WTI/GOLD)
+                    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
                     if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                        req_lead = 0.50 if asset_symbol in ("WTI", "GOLD") else 0.30
                         allowed, lead_pct, reason = check_spot_lead_loss_gate(
                             side=side,
                             spot_price=spot_price,
                             target_price=target_price,
                             asset_realized_pnl=asset_realized_pnl,
                             loss_threshold_dollars=0.50,
-                            min_lead_pct=0.30,
+                            min_lead_pct=req_lead,
+                            symbol=asset_symbol,
                         )
                         if not allowed:
                             log.info(
                                 f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 15M {ticker} ({side.upper()} @ {p_cents}¢): "
-                                f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason}). Skipping trade."
+                                f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {req_lead:.2f}% spot lead ({reason}). Skipping trade."
                             )
                             continue
 
@@ -1740,7 +1769,7 @@ def process_single_market(
                 rem_mins=rem_mins,
                 dynamic_filters=dynamic_filters,
                 client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                 spot_price=spot_price,
                 target_price=target_price,
@@ -2195,7 +2224,7 @@ def process_hourly_market_group(
                     rem_mins=item["rem_mins"],
                     dynamic_filters=dynamic_filters,
                     client=client,
-                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
+                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
                     max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                     min_rem_mins=1.0,
                     max_rem_mins=25.0,
@@ -2294,20 +2323,23 @@ def process_hourly_market_group(
                 yes_p = item["yes_price_cents"]
                 if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                     if is_spot_momentum_aligned("yes", spot_price, target_price):
-                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for WTI/GOLD)
+                        # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
                         if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                            req_lead = 0.50 if symbol in ("WTI", "GOLD") else 0.30
                             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                                 side="yes",
                                 spot_price=spot_price,
                                 target_price=target_price,
                                 asset_realized_pnl=asset_realized_pnl,
                                 loss_threshold_dollars=0.50,
-                                min_lead_pct=0.30,
+                                min_lead_pct=req_lead,
+                                symbol=symbol,
                             )
                             if not allowed:
                                 log.info(
                                     f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 1H {ticker} (YES @ {yes_p}¢): "
-                                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason}). Skipping trade."
+                                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {req_lead:.2f}% spot lead ({reason}). Skipping trade."
                                 )
                                 continue
 
@@ -2370,20 +2402,23 @@ def process_hourly_market_group(
                 no_p = item["no_price_cents"]
                 if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                     if is_spot_momentum_aligned("no", spot_price, target_price):
-                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require >= 0.30% spot lead distance
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for WTI/GOLD)
+                        # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
                         if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                            req_lead = 0.50 if symbol in ("WTI", "GOLD") else 0.30
                             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                                 side="no",
                                 spot_price=spot_price,
                                 target_price=target_price,
                                 asset_realized_pnl=asset_realized_pnl,
                                 loss_threshold_dollars=0.50,
-                                min_lead_pct=0.30,
+                                min_lead_pct=req_lead,
+                                symbol=symbol,
                             )
                             if not allowed:
                                 log.info(
                                     f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 1H {ticker} (NO @ {no_p}¢): "
-                                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= 0.30% spot lead ({reason}). Skipping trade."
+                                    f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {req_lead:.2f}% spot lead ({reason}). Skipping trade."
                                 )
                                 continue
 
@@ -2615,7 +2650,7 @@ def process_hourly_market_group(
                 rem_mins=item["rem_mins"],
                 dynamic_filters=dynamic_filters,
                 client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 80)),
+                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
                 max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
                 min_rem_mins=1.0,
                 max_rem_mins=25.0,
@@ -2822,6 +2857,20 @@ def _process_exchange_pipeline(
             log.error(f"Failed to fetch 15-minute markets from {exchange_name}: {error}")
             markets_15m = []
 
+    # Prioritize 15M markets: Crypto (BTC, SOL, ETH, XRP, BNB, DOGE, HYPE) > Indices (INX) > Commodities (GOLD, SILVER, WTI)
+    def _market_priority_score(m: dict) -> int:
+        t = str(m.get("ticker", "")).upper()
+        s = str(m.get("series_ticker", "")).upper()
+        for crypto in ["BTC", "SOL", "ETH", "XRP", "BNB", "DOGE", "HYPE", "ZEC"]:
+            if crypto in t or crypto in s:
+                return 0
+        for idx in ["INX", "NASDAQ100", "NDX", "SPX"]:
+            if idx in t or idx in s:
+                return 1
+        return 2
+
+    markets_15m = sorted(markets_15m, key=_market_priority_score)
+
     for market in markets_15m:
         tick = market.get("ticker", "UNKNOWN")
         try:
@@ -2901,7 +2950,22 @@ def _process_exchange_pipeline(
             sym = extract_asset_symbol(series_tick, tick)
             hourly_by_symbol[sym].append(m)
 
-        for sym, sym_markets in hourly_by_symbol.items():
+        # Prioritize Crypto & Index symbols over high-variance Commodities
+        _CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "HYPE", "ZEC"}
+        _INDEX_SYMBOLS = {"INX", "NASDAQ100", "NDX", "SPX"}
+
+        def _symbol_priority(s: str) -> int:
+            s_upper = str(s).upper()
+            if s_upper in _CRYPTO_SYMBOLS:
+                return 0
+            if s_upper in _INDEX_SYMBOLS:
+                return 1
+            return 2
+
+        sorted_symbols = sorted(hourly_by_symbol.keys(), key=_symbol_priority)
+
+        for sym in sorted_symbols:
+            sym_markets = hourly_by_symbol[sym]
             try:
                 hourly_snapshots = process_hourly_market_group(
                     symbol=sym,

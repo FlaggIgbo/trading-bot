@@ -414,7 +414,7 @@ def test_dynamic_loss_restriction_calibration_from_db(mock_get_coll):
     assert "SOL" in calibrated
     assert calibrated["SOL"]["00"]["is_restricted"] is False
     assert calibrated["SOL"]["00"]["contracts_per_trade"] == 3
-    assert calibrated["SOL"]["00"]["favorite_maker_min_buy"] == 80
+    assert calibrated["SOL"]["00"]["favorite_maker_min_buy"] == 86
 
 
 @patch("database.get_mongo_collection")
@@ -677,7 +677,7 @@ def test_tiered_maker_pricing_and_sizing_in_favorite_maker():
         rem_mins=5.0,
         dynamic_filters=gold_filter,
         client=client,
-        spot_price=4350.0,
+        spot_price=4370.0,
         target_price=4340.0,
     )
     assert res_early is not None
@@ -692,7 +692,7 @@ def test_tiered_maker_pricing_and_sizing_in_favorite_maker():
         rem_mins=2.0,
         dynamic_filters=gold_filter,
         client=client,
-        spot_price=4350.0,
+        spot_price=4370.0,
         target_price=4340.0,
     )
     assert res_late is not None

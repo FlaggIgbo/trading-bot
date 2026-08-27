@@ -34,7 +34,7 @@ DOCS_INFO_DIR = Path("/Users/ogechukwuflagg-igbo/Documents/trading_bot_info")
 DOCS_INFO_DIR.mkdir(parents=True, exist_ok=True)
 
 REPO_DIR = Path("/Users/ogechukwuflagg-igbo/Downloads/trading-bot")
-BRAIN_DIR = Path("/Users/ogechukwuflagg-igbo/.gemini/antigravity-cli/brain/97141b86-8b1b-499d-81aa-aa1247506929")
+BRAIN_DIR = Path("/Users/ogechukwuflagg-igbo/.gemini/antigravity-cli/brain/86b6b78a-cf99-4666-b141-b149b8d5ba70")
 BRAIN_DIR.mkdir(parents=True, exist_ok=True)
 
 # Database Connection
@@ -988,22 +988,29 @@ def generate_report_text(df_s, df_settle_valid, df_pos, df_live, df_theoretical,
         "----------------------------------------------------------------------------------------------------",
         "",
         "================================================================================",
-        "3. ACTIONABLE RISK FIXES (PREVENTING FURTHER POST-COMMIT BLEED)",
+        "3. ACTIONABLE RISK FIXES & VOLUME ALLOCATION ENHANCEMENTS",
         "================================================================================",
         "1. STRICT SAME-TICKER DUAL-SIDE HARD GATE (ELIMINATING -$7.61 SYNTHETIC LOSS):",
         "   - Hard gate in main.py blocks order submission if ANY position or resting order exists on",
         "     either side (YES or NO) for the market ticker, preventing guaranteed negative arbitrage.",
         "",
-        "2. EXPANDED SPOT LEAD DISTANCE GATING (>= 0.30% LEAD WHEN LOSS > $0.50):",
-        "   - When an asset's realized loss exceeds $0.50, the bot requires >= 0.30% spot lead distance",
-        "     from strike before allowing entry, filtering out whipsawing volatile markets.",
+        "2. MANDATED STRICTER SPOT LEAD THRESHOLD FOR WTI & GOLD (>= 0.50% LEAD CLEARANCE):",
+        "   - Enforces >= 0.50% spot lead distance (up from 0.30%) on WTI Crude and Gold contracts to enter",
+        "     or clear loss gates, shielding account from high-volatility whipsaw reversals.",
+        "   - TODO: Dynamic ATR / historical volatility auto-calibration from MongoDB.",
         "",
-        "3. DAILY CIRCUIT BREAKER AT $1.00 LOSS (MIDNIGHT ET RESET):",
+        "3. RAISED ENDGAME FAVORITE FLOOR TO >= 86¢ (ELIMINATING 70¢-80¢ DANGER ZONE):",
+        "   - Shifts minimum favorite floor from 80¢ to >= 86¢ across dynamic calibrations and order evaluation,",
+        "     focusing exclusively on the +EV mathematical sweet spot (>90.4% empirical win rate).",
+        "",
+        "4. PRIORITIZATION OF CRYPTO & 15-MINUTE MARKETS (MAX VOLUME ALLOCATION):",
+        "   - 15M pipeline and Crypto assets (BTC, SOL, ETH, XRP, BNB, DOGE, HYPE, ZEC) sorted to Priority Tier 0.",
+        "   - High win-rate assets (>=90% WR: BTC, SOL, ETH, XRP, 15m Metals) scale dynamically up to 3-4 contracts,",
+        "     while restricted volatile commodities (WTI) are clamped strictly to 1 contract.",
+        "",
+        "5. DAILY CIRCUIT BREAKER AT $1.00 LOSS (MIDNIGHT ET RESET):",
         "   - Automatically halts live execution and runs in dry-run empirical logging mode when an",
         "     asset reaches -$1.00 daily loss, protecting capital while continuing telemetry.",
-        "",
-        "4. EXCLUSIVE TAGGED MAKER STRATEGY EXECUTION:",
-        "   - Prioritizes Peak 3 Endgame Maker (+6.88¢ EV) resting limit orders to capture spread savings.",
         "",
         "================================================================================",
         "End of Post-Commit Analysis Report",

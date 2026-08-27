@@ -820,16 +820,25 @@ def check_spot_lead_loss_gate(
     asset_realized_pnl: float,
     loss_threshold_dollars: float = 0.50,
     min_lead_pct: float = 0.30,
+    symbol: str | None = None,
 ) -> tuple[bool, float | None, str]:
     """
     Evaluates whether a trade is permitted under elevated loss regimes.
-    If asset realized loss exceeds $0.50 (loss_threshold_dollars), requires >= 0.30% (min_lead_pct)
+    If asset realized loss exceeds $0.50 (loss_threshold_dollars), requires >= min_lead_pct
     spot lead distance in the direction of the trade:
-    - For YES: spot must be >= target_price * (1 + min_lead_pct / 100)  [spot >= strike + 0.30%]
-    - For NO:  spot must be <= target_price * (1 - min_lead_pct / 100)  [spot <= strike - 0.30%]
+    - For YES: spot must be >= target_price * (1 + min_lead_pct / 100)  [spot >= strike + min_lead_pct%]
+    - For NO:  spot must be <= target_price * (1 - min_lead_pct / 100)  [spot <= strike - min_lead_pct%]
+
+    For WTI and GOLD: Mandates a stricter spot lead threshold (>= 0.50% vs 0.30%) due to high whipsaw variance.
+    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
 
     Returns (allowed: bool, lead_pct: float | None, reason: str).
     """
+    # Enforce stricter spot lead for high-variance commodities (WTI & GOLD)
+    sym_clean = str(symbol or "").upper()
+    is_commodity_high_vol = sym_clean in ("WTI", "GOLD") or (symbol is None and min_lead_pct >= 0.45)
+    effective_min_lead = 0.50 if (is_commodity_high_vol and min_lead_pct < 0.50) else min_lead_pct
+
     if asset_realized_pnl > -abs(loss_threshold_dollars):
         return True, None, "loss_within_normal_limits"
 
@@ -842,10 +851,10 @@ def check_spot_lead_loss_gate(
     else:  # NO
         lead_pct = ((target_price - spot_price) / target_price) * 100.0
 
-    if lead_pct < min_lead_pct:
-        return False, lead_pct, f"insufficient_spot_lead({lead_pct:.3f}% < {min_lead_pct:.2f}% under ${abs(asset_realized_pnl):.2f} loss)"
+    if lead_pct < effective_min_lead:
+        return False, lead_pct, f"insufficient_spot_lead({lead_pct:.3f}% < {effective_min_lead:.2f}% under ${abs(asset_realized_pnl):.2f} loss)"
 
-    return True, lead_pct, f"sufficient_spot_lead({lead_pct:.3f}% >= {min_lead_pct:.2f}%)"
+    return True, lead_pct, f"sufficient_spot_lead({lead_pct:.3f}% >= {effective_min_lead:.2f}%)"
 
 
 def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> tuple[bool, str]:
@@ -977,7 +986,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "tp": 58 if is_compressed else 62,
                 "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
                 "enable_favorite_maker": True,
-                "favorite_maker_min_buy": 85,
+                "favorite_maker_min_buy": 86,
                 "favorite_maker_max_buy": 92,
                 "max_crypto_directional_concurrent": 2,
                 "max_lead_changes": 1,
@@ -1005,7 +1014,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "tp": 58 if is_compressed else 62,
             "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
             "enable_favorite_maker": True,
-            "favorite_maker_min_buy": 80,
+            "favorite_maker_min_buy": 86,
             "favorite_maker_max_buy": 93,
             "max_crypto_directional_concurrent": 3,
             "max_lead_changes": 2,
@@ -1035,7 +1044,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "tp": 58 if is_compressed else 62,
                 "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
                 "enable_favorite_maker": True,
-                "favorite_maker_min_buy": 85,
+                "favorite_maker_min_buy": 86,
                 "favorite_maker_max_buy": 92,
                 "max_crypto_directional_concurrent": 2,
                 "max_lead_changes": 1,
@@ -1056,14 +1065,14 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "contracts_per_trade": 1,
                 "is_restricted": True,
             }
-        # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker 80¢–93¢, strict momentum, 1-contract sizing)
+        # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker >= 86¢, strict momentum, 1-contract sizing)
         return {
             "min_buy": 18,
             "max_buy": 24 if is_compressed else 30,
             "tp": 58 if is_compressed else 62,
             "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
             "enable_favorite_maker": True,
-            "favorite_maker_min_buy": 80,
+            "favorite_maker_min_buy": 86,
             "favorite_maker_max_buy": 93,
             "max_crypto_directional_concurrent": 3,
             "max_lead_changes": 2,
@@ -1453,14 +1462,14 @@ def calibrate_dynamic_price_map_from_db(
                 only_fav_setting = os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes")
                 if is_heavy_loss:
                     max_buy = min(max_buy, 18 if mark == "05" else 22)
-                    fav_min_buy = 80
+                    fav_min_buy = 86
                     fav_max_buy = 93
                     enable_fav_maker = True
                     max_lead = 1
                     max_concurrent = 1
                 elif is_restricted:
                     max_buy = max(min_buy + 2, min(max_buy, 20 if mark == "05" else 25))
-                    fav_min_buy = 80
+                    fav_min_buy = 86
                     fav_max_buy = 93
                     enable_fav_maker = True
                     max_lead = 1
@@ -1470,7 +1479,7 @@ def calibrate_dynamic_price_map_from_db(
                         max_buy = max(min_buy + 2, min(max_buy, 30))
                     else:
                         max_buy = max(min_buy + 2, min(max_buy, 44))
-                    fav_min_buy = 80
+                    fav_min_buy = 86
                     fav_max_buy = 93
                     enable_fav_maker = True
                     max_lead = 2
@@ -1822,7 +1831,7 @@ def get_dynamic_filter_for_market(
         "is_restricted": bool(mark_filter.get("is_restricted", base_defaults.get("is_restricted", False))),
         "only_favorite_maker": bool(mark_filter.get("only_favorite_maker", base_defaults.get("only_favorite_maker", True))) and (os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes")),
         "enable_favorite_maker": bool(mark_filter.get("enable_favorite_maker", base_defaults.get("enable_favorite_maker", True))),
-        "favorite_maker_min_buy": int(mark_filter.get("favorite_maker_min_buy", base_defaults.get("favorite_maker_min_buy", 80))),
+        "favorite_maker_min_buy": int(mark_filter.get("favorite_maker_min_buy", base_defaults.get("favorite_maker_min_buy", 86))),
         "favorite_maker_max_buy": int(mark_filter.get("favorite_maker_max_buy", base_defaults.get("favorite_maker_max_buy", 93))),
         "is_exploration": is_exploration,
     }
