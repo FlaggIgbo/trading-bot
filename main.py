@@ -190,11 +190,16 @@ def record_exploration_trade_executed(now_utc: datetime | None = None):
     _EXPLORATION_TRADES_COUNT += 1
 
 
-# Persistent HTTP session with connection pooling sized for parallel thread queries
+# Persistent HTTP session with connection pooling and gzip compression
 http_session = requests.Session()
 _adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=25)
 http_session.mount("https://", _adapter)
 http_session.mount("http://", _adapter)
+http_session.headers.update({"Accept-Encoding": "gzip, deflate"})
+
+# Lightweight in-memory TTL cache for external spot price feeds (reduces bandwidth on Render)
+_SPOT_PRICE_TTL_CACHE: dict[str, tuple[float, float]] = {}
+_SPOT_CACHE_TTL_SECONDS: float = 20.0
 
 
 def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> float:
@@ -232,45 +237,43 @@ def calculate_seconds_until_next_5min_mark(offset_seconds: float = 30.0) -> floa
 
 def calculate_seconds_until_next_checkpoint(open_delay_seconds: float = 30.0, offset_seconds: float | None = None) -> float:
     """
-    Calculates exact seconds to sleep until the NEXT scheduled checkpoint:
+    Calculates exact seconds to sleep until the NEXT scheduled trading checkpoint.
     
-    15-Minute Market Checkpoints (Every 15m block):
-    - Minute :00:30, :15:30, :30:30, :45:30 (Open Entry, +30s open delay to allow bets to settle)
-    - Minute :02:30, :17:30, :32:30, :47:30 (2.5m Disaster Cut-Loss & 2nd Chance Entry)
-    - Minute :05:00, :20:00, :35:00, :50:00 (5m Cut-Loss & Tight Entry, exact timestamp without buffer)
-    - Minute :07:30, :22:30, :37:30, :52:30 (7.5m Mid-Candle Cut-Loss & Tight Entry)
-    - Minute :10:00, :25:00, :40:00, :55:00 (10m Stop-Loss & Winner-Roll, exact timestamp without buffer)
-    - Minute :12:30, :27:30, :42:30, :57:30 (12.5m Endgame Check: 2.5m before expiration)
-    - Minute :14:00, :29:00, :44:00, :59:00 (14m Crash Detection / Selloff Check: 1m before expiration)
-
-    Hourly Multi-Strike Market Checkpoints (Every 10m past the hour + endgame checks):
-    - Minute :00:30 (Open Multi-Strike Entry, +30s open delay)
-    - Minute :10:00 (10m Disaster Cut-Loss & 2nd Chance Entry, exact timestamp)
-    - Minute :20:00 (20m Cut-Loss & Tighter Entry, exact timestamp)
-    - Minute :30:00 (30m Mid-Hour Cut-Loss & Tighter Entry, exact timestamp without delay)
-    - Minute :40:00 (40m Winner-Roll & Stop-Loss, exact timestamp)
-    - Minute :50:00 (50m Endgame Check, exact timestamp)
-    - Minute :52:30 (52.5m Mid-Candle Cut-Loss: 7.5m before expiration)
-    - Minute :55:00 (55m Winner-Bank & Stop-Loss Check, exact timestamp - 5m before expiration)
-    - Minute :57:30 (57.5m Endgame Safety Check: 2.5m before expiration)
-    - Minute :59:00 (59m Crash Detection & Selloff Check: 1m before expiration)
+    Render Bandwidth Optimization:
+    - Default (dense_checkpoints=False): Runs exclusively on 28 core decision checkpoints per hour
+      (:00:30 open, :02:30 cut, :05:00 tight entry, :07:30 mid cut, :10:00 stop-loss/maker, :12:30 endgame, :14:00 crash cut)
+      across all 4 15-minute quarters and hourly lifecycle marks.
+      Reduces polling frequency by ~63% compared to dense 1-minute loops, drastically cutting Render bandwidth.
+    - Dense mode (DENSE_CHECKPOINTS=true): Evaluates every 1-minute mark for continuous offline EV telemetry.
     """
     if offset_seconds is not None:
         open_delay_seconds = offset_seconds
 
     now = datetime.now(timezone.utc)
-
-    # Complete 60-minute scheduled checkpoints (minute, second):
-    # Includes every 1-minute interval for dense Price(X) Asset(Y) Timestamp(Z) EV logging,
-    # plus high-precision 30s sub-minute marks for 15M/1H entry and exit intervals.
     open_delay = int(open_delay_seconds)
-    half_minute_marks = {0, 2, 7, 12, 15, 17, 22, 27, 30, 32, 37, 42, 45, 47, 52, 57}
-    checkpoints_list = []
-    for m in range(60):
-        checkpoints_list.append((m, 0))
-        if m in half_minute_marks:
-            checkpoints_list.append((m, 30 if m not in (0, 15, 30, 45) else open_delay))
-    hourly_checkpoints = tuple(checkpoints_list)
+
+    dense_mode = os.getenv("DENSE_CHECKPOINTS", "false").lower() in ("true", "1", "yes")
+
+    if dense_mode:
+        half_minute_marks = {0, 2, 7, 12, 15, 17, 22, 27, 30, 32, 37, 42, 45, 47, 52, 57}
+        checkpoints_list = []
+        for m in range(60):
+            checkpoints_list.append((m, 0))
+            if m in half_minute_marks:
+                checkpoints_list.append((m, 30 if m not in (0, 15, 30, 45) else open_delay))
+        hourly_checkpoints = tuple(checkpoints_list)
+    else:
+        # Standard High-Efficiency Production Schedule (28 checkpoints/hour)
+        hourly_checkpoints = (
+            # Q1 (:00 - :15) + Hourly Open
+            (0, open_delay), (2, 30), (5, 0), (7, 30), (10, 0), (12, 30), (14, 0),
+            # Q2 (:15 - :30) + Hourly 20m Mark
+            (15, open_delay), (17, 30), (20, 0), (22, 30), (25, 0), (27, 30), (29, 0),
+            # Q3 (:30 - :45) + Hourly 30m / 40m Marks
+            (30, open_delay), (32, 30), (35, 0), (37, 30), (40, 0), (42, 30), (44, 0),
+            # Q4 (:45 - :60) + Hourly 50m / 52.5m / 55m / 57.5m / 59m Marks
+            (45, open_delay), (47, 30), (50, 0), (52, 30), (55, 0), (57, 30), (59, 0),
+        )
 
     candidates = []
     # Generate candidate timestamps across current hour and next hour
@@ -553,19 +556,31 @@ def get_crypto_spot_price(
 
 def get_spot_price(symbol: str, client: BaseTradingClient | None = None) -> float | None:
     """
-    Unified single spot price lookup router:
+    Unified single spot price lookup router with in-memory TTL caching:
     - Commodities (GOLD, SILVER, WTI) -> Pyth Hermes API
     - Indices (INX, NASDAQ100) -> Yahoo Finance Chart API
     - Crypto (BTC, ETH, SOL, etc.) -> CF Benchmarks API / Coinbase Fallback
     """
     sym_upper = symbol.upper()
+    now_ts = time.time()
+
+    # Fast memory cache hit to eliminate redundant network bandwidth
+    if sym_upper in _SPOT_PRICE_TTL_CACHE:
+        val, cached_ts = _SPOT_PRICE_TTL_CACHE[sym_upper]
+        if now_ts - cached_ts < _SPOT_CACHE_TTL_SECONDS and val is not None:
+            return val
+
     if sym_upper in COMMODITY_SYMBOLS:
         res = get_pyth_commodity_spot_prices([sym_upper])
-        return res.get(sym_upper)
+        price = res.get(sym_upper)
     elif sym_upper in INDEX_SYMBOLS:
-        return get_index_spot_price(sym_upper)
+        price = get_index_spot_price(sym_upper)
     else:
-        return get_crypto_spot_price(sym_upper, client=client)
+        price = get_crypto_spot_price(sym_upper, client=client)
+
+    if price is not None:
+        _SPOT_PRICE_TTL_CACHE[sym_upper] = (price, now_ts)
+    return price
 
 
 def batch_fetch_spot_prices(
@@ -3090,9 +3105,9 @@ def run_pipeline_pass(
                     log.error(f"❌ Unhandled error in {ex_name} parallel pipeline: {exc}", exc_info=True)
 
     # Save valid market snapshots to MongoDB Atlas
-    # Storage Optimization Policy:
-    # 1. Always save snapshots where a trade or order action occurred ('trd' is not None).
-    # 2. Always save 15M / 5M market snapshots at standard checkpoints.
+    # Render Bandwidth & Storage Optimization Policy:
+    # 1. Always save snapshots where a trade action occurred ('trd' is not None).
+    # 2. Only save non-trade snapshots if in the active trading corridor (10¢-90¢) with active quotes or volume.
     def _is_retained_snapshot(s: dict) -> bool:
         if s.get("trd") is not None:
             return True
@@ -3100,15 +3115,12 @@ def run_pipeline_pass(
         n_val = s.get("n")
         if y_val is None and n_val is None:
             return False
-        tf = str(s.get("tf", "")).lower()
-        if tf in ("15m", "5m"):
-            return True
         vol = s.get("vol") or 0
         in_tradeable_corridor = (
-            (y_val is not None and 5 <= y_val <= 95)
-            or (n_val is not None and 5 <= n_val <= 95)
+            (y_val is not None and 10 <= y_val <= 90)
+            or (n_val is not None and 10 <= n_val <= 90)
         )
-        return (in_tradeable_corridor or vol > 0)
+        return bool(in_tradeable_corridor or vol > 0)
 
     valid_snapshots = [s for s in snapshots_to_save if _is_retained_snapshot(s)]
     if valid_snapshots:

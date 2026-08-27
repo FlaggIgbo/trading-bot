@@ -177,6 +177,7 @@ class GeminiPredictionClient:
         use_sandbox = os.getenv("GEMINI_USE_SANDBOX", "false").lower() == "true"
         self.base_url = (base_url or (SANDBOX_BASE if use_sandbox else PRODUCTION_BASE)).rstrip("/")
         self.session = requests.Session()
+        self.session.headers.update({"Accept-Encoding": "gzip, deflate"})
 
     def get_events(
         self,

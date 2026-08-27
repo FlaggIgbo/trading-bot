@@ -346,6 +346,7 @@ class KalshiClient(BaseTradingClient):
             "KALSHI-ACCESS-KEY": self.api_key_id,
             "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
             "KALSHI-ACCESS-SIGNATURE": signature,
+            "Accept-Encoding": "gzip, deflate",
         }
 
     def _get_signing_path(self, endpoint: str) -> str:
