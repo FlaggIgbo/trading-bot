@@ -355,3 +355,125 @@ def test_hourly_multi_strike_index_tiebreaker(multi_asset_client, mock_filter):
 def test_detect_market_timeframe_5m_15m_1h(ticker, expected_tf):
     from database import detect_market_timeframe
     assert detect_market_timeframe(ticker) == expected_tf
+
+
+# ---------------------------------------------------------------------------
+# 7. Commodity Spot Fallback & Gating Integrity Tests
+# ---------------------------------------------------------------------------
+
+def test_pyth_commodity_spot_prices_fallback_to_yahoo(monkeypatch):
+    """When Pyth Hermes returns 401/error, ensure automatic fallback to Yahoo Finance for Gold/Silver/WTI."""
+    from main import get_pyth_commodity_spot_prices
+
+    class MockResponse:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+            self.text = "Mocked"
+
+        def json(self):
+            return self._json
+
+    def mock_get(url, *args, **kwargs):
+        if "hermes.pyth.network" in url:
+            return MockResponse(401, {"error": "unauthorized"})
+        if "query1.finance.yahoo.com" in url or "query2.finance.yahoo.com" in url:
+            if "GC=F" in url:
+                return MockResponse(200, {"chart": {"result": [{"meta": {"regularMarketPrice": 4500.50}}]}})
+            if "SI=F" in url:
+                return MockResponse(200, {"chart": {"result": [{"meta": {"regularMarketPrice": 68.25}}]}})
+            if "CL=F" in url:
+                return MockResponse(200, {"chart": {"result": [{"meta": {"regularMarketPrice": 82.75}}]}})
+        return MockResponse(404, {})
+
+    monkeypatch.setattr("main.http_session.get", mock_get)
+
+    spots = get_pyth_commodity_spot_prices(["GOLD", "SILVER", "WTI"])
+    assert spots["GOLD"] == 4500.50
+    assert spots["SILVER"] == 68.25
+    assert spots["WTI"] == 82.75
+
+
+def test_commodity_favorite_maker_requires_spot_price(multi_asset_client, mock_filter):
+    """Ensures commodities (GOLD, SILVER, WTI) reject favorite maker entries if spot price is missing."""
+    from main import evaluate_favorite_maker_opportunity
+
+    gold_mkt = {
+        "ticker": "KXGOLDH-26AUG1800-T4400.00",
+        "series_ticker": "KXGOLDH",
+        "floor_strike": 4400.0,
+    }
+    quotes = {
+        "yes_ask": 88,
+        "yes_bid": 84,
+        "no_ask": 16,
+        "no_bid": 12,
+    }
+
+    # With missing spot price -> Rejected
+    opp_no_spot = evaluate_favorite_maker_opportunity(
+        market=gold_mkt,
+        quotes=quotes,
+        rem_mins=5.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=None,
+        target_price=4400.0,
+    )
+    assert opp_no_spot is None
+
+    # With sufficient spot lead (spot=4430.0 >= 4400.0 * 1.005) -> Accepted
+    opp_with_spot = evaluate_favorite_maker_opportunity(
+        market=gold_mkt,
+        quotes=quotes,
+        rem_mins=5.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=4430.0,
+        target_price=4400.0,
+    )
+    assert opp_with_spot is not None
+    assert opp_with_spot["side"] == "yes"
+
+
+def test_silver_stricter_spot_lead_gate(multi_asset_client, mock_filter):
+    """Ensures SILVER requires >= 0.50% spot lead, rejecting insufficient leads like 0.35%."""
+    from main import evaluate_favorite_maker_opportunity
+
+    silver_mkt = {
+        "ticker": "KXSILVER15M-26AUG170200-00",
+        "series_ticker": "KXSILVER15M",
+        "floor_strike": 65.0,
+    }
+    quotes = {
+        "yes_ask": 88,
+        "yes_bid": 84,
+        "no_ask": 16,
+        "no_bid": 12,
+    }
+
+    # 0.35% spot lead (65.0 * 1.0035 = 65.2275) -> Rejected (< 0.50%)
+    opp_weak_lead = evaluate_favorite_maker_opportunity(
+        market=silver_mkt,
+        quotes=quotes,
+        rem_mins=3.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=65.2275,
+        target_price=65.0,
+    )
+    assert opp_weak_lead is None
+
+    # 0.60% spot lead (65.0 * 1.0060 = 65.39) -> Approved (>= 0.50%)
+    opp_strong_lead = evaluate_favorite_maker_opportunity(
+        market=silver_mkt,
+        quotes=quotes,
+        rem_mins=3.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=65.39,
+        target_price=65.0,
+    )
+    assert opp_strong_lead is not None
+    assert opp_strong_lead["side"] == "yes"
+

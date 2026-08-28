@@ -140,7 +140,14 @@ INDEX_TICKER_MAP: dict[str, str] = {
     "NDX": "^NDX",
 }
 
-COMMODITY_SYMBOLS = set(PYTH_COMMODITY_FEEDS.keys())
+# Yahoo Finance ticker mapping for Commodities fallback
+COMMODITY_YAHOO_MAP: dict[str, str] = {
+    "GOLD": "GC=F",     # Gold Futures / Spot reference
+    "SILVER": "SI=F",   # Silver Futures / Spot reference
+    "WTI": "CL=F",      # Crude Oil WTI Futures / Spot reference
+}
+
+COMMODITY_SYMBOLS = set(PYTH_COMMODITY_FEEDS.keys()) | set(COMMODITY_YAHOO_MAP.keys())
 INDEX_SYMBOLS = set(INDEX_TICKER_MAP.keys())
 
 # Default expiration in seconds for Maker limit buy orders to protect against adverse price drops
@@ -420,33 +427,65 @@ def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = N
 
 def get_pyth_commodity_spot_prices(symbols: list[str]) -> dict[str, float | None]:
     """
-    Fetches real-time commodity spot prices directly from Pyth Network Hermes API.
+    Fetches real-time commodity spot prices directly from Pyth Network Hermes API
+    with automatic Yahoo Finance fallback for resilient spot price tracking.
     Matches Kalshi's official settlement source for Gold, Silver, and WTI Oil.
     """
     feeds_to_fetch = {sym: PYTH_COMMODITY_FEEDS[sym] for sym in symbols if sym in PYTH_COMMODITY_FEEDS}
     result: dict[str, float | None] = {sym: None for sym in symbols}
-    if not feeds_to_fetch:
+    if not feeds_to_fetch and not any(s in COMMODITY_YAHOO_MAP for s in symbols):
         return result
 
-    try:
-        params = [("ids[]", fid) for fid in feeds_to_fetch.values()]
-        resp = http_session.get(
-            "https://hermes.pyth.network/v2/updates/price/latest",
-            params=params,
-            timeout=3.5,
-        )
-        if resp.status_code == 200 and resp.text:
-            data = resp.json()
-            id_to_sym = {v: k for k, v in feeds_to_fetch.items()}
-            for p in data.get("parsed", []):
-                sym = id_to_sym.get(p.get("id"))
-                if sym:
-                    p_info = p.get("price", {})
-                    raw_price = int(p_info.get("price", 0))
-                    expo = int(p_info.get("expo", 0))
-                    result[sym] = round(raw_price * (10 ** expo), 4)
-    except Exception as error:
-        log.debug(f"Could not batch-fetch Pyth commodity spot prices: {error}")
+    if feeds_to_fetch:
+        try:
+            params = [("ids[]", fid) for fid in feeds_to_fetch.values()]
+            headers = {"User-Agent": "Mozilla/5.0"}
+            pyth_key = os.getenv("PYTH_API_KEY") or os.getenv("HERMES_API_KEY")
+            if pyth_key:
+                headers["Authorization"] = f"Bearer {pyth_key}"
+            resp = http_session.get(
+                "https://hermes.pyth.network/v2/updates/price/latest",
+                params=params,
+                headers=headers,
+                timeout=3.5,
+            )
+            if resp.status_code == 200 and resp.text:
+                data = resp.json()
+                id_to_sym = {v: k for k, v in feeds_to_fetch.items()}
+                for p in data.get("parsed", []):
+                    sym = id_to_sym.get(p.get("id"))
+                    if sym:
+                        p_info = p.get("price", {})
+                        raw_price = int(p_info.get("price", 0))
+                        expo = int(p_info.get("expo", 0))
+                        result[sym] = round(raw_price * (10 ** expo), 4)
+        except Exception as error:
+            log.debug(f"Could not batch-fetch Pyth commodity spot prices: {error}")
+
+    # Fallback to Yahoo Finance for any missing commodity spot prices
+    missing_syms = [s for s in symbols if result.get(s) is None and s in COMMODITY_YAHOO_MAP]
+    if missing_syms:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        for sym in missing_syms:
+            ticker = COMMODITY_YAHOO_MAP[sym]
+            for base_url in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
+                try:
+                    resp = http_session.get(
+                        f"{base_url}/v8/finance/chart/{ticker}?interval=1m&range=1d",
+                        headers=headers,
+                        timeout=3.5,
+                    )
+                    if resp.status_code == 200 and resp.text:
+                        data = resp.json()
+                        results = data.get("chart", {}).get("result", [])
+                        if results:
+                            meta = results[0].get("meta", {})
+                            price = meta.get("regularMarketPrice") or meta.get("chartPreviousClose")
+                            if price is not None:
+                                result[sym] = round(float(price), 4)
+                                break
+                except Exception as error:
+                    log.debug(f"Could not fetch commodity spot price for {sym} ({ticker}) from Yahoo: {error}")
 
     return result
 
@@ -931,10 +970,18 @@ def evaluate_favorite_maker_opportunity(
     is_restricted = bool(dynamic_filters.get("is_restricted", False)) or (dynamic_filters.get("recent_pnl_cents") or 0) < 0
 
     sym_name = detect_asset_symbol(ticker)
-    is_commodity_high_vol = sym_name in ("WTI", "GOLD")
-    # Stricter Spot Lead Gate for WTI and GOLD: Mandates >= 0.50% spot lead clearance (vs 0.30% standard)
-    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+    is_commodity_high_vol = (sym_name in ("WTI", "GOLD", "SILVER")) or (sym_name in COMMODITY_SYMBOLS)
+    # Stricter Spot Lead Gate for Commodities (WTI, GOLD, SILVER): Mandates >= 0.50% spot lead clearance (vs 0.30% standard)
+    # TODO: Make WTI/GOLD/SILVER spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
     required_spot_lead = 0.50 if is_commodity_high_vol else 0.30
+
+    # Commodity Spot Protection: Require real-time spot price confirmation before trading volatile commodities
+    if is_commodity_high_vol and (spot_price is None or target_price is None or target_price <= 0):
+        log.info(
+            f"🛡️ [COMMODITY SPOT REQUIRED] [{ex_name}] {ticker} Favorite Maker rejected: "
+            f"Real-time spot price confirmation required for {sym_name} to prevent blind adverse entry."
+        )
+        return None
 
     yes_bid = quotes.get("yes_bid")
     yes_ask = quotes.get("yes_ask")
@@ -1568,10 +1615,10 @@ def process_single_market(
                         )
                         continue
 
-                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for WTI/GOLD)
-                    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for Commodities)
+                    # TODO: Make commodity spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
                     if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                        req_lead = 0.50 if asset_symbol in ("WTI", "GOLD") else 0.30
+                        req_lead = 0.50 if (asset_symbol in COMMODITY_SYMBOLS or asset_symbol in ("WTI", "GOLD", "SILVER")) else 0.30
                         allowed, lead_pct, reason = check_spot_lead_loss_gate(
                             side=side,
                             spot_price=spot_price,
@@ -2323,10 +2370,10 @@ def process_hourly_market_group(
                 yes_p = item["yes_price_cents"]
                 if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                     if is_spot_momentum_aligned("yes", spot_price, target_price):
-                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for WTI/GOLD)
-                        # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for Commodities)
+                        # TODO: Make commodity spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
                         if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                            req_lead = 0.50 if symbol in ("WTI", "GOLD") else 0.30
+                            req_lead = 0.50 if (symbol in COMMODITY_SYMBOLS or symbol in ("WTI", "GOLD", "SILVER")) else 0.30
                             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                                 side="yes",
                                 spot_price=spot_price,
@@ -2402,10 +2449,10 @@ def process_hourly_market_group(
                 no_p = item["no_price_cents"]
                 if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                     if is_spot_momentum_aligned("no", spot_price, target_price):
-                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for WTI/GOLD)
-                        # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for Commodities)
+                        # TODO: Make commodity spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
                         if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                            req_lead = 0.50 if symbol in ("WTI", "GOLD") else 0.30
+                            req_lead = 0.50 if (symbol in COMMODITY_SYMBOLS or symbol in ("WTI", "GOLD", "SILVER")) else 0.30
                             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                                 side="no",
                                 spot_price=spot_price,
@@ -2656,6 +2703,7 @@ def process_hourly_market_group(
                 max_rem_mins=25.0,
                 spot_price=spot_price,
                 target_price=item.get("target_price"),
+                asset_realized_pnl=asset_realized_pnl,
             )
             if fav_opp is not None:
                 fav_opp_by_ticker[ticker] = fav_opp

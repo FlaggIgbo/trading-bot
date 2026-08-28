@@ -329,9 +329,9 @@ def get_market_session(hour_utc: int) -> str:
 
 
 def detect_asset_symbol(ticker: str) -> str:
-    """Extracts the base asset symbol (e.g. 'BTC', 'ETH', 'GOLD', 'WTI', 'INX') from ticker string."""
+    """Extracts the base asset symbol (e.g. 'BTC', 'ETH', 'GOLD', 'WTI', 'SILVER', 'INX', 'DOGE', 'BNB', 'HYPE') from ticker string."""
     t = (ticker or "").upper()
-    for s in ["BTC", "ETH", "SOL", "XRP", "GOLD", "WTI", "SILVER", "INX", "NASDAQ100", "NDX", "SPX"]:
+    for s in ["BTC", "ETH", "SOL", "XRP", "GOLD", "WTI", "SILVER", "INX", "NASDAQ100", "NDX", "SPX", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC"]:
         if s in t:
             return s
     return "UNKNOWN"
@@ -834,9 +834,9 @@ def check_spot_lead_loss_gate(
 
     Returns (allowed: bool, lead_pct: float | None, reason: str).
     """
-    # Enforce stricter spot lead for high-variance commodities (WTI & GOLD)
+    # Enforce stricter spot lead for high-variance commodities (WTI, GOLD, SILVER)
     sym_clean = str(symbol or "").upper()
-    is_commodity_high_vol = sym_clean in ("WTI", "GOLD") or (symbol is None and min_lead_pct >= 0.45)
+    is_commodity_high_vol = sym_clean in ("WTI", "GOLD", "SILVER") or (symbol is None and min_lead_pct >= 0.45)
     effective_min_lead = 0.50 if (is_commodity_high_vol and min_lead_pct < 0.50) else min_lead_pct
 
     if asset_realized_pnl > -abs(loss_threshold_dollars):
