@@ -813,13 +813,36 @@ def is_asset_loss_gated(
     return is_gated, pnl
 
 
+def get_dynamic_spot_lead(symbol: str | None, force_refresh: bool = False) -> float:
+    """
+    Returns the dynamic spot lead percentage requirement calibrated from MongoDB rolling volatility.
+    Commodities (WTI, GOLD, SILVER) enforce a minimum floor of 0.50%, scaling dynamically with ATR / vol_std up to 1.25%.
+    Standard crypto and index assets enforce a minimum floor of 0.30%, scaling with vol_std up to 0.80%.
+    """
+    if not symbol:
+        return 0.30
+    sym_clean = extract_symbol_from_ticker(symbol).upper()
+    is_commodity = sym_clean in ("WTI", "GOLD", "SILVER", "OIL", "CRUDE", "XAU", "XAG")
+    default_lead = 0.50 if is_commodity else 0.30
+    try:
+        price_map = get_dynamic_price_map_cached(force_refresh=force_refresh)
+        asset_map = price_map.get(sym_clean) or price_map.get("DEFAULT") or {}
+        mark_map = asset_map.get("00") or asset_map.get("05") or {}
+        lead_val = mark_map.get("spot_lead_pct")
+        if lead_val is not None and isinstance(lead_val, (int, float)):
+            return float(max(default_lead, lead_val))
+    except Exception as e:
+        log.debug(f"get_dynamic_spot_lead fallback for {symbol}: {e}")
+    return default_lead
+
+
 def check_spot_lead_loss_gate(
     side: str,
     spot_price: float | None,
     target_price: float | None,
     asset_realized_pnl: float,
     loss_threshold_dollars: float = 0.50,
-    min_lead_pct: float = 0.30,
+    min_lead_pct: float | None = None,
     symbol: str | None = None,
 ) -> tuple[bool, float | None, str]:
     """
@@ -829,15 +852,13 @@ def check_spot_lead_loss_gate(
     - For YES: spot must be >= target_price * (1 + min_lead_pct / 100)  [spot >= strike + min_lead_pct%]
     - For NO:  spot must be <= target_price * (1 - min_lead_pct / 100)  [spot <= strike - min_lead_pct%]
 
-    For WTI and GOLD: Mandates a stricter spot lead threshold (>= 0.50% vs 0.30%) due to high whipsaw variance.
-    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+    Uses dynamic ATR/volatility-calibrated spot lead thresholds from MongoDB for WTI, GOLD, SILVER, and other assets.
 
     Returns (allowed: bool, lead_pct: float | None, reason: str).
     """
-    # Enforce stricter spot lead for high-variance commodities (WTI, GOLD, SILVER)
     sym_clean = str(symbol or "").upper()
-    is_commodity_high_vol = sym_clean in ("WTI", "GOLD", "SILVER") or (symbol is None and min_lead_pct >= 0.45)
-    effective_min_lead = 0.50 if (is_commodity_high_vol and min_lead_pct < 0.50) else min_lead_pct
+    dynamic_calibrated_lead = get_dynamic_spot_lead(sym_clean) if sym_clean else 0.30
+    effective_min_lead = max(dynamic_calibrated_lead, min_lead_pct) if min_lead_pct is not None else dynamic_calibrated_lead
 
     if asset_realized_pnl > -abs(loss_threshold_dollars):
         return True, None, "loss_within_normal_limits"
@@ -977,6 +998,9 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
     sym_clean = str(asset_symbol or "").upper()
     is_wti = (sym_clean == "WTI")
 
+    is_commodity = sym_clean in ("WTI", "GOLD", "SILVER", "OIL", "CRUDE", "XAU", "XAG")
+    default_spot_lead = 0.50 if is_commodity else 0.30
+
     if tf_clean == "1h":
         if is_wti:
             # WTI Restricted 1-Hour Profile (Conservative sizing, tighter corridor, high spot lead)
@@ -1006,6 +1030,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "mid_zone_max": 55,
                 "contracts_per_trade": 1,
                 "is_restricted": True,
+                "spot_lead_pct": default_spot_lead,
             }
         # Standard 1-Hour Trend Profile (Wider runway, larger core capital sizing)
         return {
@@ -1034,6 +1059,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "mid_zone_max": 55,
             "contracts_per_trade": 3,
             "is_restricted": False,
+            "spot_lead_pct": default_spot_lead,
         }
     else:
         if is_wti:
@@ -1064,6 +1090,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "mid_zone_max": 61,
                 "contracts_per_trade": 1,
                 "is_restricted": True,
+                "spot_lead_pct": default_spot_lead,
             }
         # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker >= 86¢, strict momentum, 1-contract sizing)
         return {
@@ -1092,6 +1119,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "mid_zone_max": 61,
             "contracts_per_trade": 1,
             "is_restricted": False,
+            "spot_lead_pct": default_spot_lead,
         }
 
 
@@ -1426,6 +1454,13 @@ def calibrate_dynamic_price_map_from_db(
             mid_win_rate = (mid_wins / len(mid_trades)) if len(mid_trades) >= 3 else 0.33
             avoid_mid = (mid_win_rate < 0.40) or is_restricted  # Avoid middle band if win rate is under 40% or if restricted
 
+            # Dynamic Spot Lead Gate Calibration (ATR & Volatility auto-calibration from MongoDB)
+            is_commodity_sym = (sym in ("WTI", "GOLD", "SILVER", "OIL", "CRUDE", "XAU", "XAG"))
+            if is_commodity_sym:
+                calibrated_spot_lead = round(max(0.50, min(1.25, 1.5 * vol_std)), 2)
+            else:
+                calibrated_spot_lead = round(max(0.30, min(0.80, 1.2 * vol_std)), 2)
+
             calibrated_map[sym] = {}
             for mark in ("00", "05"):
                 trades = trades_by_sym_mark.get(sym, {}).get(mark, [])
@@ -1513,6 +1548,7 @@ def calibrate_dynamic_price_map_from_db(
                     "mid_zone_max": 55,
                     "contracts_per_trade": 1 if is_restricted else 3,
                     "is_restricted": is_restricted,
+                    "spot_lead_pct": calibrated_spot_lead,
                     "recent_win_rate": round(settle_wr, 4) if settle_cnt > 0 else round(sym_win_rate, 4),
                     "recent_pnl_cents": settle_pnl_cents,
                 }

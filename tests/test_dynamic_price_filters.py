@@ -718,6 +718,69 @@ def test_evaluate_ensemble_consensus_recommended_contracts():
     assert cons_high["recommended_contracts"] >= 2
 
 
+def test_get_dynamic_spot_lead_defaults():
+    from database import get_dynamic_spot_lead
+    assert get_dynamic_spot_lead("WTI") >= 0.50
+    assert get_dynamic_spot_lead("GOLD") >= 0.50
+    assert get_dynamic_spot_lead("SILVER") >= 0.50
+    assert get_dynamic_spot_lead("KXWTIH-26AUG2811-T82.79") >= 0.50
+    assert get_dynamic_spot_lead("KXGOLD15M-26AUG310715-15") >= 0.50
+    assert get_dynamic_spot_lead("BTC") == 0.30
+    assert get_dynamic_spot_lead("ETH") == 0.30
+    assert get_dynamic_spot_lead("INX") == 0.30
+    assert get_dynamic_spot_lead(None) == 0.30
 
 
+def test_dynamic_spot_lead_calibration_scaling():
+    from database import calibrate_dynamic_price_map_from_db
+    # Mock high-volatility snapshots for GOLD and moderate for BTC
+    mock_snaps = [
+        {"sym": "GOLD", "pct": 0.40, "ts": 100, "m": 0, "tick": "KXGOLDH-1"},
+        {"sym": "GOLD", "pct": 0.60, "ts": 200, "m": 0, "tick": "KXGOLDH-2"},
+        {"sym": "GOLD", "pct": 0.90, "ts": 300, "m": 0, "tick": "KXGOLDH-3"},
+        {"sym": "BTC", "pct": 0.05, "ts": 100, "m": 0, "tick": "KXBTC15M-1"},
+        {"sym": "BTC", "pct": 0.08, "ts": 200, "m": 0, "tick": "KXBTC15M-2"},
+    ]
+    with patch("database.get_mongo_collection") as mock_col_getter:
+        mock_snap_col = MagicMock()
+        mock_snap_col.find.return_value.sort.return_value.limit.return_value = mock_snaps
+        mock_settle_col = MagicMock()
+        mock_settle_col.find.return_value.sort.return_value.limit.return_value = []
 
+        def get_col(name):
+            return mock_snap_col if name == "market_snapshots" else mock_settle_col
+
+        mock_col_getter.side_effect = get_col
+        calibrated = calibrate_dynamic_price_map_from_db(max_history_hours=48)
+        assert "GOLD" in calibrated
+        assert "BTC" in calibrated
+        gold_lead = calibrated["GOLD"]["00"]["spot_lead_pct"]
+        btc_lead = calibrated["BTC"]["00"]["spot_lead_pct"]
+        assert gold_lead >= 0.50
+        assert btc_lead >= 0.30
+
+
+def test_check_spot_lead_loss_gate_with_dynamic_calibration():
+    from database import check_spot_lead_loss_gate
+    # When loss is above threshold (e.g. -0.80), requires dynamic spot lead
+    # For GOLD with 0.34% lead (under 0.50% requirement) -> rejected
+    allowed, lead_pct, reason = check_spot_lead_loss_gate(
+        side="yes",
+        spot_price=4420.0,
+        target_price=4405.0,  # lead = (4420 - 4405) / 4405 = +0.34% (< 0.50%)
+        asset_realized_pnl=-0.80,
+        symbol="GOLD",
+    )
+    assert allowed is False
+    assert "insufficient_spot_lead" in reason
+
+    # For GOLD with 0.68% lead (>= 0.50% requirement) -> approved
+    allowed_high, lead_pct_high, reason_high = check_spot_lead_loss_gate(
+        side="yes",
+        spot_price=4435.0,
+        target_price=4405.0,  # lead = (4435 - 4405) / 4405 = +0.68% (>= 0.50%)
+        asset_realized_pnl=-0.80,
+        symbol="GOLD",
+    )
+    assert allowed_high is True
+    assert "sufficient_spot_lead" in reason_high

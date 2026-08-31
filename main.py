@@ -54,6 +54,7 @@ from database import (
     get_asset_settlement_streak,
     get_dynamic_filter_for_market,
     get_dynamic_price_filter_map,
+    get_dynamic_spot_lead,
     is_asset_loss_gated,
     is_default_exploration_window,
     is_mid_zone_exploration_window,
@@ -971,9 +972,8 @@ def evaluate_favorite_maker_opportunity(
 
     sym_name = detect_asset_symbol(ticker)
     is_commodity_high_vol = (sym_name in ("WTI", "GOLD", "SILVER")) or (sym_name in COMMODITY_SYMBOLS)
-    # Stricter Spot Lead Gate for Commodities (WTI, GOLD, SILVER): Mandates >= 0.50% spot lead clearance (vs 0.30% standard)
-    # TODO: Make WTI/GOLD/SILVER spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
-    required_spot_lead = 0.50 if is_commodity_high_vol else 0.30
+    # Stricter Spot Lead Gate for Commodities & Volatile Assets (Dynamic ATR & Volatility calibration from MongoDB)
+    required_spot_lead = get_dynamic_spot_lead(sym_name)
 
     # Commodity Spot Protection: Require real-time spot price confirmation before trading volatile commodities
     if is_commodity_high_vol and (spot_price is None or target_price is None or target_price <= 0):
@@ -1615,10 +1615,9 @@ def process_single_market(
                         )
                         continue
 
-                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for Commodities)
-                    # TODO: Make commodity spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require dynamic spot lead distance
                     if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                        req_lead = 0.50 if (asset_symbol in COMMODITY_SYMBOLS or asset_symbol in ("WTI", "GOLD", "SILVER")) else 0.30
+                        req_lead = get_dynamic_spot_lead(asset_symbol)
                         allowed, lead_pct, reason = check_spot_lead_loss_gate(
                             side=side,
                             spot_price=spot_price,
@@ -2370,10 +2369,9 @@ def process_hourly_market_group(
                 yes_p = item["yes_price_cents"]
                 if yes_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "yes"):
                     if is_spot_momentum_aligned("yes", spot_price, target_price):
-                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for Commodities)
-                        # TODO: Make commodity spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require dynamic spot lead distance
                         if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                            req_lead = 0.50 if (symbol in COMMODITY_SYMBOLS or symbol in ("WTI", "GOLD", "SILVER")) else 0.30
+                            req_lead = get_dynamic_spot_lead(symbol)
                             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                                 side="yes",
                                 spot_price=spot_price,
@@ -2449,10 +2447,9 @@ def process_hourly_market_group(
                 no_p = item["no_price_cents"]
                 if no_p is not None and getattr(client, "is_side_allowed", lambda t, s: True)(ticker, "no"):
                     if is_spot_momentum_aligned("no", spot_price, target_price):
-                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance (>= 0.50% for Commodities)
-                        # TODO: Make commodity spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+                        # Elevated Loss Regime Gate: If asset has lost > $0.50, require dynamic spot lead distance
                         if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                            req_lead = 0.50 if (symbol in COMMODITY_SYMBOLS or symbol in ("WTI", "GOLD", "SILVER")) else 0.30
+                            req_lead = get_dynamic_spot_lead(symbol)
                             allowed, lead_pct, reason = check_spot_lead_loss_gate(
                                 side="no",
                                 spot_price=spot_price,
