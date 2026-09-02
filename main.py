@@ -1053,7 +1053,7 @@ def evaluate_favorite_maker_opportunity(
                 )
                 return None
 
-        max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
+        max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 4))
         if hasattr(client, "check_crypto_portfolio_directional_cap"):
             if not client.check_crypto_portfolio_directional_cap("yes", max_concurrent=max_conc):
                 return None
@@ -1144,7 +1144,7 @@ def evaluate_favorite_maker_opportunity(
                 )
                 return None
 
-        max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
+        max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 4))
         if hasattr(client, "check_crypto_portfolio_directional_cap"):
             if not client.check_crypto_portfolio_directional_cap("no", max_concurrent=max_conc):
                 return None
@@ -2724,7 +2724,34 @@ def process_hourly_market_group(
                     )
 
         candidates_to_execute = []
-        if peak1_cands:
+        peak1_yes = [c for c in valid_yes_candidates if c["price"] <= 35]
+        peak1_no = [c for c in valid_no_candidates if c["price"] <= 35]
+        enable_cross_hedge = bool(dynamic_filters.get("enable_cross_strike_hedge", True)) and not is_restricted and not only_fav_maker
+        max_dual_cost = int(dynamic_filters.get("max_cross_strike_combined_cents", 50))
+
+        if peak1_yes and peak1_no and enable_cross_hedge:
+            best_yes = min(peak1_yes, key=lambda c: c["price"])
+            best_no = min(peak1_no, key=lambda c: c["price"])
+            combined_cost = best_yes["price"] + best_no["price"]
+            if best_yes["ticker"] != best_no["ticker"] and combined_cost <= max_dual_cost:
+                best_yes["is_dual_hedge"] = True
+                best_no["is_dual_hedge"] = True
+                candidates_to_execute.append(best_yes)
+                candidates_to_execute.append(best_no)
+                log.info(
+                    f"🎯 [CROSS-STRIKE DUAL HEDGE CHOSEN] [{ex_name}] {symbol} Hourly: "
+                    f"Dual Strangle initiated on {best_yes['ticker']} (YES @ {best_yes['price']}¢) + "
+                    f"{best_no['ticker']} (NO @ {best_no['price']}¢) [Combined Cost: {combined_cost}¢ <= {max_dual_cost}¢]. "
+                    f"Scalping micro-wins on both wings!"
+                )
+            else:
+                chosen = min(peak1_cands, key=lambda c: c["price"])
+                candidates_to_execute.append(chosen)
+                log.info(
+                    f"🎯 [PEAK 1 ASYMMETRIC DISCOUNT CHOSEN] [{ex_name}] {symbol} Hourly: "
+                    f"{chosen['ticker']} ({chosen['side'].upper()} @ {chosen['price']}¢) heavily prioritized over other tiers."
+                )
+        elif peak1_cands:
             chosen = min(peak1_cands, key=lambda c: c["price"])
             candidates_to_execute.append(chosen)
             log.info(
@@ -2822,7 +2849,7 @@ def process_hourly_market_group(
 
             # Cross-Asset Portfolio Directional Risk Cap (Comment p3ok6ft):
             # Caps total concurrent crypto directional exposure across BTC/ETH/SOL to avoid correlated wipeouts
-            max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 3))
+            max_conc = int(dynamic_filters.get("max_crypto_directional_concurrent", 4))
             if hasattr(client, "check_crypto_portfolio_directional_cap") and symbol not in COMMODITY_SYMBOLS and symbol not in INDEX_SYMBOLS:
                 if not client.check_crypto_portfolio_directional_cap(side, max_concurrent=max_conc):
                     log.info(
@@ -2861,6 +2888,9 @@ def process_hourly_market_group(
                     details["consensus_score"] = chosen_consensus.get("consensus_score")
                     details["consensus_regime"] = chosen_consensus.get("regime")
                     details["streak_length"] = chosen_consensus.get("streak_length")
+                if cand.get("is_dual_hedge"):
+                    details["is_dual_hedge"] = True
+                    details["dual_hedge_leg"] = side
                 trade_executed_by_ticker[ticker] = details
                 hourly_buy_executed = True
 

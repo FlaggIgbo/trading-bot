@@ -50,8 +50,8 @@ flowchart TD
 
     subgraph Gates["3. Pre-Trade Risk Gates & Filters"]
         CB_Gate["Daily Circuit Breaker (-$1.00 Midnight Reset)"]
-        Single_Side["Single-Side Lock (Strictly Blocks Dual YES/NO Hedging)"]
-        Dir_Cap["Cross-Asset Directional Cap (Max 3 Concurrent Crypto Positions)"]
+        Single_Side["Single-Side Lock (Strictly Blocks Same-Ticker Dual Hedging)"]
+        Dir_Cap["Cross-Asset Directional Cap (Max 4 Concurrent Crypto Positions)"]
         Chop["Choppiness Filter (Rejects > 2 Lead Changes Across 50c)"]
         Lead_Gate["Spot Lead Distance Gate (>= 0.30% Crypto, >= 0.50% Commodities)"]
     end
@@ -130,7 +130,7 @@ MONGODB_URI=mongodb+srv://<user>:<password>@cluster0.mongodb.net/?retryWrites=tr
 2. **EV-Preservation Exit Logic**:
    - Bypasses panic stop-losses and early cuts on favorite holdings (`entry_price >= 70¢` or `strategy_tag == 'endgame_favorite_maker'`), holding them through to `100¢` ($1.00) settlement payout (preserving ~20¢ of positive EV).
 3. **Cross-Asset Portfolio Directional Risk Cap**:
-   - Caps concurrent crypto directional exposure (max 3 active `YES` or `NO` positions) because BTC/ETH/SOL settle co-directionally 74%–84% of the time.
+   - Caps concurrent crypto directional exposure (max 4 active `YES` or `NO` positions) because BTC/ETH/SOL settle co-directionally 74%–84% of the time.
 4. **Market Choppiness / Lead-Change Filter**:
    - Detects and rejects markets with `> 2` lead changes across 50¢, filtering out hyper-volatile whipsaw markets.
 5. **Parallel Multi-Source Spot Ingestion**:
@@ -183,13 +183,13 @@ To maximize capital velocity and eliminate painful endgame expiration wipeouts, 
 - **Dynamic Adaptation**: High-beta assets receive deeper discount buy requirements and elevated take-profit targets, while bouncy assets receive wider stop-loss bands.
 - **Session-Bounded Market Calibration (Equity Indices & Commodities)**: For equity index prediction markets (S&P 500, Nasdaq-100) that trade during specific exchange sessions (e.g. 10:00 AM – 6:00 PM ET), snapshots are recorded strictly during active market hours.
 
-### 5. Hourly Multi-Strike Selection & Tiebreaker Logic 🎯
-- **Priority 1 Favorite Maker Scanning**: Evaluates all strikes for resting maker limit bid opportunities across YES and NO sides.
-- **Multi-Strike Option Scanning**: Iterates through all available strike options for the active hourly event.
-- **Cheapest YES & Cheapest NO**: Identifies the cheapest valid `BUY_YES` and `BUY_NO` adhering to dynamic price corridors and underlying spot momentum.
-- **Conflict & Tiebreaker Resolution**:
-  - **Same Contract Ticker**: If cheapest YES and cheapest NO are on the exact same contract, the bot picks the strictly cheaper side. If tied in price, picks the side favored by spot momentum.
-  - **Different Contract Tickers**: Buys **BOTH** contracts independently (e.g. Strike A YES + Strike B NO) with resting Take-Profit limit orders on each.
+### 5. Hourly Multi-Strike Selection & Dual Hedging Strangle Logic 🎯
+- **Tri-Peak Multi-Strike Hierarchy**: Evaluates all strike options across Peak 1 Deep Discount (`1¢–35¢`), Peak 2 Early Value (`36¢–65¢`), and Peak 3 Endgame Favorite Maker (`86¢–93¢`).
+- **Cross-Strike Dual Strangle (Chasing Micro-Wins)**:
+  - When both Peak 1 YES and Peak 1 NO qualify across **different strike contracts** (e.g. Strike A YES @ 22¢ + Strike B NO @ 24¢) and combined cost $\le 50¢$, the bot initiates a **Cross-Strike Dual Strangle**.
+  - **Independent Take-Profit Limit Orders**: Sets resting TP auto-sells on both wings (`calculate_micro_win_take_profit`), enabling the continuous harvester to bank `+5¢` to `+8¢` realized cash profit on whichever side pops first during volatility swings.
+- **Strict Anti-Hedging Locks on Same Tickers**:
+  - **Same Contract Ticker**: Hard position gates strictly prevent buying YES and NO on the exact same ticker, eliminating negative arbitrage / synthetic losses. If both qualify on the same contract, only the strictly cheaper side is chosen.
 
 ### 6. Ensemble Consensus Signal Engine & Settlement Streak Filter 🚀
 - **Multi-Factor Signal Synthesis**: Synthesizes 4 independent market microstructure and trend dimensions before trade execution:

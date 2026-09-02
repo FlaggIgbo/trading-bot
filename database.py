@@ -1165,6 +1165,8 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "contracts_per_trade": 1,
                 "is_restricted": True,
                 "spot_lead_pct": default_spot_lead,
+                "enable_cross_strike_hedge": False,
+                "max_cross_strike_combined_cents": 50,
             }
         # Standard 1-Hour Trend Profile (Wider runway, larger core capital sizing)
         return {
@@ -1177,7 +1179,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 86,
             "favorite_maker_max_buy": 93,
-            "max_crypto_directional_concurrent": 3,
+            "max_crypto_directional_concurrent": 4,
             "max_lead_changes": 2,
             "enable_momentum_buys": True,
             "momentum_min_buy": 56,
@@ -1196,6 +1198,8 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "contracts_per_trade": 3,
             "is_restricted": False,
             "spot_lead_pct": default_spot_lead,
+            "enable_cross_strike_hedge": os.getenv("ENABLE_CROSS_STRIKE_HEDGE", "true").lower() in ("true", "1", "yes"),
+            "max_cross_strike_combined_cents": int(os.getenv("MAX_CROSS_STRIKE_COMBINED_CENTS", "50")),
         }
     else:
         if is_wti:
@@ -1229,6 +1233,8 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "contracts_per_trade": 1,
                 "is_restricted": True,
                 "spot_lead_pct": default_spot_lead,
+                "enable_cross_strike_hedge": False,
+                "max_cross_strike_combined_cents": 50,
             }
         # Standard 15-Minute Sniper Profile (Prioritizes Endgame Favorite Maker >= 86¢, strict momentum, 1-contract sizing)
         return {
@@ -1241,7 +1247,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 86,
             "favorite_maker_max_buy": 93,
-            "max_crypto_directional_concurrent": 3,
+            "max_crypto_directional_concurrent": 4,
             "max_lead_changes": 2,
             "enable_momentum_buys": True,
             "momentum_min_buy": 62,
@@ -1260,6 +1266,8 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "contracts_per_trade": 1,
             "is_restricted": False,
             "spot_lead_pct": default_spot_lead,
+            "enable_cross_strike_hedge": False,
+            "max_cross_strike_combined_cents": 50,
         }
 
 
@@ -1658,7 +1666,7 @@ def calibrate_dynamic_price_map_from_db(
                     fav_max_buy = 93
                     enable_fav_maker = True
                     max_lead = 2
-                    max_concurrent = 3
+                    max_concurrent = 4
 
                 tp_price = max(max_buy + 12, min(tp_price, 65))
 
@@ -2011,6 +2019,17 @@ def get_dynamic_filter_for_market(
         "enable_favorite_maker": bool(mark_filter.get("enable_favorite_maker", base_defaults.get("enable_favorite_maker", True))),
         "favorite_maker_min_buy": int(mark_filter.get("favorite_maker_min_buy", base_defaults.get("favorite_maker_min_buy", 86))),
         "favorite_maker_max_buy": int(mark_filter.get("favorite_maker_max_buy", base_defaults.get("favorite_maker_max_buy", 93))),
+        "enable_cross_strike_hedge": (
+            (os.getenv("ENABLE_CROSS_STRIKE_HEDGE", "true").lower() in ("true", "1", "yes"))
+            and bool(mark_filter.get("enable_cross_strike_hedge", base_defaults.get("enable_cross_strike_hedge", False)))
+        ),
+        "max_cross_strike_combined_cents": int(
+            os.getenv("MAX_CROSS_STRIKE_COMBINED_CENTS") or mark_filter.get("max_cross_strike_combined_cents", base_defaults.get("max_cross_strike_combined_cents", 50))
+        ),
+        "max_crypto_directional_concurrent": int(
+            os.getenv("MAX_CRYPTO_DIRECTIONAL_CONCURRENT")
+            or mark_filter.get("max_crypto_directional_concurrent", base_defaults.get("max_crypto_directional_concurrent", 4))
+        ),
         "is_exploration": is_exploration,
     }
 

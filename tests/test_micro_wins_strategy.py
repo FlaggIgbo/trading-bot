@@ -484,3 +484,54 @@ def test_calculate_micro_win_take_profit_dynamic_volatility_and_decay():
     assert tp_early == 92
 
 
+def test_micro_win_harvester_banks_both_wings_of_dual_hedge():
+    """Verify that micro-win harvester independently banks profits on both Strike A YES and Strike B NO when each hits profit target."""
+    client = MockMicroWinClient()
+    ticker_a = "KXBTC15M-A"
+    ticker_b = "KXBTC15M-B"
+
+    # Set up both positions from dual strangle entry:
+    # Leg A: Bought YES @ 20¢, target TP 27¢ (+7¢)
+    # Leg B: Bought NO @ 22¢, target TP 29¢ (+7¢)
+    client.set_position(ticker_a, side="yes", count=1, entry_price_cents=20, target_tp_cents=27)
+    client.set_position(ticker_b, side="no", count=1, entry_price_cents=22, target_tp_cents=29)
+
+    market_a = {
+        "ticker": ticker_a,
+        "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.29",
+        "yes_bid_dollars": "0.27",  # Leg A hit +7¢ profit!
+        "no_ask_dollars": "0.73",
+        "no_bid_dollars": "0.71",
+        "close_time": "2026-08-17T01:45:00Z",
+        "floor_strike": 60000.0,
+        "exchange": "kalshi",
+    }
+    market_b = {
+        "ticker": ticker_b,
+        "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.73",
+        "yes_bid_dollars": "0.71",
+        "no_ask_dollars": "0.31",
+        "no_bid_dollars": "0.29",  # Leg B hit +7¢ profit!
+        "close_time": "2026-08-17T01:45:00Z",
+        "floor_strike": 64000.0,
+        "exchange": "kalshi",
+    }
+
+    now_utc = datetime(2026, 8, 17, 1, 35, 0, tzinfo=timezone.utc)
+    snap_a = process_single_market(market=market_a, is_trading_interval=False, client=client, now_utc=now_utc, minute_past_hour=35, spot_cache={"BTC": 62000.0}, dry_run=False)
+    snap_b = process_single_market(market=market_b, is_trading_interval=False, client=client, now_utc=now_utc, minute_past_hour=35, spot_cache={"BTC": 62000.0}, dry_run=False)
+
+    assert len(client.liquidations) == 2
+    assert client.liquidations[0]["ticker"] == ticker_a
+    assert client.liquidations[0]["price"] == 27
+    assert client.liquidations[1]["ticker"] == ticker_b
+    assert client.liquidations[1]["price"] == 29
+    assert snap_a["trd"]["action"] == "winner_profit_banked"
+    assert snap_b["trd"]["action"] == "winner_profit_banked"
+    assert snap_a["trd"]["profit_locked_cents"] == 7
+    assert snap_b["trd"]["profit_locked_cents"] == 7
+
+
+

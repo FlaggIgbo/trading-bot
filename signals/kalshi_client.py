@@ -1391,7 +1391,7 @@ class KalshiClient(BaseTradingClient):
                     counts[side] += 1
         return counts
 
-    def check_crypto_portfolio_directional_cap(self, side: str, max_concurrent: int = 3) -> bool:
+    def check_crypto_portfolio_directional_cap(self, side: str, max_concurrent: int = 4) -> bool:
         """
         Enforces a cross-asset directional portfolio cap (Comment p3ok6ft).
         Since top crypto assets settle co-directionally 74%–84% of the time, entering more than

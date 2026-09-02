@@ -90,7 +90,8 @@ def test_extract_target_strike(market, expected):
 
 
 def test_hourly_multi_strike_single_directional_opportunity(hourly_client):
-    # Strike A (Bullish YES @ 34¢) vs Strike B (Bearish NO @ 30¢) -> Picks single cheaper opportunity (NO @ 30¢, maker 29¢)
+    # Strike A (Bullish YES @ 34¢) vs Strike B (Bearish NO @ 30¢) -> Combined cost: 64¢ > 50¢ cap
+    # Exceeds max combined dual hedge cost -> Falls back to single cheaper opportunity (NO @ 30¢, maker 29¢)
     markets = [
         {"ticker": "KXBTCD-A", "series_ticker": "KXBTCD", "floor_strike": 70000.0, "yes_ask_dollars": "0.34", "yes_bid_dollars": "0.32", "no_ask_dollars": "0.68", "no_bid_dollars": "0.66"},
         {"ticker": "KXBTCD-B", "series_ticker": "KXBTCD", "floor_strike": 74000.0, "yes_ask_dollars": "0.72", "yes_bid_dollars": "0.70", "no_ask_dollars": "0.30", "no_bid_dollars": "0.28"},
@@ -102,6 +103,66 @@ def test_hourly_multi_strike_single_directional_opportunity(hourly_client):
     assert hourly_client.buys[0]["side"] == "no"
     assert hourly_client.buys[0]["count"] == 3
     assert snaps[0]["tf"] == "1h"
+
+
+def test_hourly_cross_strike_dual_hedge_when_combined_cost_under_cap(hourly_client):
+    """Verify that hourly execution initiates a dual strangle (Peak 1 YES + Peak 1 NO) when combined cost <= 50¢."""
+    markets = [
+        {"ticker": "KXBTCD-A", "series_ticker": "KXBTCD", "floor_strike": 70000.0, "yes_ask_dollars": "0.22", "yes_bid_dollars": "0.20", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"},
+        {"ticker": "KXBTCD-B", "series_ticker": "KXBTCD", "floor_strike": 74000.0, "yes_ask_dollars": "0.78", "yes_bid_dollars": "0.76", "no_ask_dollars": "0.24", "no_bid_dollars": "0.22"},
+    ]
+    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"BTC": 72000.0}, False)
+
+    assert len(hourly_client.buys) == 2
+    tickers_bought = {b["ticker"] for b in hourly_client.buys}
+    sides_bought = {b["side"] for b in hourly_client.buys}
+    assert tickers_bought == {"KXBTCD-A", "KXBTCD-B"}
+    assert sides_bought == {"yes", "no"}
+
+    trd_a = next(s["trd"] for s in snaps if s["tick"] == "KXBTCD-A")
+    trd_b = next(s["trd"] for s in snaps if s["tick"] == "KXBTCD-B")
+    assert trd_a["is_dual_hedge"] is True
+    assert trd_a["dual_hedge_leg"] == "yes"
+    assert trd_b["is_dual_hedge"] is True
+    assert trd_b["dual_hedge_leg"] == "no"
+
+
+def test_hourly_cross_strike_dual_hedge_blocked_on_same_ticker(hourly_client):
+    """Verify that if opposing Peak 1 candidates share the SAME ticker, dual hedge is strictly blocked and cheaper leg chosen."""
+    markets = [
+        {"ticker": "KXBTCD-SAME", "series_ticker": "KXBTCD", "floor_strike": 70000.0, "yes_ask_dollars": "0.22", "yes_bid_dollars": "0.20", "no_ask_dollars": "0.24", "no_bid_dollars": "0.22"},
+    ]
+    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"BTC": 72000.0}, False)
+
+    assert len(hourly_client.buys) == 1
+    assert hourly_client.buys[0]["ticker"] == "KXBTCD-SAME"
+    assert hourly_client.buys[0]["side"] == "yes"  # 22¢ is cheaper than 24¢
+
+
+def test_hourly_cross_strike_dual_hedge_disabled_on_restricted_asset(hourly_client):
+    """Verify that restricted assets (like WTI or loss-restricted regimes) disable dual hedging."""
+    markets = [
+        {"ticker": "KXWTIH-A", "series_ticker": "KXWTIH", "floor_strike": 80.0, "yes_ask_dollars": "0.22", "yes_bid_dollars": "0.20", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"},
+        {"ticker": "KXWTIH-B", "series_ticker": "KXWTIH", "floor_strike": 86.0, "yes_ask_dollars": "0.78", "yes_bid_dollars": "0.76", "no_ask_dollars": "0.24", "no_bid_dollars": "0.22"},
+    ]
+    snaps = process_hourly_market_group("WTI", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"WTI": 83.0}, False)
+
+    assert len(hourly_client.buys) == 1
+    assert hourly_client.buys[0]["ticker"] == "KXWTIH-A"
+    assert hourly_client.buys[0]["side"] == "yes"
+
+
+def test_hourly_cross_strike_dual_hedge_disabled_via_flag(hourly_client, monkeypatch):
+    """Verify that setting ENABLE_CROSS_STRIKE_HEDGE=false forces single directional selection."""
+    monkeypatch.setenv("ENABLE_CROSS_STRIKE_HEDGE", "false")
+    markets = [
+        {"ticker": "KXBTCD-A", "series_ticker": "KXBTCD", "floor_strike": 70000.0, "yes_ask_dollars": "0.22", "yes_bid_dollars": "0.20", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"},
+        {"ticker": "KXBTCD-B", "series_ticker": "KXBTCD", "floor_strike": 74000.0, "yes_ask_dollars": "0.78", "yes_bid_dollars": "0.76", "no_ask_dollars": "0.24", "no_bid_dollars": "0.22"},
+    ]
+    snaps = process_hourly_market_group("BTC", markets, hourly_client, datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc), 0, {"BTC": 72000.0}, False)
+
+    assert len(hourly_client.buys) == 1
+    assert hourly_client.buys[0]["ticker"] == "KXBTCD-A"
 
 
 @pytest.mark.parametrize("minute, init_pos, init_price, expected_liq, expected_action", [

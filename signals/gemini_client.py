@@ -1164,7 +1164,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
                     counts[side] += 1
         return counts
 
-    def check_crypto_portfolio_directional_cap(self, side: str, max_concurrent: int = 3) -> bool:
+    def check_crypto_portfolio_directional_cap(self, side: str, max_concurrent: int = 4) -> bool:
         """Enforces a cross-asset directional portfolio cap."""
         side_clean = side.lower()
         counts = self.get_crypto_directional_counts()

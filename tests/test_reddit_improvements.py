@@ -330,11 +330,30 @@ def test_cross_asset_portfolio_directional_risk_cap():
         assert counts["yes"] == 3
         assert counts["no"] == 0
 
-        # Attempting a 4th YES crypto trade must be blocked!
+        # With default cap = 4, a 4th YES crypto trade is safely permitted:
+        assert client.check_crypto_portfolio_directional_cap("yes") is True
+        assert client.check_crypto_portfolio_directional_cap("yes", max_concurrent=4) is True
+
+        # If capped at 3, a 4th YES crypto trade is blocked:
         assert client.check_crypto_portfolio_directional_cap("yes", max_concurrent=3) is False
 
         # Attempting a NO crypto trade is allowed (0 NO positions active)
-        assert client.check_crypto_portfolio_directional_cap("no", max_concurrent=3) is True
+        assert client.check_crypto_portfolio_directional_cap("no") is True
+
+    # Test with 4 active YES positions:
+    with patch.object(
+        client,
+        "get_all_active_positions",
+        return_value={
+            "KXBTC15M-1": {"side": "yes", "count": 1},
+            "KXETH15M-1": {"side": "yes", "count": 1},
+            "KXSOL15M-1": {"side": "yes", "count": 1},
+            "KXXRP15M-1": {"side": "yes", "count": 1},
+        },
+    ):
+        # 4 YES crypto positions active -> 5th YES trade must be blocked by default cap of 4!
+        assert client.check_crypto_portfolio_directional_cap("yes") is False
+        assert client.check_crypto_portfolio_directional_cap("no") is True
 
 
 # ---------------------------------------------------------------------------

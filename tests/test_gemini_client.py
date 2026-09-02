@@ -351,10 +351,21 @@ def test_gemini_directional_risk_cap(gemini_trading_client):
     }
 
     with patch.object(gemini_trading_client, "get_all_active_positions", return_value=mock_positions):
-        # Directional cap for YES should now block 4th YES trade
+        # With default cap = 4, 4th trade is allowed:
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("yes") is True
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("yes", max_concurrent=4) is True
+
+        # Directional cap for YES with max_concurrent=3 should block 4th YES trade
         assert gemini_trading_client.check_crypto_portfolio_directional_cap("yes", max_concurrent=3) is False
         # NO trade should still be permitted
-        assert gemini_trading_client.check_crypto_portfolio_directional_cap("no", max_concurrent=3) is True
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("no") is True
+
+    # 4 positions active -> 5th trade blocked by default cap of 4
+    mock_4_positions = dict(mock_positions)
+    mock_4_positions["XRP15M-1"] = {"ticker": "XRP15M-1", "side": "yes", "count": 1}
+    with patch.object(gemini_trading_client, "get_all_active_positions", return_value=mock_4_positions):
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("yes") is False
+        assert gemini_trading_client.check_crypto_portfolio_directional_cap("no") is True
 
 
 # ---------------------------------------------------------------------------
