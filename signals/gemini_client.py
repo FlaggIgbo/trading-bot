@@ -921,6 +921,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
         target_ask_cents: int,
         count: int = 1,
         buy_order_timeout_seconds: int = 60,
+        take_profit_cents: int | None = None,
     ) -> dict:
         """
         Submits a post_only Maker Limit Bid for a confirmed Favorite (74¢–93¢) on Gemini.
@@ -944,16 +945,18 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
 
         effective_bid = max(1, min(81, effective_bid))
         spread_saved = max(0, target_ask_cents - effective_bid)
+        resolved_tp = take_profit_cents if (take_profit_cents and take_profit_cents < 100) else 100
+        tp_log_str = f", Target Micro-Win TP: {resolved_tp}¢" if resolved_tp < 100 else ""
 
         if not self.allow_live_orders:
             client_order_id = generate_safe_client_order_id(f"fav_maker_{side_clean}", ticker)
-            log.info(f"🛡️ [SAFETY MODE] [Gemini] Live orders disabled. Simulated Favorite Maker Buy for {ticker} ({side_clean.upper()} x{count} @ {effective_bid}¢).")
+            log.info(f"🛡️ [SAFETY MODE] [Gemini] Live orders disabled. Simulated Favorite Maker Buy for {ticker} ({side_clean.upper()} x{count} @ {effective_bid}¢{tp_log_str}).")
             self.record_paper_position(
                 ticker=ticker,
                 side=side_clean,
                 count=count,
                 entry_price_cents=effective_bid,
-                target_tp_cents=100,
+                target_tp_cents=resolved_tp,
                 strategy_tag="endgame_favorite_maker",
                 entry_ts=int(time.time()),
             )
@@ -961,6 +964,7 @@ class GeminiTradingClient(BaseTradingClient, GeminiPredictionClient):
                 "buy_order": {"orderId": f"sim_g_fav_{int(time.time()*1000)}", "status": "simulated"},
                 "side": side_clean,
                 "buy_price_cents": effective_bid,
+                "take_profit_cents": resolved_tp,
                 "target_ask_cents": target_ask_cents,
                 "spread_saved_cents": spread_saved,
                 "client_order_id": client_order_id,

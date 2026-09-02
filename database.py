@@ -962,6 +962,34 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
         return False, f"1h_disallowed_zone(p={price_cents}c,m={m_mod})"
         
     return False, f"unsupported_timeframe({tf})"
+
+
+def calculate_micro_win_take_profit(buy_price_cents: int, timeframe: str = "15m") -> int:
+    """
+    Calculates dynamic Take-Profit target (cents) for Acorns-style micro-wins:
+    Locks in high-probability, low-risk profits early instead of holding to binary market expiration.
+
+    Tiers:
+    - Super Low / Deep Discount (<= 25¢): Target +5¢ to +7¢ (+25% to +45% ROI). e.g. 15¢ -> 21¢, 20¢ -> 26¢.
+    - Value Corridor (26¢ - 45¢): Target +6¢ to +9¢ (+20% to +35% ROI). e.g. 30¢ -> 37¢, 40¢ -> 48¢.
+    - Momentum / Mid Corridor (46¢ - 70¢): Target +6¢ to +10¢ (+12% to +20% ROI). e.g. 55¢ -> 63¢, 65¢ -> 73¢.
+    - Favorite Maker (> 70¢): Target +5¢ to +7¢, capped at 95¢ (sell before 100¢ binary cliff!). e.g. 86¢ -> 92¢, 88¢ -> 94¢.
+
+    Invariant: Result is ALWAYS > buy_price_cents and <= 99¢ (exchange order book ceiling).
+    """
+    p = max(1, min(98, int(buy_price_cents)))
+    if p <= 25:
+        tp = p + max(4, round(p * 0.35))
+    elif p <= 45:
+        tp = p + max(6, round(p * 0.22))
+    elif p <= 70:
+        tp = p + max(6, round(p * 0.15))
+    else:
+        # Favorites: lock in +5¢ to +7¢ gain early, max 95¢ to ensure executable book liquidity
+        tp = min(95, p + 6)
+
+    return max(p + 1, min(99, tp))
+
 # Intuitive Core Concept:
 # ------------------------
 # Imagine you are shopping for sneakers to resell online:
@@ -1008,7 +1036,9 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "min_buy": 18,
                 "max_buy": 24 if is_compressed else 30,
                 "tp": 58 if is_compressed else 62,
-                "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
+                "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "false").lower() in ("true", "1", "yes"),
+                "enable_micro_wins": os.getenv("ENABLE_MICRO_WINS", "true").lower() in ("true", "1", "yes"),
+                "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
                 "enable_favorite_maker": True,
                 "favorite_maker_min_buy": 86,
                 "favorite_maker_max_buy": 92,
@@ -1037,7 +1067,9 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "min_buy": 18,
             "max_buy": 32 if is_compressed else 44,
             "tp": 58 if is_compressed else 62,
-            "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
+            "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "false").lower() in ("true", "1", "yes"),
+            "enable_micro_wins": os.getenv("ENABLE_MICRO_WINS", "true").lower() in ("true", "1", "yes"),
+            "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 86,
             "favorite_maker_max_buy": 93,
@@ -1068,7 +1100,9 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "min_buy": 18,
                 "max_buy": 22 if is_compressed else 28,
                 "tp": 58 if is_compressed else 62,
-                "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
+                "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "false").lower() in ("true", "1", "yes"),
+                "enable_micro_wins": os.getenv("ENABLE_MICRO_WINS", "true").lower() in ("true", "1", "yes"),
+                "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
                 "enable_favorite_maker": True,
                 "favorite_maker_min_buy": 86,
                 "favorite_maker_max_buy": 92,
@@ -1097,7 +1131,9 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "min_buy": 18,
             "max_buy": 24 if is_compressed else 30,
             "tp": 58 if is_compressed else 62,
-            "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes"),
+            "only_favorite_maker": os.getenv("ONLY_FAVORITE_MAKER", "false").lower() in ("true", "1", "yes"),
+            "enable_micro_wins": os.getenv("ENABLE_MICRO_WINS", "true").lower() in ("true", "1", "yes"),
+            "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 86,
             "favorite_maker_max_buy": 93,
@@ -1494,7 +1530,7 @@ def calibrate_dynamic_price_map_from_db(
 
                 # Step 4: Runway Timing Enforcement & Dynamic Loss-Tightened Corridors
                 min_buy = 18
-                only_fav_setting = os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes")
+                only_fav_setting = os.getenv("ONLY_FAVORITE_MAKER", "false").lower() in ("true", "1", "yes")
                 if is_heavy_loss:
                     max_buy = min(max_buy, 18 if mark == "05" else 22)
                     fav_min_buy = 86
@@ -1865,7 +1901,9 @@ def get_dynamic_filter_for_market(
         "mid_zone_max": int(mark_filter.get("mid_zone_max", base_defaults["mid_zone_max"])),
         "contracts_per_trade": int(mark_filter.get("contracts_per_trade", base_defaults["contracts_per_trade"])),
         "is_restricted": bool(mark_filter.get("is_restricted", base_defaults.get("is_restricted", False))),
-        "only_favorite_maker": bool(mark_filter.get("only_favorite_maker", base_defaults.get("only_favorite_maker", True))) and (os.getenv("ONLY_FAVORITE_MAKER", "true").lower() in ("true", "1", "yes")),
+        "only_favorite_maker": (os.getenv("ONLY_FAVORITE_MAKER", "false").lower() in ("true", "1", "yes")),
+        "enable_micro_wins": (os.getenv("ENABLE_MICRO_WINS", "true").lower() in ("true", "1", "yes")),
+        "micro_win_target_cents": int(mark_filter.get("micro_win_target_cents", base_defaults.get("micro_win_target_cents", 6))),
         "enable_favorite_maker": bool(mark_filter.get("enable_favorite_maker", base_defaults.get("enable_favorite_maker", True))),
         "favorite_maker_min_buy": int(mark_filter.get("favorite_maker_min_buy", base_defaults.get("favorite_maker_min_buy", 86))),
         "favorite_maker_max_buy": int(mark_filter.get("favorite_maker_max_buy", base_defaults.get("favorite_maker_max_buy", 93))),

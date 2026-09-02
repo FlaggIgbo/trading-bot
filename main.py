@@ -48,6 +48,7 @@ import requests
 
 from database import (
     calculate_dynamic_contracts_count,
+    calculate_micro_win_take_profit,
     check_spot_lead_loss_gate,
     detect_asset_symbol,
     evaluate_ensemble_consensus,
@@ -894,15 +895,18 @@ def resolve_safe_take_profit_for_position(
     """
     Resolves the intended and safe Take-Profit target (cents) for an active position:
     1. Checks recorded target_tp from order execution / MongoDB.
-    2. Falls back to momentum_tp (88¢) if entry price was in momentum corridor (>= momentum_min_buy or >= 50¢).
-    3. Falls back to discount tp (62¢).
-    4. Strict invariant: safe_tp must ALWAYS be strictly greater than entry_price.
+    2. Uses micro-win take profit if enable_micro_wins is active and intended_tp is missing/100.
+    3. Falls back to momentum_tp (88¢) if entry price was in momentum corridor (>= momentum_min_buy or >= 50¢).
+    4. Falls back to discount tp (62¢).
+    5. Strict invariant: safe_tp must ALWAYS be strictly greater than entry_price and <= 99¢.
     """
     pos_entry = client.get_entry_price(ticker)
     intended_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
 
-    if intended_tp is not None:
+    if intended_tp is not None and intended_tp < 100:
         effective_tp = intended_tp
+    elif dynamic_filters.get("enable_micro_wins") and pos_entry is not None:
+        effective_tp = calculate_micro_win_take_profit(pos_entry)
     elif pos_entry is not None and pos_entry >= dynamic_filters.get("momentum_min_buy", 56):
         effective_tp = int(dynamic_filters.get("momentum_tp", 88))
     else:
@@ -911,7 +915,7 @@ def resolve_safe_take_profit_for_position(
     if pos_entry is not None and effective_tp <= pos_entry:
         effective_tp = min(99, max(pos_entry + 5, int(dynamic_filters.get("momentum_tp", 88))))
 
-    return effective_tp
+    return min(99, effective_tp)
 
 
 def evaluate_favorite_maker_opportunity(
@@ -992,7 +996,7 @@ def evaluate_favorite_maker_opportunity(
     if yes_ask is not None and effective_min_fav <= yes_ask <= effective_max_fav:
         if not client.is_side_allowed(ticker, "yes"):
             return None
-        # High-value direction check: Require spot price confirmation (spot >= target) to avoid buying into dips/crashes
+        # High-value direction check: Require spot price confirmation and substantial belief
         if spot_price is not None and target_price is not None and target_price > 0:
             if spot_price < target_price:
                 log.info(
@@ -1000,14 +1004,17 @@ def evaluate_favorite_maker_opportunity(
                     f"Spot (${spot_price:.4f}) is below strike target (${target_price:.4f}) (Dipping/crashing)."
                 )
                 return None
-            if is_commodity_high_vol:
-                lead_pct = ((spot_price - target_price) / target_price) * 100.0
-                if lead_pct < required_spot_lead:
-                    log.info(
-                        f"🛡️ [COMMODITY SPOT LEAD GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
-                        f"{sym_name} requires >= {required_spot_lead:.2f}% spot lead (current: {lead_pct:.3f}%)."
-                    )
-                    return None
+            lead_pct = ((spot_price - target_price) / target_price) * 100.0
+            # Substantial Belief Gate (Peak 3 Endgame):
+            # Must have substantial spot clearance (>= 0.15% crypto, >= 0.40% commodity)
+            # to prevent late-candle noise flips from generating total binary losses.
+            min_sub_lead = required_spot_lead if is_commodity_high_vol else float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.15"))
+            if lead_pct < min_sub_lead:
+                log.info(
+                    f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                    f"Spot lead ({lead_pct:.3f}%) below substantial belief threshold ({min_sub_lead:.2f}%)."
+                )
+                return None
 
         # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance
         if asset_realized_pnl is not None:
@@ -1082,7 +1089,7 @@ def evaluate_favorite_maker_opportunity(
     if no_ask is not None and effective_min_fav <= no_ask <= effective_max_fav:
         if not client.is_side_allowed(ticker, "no"):
             return None
-        # High-value direction check: Require spot price confirmation (spot <= target) to avoid buying into rallies
+        # High-value direction check: Require spot price confirmation and substantial belief
         if spot_price is not None and target_price is not None and target_price > 0:
             if spot_price > target_price:
                 log.info(
@@ -1090,14 +1097,15 @@ def evaluate_favorite_maker_opportunity(
                     f"Spot (${spot_price:.4f}) is above strike target (${target_price:.4f}) (Surging against NO)."
                 )
                 return None
-            if is_commodity_high_vol:
-                lead_pct = ((target_price - spot_price) / target_price) * 100.0
-                if lead_pct < required_spot_lead:
-                    log.info(
-                        f"🛡️ [COMMODITY SPOT LEAD GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
-                        f"{sym_name} requires >= {required_spot_lead:.2f}% spot lead (current: {lead_pct:.3f}%)."
-                    )
-                    return None
+            lead_pct = ((target_price - spot_price) / target_price) * 100.0
+            # Substantial Belief Gate (Peak 3 Endgame):
+            min_sub_lead = required_spot_lead if is_commodity_high_vol else float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.15"))
+            if lead_pct < min_sub_lead:
+                log.info(
+                    f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                    f"Spot lead ({lead_pct:.3f}%) below substantial belief threshold ({min_sub_lead:.2f}%)."
+                )
+                return None
 
         # Elevated Loss Regime Gate: If asset has lost > $0.50, require spot lead distance
         if asset_realized_pnl is not None:
@@ -1193,12 +1201,13 @@ def _execute_favorite_maker_flow(
         return False, None
 
     spread_saved = max(0, target_ask - maker_bid)
+    fav_tp = calculate_micro_win_take_profit(maker_bid)
 
     log_prefix = LogTag.DRY_RUN_MATCH.value if dry_run else LogTag.BUY_MATCH.value
     log_action = (
-        f"WOULD REST MAKER BID AT {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢). Hold to 100¢ settlement."
+        f"WOULD REST MAKER BID AT {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢, Micro-Win TP: {fav_tp}¢)."
         if dry_run
-        else f"Executing Resting Maker Bid at {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢)!"
+        else f"Executing Resting Maker Bid at {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢, Micro-Win TP: {fav_tp}¢)!"
     )
     log.info(
         f"{log_prefix} [FAVORITE MAKER] [{ex_name}] {ticker} -> Confirmed {side_upper} Favorite! {log_action}"
@@ -1209,21 +1218,32 @@ def _execute_favorite_maker_flow(
     if not dry_run:
         try:
             if hasattr(client, "buy_favorite_maker_order"):
-                buy_res = client.buy_favorite_maker_order(
-                    ticker=ticker,
-                    side=side_lower,
-                    maker_bid_cents=maker_bid,
-                    target_ask_cents=target_ask,
-                    count=count,
-                    buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
-                )
+                try:
+                    buy_res = client.buy_favorite_maker_order(
+                        ticker=ticker,
+                        side=side_lower,
+                        maker_bid_cents=maker_bid,
+                        target_ask_cents=target_ask,
+                        count=count,
+                        buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
+                        take_profit_cents=fav_tp,
+                    )
+                except TypeError:
+                    buy_res = client.buy_favorite_maker_order(
+                        ticker=ticker,
+                        side=side_lower,
+                        maker_bid_cents=maker_bid,
+                        target_ask_cents=target_ask,
+                        count=count,
+                        buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
+                    )
                 effective_buy = buy_res.get("buy_price_cents", maker_bid) if isinstance(buy_res, dict) else maker_bid
             else:
                 buy_res = client.buy_and_set_take_profit(
                     ticker=ticker,
                     side=side_lower,
                     buy_price_cents=maker_bid,
-                    take_profit_cents=99,
+                    take_profit_cents=fav_tp,
                     count=count,
                     maker_bid_cents=maker_bid,
                     buy_order_timeout_seconds=BUY_ORDER_EXPIRATION_SECONDS,
@@ -1242,7 +1262,7 @@ def _execute_favorite_maker_flow(
                 side=side_lower,
                 count=count,
                 entry_price_cents=maker_bid,
-                target_tp_cents=100,
+                target_tp_cents=fav_tp,
                 strategy_tag="endgame_favorite_maker",
             )
 
@@ -1257,7 +1277,7 @@ def _execute_favorite_maker_flow(
         "side": side_lower,
         "buy": effective_buy,
         "count": count,
-        "tp": 100,
+        "tp": fav_tp,
         "sl": None,
         "outcome": determine_counterfactual_outcome(side_lower, "favorite_maker_opened", spot_price, target_price, market_result),
         "entry_ts": int(time.time()),
@@ -1281,7 +1301,7 @@ def _execute_favorite_maker_flow(
                 side=side_lower,
                 count=count,
                 client_order_id=trade_details.get("client_order_id"),
-                take_profit_cents=100,
+                take_profit_cents=fav_tp,
                 strategy_tag="endgame_favorite_maker",
                 spread_saved_cents=spread_saved,
                 order_role="maker",
@@ -1545,7 +1565,48 @@ def process_single_market(
         has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
         if pos is not None:
             log.info(f"{LogTag.OPEN_POSITION_GATE.value} [{ex_name}] Already hold active {pos['side'].upper()} pos of {pos['count']} contract(s) for {ticker}. Skipping buy.")
-            if not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not effective_dry_run:
+
+            # --- ACORNS MICRO-WIN CONTINUOUS PROFIT HARVESTER ---
+            # If position is in profit above micro-win target, immediately bank it!
+            pos_side = pos.get("side", "yes").lower()
+            current_bid = quotes.get("yes_bid") if pos_side == "yes" else quotes.get("no_bid")
+            entry_p = pos.get("entry_price_cents") or client.get_entry_price(ticker)
+            if current_bid is not None and entry_p is not None and entry_p > 0:
+                profit_c = current_bid - entry_p
+                micro_target = 5 if entry_p <= 35 else (6 if entry_p <= 50 else 5)
+                target_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
+                is_micro_win = (profit_c >= micro_target) or (target_tp is not None and target_tp < 100 and current_bid >= target_tp)
+
+                if is_micro_win and not is_stop_loss_interval and not is_12_5min_mark and not is_14min_mark:
+                    roi_pct = (profit_c / entry_p) * 100.0
+                    log.info(
+                        f"🌱 [MICRO-WIN HARVESTER] [{ex_name}] {ticker} ({pos_side.upper()} x{pos.get('count', 1)}): "
+                        f"Entry: {entry_p}¢ -> Market Bid: {current_bid}¢ (Profit: +{profit_c}¢ / +{roi_pct:.1f}% ROI). "
+                        f"Banking Acorns-style micro-win early instead of waiting for market closure!"
+                    )
+                    harvest_res = client.evaluate_and_execute_10min_strategy(
+                        ticker=ticker,
+                        current_yes_bid=quotes.get("yes_bid", yes_price_cents),
+                        current_no_bid=quotes.get("no_bid", no_price_cents),
+                        current_yes_ask=quotes.get("yes_ask"),
+                        current_no_ask=quotes.get("no_ask"),
+                        dry_run=effective_dry_run,
+                        win_threshold_cents=current_bid,
+                    )
+                    if isinstance(harvest_res, dict) and harvest_res.get("triggered"):
+                        trade_executed = True
+                        trade_details = {
+                            "ex": ex_name.lower(),
+                            "action": harvest_res.get("action", "winner_profit_banked"),
+                            "side": pos_side,
+                            "exit_price": harvest_res.get("exit_price", current_bid),
+                            "profit_locked_cents": harvest_res.get("profit_locked_cents", profit_c),
+                            "outcome": determine_counterfactual_outcome(
+                                pos_side, "winner_profit_banked", spot_price, target_price, market.get("result")
+                            ),
+                        }
+
+            if not trade_executed and not is_stop_loss_interval and not client.has_resting_take_profit_order(ticker) and not has_floor and not effective_dry_run:
                 safe_tp = resolve_safe_take_profit_for_position(
                     ticker=ticker,
                     client=client,
@@ -1564,240 +1625,277 @@ def process_single_market(
             if yes_price_cents is not None:
                 record_market_price_snapshot(ticker, yes_price_cents, timestamp=now_utc.timestamp())
 
-            # Priority 1: Endgame Favorite Maker Strategy (>= 86¢ resting maker bid)
-            fav_opp = evaluate_favorite_maker_opportunity(
-                market=market,
-                quotes=quotes,
-                rem_mins=rem_mins,
-                dynamic_filters=dynamic_filters,
-                client=client,
-                min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
-                spot_price=spot_price,
-                target_price=target_price,
-                asset_realized_pnl=asset_realized_pnl,
-            )
-            if fav_opp is not None and dynamic_filters.get("enable_favorite_maker", True):
-                fav_side = fav_opp["side"]
-                fav_maker_bid = fav_opp["maker_bid"]
-                fav_target_ask = fav_opp["target_ask"]
-                fav_count = fav_opp.get("count", 1)
-                trade_executed, trade_details = _execute_favorite_maker_flow(
-                    ticker=ticker,
-                    side=fav_side,
-                    maker_bid=fav_maker_bid,
-                    target_ask=fav_target_ask,
-                    spot_price=spot_price,
-                    target_price=target_price,
-                    market_result=market.get("result"),
-                    client=client,
-                    dry_run=effective_dry_run,
-                    count=fav_count,
-                )
+            # =======================================================================
+            # TRI-PEAK EXECUTION HIERARCHY:
+            # Priority 1: Peak 1 (Asymmetric Deep Discount: 1¢–35¢) - Heavily Prioritized
+            # Priority 2: Peak 2 (Early Value: 36¢–50¢) - Allowed with confirmed price increase signal
+            # Priority 3: Peak 3 (Endgame Favorite Maker: 86¢–93¢) - Allowed ONLY with substantial belief
+            # =======================================================================
+            only_fav_maker = bool(dynamic_filters.get("only_favorite_maker", False))
+            candidate_sides = []
+            counterfactual_details = None
 
-            # Priority 2: Screen for candidates across General Corridors if Favorite Maker not triggered
-            if not trade_executed:
-                only_fav_maker = bool(dynamic_filters.get("only_favorite_maker", False))
-                candidate_sides = []
-                counterfactual_details = None
+            for side, p_cents, aligned in [
+                ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
+                ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
+            ]:
+                if p_cents is None or not aligned:
+                    continue
 
-                for side, p_cents, aligned in [
-                    ("yes", yes_price_cents, is_spot_momentum_aligned("yes", spot_price, target_price)),
-                    ("no", no_price_cents, is_spot_momentum_aligned("no", spot_price, target_price)),
-                ]:
-                    if p_cents is None or not aligned:
-                        continue
+                if not getattr(client, "is_side_allowed", lambda t, s: True)(ticker, side):
+                    log.info(
+                        f"🛡️ [SINGLE-SIDE LOCK] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
+                        f"Opposing side already traded for this contract lifecycle. Strictly blocking dual buy."
+                    )
+                    continue
 
-                    if not getattr(client, "is_side_allowed", lambda t, s: True)(ticker, side):
+                # Elevated Loss Regime Gate: If asset has lost > $0.50, require dynamic spot lead distance
+                if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
+                    req_lead = get_dynamic_spot_lead(asset_symbol)
+                    allowed, lead_pct, reason = check_spot_lead_loss_gate(
+                        side=side,
+                        spot_price=spot_price,
+                        target_price=target_price,
+                        asset_realized_pnl=asset_realized_pnl,
+                        loss_threshold_dollars=0.50,
+                        min_lead_pct=req_lead,
+                        symbol=asset_symbol,
+                    )
+                    if not allowed:
                         log.info(
-                            f"🛡️ [SINGLE-SIDE LOCK] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢): "
-                            f"Opposing side already traded for this contract lifecycle. Strictly blocking dual buy."
+                            f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 15M {ticker} ({side.upper()} @ {p_cents}¢): "
+                            f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {req_lead:.2f}% spot lead ({reason}). Skipping trade."
                         )
                         continue
 
-                    # Elevated Loss Regime Gate: If asset has lost > $0.50, require dynamic spot lead distance
-                    if asset_realized_pnl is not None and asset_realized_pnl <= -0.50:
-                        req_lead = get_dynamic_spot_lead(asset_symbol)
-                        allowed, lead_pct, reason = check_spot_lead_loss_gate(
-                            side=side,
-                            spot_price=spot_price,
-                            target_price=target_price,
-                            asset_realized_pnl=asset_realized_pnl,
-                            loss_threshold_dollars=0.50,
-                            min_lead_pct=req_lead,
-                            symbol=asset_symbol,
-                        )
-                        if not allowed:
-                            log.info(
-                                f"🛡️ [LOSS REGIME SPOT LEAD GATE] [{ex_name}] 15M {ticker} ({side.upper()} @ {p_cents}¢): "
-                                f"Asset realized loss (${abs(asset_realized_pnl):.2f}) > $0.50 requires >= {req_lead:.2f}% spot lead ({reason}). Skipping trade."
-                            )
-                            continue
+                # Enforce Empirical 15M Rules (Peak 1: 1-35¢ @ m=0-3, Peak 2: 36-50¢ @ m=0-5, 51-80¢ BANNED)
+                is_valid_entry, entry_reason = is_valid_empirical_entry(p_cents, minute_into_market, "15m")
 
-                    # Enforce Empirical 15M Rules (Peak 1: 1-35¢ @ m=0-3, Peak 2: 36-50¢ @ m=0-5, 51-80¢ BANNED)
-                    is_valid_entry, entry_reason = is_valid_empirical_entry(p_cents, minute_into_market, "15m")
+                if is_valid_entry:
+                    tp_target = (
+                        calculate_micro_win_take_profit(p_cents, "15m")
+                        if dynamic_filters.get("enable_micro_wins", True)
+                        else max(62, p_cents + 25)
+                    )
+                    is_peak_1 = (p_cents <= 35)
+                    mode_tag = "momentum" if p_cents >= 36 else "discount"
 
-                    if is_valid_entry:
-                        tp_target = max(62, p_cents + 25)
-                        mode_tag = "momentum" if p_cents >= 36 else "discount"
-                        if only_fav_maker:
-                            # In Favorite Maker Only mode, record empirical counterfactual tracking snapshot
-                            counterfactual_details = {
-                                "dry_run": True,
-                                "ex": market.get("exchange", "kalshi"),
-                                "action": "counterfactual_empirical_reject",
-                                "regime": "empirical_tracking",
-                                "corridor": mode_tag,
-                                "side": side,
-                                "buy": p_cents,
-                                "tp": tp_target,
-                                "sl": 25,
-                                "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
-                                "entry_ts": int(time.time()),
-                                "spot_at_entry": spot_price,
-                                "target_at_entry": target_price,
-                                "entry_reason": entry_reason,
-                            }
-                            log.info(
-                                f"🛡️ [FAVORITE MAKER ONLY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
-                                f"Empirical entry [{entry_reason}] active, but live orders restricted to Favorite Maker. Tracking counterfactually."
-                            )
-                        else:
-                            log.info(
-                                f"🎯 [EMPIRICAL +EV ENTRY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
-                                f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
-                            )
-                            if "discount" in entry_reason:
-                                min_b, max_b = 1, 35
-                            elif "early_value" in entry_reason or "value" in entry_reason:
-                                min_b, max_b = 36, 50
-                            else:
-                                min_b, max_b = 1, 50
-
-                            candidate_sides.append({
-                                "side": side,
-                                "price": p_cents,
-                                "tp": tp_target,
-                                "min_buy": min_b,
-                                "max_buy": max_b,
-                                "mode": mode_tag,
-                                "entry_reason": entry_reason,
-                            })
-                    else:
+                    if only_fav_maker:
+                        # In Favorite Maker Only mode, record empirical counterfactual tracking snapshot
                         counterfactual_details = {
                             "dry_run": True,
                             "ex": market.get("exchange", "kalshi"),
                             "action": "counterfactual_empirical_reject",
                             "regime": "empirical_tracking",
-                            "corridor": "disallowed_zone",
+                            "corridor": mode_tag,
                             "side": side,
                             "buy": p_cents,
-                            "tp": take_profit_cents,
+                            "tp": tp_target,
                             "sl": 25,
                             "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
                             "entry_ts": int(time.time()),
                             "spot_at_entry": spot_price,
                             "target_at_entry": target_price,
+                            "entry_reason": entry_reason,
                         }
                         log.info(
-                            f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
-                            f"Blocked by empirical rule [{entry_reason}]. Saved as counterfactual tracking snapshot."
+                            f"🛡️ [FAVORITE MAKER ONLY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                            f"Empirical entry [{entry_reason}] active, but live orders restricted to Favorite Maker. Tracking counterfactually."
                         )
-
-                if candidate_sides:
-                    streak_data = get_asset_settlement_streak(asset_symbol, timeframe="15m", now_utc=now_utc)
-                    lead_changes_count = get_market_lead_changes(ticker)
-
-                    approved_candidates = []
-                    for cand in candidate_sides:
-                        cons = evaluate_ensemble_consensus(
-                            symbol=asset_symbol,
-                            proposed_side=cand["side"],
-                            price_cents=cand["price"],
-                            spot_price=spot_price,
-                            target_price=target_price,
-                            timeframe="15m",
-                            dynamic_filters=dynamic_filters,
-                            lead_changes=lead_changes_count,
-                            streak_data=streak_data,
-                            now_utc=now_utc,
+                    else:
+                        log.info(
+                            f"🎯 [EMPIRICAL +EV ENTRY] [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                            f"Approved by rule [{entry_reason}]. Target TP: {tp_target}¢."
                         )
-                        cand["consensus"] = cons
-                        if cons["is_approved"]:
-                            approved_candidates.append(cand)
+                        min_b, max_b = (1, 35) if is_peak_1 else (36, 50)
+
+                        candidate_sides.append({
+                            "side": side,
+                            "price": p_cents,
+                            "tp": tp_target,
+                            "min_buy": min_b,
+                            "max_buy": max_b,
+                            "mode": mode_tag,
+                            "peak_tier": 1 if is_peak_1 else 2,
+                            "entry_reason": entry_reason,
+                        })
+                else:
+                    counterfactual_details = {
+                        "dry_run": True,
+                        "ex": market.get("exchange", "kalshi"),
+                        "action": "counterfactual_empirical_reject",
+                        "regime": "empirical_tracking",
+                        "corridor": "disallowed_zone",
+                        "side": side,
+                        "buy": p_cents,
+                        "tp": take_profit_cents,
+                        "sl": 25,
+                        "outcome": determine_counterfactual_outcome(side, "buy_opened", spot_price, target_price, market.get("result")),
+                        "entry_ts": int(time.time()),
+                        "spot_at_entry": spot_price,
+                        "target_at_entry": target_price,
+                    }
+                    log.info(
+                        f"{LogTag.PRICE_REJECTED.value} [{ex_name}] {ticker} ({side.upper()} @ {p_cents}¢, m={minute_into_market}): "
+                        f"Blocked by empirical rule [{entry_reason}]. Saved as counterfactual tracking snapshot."
+                    )
+
+            if candidate_sides and not only_fav_maker:
+                streak_data = get_asset_settlement_streak(asset_symbol, timeframe="15m", now_utc=now_utc)
+                lead_changes_count = get_market_lead_changes(ticker)
+
+                approved_peak1 = []
+                approved_peak2 = []
+
+                for cand in candidate_sides:
+                    cons = evaluate_ensemble_consensus(
+                        symbol=asset_symbol,
+                        proposed_side=cand["side"],
+                        price_cents=cand["price"],
+                        spot_price=spot_price,
+                        target_price=target_price,
+                        timeframe="15m",
+                        dynamic_filters=dynamic_filters,
+                        lead_changes=lead_changes_count,
+                        streak_data=streak_data,
+                        now_utc=now_utc,
+                    )
+                    cand["consensus"] = cons
+                    if not cons["is_approved"]:
+                        log.info(
+                            f"🛡️ [ENSEMBLE CONSENSUS BLOCKED] [{ex_name}] {ticker} ({cand['side'].upper()} @ {cand['price']}¢): "
+                            f"{cons['reason']}"
+                        )
+                        continue
+
+                    if cand["peak_tier"] == 1:
+                        approved_peak1.append(cand)
+                    elif cand["peak_tier"] == 2:
+                        # PEAK 2 CONDITION: Only allow if there is an active signal that price will increase!
+                        c_side = cand["side"]
+                        c_lead = ((spot_price - target_price) / target_price * 100.0) if (c_side == "yes" and spot_price and target_price and target_price > 0) else (((target_price - spot_price) / target_price * 100.0) if (c_side == "no" and spot_price and target_price and target_price > 0) else 0.0)
+                        opposing_side = "no" if c_side == "yes" else "yes"
+                        has_upward_signal = (
+                            c_lead > 0.0
+                            and cons.get("consensus_score", 0) >= 0
+                            and cons.get("regime") != "opposing_streak_fade"
+                            and cons.get("streak_side") != opposing_side
+                        )
+                        if has_upward_signal:
+                            approved_peak2.append(cand)
                         else:
                             log.info(
-                                f"🛡️ [ENSEMBLE CONSENSUS BLOCKED] [{ex_name}] {ticker} ({cand['side'].upper()} @ {cand['price']}¢): "
-                                f"{cons['reason']}"
+                                f"🛡️ [PEAK 2 SIGNAL GATE] [{ex_name}] {ticker} ({cand['side'].upper()} @ {cand['price']}¢): "
+                                f"No confirmed upward price increase signal (lead: {c_lead:.3f}%, score: {cons.get('consensus_score', 0)}). Skipping early value entry."
                             )
 
-                    if approved_candidates:
-                        chosen_cand = min(approved_candidates, key=lambda x: x["price"])
-                        chosen_side = chosen_cand["side"]
-                        chosen_price = chosen_cand["price"]
-                        chosen_tp = chosen_cand["tp"]
-                        chosen_min = chosen_cand["min_buy"]
-                        chosen_max = chosen_cand["max_buy"]
-                        chosen_mode = chosen_cand["mode"]
-                        chosen_consensus = chosen_cand.get("consensus", {})
-                        chosen_bid = quotes["yes_bid"] if chosen_side == "yes" else quotes["no_bid"]
+                # HEAVILY PRIORITIZE PEAK 1 OVER PEAK 2
+                chosen_cand = None
+                if approved_peak1:
+                    chosen_cand = min(approved_peak1, key=lambda x: x["price"])
+                elif approved_peak2:
+                    chosen_cand = min(approved_peak2, key=lambda x: x["price"])
 
-                        log.info(
-                            f"🚀 [ENSEMBLE CONSENSUS APPROVED] [{ex_name}] {ticker} ({chosen_side.upper()} @ {chosen_price}¢) | "
-                            f"Streak: {chosen_consensus.get('streak_length', 0)}x {chosen_consensus.get('streak_side') or 'none'} | "
-                            f"Score: {chosen_consensus.get('consensus_score', 0):+.2f} | Regime: {chosen_consensus.get('regime')}"
+                if chosen_cand is not None:
+                    chosen_side = chosen_cand["side"]
+                    chosen_price = chosen_cand["price"]
+                    chosen_tp = chosen_cand["tp"]
+                    chosen_min = chosen_cand["min_buy"]
+                    chosen_max = chosen_cand["max_buy"]
+                    chosen_mode = chosen_cand["mode"]
+                    chosen_consensus = chosen_cand.get("consensus", {})
+                    chosen_bid = quotes["yes_bid"] if chosen_side == "yes" else quotes["no_bid"]
+
+                    log.info(
+                        f"🚀 [ENSEMBLE CONSENSUS APPROVED] [{ex_name}] {ticker} ({chosen_side.upper()} @ {chosen_price}¢) | "
+                        f"Peak Tier: {chosen_cand['peak_tier']} | "
+                        f"Streak: {chosen_consensus.get('streak_length', 0)}x {chosen_consensus.get('streak_side') or 'none'} | "
+                        f"Score: {chosen_consensus.get('consensus_score', 0):+.2f} | Regime: {chosen_consensus.get('regime')}"
+                    )
+
+                    # Dynamic bankroll sizing
+                    balance_cents = None
+                    if hasattr(client, "get_balance_cents"):
+                        try:
+                            b_val = client.get_balance_cents()
+                            if isinstance(b_val, (int, float)):
+                                balance_cents = int(b_val)
+                        except Exception:
+                            pass
+
+                    rec_contracts = chosen_consensus.get("recommended_contracts", 1) if chosen_consensus else 1
+                    if not is_restricted and rec_contracts > 1:
+                        base_contracts = max(base_contracts, rec_contracts)
+                    recent_wr = dynamic_filters.get("recent_win_rate")
+
+                    contracts_count = calculate_dynamic_contracts_count(
+                        balance_cents=balance_cents,
+                        buy_price_cents=chosen_price,
+                        base_count=base_contracts,
+                        is_restricted=is_restricted or is_gated,
+                        recent_win_rate=recent_wr,
+                    )
+
+                    if contracts_count <= 0 and balance_cents is not None:
+                        log.warning(
+                            f"⚠️ [INSUFFICIENT BALANCE] [{ex_name}] Cash balance ({balance_cents}¢) cannot afford 1 contract of {ticker} @ {chosen_price}¢. Skipping buy."
                         )
-
-                        # Dynamic bankroll sizing
-                        balance_cents = None
-                        if hasattr(client, "get_balance_cents"):
-                            try:
-                                b_val = client.get_balance_cents()
-                                if isinstance(b_val, (int, float)):
-                                    balance_cents = int(b_val)
-                            except Exception:
-                                pass
-
-                        rec_contracts = chosen_consensus.get("recommended_contracts", 1) if chosen_consensus else 1
-                        if not is_restricted and rec_contracts > 1:
-                            base_contracts = max(base_contracts, rec_contracts)
-                        recent_wr = dynamic_filters.get("recent_win_rate")
-
-                        contracts_count = calculate_dynamic_contracts_count(
-                            balance_cents=balance_cents,
-                            buy_price_cents=chosen_price,
-                            base_count=base_contracts,
-                            is_restricted=is_restricted or is_gated,
-                            recent_win_rate=recent_wr,
+                    else:
+                        contracts_to_buy = max(1, contracts_count)
+                        trade_executed, trade_details = _execute_buy_flow(
+                            ticker=ticker,
+                            side=chosen_side,
+                            price_cents=chosen_price,
+                            maker_bid=chosen_bid,
+                            min_buy=chosen_min,
+                            max_buy=chosen_max,
+                            take_profit_cents=chosen_tp,
+                            spot_price=spot_price,
+                            target_price=target_price,
+                            market_result=market.get("result"),
+                            client=client,
+                            dry_run=effective_dry_run,
+                            is_exploration=is_exploration,
+                            corridor_mode=chosen_mode,
+                            count=contracts_to_buy,
                         )
+                        if trade_executed and trade_details and chosen_consensus:
+                            trade_details["consensus_score"] = chosen_consensus.get("consensus_score")
+                            trade_details["consensus_regime"] = chosen_consensus.get("regime")
+                            trade_details["streak_length"] = chosen_consensus.get("streak_length")
 
-                        if contracts_count <= 0 and balance_cents is not None:
-                            log.warning(
-                                f"⚠️ [INSUFFICIENT BALANCE] [{ex_name}] Cash balance ({balance_cents}¢) cannot afford 1 contract of {ticker} @ {chosen_price}¢. Skipping buy."
-                            )
-                        else:
-                            contracts_to_buy = max(1, contracts_count)
-                            trade_executed, trade_details = _execute_buy_flow(
-                                ticker=ticker,
-                                side=chosen_side,
-                                price_cents=chosen_price,
-                                maker_bid=chosen_bid,
-                                min_buy=chosen_min,
-                                max_buy=chosen_max,
-                                take_profit_cents=chosen_tp,
-                                spot_price=spot_price,
-                                target_price=target_price,
-                                market_result=market.get("result"),
-                                client=client,
-                                dry_run=effective_dry_run,
-                                is_exploration=is_exploration,
-                                corridor_mode=chosen_mode,
-                                count=contracts_to_buy,
-                            )
-                            if trade_executed and trade_details and chosen_consensus:
-                                trade_details["consensus_score"] = chosen_consensus.get("consensus_score")
-                                trade_details["consensus_regime"] = chosen_consensus.get("regime")
-                                trade_details["streak_length"] = chosen_consensus.get("streak_length")
+            # Priority 3: Endgame Favorite Maker Strategy (>= 86¢ resting maker bid)
+            # Allowed ONLY if neither Peak 1 nor Peak 2 was executed, AND substantial belief is satisfied!
+            if not trade_executed and dynamic_filters.get("enable_favorite_maker", True):
+                fav_opp = evaluate_favorite_maker_opportunity(
+                    market=market,
+                    quotes=quotes,
+                    rem_mins=rem_mins,
+                    dynamic_filters=dynamic_filters,
+                    client=client,
+                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
+                    max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                    spot_price=spot_price,
+                    target_price=target_price,
+                    asset_realized_pnl=asset_realized_pnl,
+                )
+                if fav_opp is not None:
+                    fav_side = fav_opp["side"]
+                    fav_maker_bid = fav_opp["maker_bid"]
+                    fav_target_ask = fav_opp["target_ask"]
+                    fav_count = fav_opp.get("count", 1)
+                    trade_executed, trade_details = _execute_favorite_maker_flow(
+                        ticker=ticker,
+                        side=fav_side,
+                        maker_bid=fav_maker_bid,
+                        target_ask=fav_target_ask,
+                        spot_price=spot_price,
+                        target_price=target_price,
+                        market_result=market.get("result"),
+                        client=client,
+                        dry_run=effective_dry_run,
+                        count=fav_count,
+                    )
 
     # -----------------------------------------------------------------------
     # Step 4D: Endgame Favorite Maker Entry on Unowned Positions (:10 & :12.5 marks)
@@ -2041,7 +2139,55 @@ def process_hourly_market_group(
             record_market_price_snapshot(item["ticker"], item["yes_price_cents"], timestamp=now_utc.timestamp())
 
     # -----------------------------------------------------------------------
-    # Step 0: Hourly 59-Minute Crash Detection & Selloff Check (:59 mark - 1m before expiration)
+    # Step 0A: Hourly Continuous Micro-Profit Harvester
+    # Whenever an active hourly position is in profit >= micro_target (e.g. +5¢ to +8¢),
+    # immediately sell at the book bid to lock in cash and eliminate binary holding risk!
+    # -----------------------------------------------------------------------
+    if not (is_hourly_59min_crash_mark or is_hourly_endgame_mark or is_hourly_stop_loss_mark or is_hourly_52_5min_cut_loss):
+        for item in parsed_markets:
+            ticker = item["ticker"]
+            pos = client.get_market_position(ticker)
+            if pos is not None:
+                quotes = item["quotes"]
+                pos_side = pos.get("side", "yes").lower()
+                current_bid = quotes.get("yes_bid") if pos_side == "yes" else quotes.get("no_bid")
+                entry_p = pos.get("entry_price_cents") or client.get_entry_price(ticker)
+                if current_bid is not None and entry_p is not None and entry_p > 0:
+                    profit_c = current_bid - entry_p
+                    micro_target = 5 if entry_p <= 35 else (6 if entry_p <= 50 else 5)
+                    target_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
+                    is_micro_win = (profit_c >= micro_target) or (target_tp is not None and target_tp < 100 and current_bid >= target_tp)
+
+                    if is_micro_win:
+                        roi_pct = (profit_c / entry_p) * 100.0
+                        log.info(
+                            f"🌱 [MICRO-WIN HARVESTER] [{ex_name}] Hourly {ticker} ({pos_side.upper()} x{pos.get('count', 1)}): "
+                            f"Entry: {entry_p}¢ -> Market Bid: {current_bid}¢ (Profit: +{profit_c}¢ / +{roi_pct:.1f}% ROI). "
+                            f"Banking Acorns-style micro-win early instead of waiting for market closure!"
+                        )
+                        harvest_res = client.evaluate_and_execute_10min_strategy(
+                            ticker=ticker,
+                            current_yes_bid=quotes.get("yes_bid", item["yes_price_cents"]),
+                            current_no_bid=quotes.get("no_bid", item["no_price_cents"]),
+                            current_yes_ask=quotes.get("yes_ask"),
+                            current_no_ask=quotes.get("no_ask"),
+                            dry_run=dry_run,
+                            win_threshold_cents=current_bid,
+                        )
+                        if isinstance(harvest_res, dict) and harvest_res.get("triggered"):
+                            trade_executed_by_ticker[ticker] = {
+                                "ex": ex_name.lower(),
+                                "action": harvest_res.get("action", "winner_profit_banked"),
+                                "side": pos_side,
+                                "exit_price": harvest_res.get("exit_price", current_bid),
+                                "profit_locked_cents": harvest_res.get("profit_locked_cents", profit_c),
+                                "outcome": determine_counterfactual_outcome(
+                                    pos_side, "winner_profit_banked", spot_price, item["target_price"], item["market"].get("result")
+                                ),
+                            }
+
+    # -----------------------------------------------------------------------
+    # Step 0B: Hourly 59-Minute Crash Detection & Selloff Check (:59 mark - 1m before expiration)
     # At minute 59: Final safety net against last-minute market dumps, flash crashes, or adverse flips.
     # If trailing entry (loss > 0) OR price < crash floor (e.g. < 50¢), liquidates immediately to salvage capital!
     # If securely winning, holds into expiration for 100¢ ($1.00) settlement.
@@ -2255,58 +2401,13 @@ def process_hourly_market_group(
             for item in parsed_markets:
                 client.cancel_unfilled_buy_orders(item["ticker"])
 
-        # Step 3C-0: Priority 1 - Scan for Endgame Favorite Maker opportunities across all strikes (74¢–93¢)
-        # Empirical finding: Resting maker bids on confirmed favorites capture spread with 0% maker fees and positive EV.
-        favorite_maker_executed = False
-        fav_opp_by_ticker = {}
-        if dynamic_filters.get("enable_favorite_maker", True):
-            for item in parsed_markets:
-                ticker = item["ticker"]
-                if ticker in cut_loss_tickers or client.has_existing_position_or_order(ticker):
-                    continue
-                fav_opp = evaluate_favorite_maker_opportunity(
-                    market=item["market"],
-                    quotes=item["quotes"],
-                    rem_mins=item["rem_mins"],
-                    dynamic_filters=dynamic_filters,
-                    client=client,
-                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                    max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
-                    min_rem_mins=1.0,
-                    max_rem_mins=25.0,
-                    spot_price=spot_price,
-                    target_price=item.get("target_price"),
-                    asset_realized_pnl=asset_realized_pnl,
-                )
-                if fav_opp is not None:
-                    fav_opp_by_ticker[ticker] = fav_opp
-
-            if fav_opp_by_ticker:
-                best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
-                best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
-                fav_count = best_fav.get("count", 1)
-                fav_executed, fav_details = _execute_favorite_maker_flow(
-                    ticker=best_fav_ticker,
-                    side=best_fav["side"],
-                    maker_bid=best_fav["maker_bid"],
-                    target_ask=best_fav["target_ask"],
-                    spot_price=spot_price,
-                    target_price=best_item["target_price"],
-                    market_result=best_item["market"].get("result"),
-                    client=client,
-                    dry_run=effective_dry_run,
-                    count=fav_count,
-                )
-                if fav_executed and fav_details:
-                    trade_executed_by_ticker[best_fav_ticker] = fav_details
-                    favorite_maker_executed = True
-
-        # Step 3C: Collect valid BUY_YES and BUY_NO candidates across all strike options (if Favorite Maker not executed)
+        # Step 3C: Collect valid BUY_YES and BUY_NO candidates across all strike options
         valid_yes_candidates = []
         valid_no_candidates = []
         only_fav_maker = bool(dynamic_filters.get("only_favorite_maker", False))
+        hourly_buy_executed = False
 
-        if not favorite_maker_executed and only_fav_maker:
+        if only_fav_maker:
             for item in parsed_markets:
                 ticker = item["ticker"]
                 yes_p = item["yes_price_cents"]
@@ -2328,7 +2429,7 @@ def process_hourly_market_group(
                             "spot_at_entry": spot_price,
                             "target_at_entry": item["target_price"],
                         }
-        elif not favorite_maker_executed:
+        else:
             for item in parsed_markets:
                 ticker = item["ticker"]
                 target_price = item["target_price"]
@@ -2342,18 +2443,57 @@ def process_hourly_market_group(
                 if client.has_existing_position_or_order(ticker):
                     pos = client.get_market_position(ticker)
                     has_floor = getattr(client, "has_profit_floor", lambda t: False)(ticker)
-                    if pos is not None and not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
-                        safe_tp = resolve_safe_take_profit_for_position(
-                            ticker=ticker,
-                            client=client,
-                            dynamic_filters=dynamic_filters,
-                        )
-                        client.place_take_profit_order(
-                            ticker=ticker,
-                            side=pos["side"],
-                            count=pos["count"],
-                            take_profit_cents=safe_tp,
-                        )
+                    if pos is not None:
+                        # --- ACORNS MICRO-WIN CONTINUOUS PROFIT HARVESTER (HOURLY) ---
+                        pos_side = pos.get("side", "yes").lower()
+                        current_bid = quotes.get("yes_bid") if pos_side == "yes" else quotes.get("no_bid")
+                        entry_p = pos.get("entry_price_cents") or client.get_entry_price(ticker)
+                        if current_bid is not None and entry_p is not None and entry_p > 0:
+                            profit_c = current_bid - entry_p
+                            micro_target = 5 if entry_p <= 35 else (6 if entry_p <= 50 else 5)
+                            target_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
+                            is_micro_win = (profit_c >= micro_target) or (target_tp is not None and target_tp < 100 and current_bid >= target_tp)
+
+                            if is_micro_win and not is_hourly_stop_loss_mark and not is_hourly_endgame_mark and not is_hourly_crash_mark:
+                                roi_pct = (profit_c / entry_p) * 100.0
+                                log.info(
+                                    f"🌱 [MICRO-WIN HARVESTER] [{ex_name}] Hourly {ticker} ({pos_side.upper()} x{pos.get('count', 1)}): "
+                                    f"Entry: {entry_p}¢ -> Market Bid: {current_bid}¢ (Profit: +{profit_c}¢ / +{roi_pct:.1f}% ROI). "
+                                    f"Banking Acorns-style micro-win early instead of waiting for market closure!"
+                                )
+                                harvest_res = client.evaluate_and_execute_10min_strategy(
+                                    ticker=ticker,
+                                    current_yes_bid=quotes.get("yes_bid", item["yes_price_cents"]),
+                                    current_no_bid=quotes.get("no_bid", item["no_price_cents"]),
+                                    current_yes_ask=quotes.get("yes_ask"),
+                                    current_no_ask=quotes.get("no_ask"),
+                                    dry_run=dry_run,
+                                    win_threshold_cents=current_bid,
+                                )
+                                if isinstance(harvest_res, dict) and harvest_res.get("triggered"):
+                                    trade_executed_by_ticker[ticker] = {
+                                        "ex": ex_name.lower(),
+                                        "action": harvest_res.get("action", "winner_profit_banked"),
+                                        "side": pos_side,
+                                        "exit_price": harvest_res.get("exit_price", current_bid),
+                                        "profit_locked_cents": harvest_res.get("profit_locked_cents", profit_c),
+                                        "outcome": determine_counterfactual_outcome(
+                                            pos_side, "winner_profit_banked", spot_price, item["target_price"], item["market"].get("result")
+                                        ),
+                                    }
+                                    continue
+                        if not client.has_resting_take_profit_order(ticker) and not has_floor and not dry_run:
+                            safe_tp = resolve_safe_take_profit_for_position(
+                                ticker=ticker,
+                                client=client,
+                                dynamic_filters=dynamic_filters,
+                            )
+                            client.place_take_profit_order(
+                                ticker=ticker,
+                                side=pos["side"],
+                                count=pos["count"],
+                                take_profit_cents=safe_tp,
+                            )
                     continue
 
                 # Market Choppiness Filter: Skip markets with > 2 lead changes across 50¢
@@ -2391,7 +2531,11 @@ def process_hourly_market_group(
                         # Enforce Empirical 1H Rules (Peak 1: 1-35¢ @ m=0-15, Peak 2: 36-50¢ / 51-65¢ @ m=25-45, Valley of Death BANNED)
                         is_valid_entry, entry_reason = is_valid_empirical_entry(yes_p, minute_past_hour, "1h")
                         if is_valid_entry:
-                            tp_target = 88 if yes_p >= 51 else max(62, yes_p + 25)
+                            tp_target = (
+                                calculate_micro_win_take_profit(yes_p, "1h")
+                                if dynamic_filters.get("enable_micro_wins", True)
+                                else (88 if yes_p >= 51 else max(62, yes_p + 25))
+                            )
                             mode_tag = "momentum" if yes_p >= 36 else "discount"
                             log.info(
                                 f"🎯 [EMPIRICAL +EV 1H ENTRY] [{ex_name}] {ticker} (YES @ {yes_p}¢, m={minute_past_hour}): "
@@ -2469,7 +2613,11 @@ def process_hourly_market_group(
                         # Enforce Empirical 1H Rules (Peak 1: 1-35¢ @ m=0-15, Peak 2: 36-50¢ / 51-65¢ @ m=25-45, Valley of Death BANNED)
                         is_valid_entry, entry_reason = is_valid_empirical_entry(no_p, minute_past_hour, "1h")
                         if is_valid_entry:
-                            tp_target = 88 if no_p >= 51 else max(62, no_p + 25)
+                            tp_target = (
+                                calculate_micro_win_take_profit(no_p, "1h")
+                                if dynamic_filters.get("enable_micro_wins", True)
+                                else (88 if no_p >= 51 else max(62, no_p + 25))
+                            )
                             mode_tag = "momentum" if no_p >= 36 else "discount"
                             log.info(
                                 f"🎯 [EMPIRICAL +EV 1H ENTRY] [{ex_name}] {ticker} (NO @ {no_p}¢, m={minute_past_hour}): "
@@ -2521,38 +2669,41 @@ def process_hourly_market_group(
                                     f"Blocked by empirical rule [{entry_reason}]. Saved as counterfactual tracking snapshot."
                                 )
 
-        # Step 3D: Multi-Strike Selection & Tiebreaker Execution
-        best_yes = min(valid_yes_candidates, key=lambda c: c["price"]) if valid_yes_candidates else None
-        best_no = min(valid_no_candidates, key=lambda c: c["price"]) if valid_no_candidates else None
+        # Step 3D: Tri-Peak Multi-Strike Selection & Tiebreaker Execution
+        # Priority 1: Peak 1 (Asymmetric Deep Discount: 1¢–35¢) - Heavily Prioritized
+        # Priority 2: Peak 2 (Early/Mid Value: 36¢–65¢) - Allowed with confirmed price increase signal
+        # Priority 3: Peak 3 (Endgame Favorite Maker: 86¢–93¢) - Evaluated below if no Peak 1/2 trades executed
+        all_cands = valid_yes_candidates + valid_no_candidates
+        peak1_cands = [c for c in all_cands if c["price"] <= 35]
+        peak2_cands = []
+        for c in all_cands:
+            if 36 <= c["price"] <= 65:
+                # Peak 2 check: Require active signal that contract price will increase
+                c_dist = c.get("pct_dist")
+                c_lead = c_dist if c_dist is not None else 0.0
+                if c_lead > 0.05:
+                    peak2_cands.append(c)
+                else:
+                    log.info(
+                        f"🛡️ [HOURLY PEAK 2 SIGNAL GATE] [{ex_name}] Hourly {c['ticker']} ({c['side'].upper()} @ {c['price']}¢): "
+                        f"Spot lead ({c_lead:+.2f}%) does not confirm upward price momentum. Skipping early value entry."
+                    )
 
         candidates_to_execute = []
-
-        if best_yes and best_no:
-            # Pick single best directional opportunity to eliminate dual-buy synthetic loss risk
-            if best_yes["price"] < best_no["price"]:
-                chosen = best_yes
-                log.info(
-                    f"🎯 [SINGLE-DIRECTION OPPORTUNITY CHOSEN] [{ex_name}] {symbol} Hourly: "
-                    f"BUY_YES on {best_yes['ticker']} ({best_yes['price']}¢) is cheaper than BUY_NO on {best_no['ticker']} ({best_no['price']}¢). Picking BUY_YES."
-                )
-            elif best_no["price"] < best_yes["price"]:
-                chosen = best_no
-                log.info(
-                    f"🎯 [SINGLE-DIRECTION OPPORTUNITY CHOSEN] [{ex_name}] {symbol} Hourly: "
-                    f"BUY_NO on {best_no['ticker']} ({best_no['price']}¢) is cheaper than BUY_YES on {best_yes['ticker']} ({best_yes['price']}¢). Picking BUY_NO."
-                )
-            else:
-                pct_val = best_yes.get("pct_dist") or 0.0
-                chosen = best_yes if pct_val >= 0 else best_no
-                log.info(
-                    f"🎯 [SINGLE-DIRECTION OPPORTUNITY CHOSEN] [{ex_name}] {symbol} Hourly: "
-                    f"YES and NO tied at {chosen['price']}¢. Picking {chosen['side'].upper()} on {chosen['ticker']} based on spot momentum ({pct_val:+.2f}%)."
-                )
+        if peak1_cands:
+            chosen = min(peak1_cands, key=lambda c: c["price"])
             candidates_to_execute.append(chosen)
-        elif best_yes:
-            candidates_to_execute.append(best_yes)
-        elif best_no:
-            candidates_to_execute.append(best_no)
+            log.info(
+                f"🎯 [PEAK 1 ASYMMETRIC DISCOUNT CHOSEN] [{ex_name}] {symbol} Hourly: "
+                f"{chosen['ticker']} ({chosen['side'].upper()} @ {chosen['price']}¢) heavily prioritized over other tiers."
+            )
+        elif peak2_cands:
+            chosen = min(peak2_cands, key=lambda c: c["price"])
+            candidates_to_execute.append(chosen)
+            log.info(
+                f"🎯 [PEAK 2 EARLY VALUE CHOSEN] [{ex_name}] {symbol} Hourly: "
+                f"{chosen['ticker']} ({chosen['side'].upper()} @ {chosen['price']}¢) with confirmed upward signal."
+            )
 
         # -------------------------------------------------------------------
         # Ensemble Consensus & Settlement Streak Gating for Hourly Markets
@@ -2677,6 +2828,51 @@ def process_hourly_market_group(
                     details["consensus_regime"] = chosen_consensus.get("regime")
                     details["streak_length"] = chosen_consensus.get("streak_length")
                 trade_executed_by_ticker[ticker] = details
+                hourly_buy_executed = True
+
+        # Step 3F: Priority 3 - Peak 3 Endgame Favorite Maker Strategy (>= 86¢ resting maker bid)
+        # Allowed ONLY if neither Peak 1 nor Peak 2 was executed, AND substantial belief is satisfied!
+        if not hourly_buy_executed and dynamic_filters.get("enable_favorite_maker", True):
+            fav_opp_by_ticker = {}
+            for item in parsed_markets:
+                ticker = item["ticker"]
+                if ticker in cut_loss_tickers or client.has_existing_position_or_order(ticker) or ticker in trade_executed_by_ticker:
+                    continue
+                fav_opp = evaluate_favorite_maker_opportunity(
+                    market=item["market"],
+                    quotes=item["quotes"],
+                    rem_mins=item["rem_mins"],
+                    dynamic_filters=dynamic_filters,
+                    client=client,
+                    min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
+                    max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                    min_rem_mins=1.0,
+                    max_rem_mins=25.0,
+                    spot_price=spot_price,
+                    target_price=item.get("target_price"),
+                    asset_realized_pnl=asset_realized_pnl,
+                )
+                if fav_opp is not None:
+                    fav_opp_by_ticker[ticker] = fav_opp
+
+            if fav_opp_by_ticker:
+                best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
+                best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
+                fav_count = best_fav.get("count", 1)
+                fav_executed, fav_details = _execute_favorite_maker_flow(
+                    ticker=best_fav_ticker,
+                    side=best_fav["side"],
+                    maker_bid=best_fav["maker_bid"],
+                    target_ask=best_fav["target_ask"],
+                    spot_price=spot_price,
+                    target_price=best_item["target_price"],
+                    market_result=best_item["market"].get("result"),
+                    client=client,
+                    dry_run=effective_dry_run,
+                    count=fav_count,
+                )
+                if fav_executed and fav_details:
+                    trade_executed_by_ticker[best_fav_ticker] = fav_details
 
     # -----------------------------------------------------------------------
     # Step 3D: Endgame Favorite Maker Scan on Non-Entry Marks (:40, :50, :55, :57.5)

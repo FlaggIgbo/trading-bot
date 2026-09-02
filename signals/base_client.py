@@ -766,29 +766,14 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Bid: {bid_price}¢ | Ask: {ask_price}¢ | Status: {pnl_label}"
         )
 
-        # 1. Favorite Maker EV-Preservation Guard (Reddit Empirical Finding):
-        # Dipped favorites recover 70%+ of the time, so we allow reasonable fluctuations.
-        # However, if a favorite severely breaks down (bid_price < 35¢ or loss > 40¢),
-        # we trigger a hard stop-loss to prevent a total 100% loss at 0¢ settlement.
-        is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
-        if is_favorite_maker:
-            if bid_price >= 35 and loss_cents <= 40:
-                log.info(
-                    f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
-                    f"Holding viable favorite position into settlement (entry: {entry_price}¢, bid: {bid_price}¢). "
-                    f"Bypassing intermediate noise to capture full 100¢ payout."
-                )
-                return {"triggered": False, "action": "favorite_maker_holding"}
-            else:
-                log.warning(
-                    f"⚠️ [FAVORITE HARD STOP] [{self.exchange_name}] {ticker} ({side.upper()}): "
-                    f"Favorite entered at {entry_price}¢ has severely collapsed to {bid_price}¢ (loss: -{loss_cents}¢). "
-                    f"Executing hard stop-loss liquidation to salvage capital!"
-                )
-
-        # 2. Winning Position Profit Bank: If position reached >= 70¢ or profit >= 15¢
+        # 1. Winning Position Micro-Profit Bank (Acorns-style micro-wins):
+        # If position is in profit above dynamic micro-win threshold OR reached target TP:
         # Sell at Bid to bank realized profit in cash. Keep the cash in balance (DO NOT re-buy at 85¢-98¢ into negative EV).
-        if bid_price >= win_threshold_cents or profit_cents >= 15:
+        micro_win_target = 5 if entry_price <= 35 else (6 if entry_price <= 50 else 5)
+        is_micro_win = (profit_cents >= micro_win_target) or (profit_cents >= 15) or (
+            win_threshold_cents is not None and win_threshold_cents < 100 and bid_price >= win_threshold_cents and profit_cents > 0
+        )
+        if is_micro_win:
             if dry_run:
                 log.info(
                     f"{LogTag.DRY_RUN_WINNER_ROLLED.value} [{self.exchange_name}] {ticker} ({side.upper()}): "
@@ -832,6 +817,26 @@ class BaseTradingClient(ABC):
                 "exit_price": bid_price,
                 "profit_locked_cents": profit_cents,
             }
+
+        # 2. Favorite Maker EV-Preservation Guard (Reddit Empirical Finding):
+        # Dipped favorites recover 70%+ of the time, so we allow reasonable fluctuations.
+        # However, if a favorite severely breaks down (bid_price < 35¢ or loss > 40¢),
+        # we trigger a hard stop-loss to prevent a total 100% loss at 0¢ settlement.
+        is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
+        if is_favorite_maker:
+            if bid_price >= 35 and loss_cents <= 40:
+                log.info(
+                    f"🛡️ [FAVORITE MAKER HOLD] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Holding viable favorite position into settlement (entry: {entry_price}¢, bid: {bid_price}¢). "
+                    f"Bypassing intermediate noise to capture full 100¢ payout."
+                )
+                return {"triggered": False, "action": "favorite_maker_holding"}
+            else:
+                log.warning(
+                    f"⚠️ [FAVORITE HARD STOP] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Favorite entered at {entry_price}¢ has severely collapsed to {bid_price}¢ (loss: -{loss_cents}¢). "
+                    f"Executing hard stop-loss liquidation to salvage capital!"
+                )
 
         # 3. Stop-Loss Check: If loss >= stop_loss_threshold_cents OR bid_price <= price_floor
         is_loss_exceeded = loss_cents >= stop_loss_threshold_cents

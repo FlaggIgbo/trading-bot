@@ -1242,12 +1242,13 @@ class KalshiClient(BaseTradingClient):
         target_ask_cents: int,
         count: int = 1,
         buy_order_timeout_seconds: int = 60,
+        take_profit_cents: int | None = None,
     ) -> dict:
         """
         Submits a post_only Maker Limit Bid for a confirmed Favorite (74¢–93¢).
         - Places resting limit bid inside the spread (1¢–2¢ below ask, or 1¢ above bid).
         - Captures the spread discount and avoids taker fee friction (free maker trades on Kalshi crypto).
-        - Holds position through to 100¢ ($1.00) settlement payout without premature exit.
+        - Optionally sets early Take-Profit target to lock in micro-wins before settlement.
         """
         if is_5min_market(ticker):
             log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Kalshi] Refusing to place Favorite Maker order on 5-minute market: {ticker}")
@@ -1282,28 +1283,31 @@ class KalshiClient(BaseTradingClient):
         if buy_order_timeout_seconds > 0:
             buy_payload["expiration_ts"] = now_sec + buy_order_timeout_seconds
 
+        resolved_tp = take_profit_cents if (take_profit_cents and take_profit_cents < 100) else 100
+        tp_log_str = f", Target Micro-Win TP: {resolved_tp}¢" if resolved_tp < 100 else ""
         log.info(
             f"🎯 [FAVORITE MAKER BID] {ticker} | Side: {side_clean.upper()} | "
-            f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢) | Count: {count}"
+            f"Resting Bid: {effective_bid}¢ (Ask: {target_ask_cents}¢, Spread Saved: +{spread_saved}¢{tp_log_str}) | Count: {count}"
         )
 
         if not self.allow_live_orders:
             log.info(
                 f"🛡️ [SAFETY MODE] [Kalshi] Live orders disabled. Simulated Favorite Maker Buy for {ticker} "
-                f"({side_clean.upper()} x{count} @ {effective_bid}¢)."
+                f"({side_clean.upper()} x{count} @ {effective_bid}¢{tp_log_str})."
             )
             self.record_paper_position(
                 ticker=ticker,
                 side=side_clean,
                 count=count,
                 entry_price_cents=effective_bid,
-                target_tp_cents=100,
+                target_tp_cents=resolved_tp,
                 strategy_tag="endgame_favorite_maker",
                 entry_ts=now_sec,
             )
             return {
                 "buy_order": {"status": "simulated", "client_order_id": buy_payload["client_order_id"]},
                 "buy_price_cents": effective_bid,
+                "take_profit_cents": resolved_tp,
                 "client_order_id": buy_payload["client_order_id"],
                 "order_id": f"sim_fav_k_{now_ms}",
             }
@@ -1351,6 +1355,7 @@ class KalshiClient(BaseTradingClient):
             side=side_clean,
             count=count,
             client_order_id=client_order_id,
+            take_profit_cents=resolved_tp,
             strategy_tag="endgame_favorite_maker",
             spread_saved_cents=spread_saved,
             order_role="maker",
@@ -1360,6 +1365,7 @@ class KalshiClient(BaseTradingClient):
             "buy_order": buy_order_res,
             "side": side_clean,
             "buy_price_cents": effective_bid,
+            "take_profit_cents": resolved_tp,
             "target_ask_cents": target_ask_cents,
             "spread_saved_cents": spread_saved,
             "client_order_id": client_order_id,
