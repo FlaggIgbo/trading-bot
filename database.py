@@ -487,6 +487,9 @@ def save_settlements(settlements: list[dict]) -> int:
                 s_doc["entered_side"] = entered_side
                 s_doc["trade_won"] = (entered_side == market_res)
 
+            if "entry_price_cents" in s_doc and s_doc["entry_price_cents"] is not None:
+                s_doc["entry_cost_dollars"] = round(s_doc["entry_price_cents"] / 100.0, 4)
+
             collection.update_one(
                 filter_query,
                 {"$set": s_doc},
