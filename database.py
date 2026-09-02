@@ -123,6 +123,8 @@ def ensure_database_indexes(db=None) -> bool:
 
         # Prune legacy records beyond retention window on initial startup
         prune_old_market_snapshots(retention_hours=retention_hours)
+        prune_old_portfolio_pnl()
+        prune_old_active_positions()
         return True
     except Exception as error:
         log.warning(f"Could not initialize database indexes: {error}")
@@ -168,6 +170,64 @@ def prune_old_market_snapshots(retention_hours: int | None = None) -> int:
         return res.deleted_count
     except Exception as error:
         log.error(f"Failed to prune old market snapshots: {error}")
+        return 0
+
+
+def prune_old_portfolio_pnl(retention_days: int = 7) -> int:
+    """
+    Prunes portfolio PnL snapshots from 'portfolio_pnl' older than retention_days (default: 7 days).
+    Prevents continuous polling bloat from exhausting MongoDB Atlas storage quotas.
+
+    Args:
+        retention_days: Cutoff age in days (defaults to 7 days).
+
+    Returns:
+        int: Number of deleted documents.
+    """
+    try:
+        if _GLOBAL_MONGO_CLIENT is None:
+            return 0
+        db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
+        pnl_col = db.get_collection("portfolio_pnl")
+
+        cutoff_ts = int(time.time()) - (retention_days * 86400)
+        res = pnl_col.delete_many({"ts": {"$lt": cutoff_ts}})
+        if res.deleted_count > 0:
+            log.info(
+                f"🧹 Pruned {res.deleted_count:,} legacy portfolio PnL record(s) older than {retention_days}d from MongoDB Atlas."
+            )
+        return res.deleted_count
+    except Exception as error:
+        log.error(f"Failed to prune old portfolio PnL records: {error}")
+        return 0
+
+
+def prune_old_active_positions(retention_hours: int = 48) -> int:
+    """
+    Prunes stale position records from 'active_positions' older than retention_hours (default: 48h).
+    Cleans up orphaned or historical test positions while preserving active open contracts.
+
+    Args:
+        retention_hours: Cutoff age in hours (defaults to 48 hours).
+
+    Returns:
+        int: Number of deleted documents.
+    """
+    try:
+        if _GLOBAL_MONGO_CLIENT is None:
+            return 0
+        db = _GLOBAL_MONGO_CLIENT.get_database("trading_bot_db")
+        act_col = db.get_collection("active_positions")
+
+        cutoff_ts = int(time.time()) - (retention_hours * 3600)
+        res = act_col.delete_many({"updated_at": {"$lt": cutoff_ts}})
+        if res.deleted_count > 0:
+            log.info(
+                f"🧹 Pruned {res.deleted_count:,} stale active position record(s) older than {retention_hours}h from MongoDB Atlas."
+            )
+        return res.deleted_count
+    except Exception as error:
+        log.error(f"Failed to prune old active position records: {error}")
         return 0
 
 

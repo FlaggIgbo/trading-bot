@@ -60,7 +60,9 @@ from database import (
     is_default_exploration_window,
     is_mid_zone_exploration_window,
     is_valid_empirical_entry,
+    prune_old_active_positions,
     prune_old_market_snapshots,
+    prune_old_portfolio_pnl,
     save_market_snapshots,
     save_portfolio_pnl,
     save_settlements,
@@ -119,6 +121,23 @@ def get_market_lead_changes(ticker: str) -> int:
 def is_market_choppy(ticker: str, max_lead_changes: int = 2) -> bool:
     """Returns True if the market has flipped direction more than max_lead_changes times."""
     return get_market_lead_changes(ticker) > max_lead_changes
+
+
+def prune_market_lead_changes_cache(max_age_seconds: float = 3600.0) -> int:
+    """
+    Removes tickers from in-memory _MARKET_LEAD_CHANGES whose snapshots are older than max_age_seconds (default: 1 hour).
+    Prevents long-running Render workers from accumulating dead ticker keys in RAM.
+    """
+    now = time.time()
+    stale_tickers = [
+        ticker for ticker, snaps in _MARKET_LEAD_CHANGES.items()
+        if not snaps or (now - snaps[-1]["ts"] > max_age_seconds)
+    ]
+    for ticker in stale_tickers:
+        _MARKET_LEAD_CHANGES.pop(ticker, None)
+    if stale_tickers:
+        log.info(f"🧹 Cleaned up {len(stale_tickers)} expired ticker(s) from in-memory lead change tracking cache.")
+    return len(stale_tickers)
 
 # Supported symbols across exchanges (Crypto, Commodities, Equity Indices)
 SUPPORTED_SYMBOLS = (
@@ -3487,14 +3506,17 @@ def main():
         except Exception as error:
             log.error(f"Unexpected error in loop pass: {error}")
 
-        # Periodic automated MongoDB snapshot pruning (runs once per hour)
+        # Periodic automated MongoDB snapshot pruning & RAM memory maintenance (runs once per hour)
         current_hour = datetime.now(timezone.utc).hour
         if current_hour != last_prune_hour:
             try:
                 prune_old_market_snapshots()
+                prune_old_portfolio_pnl()
+                prune_old_active_positions()
+                prune_market_lead_changes_cache()
                 last_prune_hour = current_hour
             except Exception as prune_err:
-                log.warning(f"Periodic snapshot pruning notice: {prune_err}")
+                log.warning(f"Periodic snapshot and memory pruning notice: {prune_err}")
 
         sleep_seconds = calculate_seconds_until_next_checkpoint(offset_seconds=30.0)
         target_utc = datetime.now(timezone.utc) + timedelta(seconds=sleep_seconds)

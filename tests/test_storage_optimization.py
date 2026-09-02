@@ -295,3 +295,65 @@ def test_daily_asset_loss_gating_midnight_et_reset():
         is_gated, loss_val = is_asset_loss_gated("BTC", timeframe="15m", max_loss_dollars=1.0, now_utc=fixed_now_utc)
         assert is_gated is False
         assert loss_val == -0.50
+
+
+def test_prune_old_portfolio_pnl():
+    """Verify prune_old_portfolio_pnl deletes records older than cutoff days."""
+    from database import prune_old_portfolio_pnl
+
+    mock_coll = MagicMock()
+    mock_coll.delete_many.return_value.deleted_count = 150
+    mock_db = MagicMock()
+    mock_db.get_collection.return_value = mock_coll
+    mock_client = MagicMock()
+    mock_client.get_database.return_value = mock_db
+
+    with patch("database._GLOBAL_MONGO_CLIENT", mock_client):
+        deleted = prune_old_portfolio_pnl(retention_days=7)
+        assert deleted == 150
+        assert mock_coll.delete_many.called
+        query = mock_coll.delete_many.call_args[0][0]
+        assert "ts" in query
+        assert "$lt" in query["ts"]
+
+
+def test_prune_old_active_positions():
+    """Verify prune_old_active_positions deletes records older than cutoff hours."""
+    from database import prune_old_active_positions
+
+    mock_coll = MagicMock()
+    mock_coll.delete_many.return_value.deleted_count = 85
+    mock_db = MagicMock()
+    mock_db.get_collection.return_value = mock_coll
+    mock_client = MagicMock()
+    mock_client.get_database.return_value = mock_db
+
+    with patch("database._GLOBAL_MONGO_CLIENT", mock_client):
+        deleted = prune_old_active_positions(retention_hours=48)
+        assert deleted == 85
+        assert mock_coll.delete_many.called
+        query = mock_coll.delete_many.call_args[0][0]
+        assert "updated_at" in query
+        assert "$lt" in query["updated_at"]
+
+
+def test_prune_market_lead_changes_cache():
+    """Verify prune_market_lead_changes_cache removes stale tickers from in-memory dictionary."""
+    import time
+    from main import _MARKET_LEAD_CHANGES, prune_market_lead_changes_cache
+
+    _MARKET_LEAD_CHANGES.clear()
+    now = time.time()
+    # Add active ticker (recent snapshot)
+    _MARKET_LEAD_CHANGES["KXBTC15M-ACTIVE"] = [{"p": 50, "ts": now - 300}]
+    # Add stale ticker (> 1 hour old)
+    _MARKET_LEAD_CHANGES["KXBTC15M-STALE"] = [{"p": 40, "ts": now - 4000}]
+    # Add empty ticker
+    _MARKET_LEAD_CHANGES["KXBTC15M-EMPTY"] = []
+
+    pruned = prune_market_lead_changes_cache(max_age_seconds=3600.0)
+    assert pruned == 2
+    assert "KXBTC15M-ACTIVE" in _MARKET_LEAD_CHANGES
+    assert "KXBTC15M-STALE" not in _MARKET_LEAD_CHANGES
+    assert "KXBTC15M-EMPTY" not in _MARKET_LEAD_CHANGES
+
