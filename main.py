@@ -1062,7 +1062,27 @@ def evaluate_favorite_maker_opportunity(
         # If wide spread (>= 3¢) and runway is early (rem_mins >= 4.0m), place a deeper bid to capture higher margin.
         # Otherwise, place at top of book (max(yes_bid + 1, yes_ask - 2)) for guaranteed queue fill before expiration.
         is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
-        spread_cents = (yes_ask - yes_bid) if (yes_ask is not None and yes_bid is not None) else 0
+        spread_cents = (yes_ask - (yes_bid if yes_bid is not None else 0)) if yes_ask is not None else 0
+
+        # Wide Spread Gate: Reject illiquid order books (especially in commodities like GOLD/SILVER)
+        max_fav_spread = int(
+            dynamic_filters.get(
+                "max_commodity_spread",
+                os.getenv("FAVORITE_MAKER_COMMODITY_MAX_SPREAD", "8")
+            )
+        ) if is_commodity_high_vol else int(
+            dynamic_filters.get(
+                "max_favorite_spread",
+                os.getenv("FAVORITE_MAKER_MAX_SPREAD", "8")
+            )
+        )
+        if spread_cents > max_fav_spread:
+            log.info(
+                f"🛡️ [WIDE SPREAD GATE] [{ex_name}] {ticker} YES Favorite rejected: "
+                f"Spread ({spread_cents}¢: bid {yes_bid}¢ / ask {yes_ask}¢) exceeds max allowed ({max_fav_spread}¢)."
+            )
+            return None
+
         if is_early_endgame and spread_cents >= 3 and yes_bid is not None:
             maker_bid = min(yes_bid + 2, yes_ask - 2)
         else:
@@ -1070,6 +1090,39 @@ def evaluate_favorite_maker_opportunity(
         maker_bid = min(yes_ask - 1, max(1, maker_bid))
         if is_gemini_exchange:
             maker_bid = min(81, maker_bid)
+
+        # Determine strict minimum floor for maker_bid based on asset class and exchange profile:
+        # - Commodities (GOLD, SILVER, WTI): strictly >= 82¢ (reject illiquid wide spreads dragging bids into dead zone)
+        # - Standard Kalshi favorites: strictly >= 81¢ (above 51¢–80¢ Valley of Death)
+        # - Gemini or custom lower-bound corridors: scaled to min(effective_min_fav, 74)
+        if is_commodity_high_vol:
+            min_maker_floor = int(dynamic_filters.get("favorite_maker_commodity_min_bid", 82))
+        elif is_gemini_exchange or effective_min_fav < 80:
+            min_maker_floor = min(effective_min_fav, 74)
+        else:
+            min_maker_floor = int(dynamic_filters.get("favorite_maker_min_bid", 81))
+
+        if maker_bid < min_maker_floor:
+            log.info(
+                f"🛡️ [FAVORITE FLOOR GATE] [{ex_name}] {ticker} YES Favorite maker bid ({maker_bid}¢) "
+                f"below minimum allowed maker floor ({min_maker_floor}¢). Rejecting entry."
+            )
+            return None
+
+        # Hard Underdog & Valley of Death Protections on Kalshi:
+        if maker_bid <= 50:
+            log.info(
+                f"🛡️ [UNDERDOG BID GATE] [{ex_name}] {ticker} YES Favorite maker bid ({maker_bid}¢) "
+                f"is <= 50¢ (Underdog / Coin-flip). Strictly blocking Favorite entry."
+            )
+            return None
+
+        if not is_gemini_exchange and effective_min_fav >= 80 and (51 <= maker_bid <= 80):
+            log.info(
+                f"🛡️ [VALLEY OF DEATH GATE] [{ex_name}] {ticker} YES Favorite maker bid ({maker_bid}¢) "
+                f"falls inside Valley of Death (51¢–80¢). Strictly blocking entry."
+            )
+            return None
 
         # Dynamic Sizing & 70% Kalshi / 30% Gemini Capital Allocation:
         balance_cents = None
@@ -1150,7 +1203,27 @@ def evaluate_favorite_maker_opportunity(
                 return None
 
         is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
-        spread_cents = (no_ask - no_bid) if (no_ask is not None and no_bid is not None) else 0
+        spread_cents = (no_ask - (no_bid if no_bid is not None else 0)) if no_ask is not None else 0
+
+        # Wide Spread Gate: Reject illiquid order books (especially in commodities like GOLD/SILVER)
+        max_fav_spread = int(
+            dynamic_filters.get(
+                "max_commodity_spread",
+                os.getenv("FAVORITE_MAKER_COMMODITY_MAX_SPREAD", "8")
+            )
+        ) if is_commodity_high_vol else int(
+            dynamic_filters.get(
+                "max_favorite_spread",
+                os.getenv("FAVORITE_MAKER_MAX_SPREAD", "8")
+            )
+        )
+        if spread_cents > max_fav_spread:
+            log.info(
+                f"🛡️ [WIDE SPREAD GATE] [{ex_name}] {ticker} NO Favorite rejected: "
+                f"Spread ({spread_cents}¢: bid {no_bid}¢ / ask {no_ask}¢) exceeds max allowed ({max_fav_spread}¢)."
+            )
+            return None
+
         if is_early_endgame and spread_cents >= 3 and no_bid is not None:
             maker_bid = min(no_bid + 2, no_ask - 2)
         else:
@@ -1158,6 +1231,39 @@ def evaluate_favorite_maker_opportunity(
         maker_bid = min(no_ask - 1, max(1, maker_bid))
         if is_gemini_exchange:
             maker_bid = min(81, maker_bid)
+
+        # Determine strict minimum floor for maker_bid based on asset class and exchange profile:
+        # - Commodities (GOLD, SILVER, WTI): strictly >= 82¢ (reject illiquid wide spreads dragging bids into dead zone)
+        # - Standard Kalshi favorites: strictly >= 81¢ (above 51¢–80¢ Valley of Death)
+        # - Gemini or custom lower-bound corridors: scaled to min(effective_min_fav, 74)
+        if is_commodity_high_vol:
+            min_maker_floor = int(dynamic_filters.get("favorite_maker_commodity_min_bid", 82))
+        elif is_gemini_exchange or effective_min_fav < 80:
+            min_maker_floor = min(effective_min_fav, 74)
+        else:
+            min_maker_floor = int(dynamic_filters.get("favorite_maker_min_bid", 81))
+
+        if maker_bid < min_maker_floor:
+            log.info(
+                f"🛡️ [FAVORITE FLOOR GATE] [{ex_name}] {ticker} NO Favorite maker bid ({maker_bid}¢) "
+                f"below minimum allowed maker floor ({min_maker_floor}¢). Rejecting entry."
+            )
+            return None
+
+        # Hard Underdog & Valley of Death Protections on Kalshi:
+        if maker_bid <= 50:
+            log.info(
+                f"🛡️ [UNDERDOG BID GATE] [{ex_name}] {ticker} NO Favorite maker bid ({maker_bid}¢) "
+                f"is <= 50¢ (Underdog / Coin-flip). Strictly blocking Favorite entry."
+            )
+            return None
+
+        if not is_gemini_exchange and effective_min_fav >= 80 and (51 <= maker_bid <= 80):
+            log.info(
+                f"🛡️ [VALLEY OF DEATH GATE] [{ex_name}] {ticker} NO Favorite maker bid ({maker_bid}¢) "
+                f"falls inside Valley of Death (51¢–80¢). Strictly blocking entry."
+            )
+            return None
 
         balance_cents = None
         if hasattr(client, "get_balance_cents"):
@@ -1216,6 +1322,22 @@ def _execute_favorite_maker_flow(
         log.info(
             f"🛡️ [HARD POSITION GATE] [{ex_name}] {ticker}: "
             f"An active position or resting order already exists on either side (YES/NO). Strictly blocking Favorite Maker order submission."
+        )
+        return False, None
+
+    # Hard Valley of Death & Underdog gate: strictly prevent any maker order in the 51¢–80¢ dead-zone or <= 50¢ on Kalshi
+    is_gemini = "gemini" in ex_name.lower() or "gemini" in str(ticker).lower() or str(ticker).startswith("GEMI-")
+    if maker_bid <= 50:
+        log.warning(
+            f"🛡️ [UNDERDOG HARD GATE] [{ex_name}] {ticker}: "
+            f"Maker bid {maker_bid}¢ is <= 50¢ (Underdog / Coin-flip). Strictly blocking Favorite Maker order submission."
+        )
+        return False, None
+
+    if not is_gemini and 51 <= maker_bid <= 80:
+        log.warning(
+            f"🛡️ [VALLEY OF DEATH HARD GATE] [{ex_name}] {ticker}: "
+            f"Maker bid {maker_bid}¢ falls inside the Valley of Death (51¢–80¢). Strictly blocking Favorite Maker order submission."
         )
         return False, None
 

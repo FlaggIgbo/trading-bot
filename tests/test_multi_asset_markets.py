@@ -477,3 +477,179 @@ def test_silver_stricter_spot_lead_gate(multi_asset_client, mock_filter):
     assert opp_strong_lead is not None
     assert opp_strong_lead["side"] == "yes"
 
+
+def test_commodity_wide_spread_rejection_forensic(multi_asset_client, mock_filter):
+    """Forensic unit tests matching the real-world KXSILVERH and KXGOLDH failures:
+    Verifies that wide-spread (>8¢) or illiquid order books on commodities are strictly rejected.
+    """
+    from main import evaluate_favorite_maker_opportunity
+
+    # 1. Real KXSILVERH-26SEP0219-T65.349 failure case (Bid: 71¢, Ask: 93¢ -> 22¢ spread)
+    silver_mkt = {
+        "ticker": "KXSILVERH-26SEP0219-T65.349",
+        "series_ticker": "KXSILVERH",
+        "floor_strike": 65.349,
+    }
+    quotes_silver_wide = {
+        "yes_ask": 93,
+        "yes_bid": 71,
+        "no_ask": 29,
+        "no_bid": 7,
+    }
+    opp_silver = evaluate_favorite_maker_opportunity(
+        market=silver_mkt,
+        quotes=quotes_silver_wide,
+        rem_mins=24.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=66.00,  # strong spot lead
+        target_price=65.349,
+    )
+    assert opp_silver is None, "Expected KXSILVERH with 22¢ spread to be rejected"
+
+    # 2. Real KXGOLDH-26SEP0219-T4383.99 failure case (Bid: 66¢, Ask: 86¢ -> 20¢ spread)
+    gold_mkt = {
+        "ticker": "KXGOLDH-26SEP0219-T4383.99",
+        "series_ticker": "KXGOLDH",
+        "floor_strike": 4383.99,
+    }
+    quotes_gold_wide = {
+        "yes_ask": 86,
+        "yes_bid": 66,
+        "no_ask": 34,
+        "no_bid": 14,
+    }
+    opp_gold = evaluate_favorite_maker_opportunity(
+        market=gold_mkt,
+        quotes=quotes_gold_wide,
+        rem_mins=16.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=4420.0,
+        target_price=4383.99,
+    )
+    assert opp_gold is None, "Expected KXGOLDH with 20¢ spread to be rejected"
+
+    # 3. Real KXSILVERH-26SEP0219-T65.299 failure case (Bid: 37¢, Ask: 89¢ -> 52¢ spread)
+    quotes_silver_extreme = {
+        "yes_ask": 89,
+        "yes_bid": 37,
+        "no_ask": 63,
+        "no_bid": 11,
+    }
+    opp_silver_extreme = evaluate_favorite_maker_opportunity(
+        market=silver_mkt,
+        quotes=quotes_silver_extreme,
+        rem_mins=4.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=66.00,
+        target_price=65.349,
+    )
+    assert opp_silver_extreme is None, "Expected KXSILVERH with 52¢ spread to be rejected"
+
+    # 4. NO-side wide spread rejection on commodity
+    quotes_no_wide = {
+        "yes_ask": 35,
+        "yes_bid": 10,
+        "no_ask": 90,
+        "no_bid": 65,  # 25¢ spread on NO
+    }
+    opp_no_wide = evaluate_favorite_maker_opportunity(
+        market=silver_mkt,
+        quotes=quotes_no_wide,
+        rem_mins=10.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=64.00,  # spot below strike -> favorable for NO
+        target_price=65.349,
+    )
+    assert opp_no_wide is None, "Expected NO side with 25¢ spread to be rejected"
+
+
+def test_commodity_valley_of_death_floor_and_execution_gates(multi_asset_client, mock_filter):
+    """Verifies that even if spread filter is relaxed, maker bids < 82¢ on commodities
+    or inside the Valley of Death (51¢–80¢) are strictly blocked from execution."""
+    from main import evaluate_favorite_maker_opportunity, _execute_favorite_maker_flow
+
+    gold_mkt = {
+        "ticker": "KXGOLDH-26SEP0219-T4383.99",
+        "series_ticker": "KXGOLDH",
+        "floor_strike": 4383.99,
+    }
+    # Relax spread gate to test that maker_bid floor specifically catches it
+    relaxed_filter = dict(mock_filter)
+    relaxed_filter["max_commodity_spread"] = 30
+
+    # Bid 71¢, Ask 93¢ -> maker_bid would be 73¢ (inside Valley of Death 51¢–80¢ and < 82¢ floor)
+    quotes = {"yes_ask": 93, "yes_bid": 71, "no_ask": 29, "no_bid": 7}
+    opp = evaluate_favorite_maker_opportunity(
+        market=gold_mkt,
+        quotes=quotes,
+        rem_mins=10.0,
+        dynamic_filters=relaxed_filter,
+        client=multi_asset_client,
+        spot_price=4420.0,
+        target_price=4383.99,
+    )
+    assert opp is None, "Maker bid of 73¢ must be rejected by commodity floor / Valley of Death gate"
+
+    # Direct test of _execute_favorite_maker_flow defense-in-depth gate
+    multi_asset_client.has_existing_position_or_order = lambda t: False
+    success_vod, details_vod = _execute_favorite_maker_flow(
+        ticker="KXGOLDH-26SEP0219-T4383.99",
+        side="yes",
+        maker_bid=73,  # Valley of Death
+        target_ask=93,
+        spot_price=4420.0,
+        target_price=4383.99,
+        market_result=None,
+        client=multi_asset_client,
+        dry_run=False,
+    )
+    assert success_vod is False
+    assert details_vod is None
+
+    # Underdog bid (<= 50¢) directly blocked
+    success_underdog, details_underdog = _execute_favorite_maker_flow(
+        ticker="KXSILVERH-26SEP0219-T65.299",
+        side="yes",
+        maker_bid=39,
+        target_ask=89,
+        spot_price=66.0,
+        target_price=65.299,
+        market_result=None,
+        client=multi_asset_client,
+        dry_run=False,
+    )
+    assert success_underdog is False
+    assert details_underdog is None
+
+
+def test_commodity_tight_spread_favorite_accepted(multi_asset_client, mock_filter):
+    """Verifies that liquid, healthy commodity favorite contracts (spread <= 8¢, maker_bid >= 82¢)
+    are approved normally."""
+    from main import evaluate_favorite_maker_opportunity
+
+    silver_mkt = {
+        "ticker": "KXSILVERH-VALID",
+        "series_ticker": "KXSILVERH",
+        "floor_strike": 65.0,
+    }
+    # Tight spread (3¢: Bid 86¢, Ask 89¢) -> maker_bid will be 87¢ (>= 82¢ floor)
+    quotes = {"yes_ask": 89, "yes_bid": 86, "no_ask": 14, "no_bid": 11}
+    opp = evaluate_favorite_maker_opportunity(
+        market=silver_mkt,
+        quotes=quotes,
+        rem_mins=5.0,
+        dynamic_filters=mock_filter,
+        client=multi_asset_client,
+        spot_price=65.40,  # 0.61% spot lead >= 0.50%
+        target_price=65.0,
+    )
+    assert opp is not None
+    assert opp["side"] == "yes"
+    assert opp["maker_bid"] == 87
+    assert opp["maker_bid"] >= 82
+
+
