@@ -401,3 +401,86 @@ def test_hourly_tri_peak_prioritizes_peak1_over_peak3(monkeypatch):
     assert client.buys[0]["ticker"] == "KXBTC1H-26AUG1800-T59900"
     assert client.buys[0]["buy_price_cents"] == 25
 
+
+def test_continuous_micro_profit_harvester_banks_profit_at_endgame_marks():
+    """Verify that micro-win harvester banks profits at minute 12.5 and minute 14 instead of holding to expiration."""
+    client = MockMicroWinClient()
+    ticker = "KXBTC15M-ENDGAME-WIN"
+    client.set_position(ticker, side="yes", count=1, entry_price_cents=20, target_tp_cents=27)
+
+    market = {
+        "ticker": ticker,
+        "series_ticker": "KXBTC15M",
+        "yes_ask_dollars": "0.30",
+        "yes_bid_dollars": "0.28",  # Market bid is 28¢ -> +8¢ profit!
+        "no_ask_dollars": "0.72",
+        "no_bid_dollars": "0.70",
+        "close_time": "2026-08-17T02:00:00Z",
+        "floor_strike": 60000.0,
+        "exchange": "kalshi",
+    }
+    # Minute 12.5 (previously blocked by is_12_5min_mark lock)
+    now_utc_12 = datetime(2026, 8, 17, 1, 57, 30, tzinfo=timezone.utc)
+    snap_12 = process_single_market(
+        market=market,
+        is_trading_interval=False,
+        client=client,
+        now_utc=now_utc_12,
+        minute_past_hour=12,
+        spot_cache={"BTC": 60080.0},
+        dry_run=False,
+    )
+
+    assert len(client.liquidations) == 1
+    assert client.liquidations[0]["ticker"] == ticker
+    assert client.liquidations[0]["price"] == 28
+    assert client.get_market_position(ticker) is None
+    assert snap_12.get("trd", {}).get("action") == "winner_profit_banked"
+    assert snap_12.get("trd", {}).get("profit_locked_cents") == 8
+
+
+def test_relaxed_empirical_entry_time_window_m0_to_m10():
+    """Verify that empirical entry allows discount & value entries across m=0..10, while banning the Valley of Death."""
+    from database import is_valid_empirical_entry
+
+    # Discount corridor (1¢-35¢): allowed across m=0..10
+    for m in range(0, 11):
+        valid, reason = is_valid_empirical_entry(25, m, "15m")
+        assert valid is True, f"Failed at minute {m} for 25¢"
+        assert "discount" in reason
+
+    # Value corridor (36¢-50¢): allowed across m=0..10
+    for m in range(0, 11):
+        valid, reason = is_valid_empirical_entry(45, m, "15m")
+        assert valid is True, f"Failed at minute {m} for 45¢"
+        assert "value" in reason
+
+    # Valley of Death (51¢-80¢): STRICTLY BANNED across ALL minutes
+    for m in range(0, 15):
+        for p in [51, 55, 60, 65, 70, 75, 80]:
+            valid, reason = is_valid_empirical_entry(p, m, "15m")
+            assert valid is False, f"Failed: {p}¢ was allowed at minute {m}"
+            assert "valley_of_death_banned" in reason
+
+    # Endgame taker buys (minutes 11..14) are rejected
+    for m in [11, 12, 13, 14]:
+        valid, reason = is_valid_empirical_entry(25, m, "15m")
+        assert valid is False
+        assert "disallowed_zone" in reason
+
+
+def test_calculate_micro_win_take_profit_dynamic_volatility_and_decay():
+    """Verify dynamic TP scaling with high-volatility assets and late-window decay."""
+    # High-volatility asset (SOL) aims for higher target gain
+    tp_sol = calculate_micro_win_take_profit(15, timeframe="15m", asset_symbol="SOL", minute_into_market=2)
+    tp_btc = calculate_micro_win_take_profit(15, timeframe="15m", asset_symbol="BTC", minute_into_market=2)
+    assert tp_sol >= tp_btc
+
+    # Late-window entry (minute 8) tightens target to bank before expiration theta decay
+    tp_early = calculate_micro_win_take_profit(86, timeframe="15m", asset_symbol="DEFAULT", minute_into_market=2)
+    tp_late = calculate_micro_win_take_profit(86, timeframe="15m", asset_symbol="DEFAULT", minute_into_market=8)
+    assert tp_late <= tp_early
+    assert tp_late == 91  # +5¢ fast exit instead of +6¢
+    assert tp_early == 92
+
+

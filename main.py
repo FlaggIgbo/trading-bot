@@ -1596,7 +1596,7 @@ def process_single_market(
                 target_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
                 is_micro_win = (profit_c >= micro_target) or (target_tp is not None and target_tp < 100 and current_bid >= target_tp)
 
-                if is_micro_win and not is_stop_loss_interval and not is_12_5min_mark and not is_14min_mark:
+                if is_micro_win and not is_stop_loss_interval:
                     roi_pct = (profit_c / entry_p) * 100.0
                     log.info(
                         f"🌱 [MICRO-WIN HARVESTER] [{ex_name}] {ticker} ({pos_side.upper()} x{pos.get('count', 1)}): "
@@ -1692,7 +1692,12 @@ def process_single_market(
 
                 if is_valid_entry:
                     tp_target = (
-                        calculate_micro_win_take_profit(p_cents, "15m")
+                        calculate_micro_win_take_profit(
+                            p_cents,
+                            "15m",
+                            asset_symbol=asset_symbol,
+                            minute_into_market=minute_into_market,
+                        )
                         if dynamic_filters.get("enable_micro_wins", True)
                         else max(62, p_cents + 25)
                     )
@@ -2473,7 +2478,7 @@ def process_hourly_market_group(
                             target_tp = getattr(client, "get_target_tp", lambda t: None)(ticker)
                             is_micro_win = (profit_c >= micro_target) or (target_tp is not None and target_tp < 100 and current_bid >= target_tp)
 
-                            if is_micro_win and not is_hourly_stop_loss_mark and not is_hourly_endgame_mark and not is_hourly_crash_mark:
+                            if is_micro_win:
                                 roi_pct = (profit_c / entry_p) * 100.0
                                 log.info(
                                     f"🌱 [MICRO-WIN HARVESTER] [{ex_name}] Hourly {ticker} ({pos_side.upper()} x{pos.get('count', 1)}): "
@@ -2551,7 +2556,12 @@ def process_hourly_market_group(
                         is_valid_entry, entry_reason = is_valid_empirical_entry(yes_p, minute_past_hour, "1h")
                         if is_valid_entry:
                             tp_target = (
-                                calculate_micro_win_take_profit(yes_p, "1h")
+                                calculate_micro_win_take_profit(
+                                    yes_p,
+                                    "1h",
+                                    asset_symbol=symbol,
+                                    minute_into_market=minute_past_hour,
+                                )
                                 if dynamic_filters.get("enable_micro_wins", True)
                                 else (88 if yes_p >= 51 else max(62, yes_p + 25))
                             )
@@ -2633,7 +2643,12 @@ def process_hourly_market_group(
                         is_valid_entry, entry_reason = is_valid_empirical_entry(no_p, minute_past_hour, "1h")
                         if is_valid_entry:
                             tp_target = (
-                                calculate_micro_win_take_profit(no_p, "1h")
+                                calculate_micro_win_take_profit(
+                                    no_p,
+                                    "1h",
+                                    asset_symbol=symbol,
+                                    minute_into_market=minute_past_hour,
+                                )
                                 if dynamic_filters.get("enable_micro_wins", True)
                                 else (88 if no_p >= 51 else max(62, no_p + 25))
                             )

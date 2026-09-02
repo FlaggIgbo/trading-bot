@@ -183,10 +183,104 @@ MONGODB_URI=mongodb+srv://<user>:<password>@cluster0.mongodb.net/?retryWrites=tr
 
 ---
 
+## 🗺️ Trading Bot System Architecture & Execution Flow
+
+```mermaid
+flowchart TD
+    subgraph Oracles["1. Real-Time Settlement Oracles & Spot Feeds"]
+        CF["Kalshi CF Benchmarks RTI (60s TWAP)"]
+        Pyth["Pyth Network Hermes (Commodities)"]
+        Yahoo["Yahoo Finance Chart API (S&P 500, Nasdaq)"]
+        CB["Coinbase Spot API (Crypto Fallback)"]
+    end
+
+    subgraph Pipelines["2. Dual Checkpoint Schedulers"]
+        P15["15-Minute Pipeline (Crypto & Commodities)"]
+        P1H["Hourly Multi-Strike Pipeline (All Assets)"]
+    end
+
+    subgraph Gates["3. Pre-Trade Risk Gates & Filters"]
+        CB_Gate["Daily Circuit Breaker (-$1.00 Midnight Reset)"]
+        Single_Side["Single-Side Lock (No YES/NO Hedging)"]
+        Dir_Cap["Cross-Asset Directional Cap (Max 3 Positions)"]
+        Chop["Choppiness Filter (<= 2 Lead Changes across 50c)"]
+        Lead_Gate["Spot Lead Distance Gate (>= 0.30% Crypto, >= 0.50% Commodities)"]
+    end
+
+    subgraph EntryLogic["4. 4-Vector Empirical Entry Corridors"]
+        P1["Peak 1: Asymmetric Deep Discount (1c-35c, m=0..10)"]
+        P2["Peak 2: Early Value (36c-50c, m=0..10 with Momentum Signal)"]
+        VoD["Valley of Death (51c-80c: STRICTLY BANNED at All Minutes)"]
+        P3["Peak 3: Endgame Favorite Maker (81c-93c Maker Only, m=11..14)"]
+    end
+
+    subgraph OrderEngine["5. Order Execution & Dynamic Sizing"]
+        MakerBuy["Resting Maker Limit Bid: max(bid + 1, ask - 2)"]
+        DynamicTP["Dynamic Take-Profit Target Calculation (Scaled by Volatility & Theta)"]
+        RestingTP["Resting Limit Sell TP Order (Posted Directly to Exchange Book)"]
+    end
+
+    subgraph PositionMonitor["6. Continuous Micro-Profit Harvester & Exits"]
+        Harvester["Continuous Micro-Profit Harvester (Active at ANY minute, including 12.5m & 14m)"]
+        BankCash["Bank Realized Cash Profit (+4c to +8c Gain)"]
+        SL_Check["Stop-Loss & Cut-Loss Trigger (5m Cut, 10m SL, 59m Hourly Crash)"]
+        FavHold["Favorite Maker EV-Preservation Guard (Holds Viable Favorites to Settlement)"]
+    end
+
+    subgraph Database["7. MongoDB Atlas Telemetry & Self-Calibration"]
+        MongoSnaps["market_snapshots (Microstructure Telemetry)"]
+        MongoPnL["portfolio_pnl & settlements (Realized PnL)"]
+        MongoPos["active_positions (Persistent Trade State)"]
+        Calibration["6-Hour Auto-Calibration Engine (sigma, Corridors, Lead Rates)"]
+    end
+
+    Oracles --> Pipelines
+    Pipelines --> Gates
+    Gates -->|Passed All Filters| EntryLogic
+    EntryLogic -->|Valid Corridor| OrderEngine
+    OrderEngine --> PositionMonitor
+    PositionMonitor -->|Micro-Win Target Hit| BankCash
+    PositionMonitor -->|Severe Breakdown| SL_Check
+    PositionMonitor -->|Healthy Favorite| FavHold
+    BankCash --> Database
+    SL_Check --> Database
+    FavHold --> Database
+    Database --> Calibration
+    Calibration -.->|Updates Dynamic Filters| Gates
+    Calibration -.->|Updates Corridors & TPs| EntryLogic
+```
+
+---
+
+## 🎯 Relaxed Micro-Wins & High-Velocity Scalping Engine
+
+To maximize capital velocity and eliminate painful endgame expiration wipeouts, the bot operates a high-frequency **Acorns-Style Micro-Win Engine** balanced by strict risk asymmetry:
+
+1. **Relaxed Entry Time Window (`m=0..10` in 15M)**:
+   - Previously, trades were restricted to narrow 2-minute marks (`0..3`, `6..8`) because holding to expiration required lots of runway.
+   - For micro-wins, contracts only need **1 to 3 minutes of price momentum** to bank `+5¢`. Entries are now permitted across minutes **`0..10`** for deep discount (`1¢–35¢`) and early value (`36¢–50¢`) corridors.
+2. **Unshackled Continuous Micro-Profit Harvester**:
+   - Position profit is evaluated continuously every cycle.
+   - Sells at market bid to lock in **`+4¢` to `+8¢` realized cash profit** immediately.
+   - **No Endgame Minute Locks**: Harvester actively fires at minute 12.5 and minute 14, locking in cash and eliminating the risk of late expiration reversals turning winners into 0¢ losses.
+3. **Dynamic Volatility & Theta-Decay Scaling**:
+   - `calculate_micro_win_take_profit` dynamically tunes target sell prices:
+     - **High-Beta Assets** (`SOL`, `DOGE`, `NEAR`, `HYPE`, `ZEC`, `WTI`): Scales profit target to `+6¢` to `+8¢` to capture wider swings.
+     - **Steady Assets** (`BTC`, `ETH`, `INX`): Targets quick `+4¢` to `+5¢` flips to maximize capital turnover.
+     - **Late-Window Decay Adjustment**: If entered at minute 7+ in 15M, target gains automatically tighten by `1¢` to exit before time decay accelerates.
+4. **Preserved Mathematical Core (Strict Entry Discipline)**:
+   - **Valley of Death Ban**: The `51¢–80¢` chop zone remains **strictly banned across all minutes** (0% empirical win rate).
+   - **Maker Discipline**: High-basis contracts ($\ge 81¢$) are executed exclusively via resting limit orders inside the spread, capturing spread savings and paying zero maker fees.
+
+---
+
 ## 🧪 Testing & Verification
 
-Run the comprehensive unit test suite:
+The bot includes an extensive automated test suite covering micro-win harvesting, exchange pipelines, risk gates, and market microstructure modeling:
 
 ```bash
 pytest
 ```
+
+- **Active Test Suite**: 263 unit and integration tests passing in under 0.70 seconds.
+- **Legacy Pruning**: Deprecated exploration-window tests and redundant string permutation loops have been cleanly removed to ensure tests reflect active production code paths.

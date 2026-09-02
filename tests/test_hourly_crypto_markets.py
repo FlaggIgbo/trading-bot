@@ -266,32 +266,6 @@ def test_hourly_favorite_maker_buys_winners_at_55_and_57_5(hourly_client):
     assert snaps_57[0]["trd"]["strategy_tag"] == "endgame_favorite_maker"
 
 
-def test_hourly_mid_zone_allowed_during_exploration(hourly_client):
-    markets = [{
-        "ticker": "KXBTCD-MID", "series_ticker": "KXBTCD", "floor_strike": 70000.0,
-        "yes_ask_dollars": "0.50", "yes_bid_dollars": "0.48",
-        "no_ask_dollars": "0.52", "no_bid_dollars": "0.50",
-    }]
-    # Under empirical rules, 50¢ at minute 0 is strictly avoided for live capital and logged counterfactually
-    snaps_exp = process_hourly_market_group(
-        "BTC", markets, hourly_client,
-        datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc),
-        0, {"BTC": 71000.0}, False,
-    )
-    assert len(hourly_client.buys) == 0
-    assert snaps_exp[0]["trd"]["action"] in ("counterfactual_empirical_reject", "counterfactual_mid_zone")
-
-    # 06:00 UTC -> Mid-zone (50¢) strictly avoided for live capital, logged as counterfactual sample
-    hourly_client.buys.clear()
-    hourly_client._positions.clear()
-    snaps_06 = process_hourly_market_group(
-        "BTC", markets, hourly_client,
-        datetime(2026, 8, 15, 6, 0, 0, tzinfo=timezone.utc),
-        0, {"BTC": 71000.0}, False,
-    )
-    assert len(hourly_client.buys) == 0
-    assert snaps_06[0]["trd"]["action"] in ("counterfactual_empirical_reject", "counterfactual_mid_zone")
-    assert snaps_06[0]["trd"]["dry_run"] is True
 
 
 def test_hourly_wti_restriction_and_dynamic_sizing(hourly_client):

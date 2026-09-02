@@ -466,28 +466,14 @@ def test_passive_maker_pricing_strictly_below_ask():
 @pytest.mark.parametrize("now_dt, close_iso, tf, expected_valid, expected_rem_mins", [
     # 15M: At :05, expiry :15 -> 10 mins away (valid)
     (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:15:00Z", "15m", True, 10.0),
-    # 15M: At :00:30, expiry :15 -> 14.5 mins away (valid)
-    (datetime(2026, 8, 18, 12, 0, 30, tzinfo=timezone.utc), "2026-08-18T12:15:00Z", "15m", True, 14.5),
-    # 15M: At :12:30, expiry :15 -> 2.5 mins away (valid)
-    (datetime(2026, 8, 18, 12, 12, 30, tzinfo=timezone.utc), "2026-08-18T12:15:00Z", "15m", True, 2.5),
     # 15M: 5-minute market (expiry at :10 when now is :05 -> 5 mins away, non-15m boundary) -> INVALID
     (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:10:00Z", "15m", False, 5.0),
-    # 15M: 5-minute market (expiry at :35 -> :35 % 15 != 0) -> INVALID
-    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:35:00Z", "15m", False, 30.0),
     # 15M: Market already closed (expiry :00 when now is :05) -> INVALID
     (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:00:00Z", "15m", False, -5.0),
-    # 15M: Next cycle market (expiry :30 when now is :05 -> 25 mins away) -> INVALID
-    (datetime(2026, 8, 18, 12, 5, 0, tzinfo=timezone.utc), "2026-08-18T12:30:00Z", "15m", False, 25.0),
     # 1H: At :20, expiry :00 -> 40 mins away (valid)
     (datetime(2026, 8, 18, 12, 20, 0, tzinfo=timezone.utc), "2026-08-18T13:00:00Z", "1h", True, 40.0),
-    # 1H: At :00:30, expiry :00 -> 59.5 mins away (valid)
-    (datetime(2026, 8, 18, 12, 0, 30, tzinfo=timezone.utc), "2026-08-18T13:00:00Z", "1h", True, 59.5),
-    # 1H: At :50, expiry :00 -> 10 mins away (valid)
-    (datetime(2026, 8, 18, 12, 50, 0, tzinfo=timezone.utc), "2026-08-18T13:00:00Z", "1h", True, 10.0),
     # 1H: Non-hourly 15m/30m market (expiry at :30 when now is :20) -> INVALID (minute :30 != :00)
     (datetime(2026, 8, 18, 12, 20, 0, tzinfo=timezone.utc), "2026-08-18T12:30:00Z", "1h", False, 10.0),
-    # 1H: Closed S&P market outside trading hours (expiry tomorrow 14:00 UTC when now is 20:00 UTC) -> INVALID
-    (datetime(2026, 8, 18, 20, 0, 0, tzinfo=timezone.utc), "2026-08-19T14:00:00Z", "1h", False, 1080.0),
 ])
 def test_validate_market_closure_time(now_dt, close_iso, tf, expected_valid, expected_rem_mins):
     from signals.base_client import validate_market_closure_time

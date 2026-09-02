@@ -984,8 +984,17 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
         # 4. Peak 1b: Mid-Window Asymmetric Discount (1¢–35¢ at m=6-8, +51.8¢ to +80.0¢ EV)
         if 6 <= m_mod <= 8 and 1 <= price_cents <= 35:
             return True, "15m_mid_discount"
+
+        # 5. Relaxed Micro-Win Windows (m=0..10):
+        # Allow entries across m=0..10 for discount & value corridors since micro-wins
+        # only require 1-3 minutes of momentum to bank +5¢ profit (not full expiration).
+        if 0 <= m_mod <= 10:
+            if 1 <= price_cents <= 35:
+                return True, "15m_micro_discount_window"
+            elif 36 <= price_cents <= 50:
+                return True, "15m_micro_value_window"
             
-        # 5. Guard against high-basis taker buys (Peak 3 >= 81¢ is maker-only)
+        # 6. Guard against high-basis taker buys (Peak 3 >= 81¢ is maker-only)
         if price_cents >= 81:
             return False, f"15m_favorite_maker_only(p={price_cents}c,m={m_mod})"
             
@@ -1027,29 +1036,61 @@ def is_valid_empirical_entry(price_cents: int, minute: int, timeframe: str) -> t
     return False, f"unsupported_timeframe({tf})"
 
 
-def calculate_micro_win_take_profit(buy_price_cents: int, timeframe: str = "15m") -> int:
+def calculate_micro_win_take_profit(
+    buy_price_cents: int,
+    timeframe: str = "15m",
+    asset_symbol: str = "DEFAULT",
+    minute_into_market: int = 0,
+) -> int:
     """
     Calculates dynamic Take-Profit target (cents) for Acorns-style micro-wins:
     Locks in high-probability, low-risk profits early instead of holding to binary market expiration.
+    Dynamically scales based on asset volatility and time decay (closing minutes).
 
     Tiers:
-    - Super Low / Deep Discount (<= 25¢): Target +5¢ to +7¢ (+25% to +45% ROI). e.g. 15¢ -> 21¢, 20¢ -> 26¢.
-    - Value Corridor (26¢ - 45¢): Target +6¢ to +9¢ (+20% to +35% ROI). e.g. 30¢ -> 37¢, 40¢ -> 48¢.
+    - Super Low / Deep Discount (<= 25¢): Target +4¢ to +9¢ (+25% to +45% ROI). e.g. 15¢ -> 20¢, 20¢ -> 27¢.
+    - Value Corridor (26¢ - 45¢): Target +6¢ to +9¢ (+20% to +35% ROI). e.g. 30¢ -> 37¢, 40¢ -> 49¢.
     - Momentum / Mid Corridor (46¢ - 70¢): Target +6¢ to +10¢ (+12% to +20% ROI). e.g. 55¢ -> 63¢, 65¢ -> 73¢.
     - Favorite Maker (> 70¢): Target +5¢ to +7¢, capped at 95¢ (sell before 100¢ binary cliff!). e.g. 86¢ -> 92¢, 88¢ -> 94¢.
 
     Invariant: Result is ALWAYS > buy_price_cents and <= 99¢ (exchange order book ceiling).
     """
     p = max(1, min(98, int(buy_price_cents)))
+    sym = str(asset_symbol or "").upper()
+    is_high_vol = sym in ("SOL", "DOGE", "NEAR", "HYPE", "ZEC", "WTI")
+
+    # Time-decay awareness: late entries (minute 7+ in 15M) bank slightly faster to beat theta
+    late_window = (str(timeframe).lower() == "15m" and (minute_into_market % 15) >= 7)
+
     if p <= 25:
-        tp = p + max(4, round(p * 0.35))
+        base_gain = max(4, round(p * 0.35))
+        if is_high_vol:
+            base_gain = max(base_gain, 5)
+        if late_window:
+            base_gain = max(4, base_gain - 1)
+        tp = p + base_gain
     elif p <= 45:
-        tp = p + max(6, round(p * 0.22))
+        base_gain = max(6, round(p * 0.22))
+        if is_high_vol:
+            base_gain = max(base_gain, 7)
+        if late_window:
+            base_gain = max(5, base_gain - 1)
+        tp = p + base_gain
     elif p <= 70:
-        tp = p + max(6, round(p * 0.15))
+        base_gain = max(6, round(p * 0.15))
+        if is_high_vol:
+            base_gain = max(base_gain, 7)
+        if late_window:
+            base_gain = max(5, base_gain - 1)
+        tp = p + base_gain
     else:
         # Favorites: lock in +5¢ to +7¢ gain early, max 95¢ to ensure executable book liquidity
-        tp = min(95, p + 6)
+        fav_gain = 6
+        if is_high_vol:
+            fav_gain = 7
+        if late_window:
+            fav_gain = 5
+        tp = min(95, p + fav_gain)
 
     return max(p + 1, min(99, tp))
 

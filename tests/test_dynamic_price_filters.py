@@ -103,14 +103,6 @@ def test_should_refresh_rules(now, last_refresh_delta_hrs, cache_empty, expected
     assert should_refresh_dynamic_map(now_utc=now, last_refresh_time=last_ts, cache_is_empty=cache_empty) is expected
 
 
-@pytest.mark.parametrize("hour, minute, expected_exploring", [
-    (5, 0, True), (5, 10, True), (5, 15, False), (5, 30, False), (6, 30, False), (7, 0, False), (14, 30, False)
-])
-def test_exploration_window_flag(hour, minute, expected_exploring):
-    dt = datetime(2026, 8, 15, hour, minute, 0, tzinfo=timezone.utc)
-    assert is_default_exploration_window(dt) is expected_exploring
-
-
 @patch("database.get_mongo_collection")
 def test_dynamic_calibration_from_mock_db(mock_get_coll):
     snaps = [{"sym": "BTC", "tick": "T1", "m": 0, "pct": 0.02, "trd": {"buy": 32, "side": "yes"}}]
@@ -164,79 +156,6 @@ def test_market_screening_corridors(ask, spot_lead, should_buy, corridor):
     else:
         # Either no trade or a counterfactual dry-run sample
         assert snap.get("trd", {}).get("action") != "buy_opened"
-
-
-@pytest.mark.parametrize("hour, minute, expected_avoid_mid, expected_is_exploration", [
-    (5, 0, False, True),    # 05:00 UTC -> Mid-zone allowed, general exploration active
-    (5, 10, False, True),   # 05:10 UTC -> Mid-zone allowed, general exploration active
-    (5, 15, True, False),   # 05:15 UTC -> Mid-zone AVOIDED, exploration inactive
-    (5, 30, True, False),   # 05:30 UTC -> Mid-zone AVOIDED, exploration inactive
-    (6, 0, True, False),    # 06:00 UTC -> Mid-zone AVOIDED, exploration inactive
-    (7, 0, True, False),    # 07:00 UTC -> Mid-zone avoided, exploration inactive
-    (12, 0, True, False),   # 12:00 UTC -> Mid-zone avoided, exploration inactive
-    (0, 0, True, False),    # 00:00 UTC -> Mid-zone avoided, exploration inactive
-])
-def test_mid_zone_flag_during_exploration(hour, minute, expected_avoid_mid, expected_is_exploration):
-    dt = datetime(2026, 8, 15, hour, minute, 0, tzinfo=timezone.utc)
-    filters = get_dynamic_filter_for_market("BTC", is_5min_mark=False, now_utc=dt)
-    assert filters["avoid_mid_zone"] is expected_avoid_mid
-    assert filters["is_exploration"] is expected_is_exploration
-
-
-def test_market_screening_mid_zone_allowed_during_exploration():
-    from main import reset_exploration_trades_count
-    reset_exploration_trades_count()
-
-    client = MagicMock(exchange_name="Kalshi")
-    client.get_market_position.return_value = None
-    client.has_existing_position_or_order.return_value = False
-
-    market = {
-        "ticker": "KXBTC15M-TEST", "series_ticker": "KXBTC15M",
-        "yes_ask_dollars": "0.65", "yes_bid_dollars": "0.63",
-        "floor_strike": 60000.0, "exchange": "kalshi",
-    }
-
-    # Under empirical rules, 65¢ Valley of Death in 15M is logged as COUNTERFACTUAL sample to preserve capital
-    snap_exp = process_single_market(
-        market=market,
-        is_trading_interval=True,
-        client=client,
-        now_utc=datetime(2026, 8, 15, 5, 0, 0, tzinfo=timezone.utc),
-        minute_past_hour=0,
-        spot_cache={"BTC": 60000.0 * 1.0001},
-        dry_run=True,
-    )
-    assert "trd" in snap_exp
-    assert snap_exp["trd"]["action"] in ("counterfactual_empirical_reject", "counterfactual_mid_zone")
-    assert snap_exp["trd"]["dry_run"] is True
-
-
-def test_exploration_trade_cap_enforcement():
-    from main import (
-        MAX_EXPLORATION_TRADES_PER_SESSION,
-        can_execute_exploration_trade,
-        get_exploration_trades_count,
-        record_exploration_trade_executed,
-        reset_exploration_trades_count,
-    )
-    reset_exploration_trades_count()
-    dt = datetime(2026, 8, 15, 5, 5, 0, tzinfo=timezone.utc)
-
-    assert can_execute_exploration_trade(dt) is True
-    assert get_exploration_trades_count() == 0
-
-    # Record 3 trades
-    for i in range(MAX_EXPLORATION_TRADES_PER_SESSION):
-        assert can_execute_exploration_trade(dt) is True
-        record_exploration_trade_executed(dt)
-
-    assert get_exploration_trades_count() == MAX_EXPLORATION_TRADES_PER_SESSION
-    assert can_execute_exploration_trade(dt) is False
-
-    # Reset
-    reset_exploration_trades_count()
-    assert can_execute_exploration_trade(dt) is True
 
 
 def test_interim_data_collection_pass_non_trading_interval():
