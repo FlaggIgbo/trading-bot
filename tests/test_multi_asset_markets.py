@@ -240,7 +240,12 @@ def test_unified_batch_fetch_spot_prices_mocked():
             val = 7800.0 if "^GSPC" in ticker else 30000.0
             resp.json.return_value = {"chart": {"result": [{"meta": {"regularMarketPrice": val}}]}}
         elif "api.coinbase.com" in url:
-            resp.json.return_value = {"data": {"amount": "65000.00"}}
+            if "XAU-USD" in url:
+                resp.json.return_value = {"data": {"amount": "4400.00"}}
+            elif "XAG-USD" in url:
+                resp.json.return_value = {"data": {"amount": "65.00"}}
+            else:
+                resp.json.return_value = {"data": {"amount": "65000.00"}}
         return resp
 
     with patch("main.http_session.get", side_effect=mock_get):
@@ -651,5 +656,122 @@ def test_commodity_tight_spread_favorite_accepted(multi_asset_client, mock_filte
     assert opp["side"] == "yes"
     assert opp["maker_bid"] == 87
     assert opp["maker_bid"] >= 82
+
+
+# ---------------------------------------------------------------------------
+# 9. Coinbase Spot Pricing Integrity Tests (Gold, Silver, Crypto)
+# ---------------------------------------------------------------------------
+
+def test_coinbase_commodity_spot_prices_gold_and_silver_mocked(monkeypatch):
+    """Verifies that get_pyth_commodity_spot_prices uses Coinbase as primary for GOLD and SILVER."""
+    from main import get_pyth_commodity_spot_prices, get_coinbase_spot_price
+
+    class MockResponse:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+            self.text = "Mocked"
+
+        def json(self):
+            return self._json
+
+    def mock_get(url, *args, **kwargs):
+        if "api.coinbase.com" in url:
+            if "XAU-USD" in url:
+                return MockResponse(200, {"data": {"amount": "4383.25"}})
+            if "XAG-USD" in url:
+                return MockResponse(200, {"data": {"amount": "65.31"}})
+        return MockResponse(404, {})
+
+    monkeypatch.setattr("main.http_session.get", mock_get)
+
+    gold_spot = get_coinbase_spot_price("XAU-USD")
+    assert gold_spot == 4383.25
+
+    silver_spot = get_coinbase_spot_price("XAG-USD")
+    assert silver_spot == 65.31
+
+    spots = get_pyth_commodity_spot_prices(["GOLD", "SILVER"])
+    assert spots["GOLD"] == 4383.25
+    assert spots["SILVER"] == 65.31
+
+
+def test_coinbase_commodity_spot_prices_paxg_fallback_mocked(monkeypatch):
+    """When XAU-USD fails, verify PAXG-USD on Coinbase is used as gold fallback."""
+    from main import get_pyth_commodity_spot_prices
+
+    class MockResponse:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+            self.text = "Mocked"
+
+        def json(self):
+            return self._json
+
+    def mock_get(url, *args, **kwargs):
+        if "api.coinbase.com" in url:
+            if "XAU-USD" in url:
+                return MockResponse(404, {"error": "not found"})
+            if "PAXG-USD" in url:
+                return MockResponse(200, {"data": {"amount": "4385.50"}})
+        return MockResponse(404, {})
+
+    monkeypatch.setattr("main.http_session.get", mock_get)
+
+    spots = get_pyth_commodity_spot_prices(["GOLD"])
+    assert spots["GOLD"] == 4385.50
+
+
+def test_coinbase_crypto_fallback_mocked(monkeypatch):
+    """Verifies that get_crypto_spot_price falls back to Coinbase public API when CFB is unavailable."""
+    from main import get_crypto_spot_price
+
+    class MockResponse:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+            self.text = "Mocked"
+
+        def json(self):
+            return self._json
+
+    def mock_get(url, *args, **kwargs):
+        if "api.coinbase.com" in url and "BTC-USD" in url:
+            return MockResponse(200, {"data": {"amount": "67420.50"}})
+        return MockResponse(404, {})
+
+    monkeypatch.setattr("main.http_session.get", mock_get)
+
+    # Without a KalshiClient or CFB price, should hit Coinbase
+    btc_price = get_crypto_spot_price("BTC", client=None)
+    assert btc_price == 67420.50
+
+
+def test_wti_routes_to_yahoo_when_coinbase_has_no_oil(monkeypatch):
+    """Verifies that WTI (Oil) correctly falls back to Yahoo (CL=F) since Coinbase has no oil pairs."""
+    from main import get_pyth_commodity_spot_prices
+
+    class MockResponse:
+        def __init__(self, status_code, json_data):
+            self.status_code = status_code
+            self._json = json_data
+            self.text = "Mocked"
+
+        def json(self):
+            return self._json
+
+    def mock_get(url, *args, **kwargs):
+        if "hermes.pyth.network" in url:
+            return MockResponse(401, {"error": "unauthorized"})
+        if "finance.yahoo.com" in url and "CL=F" in url:
+            return MockResponse(200, {"chart": {"result": [{"meta": {"regularMarketPrice": 90.75}}]}})
+        return MockResponse(404, {})
+
+    monkeypatch.setattr("main.http_session.get", mock_get)
+
+    spots = get_pyth_commodity_spot_prices(["WTI"])
+    assert spots["WTI"] == 90.75
+
 
 

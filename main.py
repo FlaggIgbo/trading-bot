@@ -153,6 +153,14 @@ PYTH_COMMODITY_FEEDS: dict[str, str] = {
     "WTI": "925ca92ff005ae943c158e3563f59698ce7e75c5a8c8dd43303a0a154887b3e6",     # Commodities.USOILSPOT (WTI Oil)
 }
 
+# Coinbase public spot price mapping for physical/spot commodities (Gold & Silver)
+# XAU-USD: London spot gold bullion; PAXG-USD: Paxos physical gold token (backup)
+# XAG-USD: Spot silver bullion
+COMMODITY_COINBASE_MAP: dict[str, list[str]] = {
+    "GOLD": ["XAU-USD", "PAXG-USD"],
+    "SILVER": ["XAG-USD"],
+}
+
 # Yahoo Finance ticker mapping for Equity Indices
 INDEX_TICKER_MAP: dict[str, str] = {
     "INX": "^GSPC",          # S&P 500 Index
@@ -168,7 +176,7 @@ COMMODITY_YAHOO_MAP: dict[str, str] = {
     "WTI": "CL=F",      # Crude Oil WTI Futures / Spot reference
 }
 
-COMMODITY_SYMBOLS = set(PYTH_COMMODITY_FEEDS.keys()) | set(COMMODITY_YAHOO_MAP.keys())
+COMMODITY_SYMBOLS = set(PYTH_COMMODITY_FEEDS.keys()) | set(COMMODITY_YAHOO_MAP.keys()) | set(COMMODITY_COINBASE_MAP.keys())
 INDEX_SYMBOLS = set(INDEX_TICKER_MAP.keys())
 
 # Default expiration in seconds for Maker limit buy orders to protect against adverse price drops
@@ -446,17 +454,54 @@ def parse_cents(val_dollars: str | float | None, val_cents: int | str | None = N
     return None
 
 
+def get_coinbase_spot_price(pair: str) -> float | None:
+    """
+    Fetches real-time spot price directly from Coinbase Public Spot API.
+    100% free, zero authentication required, sub-50ms latency.
+    Accepts pairs like 'XAU-USD', 'XAG-USD', 'PAXG-USD', 'BTC-USD', 'ETH-USD'.
+    """
+    try:
+        resp = http_session.get(
+            f"https://api.coinbase.com/v2/prices/{pair}/spot",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=2.5,
+        )
+        if resp.status_code == 200 and resp.text:
+            data = resp.json()
+            if isinstance(data, dict) and "data" in data and "amount" in data["data"]:
+                return round(float(data["data"]["amount"]), 4)
+    except (requests.RequestException, ValueError, json.JSONDecodeError, KeyError) as error:
+        log.debug(f"Could not fetch spot price for {pair} from Coinbase: {error}")
+    return None
+
+
 def get_pyth_commodity_spot_prices(symbols: list[str]) -> dict[str, float | None]:
     """
-    Fetches real-time commodity spot prices directly from Pyth Network Hermes API
-    with automatic Yahoo Finance fallback for resilient spot price tracking.
-    Matches Kalshi's official settlement source for Gold, Silver, and WTI Oil.
+    Fetches real-time commodity spot prices with high resilience and zero cost:
+    1. Primary: Free Coinbase Public Spot API (sub-50ms, zero-auth) for Gold (XAU-USD / PAXG-USD) and Silver (XAG-USD).
+    2. Secondary: Pyth Network Hermes API (if HERMES_API_KEY / PYTH_API_KEY is configured).
+    3. Tertiary: Yahoo Finance Chart API fallback for WTI Oil (CL=F), Silver (SI=F), and Gold (GC=F).
     """
-    feeds_to_fetch = {sym: PYTH_COMMODITY_FEEDS[sym] for sym in symbols if sym in PYTH_COMMODITY_FEEDS}
     result: dict[str, float | None] = {sym: None for sym in symbols}
-    if not feeds_to_fetch and not any(s in COMMODITY_YAHOO_MAP for s in symbols):
+    if not symbols:
         return result
 
+    # 1. Primary: Free Coinbase Public Spot API for Gold & Silver
+    coinbase_syms = [s for s in symbols if s in COMMODITY_COINBASE_MAP]
+    for sym in coinbase_syms:
+        for pair in COMMODITY_COINBASE_MAP[sym]:
+            price = get_coinbase_spot_price(pair)
+            if price is not None and price > 0:
+                result[sym] = price
+                break
+
+    # Symbols that still need spot prices (e.g. WTI Oil or if Coinbase was unavailable)
+    missing_syms = [s for s in symbols if result.get(s) is None]
+    if not missing_syms:
+        return result
+
+    # 2. Secondary: Pyth Network Hermes API
+    feeds_to_fetch = {sym: PYTH_COMMODITY_FEEDS[sym] for sym in missing_syms if sym in PYTH_COMMODITY_FEEDS}
     if feeds_to_fetch:
         try:
             params = [("ids[]", fid) for fid in feeds_to_fetch.values()]
@@ -483,11 +528,11 @@ def get_pyth_commodity_spot_prices(symbols: list[str]) -> dict[str, float | None
         except Exception as error:
             log.debug(f"Could not batch-fetch Pyth commodity spot prices: {error}")
 
-    # Fallback to Yahoo Finance for any missing commodity spot prices
-    missing_syms = [s for s in symbols if result.get(s) is None and s in COMMODITY_YAHOO_MAP]
-    if missing_syms:
+    # 3. Tertiary: Yahoo Finance fallback for missing symbols (e.g. WTI Oil CL=F)
+    still_missing = [s for s in symbols if result.get(s) is None and s in COMMODITY_YAHOO_MAP]
+    if still_missing:
         headers = {"User-Agent": "Mozilla/5.0"}
-        for sym in missing_syms:
+        for sym in still_missing:
             ticker = COMMODITY_YAHOO_MAP[sym]
             for base_url in ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"):
                 try:
@@ -509,6 +554,9 @@ def get_pyth_commodity_spot_prices(symbols: list[str]) -> dict[str, float | None
                     log.debug(f"Could not fetch commodity spot price for {sym} ({ticker}) from Yahoo: {error}")
 
     return result
+
+
+get_commodity_spot_prices = get_pyth_commodity_spot_prices
 
 
 def get_index_spot_price(symbol: str) -> float | None:
@@ -601,18 +649,7 @@ def get_crypto_spot_price(
         return cfb_price
 
     # 2. Fallback to Coinbase public spot API
-    try:
-        resp = http_session.get(
-            f"https://api.coinbase.com/v2/prices/{symbol.upper()}-USD/spot",
-            timeout=3.5,
-        )
-        if resp.status_code == 200 and resp.text:
-            data = resp.json()
-            if isinstance(data, dict) and "data" in data and "amount" in data["data"]:
-                return round(float(data["data"]["amount"]), 4)
-    except (requests.RequestException, ValueError, json.JSONDecodeError, KeyError) as error:
-        log.debug(f"Could not fetch spot price for {symbol} from Coinbase: {error}")
-    return None
+    return get_coinbase_spot_price(f"{symbol.upper()}-USD")
 
 
 def get_spot_price(symbol: str, client: BaseTradingClient | None = None) -> float | None:
