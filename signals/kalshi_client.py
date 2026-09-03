@@ -317,7 +317,10 @@ class KalshiClient(BaseTradingClient):
         # Determine base URL (Demo vs Production)
         use_demo = os.getenv("KALSHI_USE_DEMO", "true").lower() == "true"
         default_base = DEMO_BASE_URL if use_demo else PRODUCTION_BASE_URL
-        self.base_url = (base_url or os.getenv("KALSHI_BASE_URL") or default_base).rstrip("/")
+        raw_base = base_url or os.getenv("KALSHI_BASE_URL") or default_base
+        if "api.elections.kalshi.com" in raw_base and not use_demo:
+            raw_base = PRODUCTION_BASE_URL
+        self.base_url = raw_base.rstrip("/")
 
         if not self.api_key_id:
             raise ValueError(
@@ -482,6 +485,38 @@ class KalshiClient(BaseTradingClient):
             "destination_exchange_shard": destination_exchange_shard,
         }
         return self.post("/portfolio/intra_exchange_instance_transfer", payload=payload)
+
+    def _auto_fund_crypto_shard_if_needed(self) -> bool:
+        """
+        Attempts to automatically transfer collateral from Shard 0 (Default) to Shard 2 (Crypto)
+        when the Crypto matching engine reports that no collateral is allocated.
+        """
+        if not self.allow_live_orders:
+            return False
+
+        try:
+            bal_info = self.get_balance(exchange_index=0)
+            shard0_bal = int(bal_info.get("balance", 0))
+            if shard0_bal >= 200:  # At least $2.00 available in Shard 0
+                transfer_amt = max(100, min(400, shard0_bal // 2))
+                log.info(
+                    f"🔄 [KALSHI SHARD AUTO-REBALANCE] Initiating transfer of {transfer_amt}¢ (${transfer_amt/100:.2f}) "
+                    f"from Shard 0 (Default) to Shard 2 (Crypto)..."
+                )
+                res = self.transfer_between_shards(
+                    amount_cents=transfer_amt,
+                    source_exchange_shard=0,
+                    destination_exchange_shard=2,
+                )
+                log.info(f"✅ [KALSHI SHARD AUTO-REBALANCE] Transfer accepted by exchange: {res}")
+                return True
+            else:
+                log.warning(
+                    f"⚠️ [KALSHI SHARD AUTO-REBALANCE] Shard 0 balance ({shard0_bal}¢) is too low for automated transfer."
+                )
+        except Exception as e:
+            log.warning(f"⚠️ [KALSHI SHARD AUTO-REBALANCE] Automated transfer attempt failed: {e}")
+        return False
 
     def get_positions(self, **params) -> dict:
         """Fetches current open positions in your portfolio."""
@@ -943,11 +978,12 @@ class KalshiClient(BaseTradingClient):
         except requests.HTTPError as err:
             resp_text = getattr(getattr(err, "response", None), "text", "") or ""
             if "user_not_found" in resp_text or "exchange user not found" in resp_text.lower() or "sharding" in resp_text.lower():
+                funded = self._auto_fund_crypto_shard_if_needed()
                 log.error(
                     f"🛑 [KALSHI SHARD COLLATERAL REQUIRED] Order rejected for {ticker} on Kalshi. "
                     f"Kalshi migrated Crypto markets to Shard 2. The matching engine "
                     f"reported 'Exchange user not found' because collateral has not been transferred to Shard 2. "
-                    f"Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto)."
+                    + ("An automated collateral transfer to Shard 2 was initiated. Next cycle will retry with this collateral." if funded else "Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto).")
                 )
                 return {"error": "shard_collateral_required", "ticker": ticker, "details": resp_text}
             raise
@@ -1217,11 +1253,12 @@ class KalshiClient(BaseTradingClient):
                     log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                     return {"error": "post_only_cross", "ticker": ticker}
             elif "user_not_found" in resp_text or "exchange user not found" in resp_text.lower() or "sharding" in resp_text.lower():
+                funded = self._auto_fund_crypto_shard_if_needed()
                 log.error(
                     f"🛑 [KALSHI SHARD COLLATERAL REQUIRED] Order rejected for {ticker} on Kalshi. "
                     f"Kalshi migrated Crypto markets to Shard 2. The matching engine "
                     f"reported 'Exchange user not found' because collateral has not been transferred to Shard 2. "
-                    f"Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto)."
+                    + ("An automated collateral transfer to Shard 2 was initiated. Next cycle will retry with this collateral." if funded else "Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto).")
                 )
                 return {"error": "shard_collateral_required", "ticker": ticker, "details": resp_text}
             else:
@@ -1394,11 +1431,12 @@ class KalshiClient(BaseTradingClient):
                     log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                     return {"error": "post_only_cross", "ticker": ticker}
             elif "user_not_found" in resp_text or "exchange user not found" in resp_text.lower() or "sharding" in resp_text.lower():
+                funded = self._auto_fund_crypto_shard_if_needed()
                 log.error(
                     f"🛑 [KALSHI SHARD COLLATERAL REQUIRED] Order rejected for {ticker} on Kalshi. "
                     f"Kalshi migrated Crypto markets to Shard 2. The matching engine "
                     f"reported 'Exchange user not found' because collateral has not been transferred to Shard 2. "
-                    f"Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto)."
+                    + ("An automated collateral transfer to Shard 2 was initiated. Next cycle will retry with this collateral." if funded else "Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto).")
                 )
                 return {"error": "shard_collateral_required", "ticker": ticker, "details": resp_text}
             else:
