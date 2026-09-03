@@ -1024,9 +1024,11 @@ def evaluate_favorite_maker_opportunity(
     effective_max_fav = int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price))
     is_gemini_exchange = ("gemini" in ex_name) or ("gemini" in str(ticker).lower()) or str(ticker).startswith("GEMI-")
 
-    # 4-Vector Rule: Gemini contracts capped at <= 81¢ to prevent payout margin compression
+    # 4-Vector Rule: Gemini contracts capped at <= 81¢ to prevent payout margin compression,
+    # with corridor floor scaled to <= 74¢ to ensure a valid [74¢, 81¢] favorite maker corridor
     if is_gemini_exchange:
         effective_max_fav = min(effective_max_fav, 81)
+        effective_min_fav = min(effective_min_fav, 74, effective_max_fav)
 
     is_restricted = bool(dynamic_filters.get("is_restricted", False)) or (dynamic_filters.get("recent_pnl_cents") or 0) < 0
 

@@ -896,5 +896,50 @@ def test_evaluate_favorite_maker_gemini_ceiling_and_sizing():
     assert opp_valid["count"] == 1  # 30% allocation cap
 
 
+def test_evaluate_favorite_maker_gemini_default_min_fav_clamp():
+    """Verify Gemini clamps floor from default 86¢ down to <= 74¢, avoiding an inverted [86¢, 81¢] corridor."""
+    import main
+    from signals.gemini_client import GeminiTradingClient
+
+    gemini_client = GeminiTradingClient(api_key="test", api_secret="test", allow_live_orders=False)
+    market = {"ticker": "GEMI-BTC-15M-80K", "result": None}
+
+    # Standard production dynamic filters where min_buy is 86¢
+    dynamic_filters = {
+        "enable_favorite_maker": True,
+        "favorite_maker_min_buy": 86,
+        "favorite_maker_max_buy": 93,
+        "contracts_per_trade": 1,
+    }
+
+    # Ask is 80¢, bid is 78¢ (within [74¢, 81¢] corridor)
+    quotes_80 = {"yes_bid": 78, "yes_ask": 80, "no_bid": 18, "no_ask": 20}
+    opp_80 = main.evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_80,
+        rem_mins=3.0,
+        dynamic_filters=dynamic_filters,
+        client=gemini_client,
+        spot_price=85000,
+        target_price=80000,
+    )
+    assert opp_80 is not None, "Gemini should accept 80¢ favorite even when default filter min is 86¢"
+    assert opp_80["maker_bid"] <= 81
+    assert opp_80["side"] == "yes"
+
+    # Ask is 73¢ (below 74¢ floor) -> must reject
+    quotes_73 = {"yes_bid": 71, "yes_ask": 73, "no_bid": 25, "no_ask": 27}
+    opp_73 = main.evaluate_favorite_maker_opportunity(
+        market=market,
+        quotes=quotes_73,
+        rem_mins=3.0,
+        dynamic_filters=dynamic_filters,
+        client=gemini_client,
+        spot_price=85000,
+        target_price=80000,
+    )
+    assert opp_73 is None, "Gemini should reject favorite ask below 74¢ floor"
+
+
 
 
