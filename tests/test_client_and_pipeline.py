@@ -913,6 +913,50 @@ def test_process_exchange_pipeline_59min_selloff_with_held_position(dummy_client
         mock_liq.assert_called_once_with(ticker, "yes", 1, 10)
 
 
+def test_kalshi_exchange_sharding_and_collateral_handling():
+    """Verify KalshiClient handles exchange shard queries, transfers, and user_not_found responses."""
+    import requests
+    mock_key = MagicMock()
+    client = KalshiClient(api_key_id="test_key", private_key=mock_key, allow_live_orders=True)
+
+    # 1. Scoped get_balance
+    with patch.object(client, "get", return_value={"balance": 500, "balance_breakdown": [{"exchange_index": 2, "balance": "5.00"}]}) as mock_get:
+        res = client.get_balance(exchange_index=2)
+        assert res["balance"] == 500
+        mock_get.assert_called_once_with("/portfolio/balance", params={"exchange_index": 2})
+
+    # 2. Transfer between shards
+    with patch.object(client, "post", return_value={"transfer_id": "xfer_123"}) as mock_post:
+        xfer = client.transfer_between_shards(amount_cents=500, source_exchange_shard=0, destination_exchange_shard=2)
+        assert xfer["transfer_id"] == "xfer_123"
+        mock_post.assert_called_once_with(
+            "/portfolio/intra_exchange_instance_transfer",
+            payload={
+                "source": "event_contract",
+                "destination": "event_contract",
+                "amount": 50000,
+                "source_exchange_shard": 0,
+                "destination_exchange_shard": 2,
+            },
+        )
+
+    # 3. Handle user_not_found / exchange sharding error
+    mock_err_resp = MagicMock()
+    mock_err_resp.text = '{"error":{"code":"user_not_found","message":"user not found","details":"Exchange user not found. For Predictions: reference documentation Exchange Sharding documentation."}}'
+    http_err = requests.HTTPError(response=mock_err_resp)
+
+    with patch.object(client, "post", side_effect=http_err):
+        fav_res = client.buy_favorite_maker_order(
+            ticker="KXBTCD-26SEP0318-T81799.99",
+            side="no",
+            maker_bid_cents=85,
+            target_ask_cents=86,
+            count=1,
+        )
+        assert fav_res.get("error") == "shard_collateral_required"
+        assert "KXBTCD" in fav_res.get("ticker")
+
+
 
 
 

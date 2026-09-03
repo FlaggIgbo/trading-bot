@@ -81,7 +81,7 @@ def generate_safe_client_order_id(prefix: str, ticker: str, timestamp_ms: int | 
 DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 
 # Production URL (for live real-money trading)
-PRODUCTION_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+PRODUCTION_BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
 
 # ---------------------------------------------------------------------------
 # 15-Minute Series Tickers (Crypto & Commodities)
@@ -441,12 +441,47 @@ class KalshiClient(BaseTradingClient):
     # Account & Portfolio Endpoints
     # -----------------------------------------------------------------------
 
-    def get_balance(self) -> dict:
+    def get_balance(self, exchange_index: int | None = None) -> dict:
         """
         Fetches portfolio balance in cents.
+        If exchange_index is provided (e.g. 0 for default/commodities, 2 for crypto),
+        fetches balance scoped to that specific exchange shard.
+        Otherwise returns total balance across all exchange shards and includes balance_breakdown.
         Example return: `{"balance": 1298}` -> representing $12.98 USD available.
         """
-        return self.get("/portfolio/balance")
+        params = {}
+        if exchange_index is not None:
+            params["exchange_index"] = exchange_index
+        return self.get("/portfolio/balance", params=params if params else None)
+
+    def transfer_between_shards(
+        self,
+        amount_cents: int,
+        source_exchange_shard: int = 0,
+        destination_exchange_shard: int = 2,
+    ) -> dict:
+        """
+        Transfers funds between exchange shards within the same Direct account.
+        Amount is in cents (e.g. 500 = $5.00).
+        Shard 0: Default (Indices, Commodities until Sept 10, Elections)
+        Shard 2: Crypto (BTC, ETH, SOL, XRP, etc.)
+        """
+        if not self.allow_live_orders:
+            log.info(
+                f"🛡️ [SAFETY MODE] Simulated intra-account transfer of {amount_cents}¢ "
+                f"from shard {source_exchange_shard} to shard {destination_exchange_shard}."
+            )
+            return {"status": "simulated", "amount_cents": amount_cents}
+
+        amount_centicents = int(amount_cents * 100)
+        payload = {
+            "source": "event_contract",
+            "destination": "event_contract",
+            "amount": amount_centicents,
+            "source_exchange_shard": source_exchange_shard,
+            "destination_exchange_shard": destination_exchange_shard,
+        }
+        return self.post("/portfolio/intra_exchange_instance_transfer", payload=payload)
 
     def get_positions(self, **params) -> dict:
         """Fetches current open positions in your portfolio."""
@@ -903,7 +938,19 @@ class KalshiClient(BaseTradingClient):
                 "count": count,
             }
 
-        return self.post("/portfolio/events/orders", payload=order_payload)
+        try:
+            return self.post("/portfolio/events/orders", payload=order_payload)
+        except requests.HTTPError as err:
+            resp_text = getattr(getattr(err, "response", None), "text", "") or ""
+            if "user_not_found" in resp_text or "exchange user not found" in resp_text.lower() or "sharding" in resp_text.lower():
+                log.error(
+                    f"🛑 [KALSHI SHARD COLLATERAL REQUIRED] Order rejected for {ticker} on Kalshi. "
+                    f"Kalshi migrated Crypto markets to Shard 2. The matching engine "
+                    f"reported 'Exchange user not found' because collateral has not been transferred to Shard 2. "
+                    f"Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto)."
+                )
+                return {"error": "shard_collateral_required", "ticker": ticker, "details": resp_text}
+            raise
 
     def invalidate_portfolio_caches(self):
         """Invalidates in-memory position and order caches upon trade execution or order cancellation."""
@@ -1149,7 +1196,8 @@ class KalshiClient(BaseTradingClient):
             buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
         except requests.HTTPError as err:
             err_text = str(err).lower()
-            if "post only cross" in err_text:
+            resp_text = getattr(getattr(err, "response", None), "text", "") or ""
+            if "post only cross" in err_text or "post only cross" in resp_text.lower():
                 # If post_only crossed, attempt retry 1 tick deeper inside the spread
                 if effective_buy_cents - 1 >= 1:
                     retry_price = effective_buy_cents - 1
@@ -1168,6 +1216,14 @@ class KalshiClient(BaseTradingClient):
                 else:
                     log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} buy order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                     return {"error": "post_only_cross", "ticker": ticker}
+            elif "user_not_found" in resp_text or "exchange user not found" in resp_text.lower() or "sharding" in resp_text.lower():
+                log.error(
+                    f"🛑 [KALSHI SHARD COLLATERAL REQUIRED] Order rejected for {ticker} on Kalshi. "
+                    f"Kalshi migrated Crypto markets to Shard 2. The matching engine "
+                    f"reported 'Exchange user not found' because collateral has not been transferred to Shard 2. "
+                    f"Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto)."
+                )
+                return {"error": "shard_collateral_required", "ticker": ticker, "details": resp_text}
             else:
                 raise
 
@@ -1316,7 +1372,8 @@ class KalshiClient(BaseTradingClient):
             buy_order_res = self.post("/portfolio/events/orders", payload=buy_payload)
         except requests.HTTPError as err:
             err_text = str(err).lower()
-            if "post only cross" in err_text:
+            resp_text = getattr(getattr(err, "response", None), "text", "") or ""
+            if "post only cross" in err_text or "post only cross" in resp_text.lower():
                 # If post_only crossed because spread narrowed, retry 1 tick deeper
                 if effective_bid - 1 >= 1:
                     retry_bid = effective_bid - 1
@@ -1336,6 +1393,14 @@ class KalshiClient(BaseTradingClient):
                 else:
                     log.warning(f"⚠️ [POST-ONLY CROSS] {ticker} resting maker order crossed book (spread moved/tightened). Skipping to prevent taker execution.")
                     return {"error": "post_only_cross", "ticker": ticker}
+            elif "user_not_found" in resp_text or "exchange user not found" in resp_text.lower() or "sharding" in resp_text.lower():
+                log.error(
+                    f"🛑 [KALSHI SHARD COLLATERAL REQUIRED] Order rejected for {ticker} on Kalshi. "
+                    f"Kalshi migrated Crypto markets to Shard 2. The matching engine "
+                    f"reported 'Exchange user not found' because collateral has not been transferred to Shard 2. "
+                    f"Action required: Visit https://kalshi.com/account/exchange-indexes to allocate collateral to Shard 2 (Crypto)."
+                )
+                return {"error": "shard_collateral_required", "ticker": ticker, "details": resp_text}
             else:
                 raise
 
