@@ -306,7 +306,7 @@ def test_peak2_early_value_requires_upward_price_signal(monkeypatch):
 
 
 def test_peak3_endgame_requires_substantial_belief(monkeypatch):
-    """Verify Peak 3 (Endgame Favorite Maker) is rejected when spot clearance is < 0.15%, but allowed when >= 0.15%."""
+    """Verify Peak 3 (Endgame Favorite Maker) is rejected when spot clearance is < 0.40% on 15M, but allowed when >= 0.40%."""
     monkeypatch.setenv("ONLY_FAVORITE_MAKER", "false")
     market = {
         "ticker": "KXBTC15M-PEAK3-BELIEF",
@@ -322,7 +322,7 @@ def test_peak3_endgame_requires_substantial_belief(monkeypatch):
     # 3 minutes remaining (endgame window)
     now_utc = datetime(2026, 8, 17, 1, 57, 0, tzinfo=timezone.utc)
 
-    # Case A: Spot lead is 0.05% (< 0.15% required buffer for substantial belief)
+    # Case A: Spot lead is 0.05% (< 0.40% required buffer for substantial belief)
     client_a = MockMicroWinClient()
     snap_a = process_single_market(
         market=market,
@@ -336,7 +336,7 @@ def test_peak3_endgame_requires_substantial_belief(monkeypatch):
     assert len(client_a.buys) == 0
     assert snap_a["fav_maker"] is False
 
-    # Case B: Spot lead is 0.25% (>= 0.15% required buffer for substantial belief)
+    # Case B: Spot lead is 0.50% (>= 0.40% required buffer for substantial belief)
     client_b = MockMicroWinClient()
     snap_b = process_single_market(
         market=market,
@@ -344,7 +344,7 @@ def test_peak3_endgame_requires_substantial_belief(monkeypatch):
         client=client_b,
         now_utc=now_utc,
         minute_past_hour=12,
-        spot_cache={"BTC": 60150.0},  # +0.25% lead
+        spot_cache={"BTC": 60300.0},  # +0.50% lead
         dry_run=False,
     )
     assert len(client_b.buys) == 1

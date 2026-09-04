@@ -112,7 +112,7 @@ def test_smoke_favorite_maker_evaluation():
     dynamic_filters = {
         "enable_favorite_maker": True,
         "favorite_maker_min_buy": 80,
-        "favorite_maker_max_buy": 93,
+        "favorite_maker_max_buy": 89,
         "recent_win_rate": 0.90,
     }
 
@@ -122,7 +122,7 @@ def test_smoke_favorite_maker_evaluation():
         rem_mins=3.0,
         dynamic_filters=dynamic_filters,
         client=client,
-        spot_price=60100.0,
+        spot_price=60300.0,
         target_price=60000.0,
     )
     assert res is not None

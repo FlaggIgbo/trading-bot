@@ -1080,22 +1080,34 @@ class BaseTradingClient(ABC):
             f"Entry: ~{entry_price}¢ | Current: {current_price}¢ | Floor: {endgame_floor}¢ | Status: {pnl_label}"
         )
 
-        # Favorite Maker Endgame Evaluation (Hold to Settlement):
+        # Favorite Maker Endgame Evaluation (Hold to Settlement vs Hard Breakdown Cut):
         is_favorite_maker = (self.get_strategy_tag(ticker) == "endgame_favorite_maker") or (entry_price >= 70)
         if is_favorite_maker:
-            if current_price >= 25:
+            # Enforce hard cut if favorite has broken down: loss >= 15¢ or price < 70¢
+            # Prevents taking full 100% (-90¢) wipeouts into settlement
+            is_fav_breakdown = (loss_cents >= 15) or (current_price < 70)
+            if not is_fav_breakdown:
                 if not dry_run:
                     self.cancel_and_verify_resting_orders(ticker)
                 log.info(
                     f"🚀 [FAVORITE MAKER SETTLEMENT RUN] [{self.exchange_name}] {ticker} ({side.upper()}): "
-                    f"Favorite holding at {current_price}¢ (entry: ~{entry_price}¢). Cleared resting TP orders; holding into resolution for 100¢ settlement payout!"
+                    f"Favorite holding secure at {current_price}¢ (entry: ~{entry_price}¢, loss: {loss_cents}¢). "
+                    f"Cleared resting TP orders; holding into resolution for 100¢ settlement payout!"
                 )
                 return {"triggered": False, "action": "favorite_maker_holding_to_settle"}
+            else:
+                log.info(
+                    f"⚠️ [FAVORITE MAKER BREAKDOWN CUT] [{self.exchange_name}] {ticker} ({side.upper()}): "
+                    f"Favorite deteriorated below safety threshold (Current: {current_price}¢, Entry: ~{entry_price}¢, Loss: -{loss_cents}¢). "
+                    f"Proceeding to immediate liquidation to salvage capital before 0¢ expiration."
+                )
 
         # Endgame Loss Check: If price is below endgame floor (e.g. < 25¢) or losing on entry/rebuy (loss_cents > 0)
         is_losing = (loss_cents > 0) or (current_price < endgame_floor)
         if is_losing:
             reason = f"losing at endgame mark (Entry: ~{entry_price}¢, Current: {current_price}¢, Floor: {endgame_floor}¢, Loss: -{loss_cents}¢)"
+            if is_favorite_maker:
+                reason = f"favorite maker breakdown cut at endgame mark (Entry: ~{entry_price}¢, Current: {current_price}¢, Loss: -{loss_cents}¢)"
             if dry_run:
                 log.info(
                     f"{LogTag.DRY_RUN_ENDGAME_CUT_LOSS.value} [{self.exchange_name}] {ticker} ({side.upper()}): {reason}. "
@@ -1124,6 +1136,7 @@ class BaseTradingClient(ABC):
             self.execute_liquidation(ticker, side, position_count, current_price)
             self.clear_profit_floor(ticker)
             self.clear_entry_price(ticker)
+            self.clear_strategy_tag(ticker)
             log.info(
                 f"{LogTag.ENDGAME_CUT_LOSS_TRIGGERED.value} [{self.exchange_name}] Liquidated losing position {ticker} "
                 f"({side.upper()}) at {current_price}¢ to prevent total loss at expiration ({reason})."

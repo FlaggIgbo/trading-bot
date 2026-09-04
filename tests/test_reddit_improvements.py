@@ -296,16 +296,29 @@ def test_ev_preservation_favorite_holding_bypasses_stop_losses():
     assert res_5m["action"] == "favorite_maker_holding"
     assert res_5m["triggered"] is False
 
-    # 3. 12.5-Minute Endgame Check -> Should hold to settlement payout
+    # 3. 12.5-Minute Endgame Check -> Should hold to settlement payout when intact (75¢, loss < 15¢ and >= 70¢)
     res_12m = client.evaluate_and_execute_12_5min_endgame_check(
+        ticker=ticker,
+        current_yes_price=75,
+        current_no_price=20,
+        dry_run=False,
+        endgame_floor=25,
+    )
+    assert res_12m["action"] == "favorite_maker_holding_to_settle"
+    assert res_12m["triggered"] is False
+
+    # 4. If favorite breaks down (e.g. drops to 55¢, loss >= 15¢ or price < 70¢), must trigger endgame_loss_cut
+    res_breakdown = client.evaluate_and_execute_12_5min_endgame_check(
         ticker=ticker,
         current_yes_price=55,
         current_no_price=40,
         dry_run=False,
         endgame_floor=25,
     )
-    assert res_12m["action"] == "favorite_maker_holding_to_settle"
-    assert res_12m["triggered"] is False
+    assert res_breakdown["triggered"] is True
+    assert res_breakdown["action"] == "endgame_loss_cut"
+    assert res_breakdown["exit_price"] == 55
+    assert res_breakdown["loss_cents"] == 25
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +590,7 @@ def test_favorite_maker_execution_during_10min_and_12_5min_intervals():
         client=client,
         now_utc=now_55,
         minute_past_hour=55,  # 55 % 15 = 10
-        spot_cache={"BNB": 602.0},
+        spot_cache={"BNB": 603.0},
         dry_run=False,
     )
     assert snap_55 is not None

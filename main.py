@@ -51,6 +51,7 @@ from database import (
     calculate_micro_win_take_profit,
     check_spot_lead_loss_gate,
     detect_asset_symbol,
+    detect_market_timeframe,
     evaluate_ensemble_consensus,
     get_asset_settlement_streak,
     get_dynamic_filter_for_market,
@@ -981,7 +982,7 @@ def evaluate_favorite_maker_opportunity(
     dynamic_filters: dict,
     client: BaseTradingClient,
     min_fav_price: int = 86,
-    max_fav_price: int = 93,
+    max_fav_price: int = 89,
     min_rem_mins: float = 1.0,
     max_rem_mins: float = 6.0,
     spot_price: float | None = None,
@@ -993,13 +994,13 @@ def evaluate_favorite_maker_opportunity(
     an optimal resting maker bid inside the spread to capture the spread discount.
 
     Rules:
-    - Confirmed favorite sits between effective_min_fav (default >= 86¢) and 93¢ (ensures positive EV).
+    - Confirmed favorite sits between effective_min_fav (default >= 86¢) and 89¢ (ensures positive EV and caps tail risk).
     - Window: Final 1.0m to 6.0m of 15m lifecycle (or up to 25.0m for 1h).
     - Maker Limit Bid: Places resting bid inside the spread (1¢-2¢ below ask, or 1¢ above bid).
     - Avoids crossing the spread (-6¢ taker friction) and captures zero maker fees on Kalshi crypto.
     - Gated by hard position check, choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation.
     - Stricter Spot Lead Gate for WTI and GOLD: Mandates >= 0.50% spot lead clearance (due to higher whipsaw variance).
-    # TODO: Make WTI/GOLD spot lead thresholds dynamic based on rolling ATR / historical volatility calibration from MongoDB.
+    - Stricter Spot Lead Gate for 15M Crypto: Mandates >= 0.40% spot lead clearance to prevent late-candle noise flips.
     """
     ticker = market.get("ticker", "")
     if client.has_existing_position_or_order(ticker):
@@ -1021,7 +1022,7 @@ def evaluate_favorite_maker_opportunity(
 
     ex_name = getattr(client, "exchange_name", "kalshi").lower()
     effective_min_fav = int(dynamic_filters.get("favorite_maker_min_buy", min_fav_price))
-    effective_max_fav = int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price))
+    effective_max_fav = min(89, int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price)))
     is_gemini_exchange = ("gemini" in ex_name) or ("gemini" in str(ticker).lower()) or str(ticker).startswith("GEMI-")
 
     # 4-Vector Rule: Gemini contracts capped at <= 81¢ to prevent payout margin compression,
@@ -1064,9 +1065,17 @@ def evaluate_favorite_maker_opportunity(
                 return None
             lead_pct = ((spot_price - target_price) / target_price) * 100.0
             # Substantial Belief Gate (Peak 3 Endgame):
-            # Must have substantial spot clearance (>= 0.15% crypto, >= 0.40% commodity)
+            # Must have substantial spot clearance (>= 0.40% for 15m crypto, >= 0.20% for 1h crypto, >= dynamic commodity)
             # to prevent late-candle noise flips from generating total binary losses.
-            min_sub_lead = required_spot_lead if is_commodity_high_vol else float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.15"))
+            tf = detect_market_timeframe(ticker)
+            if "min_spot_lead_pct" in dynamic_filters:
+                min_sub_lead = float(dynamic_filters["min_spot_lead_pct"])
+            elif is_commodity_high_vol:
+                min_sub_lead = required_spot_lead
+            elif is_15m_market(ticker) or tf in ("5m", "15m"):
+                min_sub_lead = float(os.getenv("FAVORITE_MAKER_15M_MIN_SPOT_LEAD", "0.40"))
+            else:
+                min_sub_lead = float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.20"))
             if lead_pct < min_sub_lead:
                 log.info(
                     f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
@@ -1127,6 +1136,7 @@ def evaluate_favorite_maker_opportunity(
         else:
             maker_bid = max(yes_bid + 1, yes_ask - 2) if yes_bid is not None else (yes_ask - 2)
         maker_bid = min(yes_ask - 1, max(1, maker_bid))
+        maker_bid = min(effective_max_fav, maker_bid)
         if is_gemini_exchange:
             maker_bid = min(81, maker_bid)
 
@@ -1210,7 +1220,17 @@ def evaluate_favorite_maker_opportunity(
                 return None
             lead_pct = ((target_price - spot_price) / target_price) * 100.0
             # Substantial Belief Gate (Peak 3 Endgame):
-            min_sub_lead = required_spot_lead if is_commodity_high_vol else float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.15"))
+            # Must have substantial spot clearance (>= 0.40% for 15m crypto, >= 0.20% for 1h crypto, >= dynamic commodity)
+            # to prevent late-candle noise flips from generating total binary losses.
+            tf = detect_market_timeframe(ticker)
+            if "min_spot_lead_pct" in dynamic_filters:
+                min_sub_lead = float(dynamic_filters["min_spot_lead_pct"])
+            elif is_commodity_high_vol:
+                min_sub_lead = required_spot_lead
+            elif is_15m_market(ticker) or tf in ("5m", "15m"):
+                min_sub_lead = float(os.getenv("FAVORITE_MAKER_15M_MIN_SPOT_LEAD", "0.40"))
+            else:
+                min_sub_lead = float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.20"))
             if lead_pct < min_sub_lead:
                 log.info(
                     f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
@@ -1268,6 +1288,7 @@ def evaluate_favorite_maker_opportunity(
         else:
             maker_bid = max(no_bid + 1, no_ask - 2) if no_bid is not None else (no_ask - 2)
         maker_bid = min(no_ask - 1, max(1, maker_bid))
+        maker_bid = min(effective_max_fav, maker_bid)
         if is_gemini_exchange:
             maker_bid = min(81, maker_bid)
 
@@ -2059,7 +2080,7 @@ def process_single_market(
                     dynamic_filters=dynamic_filters,
                     client=client,
                     min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                    max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                    max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
                     spot_price=spot_price,
                     target_price=target_price,
                     asset_realized_pnl=asset_realized_pnl,
@@ -2085,7 +2106,7 @@ def process_single_market(
     # -----------------------------------------------------------------------
     # Step 4D: Endgame Favorite Maker Entry on Unowned Positions (:10 & :12.5 marks)
     # At minutes 10.0 and 12.5 (1.0m <= rem_mins <= 6.0m): If we hold no active position
-    # or resting order on this ticker, evaluate high-probability confirmed favorites (74¢–93¢).
+    # or resting order on this ticker, evaluate high-probability confirmed favorites (74¢–89¢).
     # -----------------------------------------------------------------------
     if (is_stop_loss_interval or is_12_5min_mark) and not trade_executed:
         if not client.has_existing_position_or_order(ticker) and dynamic_filters.get("enable_favorite_maker", True):
@@ -2099,7 +2120,7 @@ def process_single_market(
                 dynamic_filters=dynamic_filters,
                 client=client,
                 min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
                 spot_price=spot_price,
                 target_price=target_price,
             )
@@ -3070,7 +3091,7 @@ def process_hourly_market_group(
                     dynamic_filters=dynamic_filters,
                     client=client,
                     min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                    max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                    max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
                     min_rem_mins=1.0,
                     max_rem_mins=25.0,
                     spot_price=spot_price,
@@ -3101,7 +3122,7 @@ def process_hourly_market_group(
 
     # -----------------------------------------------------------------------
     # Step 3D: Endgame Favorite Maker Scan on Non-Entry Marks (:40, :50, :55, :57.5)
-    # Allows hourly strikes in 74¢–93¢ corridor to be entered with maker bids in endgame window
+    # Allows hourly strikes in 74¢–89¢ corridor to be entered with maker bids in endgame window
     # -----------------------------------------------------------------------
     if not is_hourly_trading_interval and not circuit_breaker_tripped and dynamic_filters.get("enable_favorite_maker", True):
         fav_opp_by_ticker = {}
@@ -3116,7 +3137,7 @@ def process_hourly_market_group(
                 dynamic_filters=dynamic_filters,
                 client=client,
                 min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                max_fav_price=int(dynamic_filters.get("favorite_maker_max_buy", 93)),
+                max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
                 min_rem_mins=1.0,
                 max_rem_mins=25.0,
                 spot_price=spot_price,

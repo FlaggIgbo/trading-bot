@@ -1145,7 +1145,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
                 "enable_favorite_maker": True,
                 "favorite_maker_min_buy": 86,
-                "favorite_maker_max_buy": 92,
+                "favorite_maker_max_buy": 89,
                 "max_crypto_directional_concurrent": 2,
                 "max_lead_changes": 1,
                 "enable_momentum_buys": True,
@@ -1178,7 +1178,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 86,
-            "favorite_maker_max_buy": 93,
+            "favorite_maker_max_buy": 89,
             "max_crypto_directional_concurrent": 4,
             "max_lead_changes": 2,
             "enable_momentum_buys": True,
@@ -1213,7 +1213,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
                 "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
                 "enable_favorite_maker": True,
                 "favorite_maker_min_buy": 86,
-                "favorite_maker_max_buy": 92,
+                "favorite_maker_max_buy": 89,
                 "max_crypto_directional_concurrent": 2,
                 "max_lead_changes": 1,
                 "enable_momentum_buys": True,
@@ -1246,7 +1246,7 @@ def _make_default_mark(mark: str, timeframe: str = "15m", asset_symbol: str = "D
             "micro_win_target_cents": int(os.getenv("MICRO_WIN_TARGET_CENTS", "6")),
             "enable_favorite_maker": True,
             "favorite_maker_min_buy": 86,
-            "favorite_maker_max_buy": 93,
+            "favorite_maker_max_buy": 89,
             "max_crypto_directional_concurrent": 4,
             "max_lead_changes": 2,
             "enable_momentum_buys": True,
@@ -1663,7 +1663,7 @@ def calibrate_dynamic_price_map_from_db(
                     else:
                         max_buy = max(min_buy + 2, min(max_buy, 44))
                     fav_min_buy = 86
-                    fav_max_buy = 93
+                    fav_max_buy = 89
                     enable_fav_maker = True
                     max_lead = 2
                     max_concurrent = 4
@@ -2018,7 +2018,7 @@ def get_dynamic_filter_for_market(
         "micro_win_target_cents": int(mark_filter.get("micro_win_target_cents", base_defaults.get("micro_win_target_cents", 6))),
         "enable_favorite_maker": bool(mark_filter.get("enable_favorite_maker", base_defaults.get("enable_favorite_maker", True))),
         "favorite_maker_min_buy": int(mark_filter.get("favorite_maker_min_buy", base_defaults.get("favorite_maker_min_buy", 86))),
-        "favorite_maker_max_buy": int(mark_filter.get("favorite_maker_max_buy", base_defaults.get("favorite_maker_max_buy", 93))),
+        "favorite_maker_max_buy": min(89, int(mark_filter.get("favorite_maker_max_buy", base_defaults.get("favorite_maker_max_buy", 89)))),
         "enable_cross_strike_hedge": (
             (os.getenv("ENABLE_CROSS_STRIKE_HEDGE", "true").lower() in ("true", "1", "yes"))
             and bool(mark_filter.get("enable_cross_strike_hedge", base_defaults.get("enable_cross_strike_hedge", False)))

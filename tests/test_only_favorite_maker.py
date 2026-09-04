@@ -65,7 +65,7 @@ def test_dynamic_filter_reflects_only_favorite_maker_env(monkeypatch):
     assert filt["only_favorite_maker"] is True
     assert filt["enable_favorite_maker"] is True
     assert filt["favorite_maker_min_buy"] == 86
-    assert filt["favorite_maker_max_buy"] == 93
+    assert filt["favorite_maker_max_buy"] == 89
 
 
 def test_15m_market_skips_general_corridors_and_logs_counterfactual(monkeypatch):
