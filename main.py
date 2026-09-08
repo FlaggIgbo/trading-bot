@@ -140,6 +140,156 @@ def prune_market_lead_changes_cache(max_age_seconds: float = 3600.0) -> int:
         log.info(f"🧹 Cleaned up {len(stale_tickers)} expired ticker(s) from in-memory lead change tracking cache.")
     return len(stale_tickers)
 
+
+# In-memory spot price history tracker for directional intraday trend detection
+_SPOT_PRICE_HISTORY: dict[str, list[dict]] = defaultdict(list)
+
+
+def record_spot_price_history(symbol: str, price: float | None, timestamp: float | None = None) -> None:
+    """Records real-time spot price to maintain a rolling window for intraday trend detection."""
+    if price is None or price <= 0:
+        return
+    sym = symbol.upper()
+    ts = timestamp or time.time()
+    history = _SPOT_PRICE_HISTORY[sym]
+    # Prune snapshots older than 2 hours (7200s)
+    _SPOT_PRICE_HISTORY[sym] = [h for h in history if ts - h["ts"] <= 7200]
+    # Keep granularity to at most 1 point every 10 seconds
+    if not _SPOT_PRICE_HISTORY[sym] or (ts - _SPOT_PRICE_HISTORY[sym][-1]["ts"] >= 10):
+        _SPOT_PRICE_HISTORY[sym].append({"p": float(price), "ts": ts})
+
+
+def get_spot_trend_metrics(symbol: str, lookback_seconds: float = 1800.0) -> dict:
+    """
+    Calculates the directional intraday trend of the underlying asset over a rolling lookback window.
+    Default lookback: 30 minutes (1800s).
+    Returns:
+        dict: {
+            "has_trend_data": bool,
+            "direction": "bullish" | "bearish" | "neutral",
+            "delta_pct": float,
+            "start_price": float | None,
+            "current_price": float | None,
+            "elapsed_seconds": float,
+        }
+    """
+    sym = symbol.upper()
+    history = _SPOT_PRICE_HISTORY.get(sym, [])
+    if len(history) < 2:
+        return {
+            "has_trend_data": False,
+            "direction": "neutral",
+            "delta_pct": 0.0,
+            "start_price": None,
+            "current_price": None,
+            "elapsed_seconds": 0.0,
+        }
+
+    now_ts = history[-1]["ts"]
+    current_price = history[-1]["p"]
+
+    # Find the historical price closest to lookback_seconds ago (minimum 120s elapsed)
+    candidates = [h for h in history if (now_ts - h["ts"]) >= min(120.0, lookback_seconds * 0.25)]
+    if not candidates:
+        start_entry = history[0]
+    else:
+        start_entry = min(candidates, key=lambda h: abs((now_ts - h["ts"]) - lookback_seconds))
+
+    start_price = start_entry["p"]
+    elapsed = now_ts - start_entry["ts"]
+
+    if start_price <= 0 or elapsed < 60.0:
+        return {
+            "has_trend_data": False,
+            "direction": "neutral",
+            "delta_pct": 0.0,
+            "start_price": start_price,
+            "current_price": current_price,
+            "elapsed_seconds": elapsed,
+        }
+
+    delta_pct = ((current_price - start_price) / start_price) * 100.0
+    threshold_pct = float(os.getenv("INTRADAY_TREND_THRESHOLD_PCT", "0.25"))
+
+    if delta_pct >= threshold_pct:
+        direction = "bullish"
+    elif delta_pct <= -threshold_pct:
+        direction = "bearish"
+    else:
+        direction = "neutral"
+
+    return {
+        "has_trend_data": True,
+        "direction": direction,
+        "delta_pct": round(delta_pct, 4),
+        "start_price": start_price,
+        "current_price": current_price,
+        "elapsed_seconds": round(elapsed, 1),
+    }
+
+
+def is_counter_trend_entry(
+    symbol: str,
+    side: str,
+    spot_price: float | None = None,
+    threshold_pct: float | None = None,
+) -> tuple[bool, str, dict]:
+    """
+    Directional Intraday Trend & Counter-Trend Reality Filter:
+    ---------------------------------------------------------
+    Determines if taking a prediction position is directly COUNTER to the intraday spot trend:
+      - Buying NO into a strong Bullish Rally (spot surging >= +threshold_pct):
+        Dangerous counter-trend bet! High probability the rally breaches the strike target above.
+      - Buying YES into a strong Bearish Dump (spot plummeting <= -threshold_pct):
+        Dangerous counter-trend bet! High probability the selloff breaches below the strike target.
+
+    Returns:
+        tuple[bool, str, dict]: (is_counter_trend, rejection_reason, trend_metrics)
+    """
+    if os.getenv("ENABLE_COUNTER_TREND_FILTER", "true").lower() not in ("true", "1", "yes"):
+        return False, "filter_disabled", {}
+
+    if spot_price is not None:
+        record_spot_price_history(symbol, spot_price)
+
+    trend = get_spot_trend_metrics(symbol)
+    if not trend.get("has_trend_data"):
+        return False, "insufficient_trend_history", trend
+
+    dir_val = trend.get("direction", "neutral")
+    delta_pct = trend.get("delta_pct", 0.0)
+    side_lower = side.lower().strip()
+
+    # 1. Buying NO while spot is aggressively rallying (Bullish surge)
+    if side_lower == "no" and dir_val == "bullish":
+        reason = (
+            f"Asset {symbol} is in a strong bullish intraday trend ({delta_pct:+.2f}% over {int(trend['elapsed_seconds']/60)}m). "
+            f"Rejecting counter-trend NO bet to avoid steamroller risk into expiration."
+        )
+        return True, reason, trend
+
+    # 2. Buying YES while spot is aggressively dumping (Bearish selloff)
+    if side_lower == "yes" and dir_val == "bearish":
+        reason = (
+            f"Asset {symbol} is in a strong bearish intraday trend ({delta_pct:+.2f}% over {int(trend['elapsed_seconds']/60)}m). "
+            f"Rejecting counter-trend YES bet to avoid catching falling knives into expiration."
+        )
+        return True, reason, trend
+
+    return False, "trend_aligned", trend
+
+
+def prune_spot_price_history_cache(max_age_seconds: float = 7200.0) -> int:
+    """Removes spot history entries older than max_age_seconds (default: 2 hours)."""
+    now = time.time()
+    pruned_count = 0
+    for sym, history in list(_SPOT_PRICE_HISTORY.items()):
+        fresh = [h for h in history if now - h["ts"] <= max_age_seconds]
+        pruned_count += len(history) - len(fresh)
+        _SPOT_PRICE_HISTORY[sym] = fresh
+    return pruned_count
+
+
 # Supported symbols across exchanges (Crypto, Commodities, Equity Indices)
 SUPPORTED_SYMBOLS = (
     "BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", "ADA", "TON", "BCH", "NEAR", "ZEC",
@@ -679,6 +829,7 @@ def get_spot_price(symbol: str, client: BaseTradingClient | None = None) -> floa
 
     if price is not None:
         _SPOT_PRICE_TTL_CACHE[sym_upper] = (price, now_ts)
+        record_spot_price_history(sym_upper, price, now_ts)
     return price
 
 
@@ -721,8 +872,13 @@ def batch_fetch_spot_prices(
                 k, v = future.result()
                 if k == "__COMMODITIES__":
                     spot_cache.update(v)
+                    for c_sym, c_price in v.items():
+                        if c_price is not None and c_price > 0:
+                            record_spot_price_history(c_sym, c_price)
                 else:
                     spot_cache[k] = v
+                    if v is not None and v > 0:
+                        record_spot_price_history(k, v)
             except Exception as err:
                 log.debug(f"Batch spot fetch worker error: {err}")
 
@@ -1106,6 +1262,12 @@ def evaluate_favorite_maker_opportunity(
             if not client.check_crypto_portfolio_directional_cap("yes", max_concurrent=max_conc):
                 return None
 
+        # Counter-Trend Intraday Protection: Reject buying YES when asset is dumping in a strong downtrend
+        is_ct, ct_reason, _ = is_counter_trend_entry(sym_name, "yes", spot_price=spot_price)
+        if is_ct:
+            log.info(f"🛡️ [COUNTER-TREND GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: {ct_reason}")
+            return None
+
         # Tiered Maker Pricing:
         # If wide spread (>= 3¢) and runway is early (rem_mins >= 4.0m), place a deeper bid to capture higher margin.
         # Otherwise, place at top of book (max(yes_bid + 1, yes_ask - 2)) for guaranteed queue fill before expiration.
@@ -1260,6 +1422,12 @@ def evaluate_favorite_maker_opportunity(
         if hasattr(client, "check_crypto_portfolio_directional_cap"):
             if not client.check_crypto_portfolio_directional_cap("no", max_concurrent=max_conc):
                 return None
+
+        # Counter-Trend Intraday Protection: Reject buying NO when asset is rallying in a strong uptrend
+        is_ct, ct_reason, _ = is_counter_trend_entry(sym_name, "no", spot_price=spot_price)
+        if is_ct:
+            log.info(f"🛡️ [COUNTER-TREND GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: {ct_reason}")
+            return None
 
         is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
         spread_cents = (no_ask - (no_bid if no_bid is not None else 0)) if no_ask is not None else 0
@@ -3657,11 +3825,28 @@ def run_pipeline_pass(
 
     # Save valid market snapshots to MongoDB Atlas
     # Render Bandwidth & Storage Optimization Policy:
-    # 1. Always save snapshots where a trade action occurred ('trd' is not None).
-    # 2. Only save non-trade snapshots if in the active trading corridor (10¢-90¢) with active quotes or volume.
+    # 1. Always save snapshots where an actual trade action occurred ('trd' is not None).
+    # 2. Bandwidth Saving Mode (default in production):
+    #    Skips uploading non-traded quotes to MongoDB (saving ~67,000 document uploads/day).
+    #    Only uploads actual trade snapshots (buys, sells, cuts, etc.).
+    # 3. Dense Telemetry Mode (SAVE_ALL_SNAPSHOTS=true or test suite):
+    #    Saves tradeable corridor quotes (10¢-90¢) with active volume for offline backtesting/research.
+    save_dense_telemetry = (
+        os.getenv("SAVE_ALL_SNAPSHOTS", "false").lower() in ("true", "1", "yes")
+        or ("pytest" in sys.modules and os.getenv("BANDWIDTH_SAVING_MODE") is None)
+    )
+
     def _is_retained_snapshot(s: dict) -> bool:
-        if s.get("trd") is not None:
+        trd = s.get("trd")
+        if trd is not None:
+            # Skip high-frequency dry-run counterfactual rejects from MongoDB unless explicitly configured
+            if trd.get("action") == "counterfactual_empirical_reject":
+                return os.getenv("SAVE_COUNTERFACTUALS", "false").lower() in ("true", "1", "yes") or save_dense_telemetry
             return True
+
+        if not save_dense_telemetry:
+            return False
+
         y_val = s.get("y")
         n_val = s.get("n")
         if y_val is None and n_val is None:
@@ -3741,6 +3926,7 @@ def main():
                 prune_old_portfolio_pnl()
                 prune_old_active_positions()
                 prune_market_lead_changes_cache()
+                prune_spot_price_history_cache()
                 last_prune_hour = current_hour
             except Exception as prune_err:
                 log.warning(f"Periodic snapshot and memory pruning notice: {prune_err}")

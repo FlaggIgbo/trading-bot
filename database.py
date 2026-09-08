@@ -397,15 +397,40 @@ def detect_asset_symbol(ticker: str) -> str:
     return "UNKNOWN"
 
 
-def save_settlements(settlements: list[dict]) -> int:
+# In-memory deduplication cache to prevent re-processing identical settlements every 2 minutes
+_PROCESSED_SETTLEMENT_KEYS: set[str] = set()
+
+
+def save_settlements(settlements: list[dict], force_refresh: bool = False) -> int:
     """
     Saves individual settled market PnL records into MongoDB 'settlements' collection.
     Automatically enriches settlement records with entry-time metadata from 'active_positions'
     (e.g., entry price, spot at entry, strike distance %, minute of candle, order role, strategy tag)
     to enable permanent, high-resolution Expected Value (EV) and win-rate analysis across Price, Asset, and Time.
     Cleans up settled positions from 'active_positions' after enrichment.
+
+    Bandwidth Optimization:
+    Maintains an in-memory cache of processed settlement keys (_PROCESSED_SETTLEMENT_KEYS)
+    so the bot avoids executing ~175,000 redundant MongoDB queries per day re-processing the
+    identical 100 historical settlements on every 2-minute loop pass.
     """
+    global _PROCESSED_SETTLEMENT_KEYS
     if not settlements:
+        return 0
+
+    # Filter for settlements that have not yet been processed in this runtime session
+    unprocessed_settlements: list[tuple[str, dict]] = []
+    for s in settlements:
+        ticker = s.get("ticker")
+        settled_time = s.get("settled_time") or ""
+        ex_name = str(s.get("exchange") or s.get("ex") or "kalshi").lower()
+        if not ticker:
+            continue
+        key = f"{ex_name}_{ticker}_{settled_time}"
+        if force_refresh or (key not in _PROCESSED_SETTLEMENT_KEYS):
+            unprocessed_settlements.append((key, s))
+
+    if not unprocessed_settlements:
         return 0
 
     collection = get_mongo_collection("settlements")
@@ -415,7 +440,7 @@ def save_settlements(settlements: list[dict]) -> int:
     active_col = get_mongo_collection("active_positions")
     saved_count = 0
     try:
-        for s in settlements:
+        for key, s in unprocessed_settlements:
             ticker = s.get("ticker")
             settled_time = s.get("settled_time")
             ex_name = str(s.get("exchange") or s.get("ex") or "kalshi").lower()
@@ -496,6 +521,7 @@ def save_settlements(settlements: list[dict]) -> int:
                 upsert=True,
             )
             saved_count += 1
+            _PROCESSED_SETTLEMENT_KEYS.add(key)
 
             # Clean up settled position from active_positions
             if active_col is not None and active_doc is not None:
@@ -503,6 +529,10 @@ def save_settlements(settlements: list[dict]) -> int:
                     active_col.delete_one({"ticker": ticker, "ex": ex_name})
                 except Exception:
                     pass
+
+        # Maintain bounded in-memory cache size (keep latest 1500)
+        if len(_PROCESSED_SETTLEMENT_KEYS) > 3000:
+            _PROCESSED_SETTLEMENT_KEYS = set(list(_PROCESSED_SETTLEMENT_KEYS)[-1500:])
 
         if saved_count > 0:
             log.info(f"📊 Saved/updated {saved_count} enriched settlement PnL record(s) in MongoDB Atlas!")
