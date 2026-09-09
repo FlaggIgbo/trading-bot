@@ -337,6 +337,13 @@ class KalshiClient(BaseTradingClient):
         self._cached_resting_orders_ts: float = 0.0
         self._CACHE_VALIDITY_SECONDS: float = 4.0
 
+        # Strict single-fill protection & cumulative cost basis tracking (<= 92¢ cap)
+        self._ticker_cumulative_cost_cents: dict[str, int] = {}
+        self._ticker_filled_contracts: set[str] = set()
+        self._ticker_liquidated_contracts: set[str] = set()
+        self._cached_kalshi_fills: list[dict] = []
+        self._cached_kalshi_fills_ts: float = 0.0
+
     def _build_auth_headers(self, http_method: str, path: str) -> dict[str, str]:
         """
         Generates required authentication HTTP headers for Kalshi requests.
@@ -1347,6 +1354,10 @@ class KalshiClient(BaseTradingClient):
             log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Kalshi] Refusing to place Favorite Maker order on 5-minute market: {ticker}")
             return {"error": "5min_market_rejected", "ticker": ticker}
 
+        if self.has_exceeded_single_fill_or_cost_cap(ticker, max_cost_basis_cents=92):
+            log.warning(f"🛑 [SINGLE-FILL CAP REJECT] [Kalshi] Refusing Favorite Maker order for {ticker}: already filled or cumulative cost cap 92¢ reached.")
+            return {"error": "single_fill_or_cost_cap_exceeded", "ticker": ticker}
+
         side_clean = side.lower()
         effective_bid = max(1, min(99, maker_bid_cents))
         if target_ask_cents and effective_bid >= target_ask_cents:
@@ -1397,6 +1408,10 @@ class KalshiClient(BaseTradingClient):
                 strategy_tag="endgame_favorite_maker",
                 entry_ts=now_sec,
             )
+            if hasattr(self, "_ticker_filled_contracts"):
+                self._ticker_filled_contracts.add(ticker)
+            if hasattr(self, "_ticker_cumulative_cost_cents"):
+                self._ticker_cumulative_cost_cents[ticker] = self._ticker_cumulative_cost_cents.get(ticker, 0) + (effective_bid * count)
             return {
                 "buy_order": {"status": "simulated", "client_order_id": buy_payload["client_order_id"]},
                 "buy_price_cents": effective_bid,
@@ -1463,6 +1478,10 @@ class KalshiClient(BaseTradingClient):
             spread_saved_cents=spread_saved,
             order_role="maker",
         )
+        if hasattr(self, "_ticker_filled_contracts"):
+            self._ticker_filled_contracts.add(ticker)
+        if hasattr(self, "_ticker_cumulative_cost_cents"):
+            self._ticker_cumulative_cost_cents[ticker] = self._ticker_cumulative_cost_cents.get(ticker, 0) + (effective_bid * count)
 
         return {
             "buy_order": buy_order_res,
@@ -1699,6 +1718,104 @@ class KalshiClient(BaseTradingClient):
         except Exception:
             pass
 
+        # Step 5: Strict single-fill check & cumulative cost basis cap (<= 92¢)
+        # Prevents re-entering a ticker after partial fills, rebuys, or early liquidations,
+        # ensuring cumulative cost basis on any single contract never exceeds 92¢ ($0.92)
+        # to eliminate cost > $1.00 settlement drag.
+        if self.has_exceeded_single_fill_or_cost_cap(ticker, max_cost_basis_cents=92):
+            return True
+
+        return False
+
+    def has_exceeded_single_fill_or_cost_cap(self, ticker: str, max_cost_basis_cents: int = 92) -> bool:
+        """
+        Enforces a strict single-fill check and cumulative cost basis limit (default 92¢).
+        Prevents cumulative capital wagered on any single contract from ever exceeding 92¢,
+        eliminating the catastrophic 'cost > $1.00' settlement drag where multi-fills or
+        re-buys guarantee negative PnL even on winning markets.
+
+        Checks:
+        1. In-memory single-fill tracking for current session.
+        2. In-memory liquidated contract registry (once exited/cut, never re-enter the same contract).
+        3. Cumulative cost basis limit (reject if cumulative cost >= max_cost_basis_cents).
+        4. Persistent database active position cost basis.
+        5. Persistent database settlements history (if contract already expired/settled).
+        6. Kalshi live execution fills history.
+        """
+        # 1. In-memory single-fill tracking
+        if hasattr(self, "_ticker_filled_contracts") and ticker in self._ticker_filled_contracts:
+            log.warning(f"🛑 [SINGLE-FILL CHECK] [Kalshi] Ticker {ticker} already filled in current lifecycle. Rejecting additional entry.")
+            return True
+
+        # 2. In-memory liquidated contract check (never re-enter after early cut)
+        if hasattr(self, "_ticker_liquidated_contracts") and ticker in self._ticker_liquidated_contracts:
+            log.warning(f"🛑 [SINGLE-FILL CHECK] [Kalshi] Ticker {ticker} was previously liquidated/cut in this lifecycle. Rejecting re-entry.")
+            return True
+
+        # 3. Cumulative cost basis limit (<= 92¢)
+        cum_cost = getattr(self, "_ticker_cumulative_cost_cents", {}).get(ticker, 0)
+        if cum_cost >= max_cost_basis_cents:
+            log.warning(f"🛑 [COST BASIS CAP] [Kalshi] Ticker {ticker} cumulative cost basis {cum_cost}¢ reaches/exceeds {max_cost_basis_cents}¢ cap. Rejecting order.")
+            return True
+
+        # 4. Check persistent database active position cost basis
+        try:
+            from database import get_active_position_doc
+            db_pos = get_active_position_doc(ticker, "kalshi")
+            if db_pos is not None:
+                cost_cents = int(round((db_pos.get("total_cost_dollars") or 0.0) * 100)) or int(db_pos.get("entry_price_cents") or 0)
+                if cost_cents >= max_cost_basis_cents or int(db_pos.get("count") or 0) >= 1:
+                    log.warning(f"🛑 [SINGLE-FILL CHECK] DB active position found for {ticker} with cost {cost_cents}¢. Rejecting re-entry.")
+                    if hasattr(self, "_ticker_filled_contracts"):
+                        self._ticker_filled_contracts.add(ticker)
+                    return True
+        except Exception:
+            pass
+
+        # 5. Check persistent database settlements (if contract already settled)
+        try:
+            from database import get_mongo_collection
+            settle_col = get_mongo_collection("settlements")
+            if settle_col is not None:
+                prior_settle = settle_col.find_one({"ticker": ticker, "ex": "kalshi"})
+                if prior_settle is not None:
+                    log.warning(f"🛑 [SINGLE-FILL CHECK] Prior settlement record exists for {ticker}. Rejecting re-entry on settled contract.")
+                    if hasattr(self, "_ticker_filled_contracts"):
+                        self._ticker_filled_contracts.add(ticker)
+                    return True
+        except Exception:
+            pass
+
+        # 6. Check Kalshi live fills history
+        if self.allow_live_orders:
+            try:
+                now = time.time()
+                cached_ts = getattr(self, "_cached_kalshi_fills_ts", 0.0)
+                if (now - cached_ts) > 10.0:
+                    fills_resp = self.get_fills(limit=100)
+                    self._cached_kalshi_fills = fills_resp.get("fills", []) if isinstance(fills_resp, dict) else []
+                    self._cached_kalshi_fills_ts = now
+
+                cached_fills = getattr(self, "_cached_kalshi_fills", [])
+                ticker_fills = [f for f in cached_fills if f.get("ticker") == ticker]
+                if ticker_fills:
+                    total_fill_cost_cents = sum(
+                        int(round(float(f.get("price") or f.get("yes_price") or 0) * 100)) * int(f.get("count") or 1)
+                        for f in ticker_fills
+                    )
+                    if len(ticker_fills) >= 1 or total_fill_cost_cents >= max_cost_basis_cents:
+                        log.warning(
+                            f"🛑 [SINGLE-FILL CHECK] Found {len(ticker_fills)} existing fill(s) ({total_fill_cost_cents}¢) "
+                            f"on Kalshi for {ticker} (cap: {max_cost_basis_cents}¢). Rejecting new order to eliminate cost > $1.00 drag."
+                        )
+                        if hasattr(self, "_ticker_filled_contracts"):
+                            self._ticker_filled_contracts.add(ticker)
+                        if hasattr(self, "_ticker_cumulative_cost_cents"):
+                            self._ticker_cumulative_cost_cents[ticker] = max(self._ticker_cumulative_cost_cents.get(ticker, 0), total_fill_cost_cents)
+                        return True
+            except Exception:
+                pass
+
         return False
 
     def execute_liquidation(self, ticker: str, side: str, count: int, current_price: int) -> dict:
@@ -1732,6 +1849,10 @@ class KalshiClient(BaseTradingClient):
             self.clear_profit_floor(ticker)
             self.clear_entry_price(ticker)
             self.clear_strategy_tag(ticker)
+            if hasattr(self, "_ticker_liquidated_contracts"):
+                self._ticker_liquidated_contracts.add(ticker)
+            if hasattr(self, "_ticker_filled_contracts"):
+                self._ticker_filled_contracts.add(ticker)
             return {"status": "simulated_liquidated", "ticker": ticker, "price": current_price, "count": count}
 
         if side_clean == "yes":
@@ -1774,6 +1895,10 @@ class KalshiClient(BaseTradingClient):
             if fill_cnt > 0 or status in ("executed", "filled"):
                 self.clear_profit_floor(ticker)
                 self.clear_entry_price(ticker)
+                if hasattr(self, "_ticker_liquidated_contracts"):
+                    self._ticker_liquidated_contracts.add(ticker)
+                if hasattr(self, "_ticker_filled_contracts"):
+                    self._ticker_filled_contracts.add(ticker)
                 try:
                     from database import remove_active_position_cost
                     remove_active_position_cost(ticker, "kalshi")
@@ -1811,6 +1936,10 @@ class KalshiClient(BaseTradingClient):
                 if fill_cnt2 > 0 or status2 in ("executed", "filled"):
                     self.clear_profit_floor(ticker)
                     self.clear_entry_price(ticker)
+                    if hasattr(self, "_ticker_liquidated_contracts"):
+                        self._ticker_liquidated_contracts.add(ticker)
+                    if hasattr(self, "_ticker_filled_contracts"):
+                        self._ticker_filled_contracts.add(ticker)
                     try:
                         from database import remove_active_position_cost
                         remove_active_position_cost(ticker, "kalshi")
@@ -1840,6 +1969,10 @@ class KalshiClient(BaseTradingClient):
             log.error(f"🛑 [5-MINUTE MARKET REJECTED] [Kalshi] Refusing to place buy order on 5-minute market: {ticker}")
             return {"error": "5min_market_rejected", "ticker": ticker}
 
+        if self.has_exceeded_single_fill_or_cost_cap(ticker, max_cost_basis_cents=92):
+            log.warning(f"🛑 [SINGLE-FILL CAP REJECT] [Kalshi] Refusing buy order for {ticker}: already filled or cumulative cost exceeds 92¢ cap.")
+            return {"error": "single_fill_or_cost_cap_exceeded", "ticker": ticker}
+
         side_clean = side.lower()
         now_sec = int(time.time())
         now_ms = int(time.time() * 1000)
@@ -1848,6 +1981,10 @@ class KalshiClient(BaseTradingClient):
         if not self.allow_live_orders:
             log.info(f"🛡️ [SAFETY MODE] [Kalshi] Simulated buy for {ticker} ({side_clean.upper()} x{count} @ {clamped_cents}¢).")
             self.record_paper_position(ticker, side_clean, count, clamped_cents)
+            if hasattr(self, "_ticker_filled_contracts"):
+                self._ticker_filled_contracts.add(ticker)
+            if hasattr(self, "_ticker_cumulative_cost_cents"):
+                self._ticker_cumulative_cost_cents[ticker] = self._ticker_cumulative_cost_cents.get(ticker, 0) + (clamped_cents * count)
             return {"status": "simulated_bought", "ticker": ticker, "price": clamped_cents, "count": count}
 
         if side_clean == "yes":
@@ -1872,4 +2009,8 @@ class KalshiClient(BaseTradingClient):
         res = self.post("/portfolio/events/orders", payload=buy_payload)
         self.invalidate_portfolio_caches()
         self.set_entry_price(ticker, clamped_cents)
+        if hasattr(self, "_ticker_filled_contracts"):
+            self._ticker_filled_contracts.add(ticker)
+        if hasattr(self, "_ticker_cumulative_cost_cents"):
+            self._ticker_cumulative_cost_cents[ticker] = self._ticker_cumulative_cost_cents.get(ticker, 0) + (clamped_cents * count)
         return res

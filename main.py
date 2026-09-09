@@ -3464,8 +3464,7 @@ def _process_exchange_pipeline(
 
         # Always persist real-time portfolio tracking to MongoDB in both live and non-live (paper) modes
         save_portfolio_pnl(pnl)
-        if pnl.get("settlements"):
-            save_settlements(pnl["settlements"])
+        save_settlements(pnl.get("settlements"))
     except Exception as err:
         log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
 

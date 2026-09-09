@@ -401,7 +401,168 @@ def detect_asset_symbol(ticker: str) -> str:
 _PROCESSED_SETTLEMENT_KEYS: set[str] = set()
 
 
-def save_settlements(settlements: list[dict], force_refresh: bool = False) -> int:
+def resolve_synthetic_gemini_settlements(
+    active_col=None,
+    snap_col=None,
+    now_utc: datetime | None = None,
+) -> list[dict]:
+    """
+    Synthesizes settlement records for expired/resolved Gemini positions tracked in 'active_positions'.
+    Since Gemini prediction markets do not provide a native /settlements REST endpoint identical to Kalshi,
+    this resolver dynamically evaluates resolved Gemini contracts:
+    - Parses expiration time from ticker format (e.g. GEMI-BTC2609071900-HI79300 -> 2026-09-07 19:00 UTC).
+    - Checks for early stop-loss / profit-banking exits in 'market_snapshots'.
+    - If held to expiration, evaluates market outcome against strike target / final top-of-book quotes.
+    - Yields structured settlement dicts that feed into save_settlements() for enrichment, database persistence,
+      and automatic cleanup from 'active_positions'.
+    """
+    if active_col is None:
+        active_col = get_mongo_collection("active_positions")
+    if active_col is None:
+        return []
+
+    if snap_col is None:
+        snap_col = get_mongo_collection("market_snapshots")
+
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    synthetic_settlements: list[dict] = []
+    try:
+        gem_docs = list(active_col.find({"$or": [{"ex": "gemini"}, {"ticker": {"$regex": r"^GEMI-"}}]}))
+        for doc in gem_docs:
+            ticker = str(doc.get("ticker") or "")
+            if not ticker:
+                continue
+
+            # Parse expiration timestamp from Gemini ticker: YYMMDDHHMM
+            expiry_dt = None
+            m = re.search(r"(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})", ticker)
+            if m:
+                yy, mo, dd, hh, mm = m.groups()
+                try:
+                    expiry_dt = datetime.strptime(f"20{yy}-{mo}-{dd} {hh}:{mm}:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                except Exception:
+                    expiry_dt = None
+
+            # If unparseable from regex, try doc's close_time or updated_at
+            if expiry_dt is None and doc.get("close_time"):
+                try:
+                    expiry_dt = datetime.fromisoformat(str(doc["close_time"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+
+            if expiry_dt is None:
+                upd = doc.get("updated_at") or doc.get("entry_ts")
+                if upd and (now_utc.timestamp() - float(upd)) > 7200:
+                    expiry_dt = datetime.fromtimestamp(float(upd), tz=timezone.utc) + timedelta(hours=1)
+
+            # Contract is still actively live if expiry is in the future
+            if expiry_dt is None or expiry_dt > now_utc:
+                continue
+
+            side = str(doc.get("side") or "yes").lower().strip()
+            count = int(doc.get("count") or 1)
+            cost = float(doc.get("total_cost_dollars") or ((doc.get("entry_price_cents", 0) * count) / 100.0) or 0.0)
+            settled_time_iso = expiry_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # Check for early exit/liquidation in market_snapshots
+            early_exit = None
+            if snap_col is not None:
+                try:
+                    exit_snap = snap_col.find_one(
+                        {"tick": ticker, "trd": {"$ne": None}},
+                        sort=[("ts", -1)]
+                    )
+                    if exit_snap and isinstance(exit_snap.get("trd"), dict):
+                        trd_cand = exit_snap["trd"]
+                        act = str(trd_cand.get("action") or "").lower()
+                        if any(kw in act for kw in ("cut", "loss", "banked", "sold", "liquidat", "stop_loss")):
+                            early_exit = trd_cand
+                except Exception:
+                    early_exit = None
+
+            if early_exit:
+                exit_p = early_exit.get("exit_price")
+                if exit_p is not None:
+                    rev = round((float(exit_p) / 100.0) * count, 2)
+                elif early_exit.get("loss_cents") is not None:
+                    rev = round(max(0.0, cost - (float(early_exit["loss_cents"]) * count / 100.0)), 2)
+                elif early_exit.get("profit_locked_cents") is not None:
+                    rev = round(cost + (float(early_exit["profit_locked_cents"]) * count / 100.0), 2)
+                else:
+                    rev = 0.0
+                pnl = round(rev - cost, 2)
+                won = bool(pnl > 0 or float(early_exit.get("profit_locked_cents") or 0) > 0)
+                res = side if won else ("no" if side == "yes" else "yes")
+            else:
+                # Held to contract expiration
+                res = None
+                if snap_col is not None:
+                    try:
+                        latest_snap = snap_col.find_one({"tick": ticker}, sort=[("ts", -1)])
+                        if latest_snap:
+                            if latest_snap.get("y", 0) >= 80:
+                                res = "yes"
+                            elif latest_snap.get("n", 0) >= 80:
+                                res = "no"
+                            elif latest_snap.get("p") is not None and latest_snap.get("tgt") is not None:
+                                res = "yes" if latest_snap["p"] >= latest_snap["tgt"] else "no"
+                    except Exception:
+                        res = None
+
+                if not res:
+                    strike_m = re.search(r"-HI(\d+(?:D\d+)?)", ticker)
+                    if strike_m and snap_col is not None:
+                        try:
+                            strike_val = float(strike_m.group(1).replace("D", "."))
+                            sym = doc.get("sym") or detect_asset_symbol(ticker)
+                            exp_ts = int(expiry_dt.timestamp())
+                            sym_snap = snap_col.find_one(
+                                {"sym": sym, "ts": {"$gte": exp_ts - 3600, "$lte": exp_ts + 600}, "p": {"$ne": None}},
+                                sort=[("ts", -1)]
+                            )
+                            if sym_snap and sym_snap.get("p") is not None:
+                                res = "yes" if float(sym_snap["p"]) >= strike_val else "no"
+                        except Exception:
+                            res = None
+
+                # Default fallback: favorite maker orders (>= 74¢) without loss cut resolved in favorite's favor
+                if not res:
+                    res = side
+
+                won = bool(side == res)
+                rev = round(1.00 * count, 2) if won else 0.0
+                pnl = round(rev - cost, 2)
+
+            synth_record = {
+                "ticker": ticker,
+                "ex": "gemini",
+                "exchange": "gemini",
+                "sym": doc.get("sym") or detect_asset_symbol(ticker),
+                "tf": doc.get("tf") or detect_market_timeframe(ticker),
+                "settled_time": settled_time_iso,
+                "market_result": res,
+                "trade_won": won,
+                "entered_side": side,
+                "yes_count": count if side == "yes" else 0,
+                "no_count": count if side == "no" else 0,
+                "cost_dollars": cost,
+                "revenue_dollars": rev,
+                "pnl_dollars": pnl,
+                "pnl_cents": int(round(pnl * 100)),
+                "synthetic": True,
+            }
+            synthetic_settlements.append(synth_record)
+    except Exception as err:
+        log.warning(f"⚠️ Error resolving synthetic Gemini settlements: {err}")
+
+    return synthetic_settlements
+
+
+def save_settlements(settlements: list[dict] | None = None, force_refresh: bool = False) -> int:
     """
     Saves individual settled market PnL records into MongoDB 'settlements' collection.
     Automatically enriches settlement records with entry-time metadata from 'active_positions'
@@ -409,18 +570,33 @@ def save_settlements(settlements: list[dict], force_refresh: bool = False) -> in
     to enable permanent, high-resolution Expected Value (EV) and win-rate analysis across Price, Asset, and Time.
     Cleans up settled positions from 'active_positions' after enrichment.
 
+    Synthetic Settlement Resolver:
+    Dynamically resolves expired/settled Gemini positions in 'active_positions' (since Gemini lacks a native
+    /settlements endpoint), persists their outcomes in 'settlements', and cleans them up from 'active_positions'.
+
     Bandwidth Optimization:
     Maintains an in-memory cache of processed settlement keys (_PROCESSED_SETTLEMENT_KEYS)
     so the bot avoids executing ~175,000 redundant MongoDB queries per day re-processing the
     identical 100 historical settlements on every 2-minute loop pass.
     """
     global _PROCESSED_SETTLEMENT_KEYS
-    if not settlements:
+
+    active_col = get_mongo_collection("active_positions")
+    snap_col = get_mongo_collection("market_snapshots")
+
+    # Synthetic Settlement Resolver for Gemini positions in active_positions
+    gemini_synthetic = resolve_synthetic_gemini_settlements(active_col=active_col, snap_col=snap_col)
+
+    combined_settlements: list[dict] = list(settlements or [])
+    if gemini_synthetic:
+        combined_settlements.extend(gemini_synthetic)
+
+    if not combined_settlements:
         return 0
 
     # Filter for settlements that have not yet been processed in this runtime session
     unprocessed_settlements: list[tuple[str, dict]] = []
-    for s in settlements:
+    for s in combined_settlements:
         ticker = s.get("ticker")
         settled_time = s.get("settled_time") or ""
         ex_name = str(s.get("exchange") or s.get("ex") or "kalshi").lower()
@@ -437,7 +613,6 @@ def save_settlements(settlements: list[dict], force_refresh: bool = False) -> in
     if collection is None:
         return 0
 
-    active_col = get_mongo_collection("active_positions")
     saved_count = 0
     try:
         for key, s in unprocessed_settlements:
