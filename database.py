@@ -1048,17 +1048,25 @@ def get_asset_realized_pnl_dollars(
 def is_asset_loss_gated(
     symbol: str,
     timeframe: str | None = None,
-    max_loss_dollars: float = 1.0,
+    max_loss_dollars: float = 2.50,
     since_midnight_et: bool = True,
     now_utc: datetime | None = None,
     db=None,
 ) -> tuple[bool, float]:
     """
-    Checks if a specific (symbol, timeframe) contract or overall asset's realized losses since midnight ET exceed the threshold (default: $1.00).
+    Checks if a specific (symbol, timeframe) contract or overall asset's realized losses since midnight ET exceed the threshold (default: $2.50).
     Evaluates timeframe-specific realized losses and aggregate symbol losses.
-    If daily realized PnL <= -$1.00, returns (True, pnl_dollars) indicating live trading is gated for that asset today.
+    If daily realized PnL <= -$2.50, returns (True, pnl_dollars) indicating live trading is gated for that asset today.
     Resets at midnight ET every day.
     """
+    effective_max_loss = max_loss_dollars
+    env_limit = os.getenv("MAX_ASSET_LOSS_DOLLARS")
+    if env_limit is not None:
+        try:
+            effective_max_loss = float(env_limit)
+        except (ValueError, TypeError):
+            pass
+
     pnl_tf = get_asset_realized_pnl_dollars(
         symbol,
         timeframe=timeframe,
@@ -1077,7 +1085,7 @@ def is_asset_loss_gated(
         )
         pnl = min(pnl_tf, pnl_overall)
 
-    is_gated = (pnl <= -abs(max_loss_dollars))
+    is_gated = (pnl <= -abs(effective_max_loss))
     return is_gated, pnl
 
 

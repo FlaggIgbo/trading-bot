@@ -1814,14 +1814,15 @@ def process_single_market(
     is_restricted = dynamic_filters.get("is_restricted", False)
     base_contracts = int(dynamic_filters.get("contracts_per_trade", 1))
 
-    # Asset/Timeframe Daily Loss Gating ($1.00 loss threshold since midnight ET): If daily realized losses for (asset, 15m) exceed $1.00, disable live trades
-    is_gated, asset_realized_pnl = is_asset_loss_gated(asset_symbol, timeframe="15m", max_loss_dollars=1.0, now_utc=now_utc)
+    # Asset/Timeframe Daily Loss Gating ($2.50 loss threshold since midnight ET): If daily realized losses for (asset, 15m) exceed $2.50, disable live trades
+    daily_asset_loss_limit = float(os.getenv("MAX_ASSET_LOSS_DOLLARS", "2.50"))
+    is_gated, asset_realized_pnl = is_asset_loss_gated(asset_symbol, timeframe="15m", max_loss_dollars=daily_asset_loss_limit, now_utc=now_utc)
     effective_dry_run = dry_run or is_gated
     ex_name = getattr(client, "exchange_name", "Exchange")
     if is_gated and not dry_run:
         log.info(
             f"🛡️ [DAILY ASSET LOSS GATED] [{ex_name}] 15M {asset_symbol} daily realized loss since midnight ET (${abs(asset_realized_pnl):.2f}) "
-            f"exceeds $1.00 limit. Disabling live 15M order execution for today; running in DRY-RUN empirical logging mode."
+            f"exceeds ${daily_asset_loss_limit:.2f} limit. Disabling live 15M order execution for today; running in DRY-RUN empirical logging mode."
         )
 
     trade_executed = False
@@ -2412,13 +2413,14 @@ def process_hourly_market_group(
     is_restricted = dynamic_filters.get("is_restricted", False)
     base_contracts = int(dynamic_filters.get("contracts_per_trade", 1 if is_restricted else 3))
 
-    # Asset/Timeframe Daily Loss Gating ($1.00 loss threshold since midnight ET): If daily realized losses for (symbol, 1h) exceed $1.00, disable live trades
-    is_gated, asset_realized_pnl = is_asset_loss_gated(symbol, timeframe="1h", max_loss_dollars=1.0, now_utc=now_utc)
+    # Asset/Timeframe Daily Loss Gating ($2.50 loss threshold since midnight ET): If daily realized losses for (symbol, 1h) exceed $2.50, disable live trades
+    daily_asset_loss_limit = float(os.getenv("MAX_ASSET_LOSS_DOLLARS", "2.50"))
+    is_gated, asset_realized_pnl = is_asset_loss_gated(symbol, timeframe="1h", max_loss_dollars=daily_asset_loss_limit, now_utc=now_utc)
     effective_dry_run = dry_run or is_gated
     if is_gated and not dry_run:
         log.info(
             f"🛡️ [DAILY ASSET LOSS GATED] [{ex_name}] 1H {symbol} daily realized loss since midnight ET (${abs(asset_realized_pnl):.2f}) "
-            f"exceeds $1.00 limit. Disabling live 1H order execution for today; running in DRY-RUN empirical logging mode."
+            f"exceeds ${daily_asset_loss_limit:.2f} limit. Disabling live 1H order execution for today; running in DRY-RUN empirical logging mode."
         )
 
     snapshots: list[dict] = []
