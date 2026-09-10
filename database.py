@@ -231,6 +231,163 @@ def prune_old_active_positions(retention_hours: int = 48) -> int:
         return 0
 
 
+def prune_stale_active_positions(
+    confirmed_tickers: set[str] | list[str] | None = None,
+    confirmed_tickers_by_exchange: dict[str, set[str] | list[str]] | None = None,
+    exchange: str | None = None,
+    max_age_hours: float = 2.0,
+    now_utc: datetime | None = None,
+    client=None,
+    active_col=None,
+) -> int:
+    """
+    Deletes stale/orphaned documents from MongoDB 'active_positions' whose contract expiration
+    timestamp has passed by > max_age_hours (default: 2.0 hours) and have no confirmed active
+    open position on the underlying exchange.
+
+    This prevents resting maker orders that expired unfilled (or unrecorded settlements)
+    from lingering indefinitely in 'active_positions' while strictly preserving any currently
+    active/held exchange positions.
+
+    Parameters:
+        confirmed_tickers: Set or list of tickers currently confirmed as open on the exchange.
+        confirmed_tickers_by_exchange: Dict mapping {exchange -> set/list of confirmed tickers}.
+        exchange: Specific exchange name (e.g. 'kalshi' or 'gemini') to prune. If None, prunes all.
+        max_age_hours: Time-to-live threshold in hours after contract expiration (default: 2.0h).
+        now_utc: Current UTC datetime reference for time calculations.
+        client: Optional TradingClient instance to query live open positions directly.
+        active_col: Optional MongoDB collection reference for testing.
+
+    Returns:
+        int: Number of stale positions pruned from MongoDB.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now_utc.astimezone(timezone.utc)
+
+    # If client is provided and confirmed positions not explicitly supplied, extract from client
+    if client is not None and confirmed_tickers is None and confirmed_tickers_by_exchange is None:
+        client_ex = getattr(client, "exchange_name", None)
+        if client_ex and exchange is None:
+            exchange = client_ex.lower()
+        if hasattr(client, "get_all_active_positions"):
+            try:
+                live_map = client.get_all_active_positions()
+                if isinstance(live_map, dict):
+                    confirmed_tickers = set(live_map.keys())
+            except Exception as err:
+                log.warning(f"Could not retrieve active positions from client for TTL pruning: {err}")
+
+    # Build normalized confirmed lookup map: {exchange -> uppercase_tickers_set}
+    confirmed_by_ex: dict[str, set[str]] = {}
+    if isinstance(confirmed_tickers_by_exchange, dict):
+        for ex_k, t_set in confirmed_tickers_by_exchange.items():
+            confirmed_by_ex[str(ex_k).lower()] = {str(t).upper() for t in t_set} if t_set else set()
+    elif confirmed_tickers is not None:
+        c_set = {str(t).upper() for t in confirmed_tickers}
+        if exchange:
+            confirmed_by_ex[exchange.lower()] = c_set
+        else:
+            confirmed_by_ex["_all"] = c_set
+
+    if active_col is None:
+        active_col = get_mongo_collection("active_positions")
+    if active_col is None:
+        return 0
+
+    query: dict = {}
+    if exchange:
+        query["ex"] = exchange.lower()
+
+    pruned_count = 0
+    try:
+        docs = list(active_col.find(query))
+        if not docs:
+            return 0
+
+        # Lazy import of parse_market_close_datetime
+        try:
+            from signals.base_client import parse_market_close_datetime
+        except Exception:
+            parse_market_close_datetime = None
+
+        for doc in docs:
+            ticker = str(doc.get("ticker") or "")
+            doc_ex = str(doc.get("ex") or "kalshi").lower()
+            if not ticker:
+                continue
+
+            ticker_upper = ticker.upper()
+
+            # 1. Check if confirmed on exchange (if confirmed, never prune)
+            is_confirmed = False
+            if doc_ex in confirmed_by_ex:
+                is_confirmed = ticker_upper in confirmed_by_ex[doc_ex]
+            elif "_all" in confirmed_by_ex:
+                is_confirmed = ticker_upper in confirmed_by_ex["_all"]
+
+            if is_confirmed:
+                continue
+
+            # 2. Parse expiration timestamp
+            expiry_dt = None
+            close_raw = doc.get("close_time") or doc.get("expiration_time")
+            if parse_market_close_datetime is not None:
+                try:
+                    expiry_dt = parse_market_close_datetime(close_raw, ticker=ticker)
+                except Exception:
+                    pass
+
+            if expiry_dt is None and close_raw:
+                try:
+                    expiry_dt = datetime.fromisoformat(str(close_raw).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+
+            # Fallback to entry_ts or updated_at
+            if expiry_dt is None:
+                entry_ts = doc.get("entry_ts") or doc.get("updated_at")
+                if entry_ts:
+                    tf = str(doc.get("tf") or "").lower()
+                    duration = timedelta(minutes=15) if ("15m" in tf or "15min" in tf) else timedelta(hours=1)
+                    try:
+                        expiry_dt = datetime.fromtimestamp(float(entry_ts), tz=timezone.utc) + duration
+                    except Exception:
+                        pass
+
+            if expiry_dt is None:
+                continue
+
+            # Ensure UTC timezone awareness
+            if expiry_dt.tzinfo is None:
+                expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+            else:
+                expiry_dt = expiry_dt.astimezone(timezone.utc)
+
+            # 3. Check if expiration timestamp has passed by > max_age_hours
+            elapsed_seconds = (now_utc - expiry_dt).total_seconds()
+            if elapsed_seconds > (max_age_hours * 3600):
+                try:
+                    active_col.delete_one({"_id": doc["_id"]})
+                    pruned_count += 1
+                    log.info(
+                        f"🧹 [TTL PRUNED] Deleted stale unconfirmed active position: {ticker} (ex={doc_ex}) "
+                        f"expired {elapsed_seconds / 3600:.1f}h ago (> {max_age_hours:.1f}h TTL limit)."
+                    )
+                except Exception as del_err:
+                    log.warning(f"Failed to delete stale active position {ticker}: {del_err}")
+
+        if pruned_count > 0:
+            log.info(f"🧹 Pruned {pruned_count} stale/expired position(s) from 'active_positions'.")
+        return pruned_count
+    except Exception as err:
+        log.error(f"Error during TTL active positions pruning: {err}")
+        return 0
+
+
 def get_mongo_collection(collection_name: str = "market_snapshots"):
     """
     Establishes or reuses a connection to MongoDB Atlas using MONGODB_URI.

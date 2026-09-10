@@ -64,6 +64,7 @@ from database import (
     prune_old_active_positions,
     prune_old_market_snapshots,
     prune_old_portfolio_pnl,
+    prune_stale_active_positions,
     save_market_snapshots,
     save_portfolio_pnl,
     save_settlements,
@@ -1138,7 +1139,7 @@ def evaluate_favorite_maker_opportunity(
     dynamic_filters: dict,
     client: BaseTradingClient,
     min_fav_price: int = 86,
-    max_fav_price: int = 89,
+    max_fav_price: int = 92,
     min_rem_mins: float = 1.0,
     max_rem_mins: float = 6.0,
     spot_price: float | None = None,
@@ -1150,13 +1151,20 @@ def evaluate_favorite_maker_opportunity(
     an optimal resting maker bid inside the spread to capture the spread discount.
 
     Rules:
-    - Confirmed favorite sits between effective_min_fav (default >= 86¢) and 89¢ (ensures positive EV and caps tail risk).
+    - Standard Favorite Corridor: 86¢ <= ask <= 89¢ (or Gemini scaled to [74¢, 81¢]).
+    - Titanium Conviction Tier (90¢–92¢): Higher-conviction endgame tier for contracts
+      priced 90¢–92¢ to capture edge while requiring:
+        1. Ultra-Strict Spot Lead: >= 0.60% for 15m crypto, >= 0.40% for 1h crypto, >= 0.80% (or 1.5x dynamic) for commodities.
+        2. Ultra-Tight Runway: rem_mins <= 4.0m for 15m, rem_mins <= 10.0m for 1h.
+        3. Tight Spread: spread_cents <= 4¢ (illiquid books strictly blocked).
+        4. Conservative Sizing: strictly 1 contract max (no bankroll compounding).
+        5. Real-time Spot Required: mandatory spot price confirmation (blind entry rejected).
+    - Hard Ceiling Gate: ALL contracts with ask >= 93¢ or maker_bid >= 93¢ are strictly blocked
+      under all circumstances to protect positive expected value (negative EV tail risk).
     - Window: Final 1.0m to 6.0m of 15m lifecycle (or up to 25.0m for 1h).
     - Maker Limit Bid: Places resting bid inside the spread (1¢-2¢ below ask, or 1¢ above bid).
     - Avoids crossing the spread (-6¢ taker friction) and captures zero maker fees on Kalshi crypto.
     - Gated by hard position check, choppiness filter (lead_changes <= max_lead), single-side lock, and spot price confirmation.
-    - Stricter Spot Lead Gate for WTI and GOLD: Mandates >= 0.50% spot lead clearance (due to higher whipsaw variance).
-    - Stricter Spot Lead Gate for 15M Crypto: Mandates >= 0.40% spot lead clearance to prevent late-candle noise flips.
     """
     ticker = market.get("ticker", "")
     if client.has_existing_position_or_order(ticker):
@@ -1178,14 +1186,23 @@ def evaluate_favorite_maker_opportunity(
 
     ex_name = getattr(client, "exchange_name", "kalshi").lower()
     effective_min_fav = int(dynamic_filters.get("favorite_maker_min_buy", min_fav_price))
-    effective_max_fav = min(89, int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price)))
     is_gemini_exchange = ("gemini" in ex_name) or ("gemini" in str(ticker).lower()) or str(ticker).startswith("GEMI-")
 
     # 4-Vector Rule: Gemini contracts capped at <= 81¢ to prevent payout margin compression,
-    # with corridor floor scaled to <= 74¢ to ensure a valid [74¢, 81¢] favorite maker corridor
+    # with corridor floor scaled to <= 74¢ to ensure a valid [74¢, 81¢] favorite maker corridor.
+    # Titanium tier (90¢–92¢) is strictly blocked on Gemini.
+    enable_titanium = bool(dynamic_filters.get("enable_titanium_tier", True)) and not is_gemini_exchange
+    fav_max_filter = int(dynamic_filters.get("favorite_maker_max_buy", max_fav_price))
     if is_gemini_exchange:
-        effective_max_fav = min(effective_max_fav, 81)
+        effective_max_fav = min(81, fav_max_filter)
         effective_min_fav = min(effective_min_fav, 74, effective_max_fav)
+    elif not enable_titanium:
+        effective_max_fav = min(89, fav_max_filter, max_fav_price)
+    elif fav_max_filter < 89 or max_fav_price < 89:
+        effective_max_fav = min(fav_max_filter, max_fav_price)
+    else:
+        # Titanium Conviction Tier: allows up to 92¢ (capped strictly at <= 92¢; >= 93¢ strictly blocked)
+        effective_max_fav = 92
 
     is_restricted = bool(dynamic_filters.get("is_restricted", False)) or (dynamic_filters.get("recent_pnl_cents") or 0) < 0
 
@@ -1207,10 +1224,29 @@ def evaluate_favorite_maker_opportunity(
     no_bid = quotes.get("no_bid")
     no_ask = quotes.get("no_ask")
 
+    tf = detect_market_timeframe(ticker)
+    is_15m = is_15m_market(ticker) or tf in ("5m", "15m")
+
     # 1. Check YES as favorite
     if yes_ask is not None and effective_min_fav <= yes_ask <= effective_max_fav:
+        # Hard Ceiling Gate: strictly block anything >= 93¢ (negative EV tail risk)
+        if yes_ask >= 93:
+            log.info(f"🛡️ [HARD CEILING GATE] [{ex_name}] {ticker} YES ask ({yes_ask}¢) >= 93¢ strictly blocked.")
+            return None
+
         if not client.is_side_allowed(ticker, "yes"):
             return None
+
+        is_titanium_price = (yes_ask >= 90)
+
+        # Titanium Gate: Real-time spot confirmation is strictly required for 90¢–92¢
+        if is_titanium_price and (spot_price is None or target_price is None or target_price <= 0):
+            log.info(
+                f"🛡️ [TITANIUM SPOT REQUIRED] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                f"Real-time spot price confirmation required for Titanium Conviction Tier (90¢–92¢)."
+            )
+            return None
+
         # High-value direction check: Require spot price confirmation and substantial belief
         if spot_price is not None and target_price is not None and target_price > 0:
             if spot_price < target_price:
@@ -1220,22 +1256,56 @@ def evaluate_favorite_maker_opportunity(
                 )
                 return None
             lead_pct = ((spot_price - target_price) / target_price) * 100.0
-            # Substantial Belief Gate (Peak 3 Endgame):
-            # Must have substantial spot clearance (>= 0.40% for 15m crypto, >= 0.20% for 1h crypto, >= dynamic commodity)
-            # to prevent late-candle noise flips from generating total binary losses.
-            tf = detect_market_timeframe(ticker)
-            if "min_spot_lead_pct" in dynamic_filters:
-                min_sub_lead = float(dynamic_filters["min_spot_lead_pct"])
-            elif is_commodity_high_vol:
-                min_sub_lead = required_spot_lead
-            elif is_15m_market(ticker) or tf in ("5m", "15m"):
-                min_sub_lead = float(os.getenv("FAVORITE_MAKER_15M_MIN_SPOT_LEAD", "0.40"))
+
+            if is_titanium_price:
+                # Titanium Conviction Tier Gate A (Ultra-Strict Spot Lead):
+                # Requires higher conviction to protect positive EV on asymmetric payoff:
+                # >= 0.60% for 15m crypto, >= 0.40% for 1h crypto, >= 0.80% (or 1.5x dynamic lead) for commodities
+                if is_commodity_high_vol:
+                    min_sub_lead = max(0.80, required_spot_lead * 1.5)
+                elif is_15m:
+                    min_sub_lead = float(os.getenv("TITANIUM_15M_MIN_SPOT_LEAD", "0.60"))
+                else:
+                    min_sub_lead = float(os.getenv("TITANIUM_1H_MIN_SPOT_LEAD", "0.40"))
+
+                if "min_spot_lead_pct" in dynamic_filters:
+                    min_sub_lead = max(min_sub_lead, float(dynamic_filters["min_spot_lead_pct"]))
+
+                if lead_pct < min_sub_lead:
+                    log.info(
+                        f"🛡️ [TITANIUM SPOT LEAD GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                        f"Spot lead ({lead_pct:.3f}%) below Titanium threshold ({min_sub_lead:.2f}%)."
+                    )
+                    return None
             else:
-                min_sub_lead = float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.20"))
-            if lead_pct < min_sub_lead:
+                # Substantial Belief Gate (Standard Peak 3 Endgame: 86¢–89¢):
+                # Must have substantial spot clearance (>= 0.40% for 15m crypto, >= 0.20% for 1h crypto, >= dynamic commodity)
+                # to prevent late-candle noise flips from generating total binary losses.
+                if "min_spot_lead_pct" in dynamic_filters:
+                    min_sub_lead = float(dynamic_filters["min_spot_lead_pct"])
+                elif is_commodity_high_vol:
+                    min_sub_lead = required_spot_lead
+                elif is_15m:
+                    min_sub_lead = float(os.getenv("FAVORITE_MAKER_15M_MIN_SPOT_LEAD", "0.40"))
+                else:
+                    min_sub_lead = float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.20"))
+
+                if lead_pct < min_sub_lead:
+                    log.info(
+                        f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                        f"Spot lead ({lead_pct:.3f}%) below substantial belief threshold ({min_sub_lead:.2f}%)."
+                    )
+                    return None
+
+        # Titanium Conviction Tier Gate B (Ultra-Tight Runway Gate):
+        # Restrict entry to late endgame window (rem_mins <= 4.0m for 15m, rem_mins <= 10.0m for 1h)
+        # to minimize exposure duration to late whipsaw reversals.
+        if is_titanium_price and rem_mins is not None:
+            max_titanium_runway = 4.0 if is_15m else 10.0
+            if rem_mins > max_titanium_runway:
                 log.info(
-                    f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
-                    f"Spot lead ({lead_pct:.3f}%) below substantial belief threshold ({min_sub_lead:.2f}%)."
+                    f"🛡️ [TITANIUM RUNWAY GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                    f"Runway ({rem_mins:.1f}m) exceeds Titanium max allowed ({max_titanium_runway:.1f}m)."
                 )
                 return None
 
@@ -1268,11 +1338,17 @@ def evaluate_favorite_maker_opportunity(
             log.info(f"🛡️ [COUNTER-TREND GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: {ct_reason}")
             return None
 
-        # Tiered Maker Pricing:
-        # If wide spread (>= 3¢) and runway is early (rem_mins >= 4.0m), place a deeper bid to capture higher margin.
-        # Otherwise, place at top of book (max(yes_bid + 1, yes_ask - 2)) for guaranteed queue fill before expiration.
-        is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
         spread_cents = (yes_ask - (yes_bid if yes_bid is not None else 0)) if yes_ask is not None else 0
+
+        # Titanium Conviction Tier Gate C (Tight Spread Gate <= 4¢):
+        if is_titanium_price:
+            max_titanium_spread = int(dynamic_filters.get("titanium_max_spread", os.getenv("TITANIUM_MAX_SPREAD", "4")))
+            if spread_cents > max_titanium_spread:
+                log.info(
+                    f"🛡️ [TITANIUM SPREAD GATE] [{ex_name}] {ticker} YES Favorite @ {yes_ask}¢ rejected: "
+                    f"Spread ({spread_cents}¢: bid {yes_bid}¢ / ask {yes_ask}¢) exceeds Titanium limit ({max_titanium_spread}¢)."
+                )
+                return None
 
         # Wide Spread Gate: Reject illiquid order books (especially in commodities like GOLD/SILVER)
         max_fav_spread = int(
@@ -1293,6 +1369,7 @@ def evaluate_favorite_maker_opportunity(
             )
             return None
 
+        is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
         if is_early_endgame and spread_cents >= 3 and yes_bid is not None:
             maker_bid = min(yes_bid + 2, yes_ask - 2)
         else:
@@ -1301,6 +1378,15 @@ def evaluate_favorite_maker_opportunity(
         maker_bid = min(effective_max_fav, maker_bid)
         if is_gemini_exchange:
             maker_bid = min(81, maker_bid)
+
+        # Hard Ceiling Gate: strictly block if maker_bid >= 93
+        if maker_bid >= 93:
+            log.info(
+                f"🛡️ [HARD CEILING GATE] [{ex_name}] {ticker} YES Favorite maker bid ({maker_bid}¢) >= 93¢ strictly blocked."
+            )
+            return None
+
+        is_titanium = is_titanium_price or (maker_bid >= 90)
 
         # Determine strict minimum floor for maker_bid based on asset class and exchange profile:
         # - Commodities (GOLD, SILVER, WTI): strictly >= 82¢ (reject illiquid wide spreads dragging bids into dead zone)
@@ -1335,7 +1421,7 @@ def evaluate_favorite_maker_opportunity(
             )
             return None
 
-        # Dynamic Sizing & 70% Kalshi / 30% Gemini Capital Allocation:
+        # Dynamic Sizing & Titanium Conservative Sizing:
         balance_cents = None
         if hasattr(client, "get_balance_cents"):
             try:
@@ -1354,24 +1440,43 @@ def evaluate_favorite_maker_opportunity(
             is_restricted=is_restricted,
             recent_win_rate=recent_wr,
         )
-        if is_gemini_exchange:
+        if is_titanium:
+            contracts_to_buy = 1  # Titanium Conviction Tier Gate D: strictly 1 contract max (no compounding)
+        elif is_gemini_exchange:
             contracts_to_buy = max(1, min(1, contracts_count))  # 30% allocation weighting (1 contract baseline)
         else:
             contracts_to_buy = max(1, contracts_count)  # 70% allocation (full compounding)
 
+        fav_type = "titanium_favorite_yes" if is_titanium else "heavy_favorite_yes"
         return {
             "side": "yes",
             "maker_bid": maker_bid,
             "target_ask": yes_ask,
             "spread_saved": max(1, yes_ask - maker_bid),
-            "favorite_type": "heavy_favorite_yes",
+            "favorite_type": fav_type,
             "count": contracts_to_buy,
         }
 
     # 2. Check NO as favorite
     if no_ask is not None and effective_min_fav <= no_ask <= effective_max_fav:
+        # Hard Ceiling Gate: strictly block anything >= 93¢ (negative EV tail risk)
+        if no_ask >= 93:
+            log.info(f"🛡️ [HARD CEILING GATE] [{ex_name}] {ticker} NO ask ({no_ask}¢) >= 93¢ strictly blocked.")
+            return None
+
         if not client.is_side_allowed(ticker, "no"):
             return None
+
+        is_titanium_price = (no_ask >= 90)
+
+        # Titanium Gate: Real-time spot confirmation is strictly required for 90¢–92¢
+        if is_titanium_price and (spot_price is None or target_price is None or target_price <= 0):
+            log.info(
+                f"🛡️ [TITANIUM SPOT REQUIRED] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                f"Real-time spot price confirmation required for Titanium Conviction Tier (90¢–92¢)."
+            )
+            return None
+
         # High-value direction check: Require spot price confirmation and substantial belief
         if spot_price is not None and target_price is not None and target_price > 0:
             if spot_price > target_price:
@@ -1381,22 +1486,54 @@ def evaluate_favorite_maker_opportunity(
                 )
                 return None
             lead_pct = ((target_price - spot_price) / target_price) * 100.0
-            # Substantial Belief Gate (Peak 3 Endgame):
-            # Must have substantial spot clearance (>= 0.40% for 15m crypto, >= 0.20% for 1h crypto, >= dynamic commodity)
-            # to prevent late-candle noise flips from generating total binary losses.
-            tf = detect_market_timeframe(ticker)
-            if "min_spot_lead_pct" in dynamic_filters:
-                min_sub_lead = float(dynamic_filters["min_spot_lead_pct"])
-            elif is_commodity_high_vol:
-                min_sub_lead = required_spot_lead
-            elif is_15m_market(ticker) or tf in ("5m", "15m"):
-                min_sub_lead = float(os.getenv("FAVORITE_MAKER_15M_MIN_SPOT_LEAD", "0.40"))
+
+            if is_titanium_price:
+                # Titanium Conviction Tier Gate A (Ultra-Strict Spot Lead):
+                # Requires higher conviction to protect positive EV on asymmetric payoff:
+                # >= 0.60% for 15m crypto, >= 0.40% for 1h crypto, >= 0.80% (or 1.5x dynamic lead) for commodities
+                if is_commodity_high_vol:
+                    min_sub_lead = max(0.80, required_spot_lead * 1.5)
+                elif is_15m:
+                    min_sub_lead = float(os.getenv("TITANIUM_15M_MIN_SPOT_LEAD", "0.60"))
+                else:
+                    min_sub_lead = float(os.getenv("TITANIUM_1H_MIN_SPOT_LEAD", "0.40"))
+
+                if "min_spot_lead_pct" in dynamic_filters:
+                    min_sub_lead = max(min_sub_lead, float(dynamic_filters["min_spot_lead_pct"]))
+
+                if lead_pct < min_sub_lead:
+                    log.info(
+                        f"🛡️ [TITANIUM SPOT LEAD GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                        f"Spot lead ({lead_pct:.3f}%) below Titanium threshold ({min_sub_lead:.2f}%)."
+                    )
+                    return None
             else:
-                min_sub_lead = float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.20"))
-            if lead_pct < min_sub_lead:
+                # Substantial Belief Gate (Standard Peak 3 Endgame: 86¢–89¢):
+                # Must have substantial spot clearance (>= 0.40% for 15m crypto, >= 0.20% for 1h crypto, >= dynamic commodity)
+                if "min_spot_lead_pct" in dynamic_filters:
+                    min_sub_lead = float(dynamic_filters["min_spot_lead_pct"])
+                elif is_commodity_high_vol:
+                    min_sub_lead = required_spot_lead
+                elif is_15m:
+                    min_sub_lead = float(os.getenv("FAVORITE_MAKER_15M_MIN_SPOT_LEAD", "0.40"))
+                else:
+                    min_sub_lead = float(os.getenv("FAVORITE_MAKER_MIN_SPOT_LEAD", "0.20"))
+
+                if lead_pct < min_sub_lead:
+                    log.info(
+                        f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                        f"Spot lead ({lead_pct:.3f}%) below substantial belief threshold ({min_sub_lead:.2f}%)."
+                    )
+                    return None
+
+        # Titanium Conviction Tier Gate B (Ultra-Tight Runway Gate):
+        # Restrict entry to late endgame window (rem_mins <= 4.0m for 15m, rem_mins <= 10.0m for 1h)
+        if is_titanium_price and rem_mins is not None:
+            max_titanium_runway = 4.0 if is_15m else 10.0
+            if rem_mins > max_titanium_runway:
                 log.info(
-                    f"🛡️ [SUBSTANTIAL BELIEF GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
-                    f"Spot lead ({lead_pct:.3f}%) below substantial belief threshold ({min_sub_lead:.2f}%)."
+                    f"🛡️ [TITANIUM RUNWAY GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                    f"Runway ({rem_mins:.1f}m) exceeds Titanium max allowed ({max_titanium_runway:.1f}m)."
                 )
                 return None
 
@@ -1429,8 +1566,17 @@ def evaluate_favorite_maker_opportunity(
             log.info(f"🛡️ [COUNTER-TREND GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: {ct_reason}")
             return None
 
-        is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
         spread_cents = (no_ask - (no_bid if no_bid is not None else 0)) if no_ask is not None else 0
+
+        # Titanium Conviction Tier Gate C (Tight Spread Gate <= 4¢):
+        if is_titanium_price:
+            max_titanium_spread = int(dynamic_filters.get("titanium_max_spread", os.getenv("TITANIUM_MAX_SPREAD", "4")))
+            if spread_cents > max_titanium_spread:
+                log.info(
+                    f"🛡️ [TITANIUM SPREAD GATE] [{ex_name}] {ticker} NO Favorite @ {no_ask}¢ rejected: "
+                    f"Spread ({spread_cents}¢: bid {no_bid}¢ / ask {no_ask}¢) exceeds Titanium limit ({max_titanium_spread}¢)."
+                )
+                return None
 
         # Wide Spread Gate: Reject illiquid order books (especially in commodities like GOLD/SILVER)
         max_fav_spread = int(
@@ -1451,6 +1597,7 @@ def evaluate_favorite_maker_opportunity(
             )
             return None
 
+        is_early_endgame = (rem_mins is not None and rem_mins >= 4.0)
         if is_early_endgame and spread_cents >= 3 and no_bid is not None:
             maker_bid = min(no_bid + 2, no_ask - 2)
         else:
@@ -1459,6 +1606,15 @@ def evaluate_favorite_maker_opportunity(
         maker_bid = min(effective_max_fav, maker_bid)
         if is_gemini_exchange:
             maker_bid = min(81, maker_bid)
+
+        # Hard Ceiling Gate: strictly block if maker_bid >= 93
+        if maker_bid >= 93:
+            log.info(
+                f"🛡️ [HARD CEILING GATE] [{ex_name}] {ticker} NO Favorite maker bid ({maker_bid}¢) >= 93¢ strictly blocked."
+            )
+            return None
+
+        is_titanium = is_titanium_price or (maker_bid >= 90)
 
         # Determine strict minimum floor for maker_bid based on asset class and exchange profile:
         # - Commodities (GOLD, SILVER, WTI): strictly >= 82¢ (reject illiquid wide spreads dragging bids into dead zone)
@@ -1511,17 +1667,20 @@ def evaluate_favorite_maker_opportunity(
             is_restricted=is_restricted,
             recent_win_rate=recent_wr,
         )
-        if is_gemini_exchange:
+        if is_titanium:
+            contracts_to_buy = 1  # Titanium Conviction Tier Gate D: strictly 1 contract max (no compounding)
+        elif is_gemini_exchange:
             contracts_to_buy = max(1, min(1, contracts_count))  # 30% allocation weighting
         else:
             contracts_to_buy = max(1, contracts_count)  # 70% allocation
 
+        fav_type = "titanium_favorite_no" if is_titanium else "heavy_favorite_no"
         return {
             "side": "no",
             "maker_bid": maker_bid,
             "target_ask": no_ask,
             "spread_saved": max(1, no_ask - maker_bid),
-            "favorite_type": "heavy_favorite_no",
+            "favorite_type": fav_type,
             "count": contracts_to_buy,
         }
 
@@ -1539,11 +1698,21 @@ def _execute_favorite_maker_flow(
     client: BaseTradingClient,
     dry_run: bool,
     count: int = 1,
+    favorite_type: str = "heavy_favorite",
+    rem_mins: float | None = None,
 ) -> tuple[bool, dict | None]:
     """Helper function to execute resting Favorite Maker limit bid inside the spread."""
     side_lower = side.lower()
     side_upper = side.upper()
     ex_name = getattr(client, "exchange_name", "Exchange")
+
+    # Hard Ceiling Gate: strictly prevent any maker order >= 93¢ or target_ask >= 93¢ under all circumstances
+    if maker_bid >= 93 or target_ask >= 93:
+        log.warning(
+            f"🛡️ [HARD CEILING GATE] [{ex_name}] {ticker}: "
+            f"Maker bid ({maker_bid}¢) or target ask ({target_ask}¢) is >= 93¢. Strictly blocking trade to protect positive EV."
+        )
+        return False, None
 
     # Hard position gate: strictly prevent any order if any position or order exists on either side (YES/NO)
     if client.has_existing_position_or_order(ticker):
@@ -1569,6 +1738,11 @@ def _execute_favorite_maker_flow(
         )
         return False, None
 
+    is_titanium = (maker_bid >= 90) or (target_ask >= 90) or str(favorite_type).startswith("titanium")
+    strat_tag = "titanium_favorite_maker" if is_titanium else "endgame_favorite_maker"
+    tag_label = "TITANIUM FAVORITE MAKER" if is_titanium else "FAVORITE MAKER"
+    corridor_label = "titanium_conviction" if is_titanium else "favorite_maker"
+
     spread_saved = max(0, target_ask - maker_bid)
     fav_tp = calculate_micro_win_take_profit(maker_bid)
 
@@ -1579,7 +1753,7 @@ def _execute_favorite_maker_flow(
         else f"Executing Resting Maker Bid at {maker_bid}¢ (Ask: {target_ask}¢, Spread Saved: +{spread_saved}¢, Micro-Win TP: {fav_tp}¢)!"
     )
     log.info(
-        f"{log_prefix} [FAVORITE MAKER] [{ex_name}] {ticker} -> Confirmed {side_upper} Favorite! {log_action}"
+        f"{log_prefix} [{tag_label}] [{ex_name}] {ticker} -> Confirmed {side_upper} Favorite! {log_action}"
     )
 
     effective_buy = maker_bid
@@ -1632,17 +1806,19 @@ def _execute_favorite_maker_flow(
                 count=count,
                 entry_price_cents=maker_bid,
                 target_tp_cents=fav_tp,
-                strategy_tag="endgame_favorite_maker",
+                strategy_tag=strat_tag,
             )
 
     trade_details = {
         **({"dry_run": True} if dry_run else {}),
         "ex": ex_name.lower(),
         "action": "favorite_maker_opened",
-        "strategy_tag": "endgame_favorite_maker",
+        "strategy_tag": strat_tag,
+        "favorite_type": favorite_type,
+        "is_titanium": is_titanium,
         "order_role": "maker",
         "spread_saved_cents": spread_saved,
-        "corridor": "favorite_maker",
+        "corridor": corridor_label,
         "side": side_lower,
         "buy": effective_buy,
         "count": count,
@@ -1671,15 +1847,15 @@ def _execute_favorite_maker_flow(
                 count=count,
                 client_order_id=trade_details.get("client_order_id"),
                 take_profit_cents=fav_tp,
-                strategy_tag="endgame_favorite_maker",
+                strategy_tag=strat_tag,
                 spread_saved_cents=spread_saved,
                 order_role="maker",
                 spot_price_at_entry=spot_price,
                 target_strike_price=target_price,
                 strike_distance_diff=diff_val,
                 strike_distance_pct=pct_val,
-                seconds_remaining=round(rem_mins * 60.0, 1),
-                regime="favorite_maker",
+                seconds_remaining=round(rem_mins * 60.0, 1) if rem_mins is not None else None,
+                regime="titanium_conviction" if is_titanium else "favorite_maker",
             )
         except Exception as err:
             log.debug(f"Could not persist enriched favorite maker entry details for {ticker}: {err}")
@@ -2239,7 +2415,7 @@ def process_single_market(
                             trade_details["consensus_regime"] = chosen_consensus.get("regime")
                             trade_details["streak_length"] = chosen_consensus.get("streak_length")
 
-            # Priority 3: Endgame Favorite Maker Strategy (>= 86¢ resting maker bid)
+            # Priority 3: Endgame Favorite Maker Strategy (>= 86¢ resting maker bid, up to 92¢ Titanium Tier)
             # Allowed ONLY if neither Peak 1 nor Peak 2 was executed, AND substantial belief is satisfied!
             if not trade_executed and dynamic_filters.get("enable_favorite_maker", True):
                 fav_opp = evaluate_favorite_maker_opportunity(
@@ -2249,7 +2425,7 @@ def process_single_market(
                     dynamic_filters=dynamic_filters,
                     client=client,
                     min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                    max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
+                    max_fav_price=92,
                     spot_price=spot_price,
                     target_price=target_price,
                     asset_realized_pnl=asset_realized_pnl,
@@ -2259,6 +2435,7 @@ def process_single_market(
                     fav_maker_bid = fav_opp["maker_bid"]
                     fav_target_ask = fav_opp["target_ask"]
                     fav_count = fav_opp.get("count", 1)
+                    fav_type = fav_opp.get("favorite_type", "heavy_favorite")
                     trade_executed, trade_details = _execute_favorite_maker_flow(
                         ticker=ticker,
                         side=fav_side,
@@ -2270,12 +2447,14 @@ def process_single_market(
                         client=client,
                         dry_run=effective_dry_run,
                         count=fav_count,
+                        favorite_type=fav_type,
+                        rem_mins=rem_mins,
                     )
 
     # -----------------------------------------------------------------------
     # Step 4D: Endgame Favorite Maker Entry on Unowned Positions (:10 & :12.5 marks)
     # At minutes 10.0 and 12.5 (1.0m <= rem_mins <= 6.0m): If we hold no active position
-    # or resting order on this ticker, evaluate high-probability confirmed favorites (74¢–89¢).
+    # or resting order on this ticker, evaluate high-probability confirmed favorites (74¢–92¢, including Titanium Tier).
     # -----------------------------------------------------------------------
     if (is_stop_loss_interval or is_12_5min_mark) and not trade_executed:
         if not client.has_existing_position_or_order(ticker) and dynamic_filters.get("enable_favorite_maker", True):
@@ -2289,7 +2468,7 @@ def process_single_market(
                 dynamic_filters=dynamic_filters,
                 client=client,
                 min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
+                max_fav_price=92,
                 spot_price=spot_price,
                 target_price=target_price,
             )
@@ -2298,6 +2477,7 @@ def process_single_market(
                 fav_maker_bid = fav_opp["maker_bid"]
                 fav_target_ask = fav_opp["target_ask"]
                 fav_count = fav_opp.get("count", 1)
+                fav_type = fav_opp.get("favorite_type", "heavy_favorite")
                 trade_executed, trade_details = _execute_favorite_maker_flow(
                     ticker=ticker,
                     side=fav_side_val,
@@ -2309,6 +2489,8 @@ def process_single_market(
                     client=client,
                     dry_run=dry_run,
                     count=fav_count,
+                    favorite_type=fav_type,
+                    rem_mins=rem_mins,
                 )
 
     # 5. Build Compact Snapshot Document
@@ -3246,7 +3428,7 @@ def process_hourly_market_group(
                 trade_executed_by_ticker[ticker] = details
                 hourly_buy_executed = True
 
-        # Step 3F: Priority 3 - Peak 3 Endgame Favorite Maker Strategy (>= 86¢ resting maker bid)
+        # Step 3F: Priority 3 - Peak 3 Endgame Favorite Maker Strategy (>= 86¢ resting maker bid, up to 92¢ Titanium Tier)
         # Allowed ONLY if neither Peak 1 nor Peak 2 was executed, AND substantial belief is satisfied!
         if not hourly_buy_executed and dynamic_filters.get("enable_favorite_maker", True):
             fav_opp_by_ticker = {}
@@ -3261,7 +3443,7 @@ def process_hourly_market_group(
                     dynamic_filters=dynamic_filters,
                     client=client,
                     min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                    max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
+                    max_fav_price=92,
                     min_rem_mins=1.0,
                     max_rem_mins=25.0,
                     spot_price=spot_price,
@@ -3275,6 +3457,8 @@ def process_hourly_market_group(
                 best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
                 best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
                 fav_count = best_fav.get("count", 1)
+                fav_type = best_fav.get("favorite_type", "heavy_favorite")
+                fav_rem_mins = best_item.get("rem_mins")
                 fav_executed, fav_details = _execute_favorite_maker_flow(
                     ticker=best_fav_ticker,
                     side=best_fav["side"],
@@ -3286,13 +3470,15 @@ def process_hourly_market_group(
                     client=client,
                     dry_run=effective_dry_run,
                     count=fav_count,
+                    favorite_type=fav_type,
+                    rem_mins=fav_rem_mins,
                 )
                 if fav_executed and fav_details:
                     trade_executed_by_ticker[best_fav_ticker] = fav_details
 
     # -----------------------------------------------------------------------
     # Step 3D: Endgame Favorite Maker Scan on Non-Entry Marks (:40, :50, :55, :57.5)
-    # Allows hourly strikes in 74¢–89¢ corridor to be entered with maker bids in endgame window
+    # Allows hourly strikes in 74¢–92¢ corridor to be entered with maker bids in endgame window
     # -----------------------------------------------------------------------
     if not is_hourly_trading_interval and not circuit_breaker_tripped and dynamic_filters.get("enable_favorite_maker", True):
         fav_opp_by_ticker = {}
@@ -3307,7 +3493,7 @@ def process_hourly_market_group(
                 dynamic_filters=dynamic_filters,
                 client=client,
                 min_fav_price=int(dynamic_filters.get("favorite_maker_min_buy", 86)),
-                max_fav_price=min(89, int(dynamic_filters.get("favorite_maker_max_buy", 89))),
+                max_fav_price=92,
                 min_rem_mins=1.0,
                 max_rem_mins=25.0,
                 spot_price=spot_price,
@@ -3321,6 +3507,8 @@ def process_hourly_market_group(
             best_fav_ticker, best_fav = min(fav_opp_by_ticker.items(), key=lambda x: x[1]["maker_bid"])
             best_item = next(it for it in parsed_markets if it["ticker"] == best_fav_ticker)
             fav_count = best_fav.get("count", 1)
+            fav_type = best_fav.get("favorite_type", "heavy_favorite")
+            fav_rem_mins = best_item.get("rem_mins")
             fav_executed, fav_details = _execute_favorite_maker_flow(
                 ticker=best_fav_ticker,
                 side=best_fav["side"],
@@ -3332,6 +3520,8 @@ def process_hourly_market_group(
                 client=client,
                 dry_run=effective_dry_run,
                 count=fav_count,
+                favorite_type=fav_type,
+                rem_mins=fav_rem_mins,
             )
             if fav_executed and fav_details:
                 trade_executed_by_ticker[best_fav_ticker] = fav_details
@@ -3467,6 +3657,23 @@ def _process_exchange_pipeline(
         # Always persist real-time portfolio tracking to MongoDB in both live and non-live (paper) modes
         save_portfolio_pnl(pnl)
         save_settlements(pnl.get("settlements"))
+
+        # TTL Pruning Loop: Delete active positions for contracts whose expiration passed by > 2 hours and have no confirmed exchange position
+        try:
+            confirmed_tickers = set(client.get_all_active_positions().keys())
+            pruned_count = prune_stale_active_positions(
+                confirmed_tickers=confirmed_tickers,
+                exchange=exchange_name.lower(),
+                max_age_hours=2.0,
+                now_utc=now_utc,
+            )
+            if pruned_count > 0:
+                log.info(
+                    f"🧹 [{exchange_name}] TTL Pruning Loop deleted {pruned_count} stale unconfirmed active position(s) "
+                    f"(> 2.0h past expiration)."
+                )
+        except Exception as prune_err:
+            log.debug(f"Could not complete TTL active positions pruning for {exchange_name}: {prune_err}")
     except Exception as err:
         log.warning(f"Could not retrieve portfolio PnL summary from {exchange_name}: {err}")
 
@@ -3926,6 +4133,13 @@ def main():
                 prune_old_market_snapshots()
                 prune_old_portfolio_pnl()
                 prune_old_active_positions()
+                confirmed_map = {}
+                for name, cl in persistent_clients:
+                    try:
+                        confirmed_map[name.lower()] = set(cl.get_all_active_positions().keys())
+                    except Exception:
+                        pass
+                prune_stale_active_positions(confirmed_tickers_by_exchange=confirmed_map, max_age_hours=2.0)
                 prune_market_lead_changes_cache()
                 prune_spot_price_history_cache()
                 last_prune_hour = current_hour
