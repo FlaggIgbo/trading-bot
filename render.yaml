@@ -8,8 +8,9 @@ services:
     buildFilter:
       paths:
         - "main.py"
-        - "database.py"
-        - "signals/**"
+        - "ingestion/**"
+        - "risk_engine/**"
+        - "logging/**"
         - "requirements.txt"
         - "pyproject.toml"
       ignoredPaths:
