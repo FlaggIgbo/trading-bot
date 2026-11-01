@@ -169,3 +169,43 @@ def test_settler_checks_resolution_and_computes_pnl():
     assert positions["order_future_3"]["status"] == "OPEN"
     assert positions["order_future_3"]["pnl_cents"] is None
     db.close()
+
+
+def test_sqlite_differentiates_production_and_demo_entries(tmp_path):
+    db_file = str(tmp_path / "shared_state.db")
+    demo_db = Database(db_file, environment="demo.kalshi.co")
+    prod_db = Database(db_file, environment="production")
+
+    # Upsert same ticker with different prices in demo vs production
+    demo_db.upsert_markets([{"ticker": "KXBTC15M-SHARED", "status": "open", "yes_ask": 42, "no_ask": 58}])
+    prod_db.upsert_markets([{"ticker": "KXBTC15M-SHARED", "status": "open", "yes_ask": 75, "no_ask": 25}])
+
+    demo_markets = demo_db.get_open_markets()
+    prod_markets = prod_db.get_open_markets()
+    assert len(demo_markets) == 1
+    assert demo_markets[0]["environment"] == "demo.kalshi.co"
+    assert demo_markets[0]["yes_ask"] == 42
+    assert len(prod_markets) == 1
+    assert prod_markets[0]["environment"] == "production"
+    assert prod_markets[0]["yes_ask"] == 75
+
+    # Insert open position in demo.kalshi.co only
+    demo_db.insert_open_position(
+        client_order_id="demo_order_1",
+        ticker="KXBTC15M-SHARED",
+        side="YES",
+        count=1,
+        price_cents=42,
+        close_time="2026-10-31T10:00:00Z",
+    )
+
+    # Demo sees the position; production does not collide with demo positions
+    assert "KXBTC15M-SHARED" in demo_db.get_positioned_tickers()
+    assert "KXBTC15M-SHARED" not in prod_db.get_positioned_tickers()
+    assert len(demo_db.get_all_positions()) == 1
+    assert demo_db.get_all_positions()[0]["environment"] == "demo.kalshi.co"
+    assert len(prod_db.get_all_positions()) == 0
+    assert len(prod_db.get_all_positions(environment="*")) == 1
+
+    demo_db.close()
+    prod_db.close()

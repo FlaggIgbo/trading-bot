@@ -25,9 +25,10 @@ def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db"):
     print("Starting the simplified trading bot...")
     print("Strategy: If market is open, randomly bet 1 contract on YES or NO. Never sell, hold and hope for the best.")
 
-    # Initialize SQLite database and Kalshi REST API client
-    db = Database(db_path=db_path)
+    # Initialize Kalshi REST API client and SQLite database (tagged by environment)
     client = KalshiClient()
+    db = Database(db_path=db_path, environment=client.environment)
+    print(f"Environment: {client.environment} ({client.base_url})")
 
     # Initialize the 3 pipeline steps
     scanner = Scanner(client=client, db=db)

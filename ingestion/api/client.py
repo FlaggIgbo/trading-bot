@@ -102,6 +102,8 @@ class KalshiClient:
             self.base_url = os.getenv("KALSHI_BASE_URL", demo_base_url).rstrip("/")
 
         is_demo_url = "demo-api.kalshi.co" in self.base_url or "demo.kalshi.co" in self.base_url
+        self.is_demo = is_demo_url
+        self.environment = "demo.kalshi.co" if is_demo_url else "production"
 
         # API Key ID (use KALSHI_DEMO_API_KEY_ID when targeting demo environment)
         if api_key_id:
