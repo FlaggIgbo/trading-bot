@@ -5,7 +5,7 @@ and have live order execution disabled so tests never make actual trades on prod
 """
 
 import pytest
-from ingestion.client import DEFAULT_DEMO_API_KEY_ID, DEMO_BASE_URL
+from ingestion.api.client import DEFAULT_DEMO_API_KEY_ID, DEMO_BASE_URL
 
 
 @pytest.fixture(autouse=True)

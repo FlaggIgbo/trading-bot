@@ -1,9 +1,10 @@
 """
-Tests for the ingestion layer against Kalshi demo environment (demo-api.kalshi.co).
+Tests for the ingestion layer (Kalshi API client and Scanner) against Kalshi demo environment (demo-api.kalshi.co).
 """
 
 import pytest
-from ingestion.client import (
+from db import Database
+from ingestion.api.client import (
     DEFAULT_DEMO_API_KEY_ID,
     DEMO_BASE_URL,
     KalshiClient,
@@ -11,6 +12,7 @@ from ingestion.client import (
     load_private_key,
     sign_request,
 )
+from ingestion.scanner import Scanner
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 
@@ -70,6 +72,27 @@ def test_get_open_markets_demo():
         assert is_binary_market(market) is True
 
 
+def test_scanner_upserts_into_sqlite():
+    # Verify Scanner filters binary markets and saves them to SQLite
+    db = Database(":memory:")
+    scanner = Scanner(client=None, db=db)
+
+    raw_markets = [
+        {"ticker": "KXBTC15M-1", "event_ticker": "EV1", "market_type": "binary", "status": "open", "yes_ask": 45, "no_ask": 55, "close_time": "2026-11-01T15:00:00Z"},
+        {"ticker": "KXINXU-26NOV02H1600-T7499.9999", "event_ticker": "EV2", "market_type": "binary", "status": "open"},
+    ]
+    filtered = scanner.filter_markets(raw_markets)
+    assert len(filtered) == 1
+    assert filtered[0]["ticker"] == "KXBTC15M-1"
+
+    db.upsert_markets(filtered)
+    saved = db.get_open_markets()
+    assert len(saved) == 1
+    assert saved[0]["ticker"] == "KXBTC15M-1"
+    assert saved[0]["yes_ask"] == 45
+    db.close()
+
+
 def test_place_order_simulation():
     # In simulation mode, order returns simulated dict using real KalshiClient
     client = KalshiClient(live_orders=False)
@@ -83,6 +106,7 @@ def test_place_order_simulation():
         assert order["count"] == 1
         assert order["price"] == 45
         assert order["order_id"].startswith("buy_yes_KXBTCD-100_")
+        assert order["client_order_id"] == order["order_id"]
 
     for side_input in ("NO", "BUY_NO"):
         order = client.place_order(ticker="KXBTCD-100", side=side_input, count=1, price_cents=65)
@@ -92,6 +116,7 @@ def test_place_order_simulation():
         assert order["count"] == 1
         assert order["price"] == 65
         assert order["order_id"].startswith("buy_no_KXBTCD-100_")
+        assert order["client_order_id"] == order["order_id"]
 
 
 def test_place_order_live_buy_yes_and_buy_no_on_demo():
@@ -122,5 +147,3 @@ def test_place_order_rejects_multi_strike_market():
     client = KalshiClient(live_orders=False)
     with pytest.raises(ValueError, match="Non-binary multi-strike market"):
         client.place_order(ticker="KXINXU-26NOV02H1600-T7499.9999", side="YES", count=1, price_cents=50)
-
-

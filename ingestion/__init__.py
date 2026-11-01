@@ -2,6 +2,7 @@
 Ingestion layer package.
 """
 
-from ingestion.client import KalshiClient
+from ingestion.api.client import KalshiClient
+from ingestion.scanner import Scanner
 
-__all__ = ["KalshiClient"]
+__all__ = ["KalshiClient", "Scanner"]

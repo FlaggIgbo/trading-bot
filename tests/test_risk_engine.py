@@ -1,12 +1,14 @@
 """
-Tests for the simplified risk engine.
+Tests for the Trader (RiskEngine) and Settler with SQLite storage.
 Rule:
 If market is open (and when it opens), randomly bet 1 contract on one side ("YES", "NO").
-Never sell, just hold it and hope for the best.
+Never sell, just hold it until resolution and compute PnL.
 """
 
-from ingestion.client import KalshiClient
-from risk_engine.engine import RiskEngine
+from db import Database
+from ingestion.api.client import KalshiClient
+from risk_engine.engine import RiskEngine, Trader
+from risk_engine.settler import Settler
 
 
 def test_is_market_open():
@@ -26,17 +28,31 @@ def test_pick_random_side():
         assert side in ["YES", "NO"]
 
 
-def test_bets_1_contract_on_open_market():
+def test_bets_1_contract_on_open_market_and_writes_to_db():
+    db = Database(":memory:")
     client = KalshiClient()
-    engine = RiskEngine(client=client)
-    market = {"ticker": "KXBTC15M-26OCT312200-00", "status": "open", "yes_ask": 40, "no_ask": 60}
+    trader = Trader(client=client, db=db)
 
-    result = engine.process_market(market)
-    assert result is not None
-    assert "KXBTC15M-26OCT312200-00" in engine.bet_markets
-    assert result["ticker"] == "KXBTC15M-26OCT312200-00"
-    assert result["count"] == 1
-    assert result["side"] in ["YES", "NO"]
+    market = {
+        "ticker": "KXBTC15M-26OCT312200-00",
+        "status": "open",
+        "yes_ask": 40,
+        "no_ask": 60,
+        "close_time": "2026-10-31T22:00:00Z",
+    }
+    db.upsert_markets([market])
+
+    orders = trader.trade()
+    assert len(orders) == 1
+    assert "KXBTC15M-26OCT312200-00" in trader.bet_markets
+
+    positions = db.get_all_positions()
+    assert len(positions) == 1
+    assert positions[0]["ticker"] == "KXBTC15M-26OCT312200-00"
+    assert positions[0]["status"] == "OPEN"
+    assert positions[0]["count"] == 1
+    assert positions[0]["side"] in ["YES", "NO"]
+    db.close()
 
 
 def test_does_not_bet_on_closed_market():
@@ -50,8 +66,9 @@ def test_does_not_bet_on_closed_market():
 
 
 def test_does_not_bet_twice_on_same_market():
+    db = Database(":memory:")
     client = KalshiClient()
-    engine = RiskEngine(client=client)
+    engine = RiskEngine(client=client, db=db)
     market = {"ticker": "KXBTC15M-26OCT312200-00", "status": "open"}
 
     # First time market is seen, bet should be placed
@@ -63,6 +80,7 @@ def test_does_not_bet_twice_on_same_market():
     result2 = engine.process_market(market)
     assert result2 is None
     assert len(engine.bet_markets) == 1
+    db.close()
 
 
 def test_never_sells():
@@ -98,3 +116,56 @@ def test_only_bets_on_binary_markets():
     res = engine.evaluate_all([binary_market])
     assert len(res) == 1
     assert "KXBTC15M-26OCT312200-00" in engine.bet_markets
+
+
+def test_settler_checks_resolution_and_computes_pnl():
+    db = Database(":memory:")
+
+    # Insert two expired OPEN positions (one winning YES bet at 40c, one losing NO bet at 60c)
+    db.insert_open_position(
+        client_order_id="order_win_1",
+        ticker="KXBTC15M-WIN",
+        side="YES",
+        count=1,
+        price_cents=40,
+        close_time="2026-10-31T10:00:00Z",
+    )
+    db.insert_open_position(
+        client_order_id="order_loss_2",
+        ticker="KXBTC15M-LOSS",
+        side="NO",
+        count=1,
+        price_cents=60,
+        close_time="2026-10-31T10:00:00Z",
+    )
+    # And one future position that shouldn't be checked yet
+    db.insert_open_position(
+        client_order_id="order_future_3",
+        ticker="KXBTC15M-FUTURE",
+        side="YES",
+        count=1,
+        price_cents=50,
+        close_time="2099-12-31T23:59:59Z",
+    )
+
+    class StubResolutionClient:
+        def get_market(self, ticker):
+            # Return Kalshi v2 finalized market with result="yes"
+            return {"ticker": ticker, "status": "finalized", "result": "yes"}
+
+    settler = Settler(client=StubResolutionClient(), db=db)
+    settled = settler.settle(now_iso="2026-11-01T00:00:00Z")
+
+    assert len(settled) == 2
+
+    positions = {p["client_order_id"]: p for p in db.get_all_positions()}
+    # Winning YES at 40c -> +60c PnL
+    assert positions["order_win_1"]["status"] == "SETTLED"
+    assert positions["order_win_1"]["pnl_cents"] == 60
+    # Losing NO at 60c when result is YES -> -60c PnL
+    assert positions["order_loss_2"]["status"] == "SETTLED"
+    assert positions["order_loss_2"]["pnl_cents"] == -60
+    # Future position remains OPEN
+    assert positions["order_future_3"]["status"] == "OPEN"
+    assert positions["order_future_3"]["pnl_cents"] is None
+    db.close()
