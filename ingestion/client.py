@@ -15,13 +15,14 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
 import requests
 
-# Load environment variables
+# Load environment variables (fall back to .env.example defaults if not set in .env)
 load_dotenv()
+load_dotenv(".env.example", override=False)
 
 # Default series to look for tradeable binary (single-market Yes/No) prediction markets
 DEFAULT_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M", "KXBNB15M"]
-DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
-DEFAULT_DEMO_API_KEY_ID = "98d50000-98b9-4649-b0d5-863fff7a2af5"
+DEMO_BASE_URL = os.getenv("KALSHI_DEMO_BASE_URL", "")
+DEFAULT_DEMO_API_KEY_ID = os.getenv("KALSHI_DEMO_API_KEY_ID", "")
 
 # Regex matching multi-strike ladder ticker suffixes (e.g., -T7499.9999, -B7500, -A100)
 MULTI_STRIKE_SUFFIX_RE = re.compile(r"-[TBA]\d+(?:\.\d+)?$", re.IGNORECASE)
@@ -91,13 +92,14 @@ def sign_request(private_key, timestamp_ms, http_method, request_path):
 class KalshiClient:
     def __init__(self, api_key_id=None, private_key_path=None, base_url=None, live_orders=None):
         # Base URL (if KALSHI_USE_DEMO=true, always use demo environment)
+        demo_base_url = os.getenv("KALSHI_DEMO_BASE_URL", DEMO_BASE_URL).rstrip("/")
         use_demo = os.getenv("KALSHI_USE_DEMO", "").lower() in ["true", "1", "yes"]
         if base_url:
             self.base_url = base_url.rstrip("/")
         elif use_demo:
-            self.base_url = DEMO_BASE_URL
+            self.base_url = demo_base_url
         else:
-            self.base_url = os.getenv("KALSHI_BASE_URL", DEMO_BASE_URL).rstrip("/")
+            self.base_url = os.getenv("KALSHI_BASE_URL", demo_base_url).rstrip("/")
 
         is_demo_url = "demo-api.kalshi.co" in self.base_url or "demo.kalshi.co" in self.base_url
 

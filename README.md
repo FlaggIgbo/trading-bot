@@ -111,8 +111,6 @@ Run the full pytest suite:
 pytest -v
 ```
 
-All tests run in less than 1 second!
-
 ---
 
 ## Database Purge Utility

@@ -16,6 +16,7 @@ def enforce_kalshi_demo_environment(monkeypatch):
     overriding any local .env values.
     """
     monkeypatch.setenv("KALSHI_BASE_URL", DEMO_BASE_URL)
+    monkeypatch.setenv("KALSHI_DEMO_BASE_URL", DEMO_BASE_URL)
     monkeypatch.setenv("KALSHI_USE_DEMO", "true")
     monkeypatch.setenv("KALSHI_DEMO_API_KEY_ID", DEFAULT_DEMO_API_KEY_ID)
     monkeypatch.setenv("KALSHI_API_KEY_ID", DEFAULT_DEMO_API_KEY_ID)
