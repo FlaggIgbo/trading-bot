@@ -80,3 +80,30 @@ def test_never_sells():
     assert not hasattr(engine, "liquidate")
     assert not hasattr(engine, "stop_loss")
     assert not hasattr(engine, "take_profit")
+
+
+def test_only_bets_on_binary_markets():
+    mock_client = MagicMock()
+    mock_client.place_order.return_value = {"status": "ok"}
+    engine = RiskEngine(client=mock_client)
+
+    # Multi-strike ladder market (e.g. S&P 500 or Nasdaq above/below strike) must be skipped
+    multi_strike = {"ticker": "KXINXU-26NOV02H1600-T7499.9999", "event_ticker": "KXINXU-26NOV02H1600", "status": "open"}
+    assert engine.process_market(multi_strike) is None
+
+    # Non-binary market_type must be skipped
+    non_binary = {"ticker": "KXBTC15M-26OCT312200-00", "market_type": "scalar", "status": "open"}
+    assert engine.process_market(non_binary) is None
+
+    # Multiple markets sharing the same event_ticker must be skipped
+    multi_event_markets = [
+        {"ticker": "KXEVENT-1", "event_ticker": "KXEVENT", "status": "open"},
+        {"ticker": "KXEVENT-2", "event_ticker": "KXEVENT", "status": "open"},
+    ]
+    assert engine.evaluate_all(multi_event_markets) == []
+
+    # True standalone binary market (e.g. BTC 15-min) is bet on
+    binary_market = {"ticker": "KXBTC15M-26OCT312200-00", "event_ticker": "KXBTC15M-26OCT312200", "market_type": "binary", "status": "open"}
+    res = engine.evaluate_all([binary_market])
+    assert len(res) == 1
+    assert "KXBTC15M-26OCT312200-00" in engine.bet_markets

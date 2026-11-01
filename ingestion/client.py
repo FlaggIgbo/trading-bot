@@ -18,8 +18,38 @@ import requests
 # Load environment variables
 load_dotenv()
 
-# Default series to look for tradeable prediction markets
-DEFAULT_SERIES = ["KXBTCD", "KXETHD", "KXSOLD", "KXINXU", "KXNASDAQ100U"]
+# Default series to look for tradeable binary (single-market Yes/No) prediction markets
+DEFAULT_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M", "KXBNB15M"]
+DEMO_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
+DEFAULT_DEMO_API_KEY_ID = "98d50000-98b9-4649-b0d5-863fff7a2af5"
+
+# Regex matching multi-strike ladder ticker suffixes (e.g., -T7499.9999, -B7500, -A100)
+MULTI_STRIKE_SUFFIX_RE = re.compile(r"-[TBA]\d+(?:\.\d+)?$", re.IGNORECASE)
+
+
+def is_binary_market(market, event_market_count=None):
+    """
+    Checks if a Kalshi market is a true standalone binary market (only Buy YES / Buy NO,
+    not a multi-strike ladder or range bracket market).
+    """
+    if not isinstance(market, dict):
+        return False
+
+    # Must have market_type == 'binary' (if specified)
+    market_type = market.get("market_type", "binary").lower()
+    if market_type != "binary":
+        return False
+
+    # If event market count is known, event must have exactly 1 market
+    if event_market_count is not None and event_market_count != 1:
+        return False
+
+    # Reject multi-strike ladder tickers (e.g. KXINXU-26NOV02H1600-T7499.9999)
+    ticker = market.get("ticker", "")
+    if MULTI_STRIKE_SUFFIX_RE.search(ticker):
+        return False
+
+    return True
 
 
 def load_private_key(key_path=None, key_content=None):
@@ -60,12 +90,27 @@ def sign_request(private_key, timestamp_ms, http_method, request_path):
 
 class KalshiClient:
     def __init__(self, api_key_id=None, private_key_path=None, base_url=None, live_orders=None):
-        # API Key ID
-        self.api_key_id = api_key_id or os.getenv("KALSHI_API_KEY_ID", "")
+        # Base URL (if KALSHI_USE_DEMO=true, always use demo environment)
+        use_demo = os.getenv("KALSHI_USE_DEMO", "").lower() in ["true", "1", "yes"]
+        if base_url:
+            self.base_url = base_url.rstrip("/")
+        elif use_demo:
+            self.base_url = DEMO_BASE_URL
+        else:
+            self.base_url = os.getenv("KALSHI_BASE_URL", DEMO_BASE_URL).rstrip("/")
 
-        # Base URL
-        default_base = "https://demo-api.kalshi.co/trade-api/v2"
-        self.base_url = (base_url or os.getenv("KALSHI_BASE_URL", default_base)).rstrip("/")
+        is_demo_url = "demo-api.kalshi.co" in self.base_url or "demo.kalshi.co" in self.base_url
+
+        # API Key ID (use KALSHI_DEMO_API_KEY_ID when targeting demo environment)
+        if api_key_id:
+            self.api_key_id = api_key_id
+        elif is_demo_url:
+            self.api_key_id = os.getenv(
+                "KALSHI_DEMO_API_KEY_ID",
+                os.getenv("KALSHI_API_KEY_ID", DEFAULT_DEMO_API_KEY_ID),
+            )
+        else:
+            self.api_key_id = os.getenv("KALSHI_API_KEY_ID", "")
 
         # Check if live orders are enabled
         if live_orders is None:
@@ -75,7 +120,12 @@ class KalshiClient:
             self.live_orders = live_orders
 
         # Load RSA private key
-        key_path = private_key_path or os.getenv("KALSHI_PRIVATE_KEY_PATH")
+        if private_key_path:
+            key_path = private_key_path
+        elif is_demo_url:
+            key_path = os.getenv("KALSHI_DEMO_PRIVATE_KEY_PATH", os.getenv("KALSHI_PRIVATE_KEY_PATH"))
+        else:
+            key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
         self.private_key = load_private_key(key_path=key_path)
 
         # HTTP session
@@ -113,7 +163,18 @@ class KalshiClient:
                 response = self.session.get(url, headers=headers, timeout=10)
                 if response.status_code == 200:
                     markets = response.json().get("markets", [])
-                    open_markets.extend(markets)
+                    # Group by event_ticker to ensure we only keep standalone binary events (1 market per event)
+                    event_counts = {}
+                    for m in markets:
+                        ev = m.get("event_ticker")
+                        if ev:
+                            event_counts[ev] = event_counts.get(ev, 0) + 1
+
+                    for m in markets:
+                        ev = m.get("event_ticker")
+                        ev_count = event_counts.get(ev, 1) if ev else 1
+                        if is_binary_market(m, event_market_count=ev_count):
+                            open_markets.append(m)
                 else:
                     print(f"Could not fetch series {series}: {response.status_code}")
             except Exception as error:
@@ -122,30 +183,42 @@ class KalshiClient:
         return open_markets
 
     def place_order(self, ticker, side, count=1, price_cents=50):
-        # Clean side string ('yes' or 'no')
-        side_clean = side.lower()
+        # Reject multi-strike ladder tickers (only binary markets allowed)
+        if not is_binary_market({"ticker": ticker, "market_type": "binary"}):
+            raise ValueError(f"Non-binary multi-strike market '{ticker}' is not allowed.")
+
+        # Normalize side ('yes'/'buy_yes' or 'no'/'buy_no')
+        side_clean = side.strip().lower()
 
         # In Kalshi event model, buying YES is 'bid', buying NO is 'ask'
-        if side_clean == "yes":
+        if side_clean in ("yes", "buy_yes"):
+            normalized_side = "yes"
             order_side = "bid"
-        else:
+        elif side_clean in ("no", "buy_no"):
+            normalized_side = "no"
             order_side = "ask"
+        else:
+            raise ValueError(f"Invalid order side '{side}'. Expected 'YES'/'BUY_YES' or 'NO'/'BUY_NO'.")
 
-        # Price in cents between 1 and 99
+        # Price in cents between 1 and 99 (passed as the target side's cost)
         safe_price = max(1, min(99, int(price_cents)))
-        price_string = f"0.{safe_price:02d}00"
+
+        # Kalshi /portfolio/events/orders prices the book on the YES leg:
+        # Buying YES ('bid') uses safe_price; Buying NO ('ask') uses (100 - safe_price)
+        book_price_cents = safe_price if normalized_side == "yes" else (100 - safe_price)
+        price_string = f"0.{book_price_cents:02d}00"
 
         # Generate safe order ID with only alphanumeric and underscore
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
-        order_id = f"buy_{side_clean}_{safe_ticker}_{int(time.time() * 1000)}"
+        order_id = f"buy_{normalized_side}_{safe_ticker}_{int(time.time() * 1000)}"
 
         # If live orders are off, return simulated order
         if not self.live_orders:
-            print(f"[SIMULATION] Bet 1 contract on {side.upper()} for {ticker} at {safe_price} cents.")
+            print(f"[SIMULATION] Bet 1 contract on {normalized_side.upper()} for {ticker} at {safe_price} cents.")
             return {
                 "order_id": order_id,
                 "ticker": ticker,
-                "side": side.upper(),
+                "side": normalized_side.upper(),
                 "count": count,
                 "price": safe_price,
                 "status": "simulated",
@@ -168,7 +241,7 @@ class KalshiClient:
         try:
             response = self.session.post(url, headers=headers, json=payload, timeout=10)
             if response.status_code in [200, 201]:
-                print(f"[LIVE] Placed order: 1 contract on {side.upper()} for {ticker}!")
+                print(f"[LIVE] Placed order: 1 contract on {normalized_side.upper()} for {ticker}!")
                 return response.json()
             else:
                 print(f"Order failed ({response.status_code}): {response.text[:100]}")
