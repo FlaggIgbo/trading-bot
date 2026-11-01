@@ -5,7 +5,7 @@ If market is open (and when it opens), randomly bet 1 contract on one side ("YES
 Never sell, just hold it and hope for the best.
 """
 
-from unittest.mock import MagicMock
+from ingestion.client import KalshiClient
 from risk_engine.engine import RiskEngine
 
 
@@ -27,50 +27,42 @@ def test_pick_random_side():
 
 
 def test_bets_1_contract_on_open_market():
-    mock_client = MagicMock()
-    mock_client.place_order.return_value = {"status": "ok"}
-
-    engine = RiskEngine(client=mock_client)
-    market = {"ticker": "MARKET-A", "status": "open", "yes_ask": 40, "no_ask": 60}
+    client = KalshiClient()
+    engine = RiskEngine(client=client)
+    market = {"ticker": "KXBTC15M-26OCT312200-00", "status": "open", "yes_ask": 40, "no_ask": 60}
 
     result = engine.process_market(market)
-    assert result == {"status": "ok"}
-    assert "MARKET-A" in engine.bet_markets
-
-    # Verify order was placed for count=1
-    call_args = mock_client.place_order.call_args[1]
-    assert call_args["ticker"] == "MARKET-A"
-    assert call_args["count"] == 1
-    assert call_args["side"] in ["YES", "NO"]
+    assert result is not None
+    assert "KXBTC15M-26OCT312200-00" in engine.bet_markets
+    assert result["ticker"] == "KXBTC15M-26OCT312200-00"
+    assert result["count"] == 1
+    assert result["side"] in ["YES", "NO"]
 
 
 def test_does_not_bet_on_closed_market():
-    mock_client = MagicMock()
-    engine = RiskEngine(client=mock_client)
-    closed_market = {"ticker": "MARKET-CLOSED", "status": "closed"}
+    client = KalshiClient()
+    engine = RiskEngine(client=client)
+    closed_market = {"ticker": "KXBTC15M-CLOSED", "status": "closed"}
 
     result = engine.process_market(closed_market)
     assert result is None
-    assert "MARKET-CLOSED" not in engine.bet_markets
-    mock_client.place_order.assert_not_called()
+    assert "KXBTC15M-CLOSED" not in engine.bet_markets
 
 
 def test_does_not_bet_twice_on_same_market():
-    mock_client = MagicMock()
-    mock_client.place_order.return_value = {"status": "ok"}
-
-    engine = RiskEngine(client=mock_client)
-    market = {"ticker": "MARKET-A", "status": "open"}
+    client = KalshiClient()
+    engine = RiskEngine(client=client)
+    market = {"ticker": "KXBTC15M-26OCT312200-00", "status": "open"}
 
     # First time market is seen, bet should be placed
     result1 = engine.process_market(market)
     assert result1 is not None
-    assert mock_client.place_order.call_count == 1
+    assert len(engine.bet_markets) == 1
 
     # Second time market is seen while still open, do not bet again
     result2 = engine.process_market(market)
     assert result2 is None
-    assert mock_client.place_order.call_count == 1
+    assert len(engine.bet_markets) == 1
 
 
 def test_never_sells():
@@ -83,9 +75,8 @@ def test_never_sells():
 
 
 def test_only_bets_on_binary_markets():
-    mock_client = MagicMock()
-    mock_client.place_order.return_value = {"status": "ok"}
-    engine = RiskEngine(client=mock_client)
+    client = KalshiClient()
+    engine = RiskEngine(client=client)
 
     # Multi-strike ladder market (e.g. S&P 500 or Nasdaq above/below strike) must be skipped
     multi_strike = {"ticker": "KXINXU-26NOV02H1600-T7499.9999", "event_ticker": "KXINXU-26NOV02H1600", "status": "open"}

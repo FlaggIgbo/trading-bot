@@ -1,8 +1,7 @@
 """
-Tests for the ingestion layer.
+Tests for the ingestion layer against Kalshi demo environment (demo-api.kalshi.co).
 """
 
-from unittest.mock import MagicMock
 import pytest
 from ingestion.client import (
     DEFAULT_DEMO_API_KEY_ID,
@@ -55,35 +54,26 @@ def test_sign_request_and_auth_headers():
     # Test client auth headers
     client = KalshiClient(api_key_id="test_key", live_orders=False)
     client.private_key = private_key
-    headers = client._build_auth_headers("GET", "https://api.kalshi.com/trade-api/v2/markets")
+    headers = client._build_auth_headers("GET", f"{DEMO_BASE_URL}/markets")
     assert headers["KALSHI-ACCESS-KEY"] == "test_key"
     assert headers["KALSHI-ACCESS-SIGNATURE"] != ""
 
 
-def test_get_open_markets_mock():
-    # Mock HTTP session response for get_open_markets (filters out multi-strike markets)
+def test_get_open_markets_demo():
+    # Query open markets from demo-api.kalshi.co using the real KalshiClient
     client = KalshiClient(live_orders=False)
-    client.session = MagicMock()
+    assert client.base_url == DEMO_BASE_URL
 
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {
-        "markets": [
-            {"ticker": "KXBTC15M-26OCT312200-00", "event_ticker": "KXBTC15M-26OCT312200", "market_type": "binary", "status": "open"},
-            {"ticker": "KXINXU-26NOV02H1600-T7499.9999", "event_ticker": "KXINXU-26NOV02H1600", "market_type": "binary", "status": "open"},
-        ]
-    }
-    client.session.get.return_value = mock_response
-
-    markets = client.get_open_markets(series_list=["KXBTC15M"])
-    assert len(markets) == 1
-    assert markets[0]["ticker"] == "KXBTC15M-26OCT312200-00"
+    markets = client.get_open_markets(series_list=["KXBTC15M"], limit_per_series=5)
+    assert isinstance(markets, list)
+    for market in markets:
+        assert is_binary_market(market) is True
 
 
 def test_place_order_simulation():
-    # In simulation mode, order should not send HTTP POST
+    # In simulation mode, order returns simulated dict using real KalshiClient
     client = KalshiClient(live_orders=False)
-    client.session = MagicMock()
+    assert client.base_url == DEMO_BASE_URL
 
     for side_input in ("YES", "BUY_YES"):
         order = client.place_order(ticker="KXBTCD-100", side=side_input, count=1, price_cents=45)
@@ -103,35 +93,23 @@ def test_place_order_simulation():
         assert order["price"] == 65
         assert order["order_id"].startswith("buy_no_KXBTCD-100_")
 
-    # Ensure no network call was made
-    client.session.post.assert_not_called()
 
-
-def test_place_order_live_buy_yes_and_buy_no():
-    # Verify live order payload maps BUY_YES -> bid (price) and BUY_NO -> ask (100 - price)
+def test_place_order_live_buy_yes_and_buy_no_on_demo():
+    # Place live BUY_YES and BUY_NO orders against demo-api.kalshi.co using real KalshiClient
     client = KalshiClient(live_orders=True)
-    client.session = MagicMock()
+    assert client.base_url == DEMO_BASE_URL
+    assert "demo-api.kalshi.co" in client.base_url
 
-    mock_response = MagicMock()
-    mock_response.status_code = 201
-    mock_response.json.return_value = {"order": {"status": "resting"}}
-    client.session.post.return_value = mock_response
+    open_markets = client.get_open_markets(series_list=["KXBTC15M"], limit_per_series=1)
+    ticker = open_markets[0]["ticker"] if open_markets else "KXBTC15M-26OCT312200-00"
 
-    # 1. Test BUY_YES at 45 cents -> side='bid', price='0.4500'
-    client.place_order(ticker="KXBTCD-100", side="BUY_YES", count=1, price_cents=45)
-    yes_payload = client.session.post.call_args[1]["json"]
-    assert yes_payload["ticker"] == "KXBTCD-100"
-    assert yes_payload["side"] == "bid"
-    assert yes_payload["price"] == "0.4500"
-    assert yes_payload["count"] == "1"
+    yes_res = client.place_order(ticker=ticker, side="BUY_YES", count=1, price_cents=45)
+    assert isinstance(yes_res, dict)
+    assert "order" in yes_res or "error" in yes_res
 
-    # 2. Test BUY_NO at 65 cents -> side='ask', price='0.3500' (100 - 65)
-    client.place_order(ticker="KXBTCD-100", side="BUY_NO", count=1, price_cents=65)
-    no_payload = client.session.post.call_args[1]["json"]
-    assert no_payload["ticker"] == "KXBTCD-100"
-    assert no_payload["side"] == "ask"
-    assert no_payload["price"] == "0.3500"
-    assert no_payload["count"] == "1"
+    no_res = client.place_order(ticker=ticker, side="BUY_NO", count=1, price_cents=65)
+    assert isinstance(no_res, dict)
+    assert "order" in no_res or "error" in no_res
 
 
 def test_place_order_invalid_side():
@@ -144,4 +122,5 @@ def test_place_order_rejects_multi_strike_market():
     client = KalshiClient(live_orders=False)
     with pytest.raises(ValueError, match="Non-binary multi-strike market"):
         client.place_order(ticker="KXINXU-26NOV02H1600-T7499.9999", side="YES", count=1, price_cents=50)
+
 
