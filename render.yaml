@@ -17,6 +17,5 @@ services:
         - "tests/**"
         - ".github/**"
         - ".githooks/**"
-        - "scripts/**"
         - "README.md"
         - ".gitignore"

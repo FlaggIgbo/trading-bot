@@ -47,8 +47,6 @@ trading-bot/
 │   └── engine.py
 ├── logging/             # System 3: Logging layer (TODO for ClickHouse)
 │   └── TODO.md
-├── scripts/             # Utility scripts
-│   └── purge_mongo.py   # Script to purge online MongoDB cluster
 ├── tests/               # Clean unit tests
 │   ├── test_smoke.py
 │   ├── test_ingestion.py
@@ -110,16 +108,6 @@ Run the full pytest suite:
 ```bash
 pytest -v
 ```
-
----
-
-## Database Purge Utility
-
-If you ever need to purge your online MongoDB cluster:
-```bash
-python scripts/purge_mongo.py
-```
-This connects to `MONGODB_URI` and drops all non-system databases and collections.
 
 ---
 
