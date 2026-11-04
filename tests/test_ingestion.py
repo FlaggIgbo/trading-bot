@@ -31,14 +31,19 @@ def test_scanner_upserts_only_binary_markets():
     scanner = Scanner(client=None, db=db)
 
     raw = [
-        {"ticker": "KXBTC15M-1", "event_ticker": "E1", "market_type": "binary", "status": "open", "yes_ask": 45},
+        {"ticker": "KXBTC15M-1", "event_ticker": "E1", "market_type": "binary", "status": "open", "yes_ask": 45, "no_ask_dollars": "1.0000"},
         {"ticker": "KXINXU-T7500", "event_ticker": "E2", "market_type": "binary", "status": "open"},
     ]
     db.upsert_markets(scanner.filter_markets(raw))
 
+    # Later poll with 0/100 should not overwrite opening yes_ask (45) or default 50c no_ask
+    db.upsert_markets([{"ticker": "KXBTC15M-1", "status": "open", "yes_ask": 100, "no_ask": 0}])
+
     saved = db.get_open_markets()
     assert len(saved) == 1
     assert saved[0]["ticker"] == "KXBTC15M-1"
+    assert saved[0]["yes_ask"] == 45
+    assert saved[0]["no_ask"] == 50
     db.close()
 
 

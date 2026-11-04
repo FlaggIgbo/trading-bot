@@ -1,12 +1,22 @@
 """
-Tests for main bot entry point against Kalshi demo environment.
+Tests for main bot entry point and clock alignment (:00:30, :15:30, :30:30, :45:30).
 """
 
-from pathlib import Path
-from main import main
+from main import main, seconds_until_next_slot
 
 
-def test_main_single_cycle(tmp_path: Path) -> None:
-    # Run one full cycle against the demo environment configured by conftest.py using a temporary SQLite DB
+def test_seconds_until_next_slot():
+    # (current_timestamp_seconds, expected_wait_seconds)
+    tests = [
+        (10, 20),   # 00:00:10 -> wait 20s until 00:00:30
+        (30, 0),    # 00:00:30 -> run immediately (0s wait)
+        (35, 895),  # 00:00:35 -> wait 895s until 00:15:30
+        (900, 30),  # 00:15:00 -> wait 30s until 00:15:30
+    ]
+    for now, expected_wait in tests:
+        assert seconds_until_next_slot(now=now, interval=900, offset=30) == expected_wait
+
+
+def test_main_single_cycle(tmp_path):
     db_file = str(tmp_path / "test_bot.db")
     main(single_cycle=True, sleep_seconds=0, db_path=db_file)

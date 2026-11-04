@@ -1,10 +1,11 @@
 """
-Main Trading Bot (One Process, One Polling Loop)
-================================================
+Main Trading Bot (One Process, Aligned 15-Minute Cycle)
+=======================================================
 System design:
-1. Scanner: Fetch + filter open binary markets from Kalshi -> upsert into SQLite.
-2. Trader: Read candidates + open positions from SQLite -> place 1-contract bet -> write OPEN to SQLite.
+1. Wait until the next :00:30, :15:30, :30:30, or :45:30 mark on the clock.
+2. Scanner: Fetch + filter open binary 15-minute markets from Kalshi -> upsert into SQLite.
 3. Settler: Read OPEN positions where close_time < now -> GET resolution from Kalshi -> write SETTLED + PnL to SQLite.
+4. Trader: Read candidates + open positions from SQLite -> place 1-contract bet -> write OPEN to SQLite.
 """
 
 import argparse
@@ -21,8 +22,18 @@ from risk_engine.settler import Settler
 load_dotenv()
 
 
-def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db", strategy="last_3"):
-    print(f"Starting the simplified trading bot (strategy={strategy})...")
+def seconds_until_next_slot(now=None, interval=900, offset=30):
+    # Every 15 minutes (900s) is :00, :15, :30, :45.
+    # Adding offset=30 targets :00:30, :15:30, :30:30, and :45:30.
+    if now is None:
+        now = time.time()
+    elapsed = (now - offset) % interval
+    wait = interval - elapsed
+    return 0.0 if wait == interval else wait
+
+
+def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3"):
+    print(f"Starting trading bot (strategy={strategy}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...")
 
     # Initialize Kalshi REST API client and SQLite database (tagged by environment)
     client = KalshiClient()
@@ -31,30 +42,35 @@ def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db", strateg
 
     # Initialize the 3 pipeline steps
     scanner = Scanner(client=client, db=db)
-    trader = Trader(client=client, db=db, strategy=strategy)
     settler = Settler(client=client, db=db)
+    trader = Trader(client=client, db=db, strategy=strategy)
 
-    # Main polling loop
+    # Main loop aligned to :00:30, :15:30, :30:30, :45:30
     try:
         while True:
-            # 1. Scanner: fetch + filter markets and upsert into SQLite
+            if not single_cycle and sleep_seconds > 0:
+                wait_sec = seconds_until_next_slot(interval=sleep_seconds, offset=offset_seconds)
+                print(f"Waiting {wait_sec:.1f}s until next :{offset_seconds:02d}s slot...")
+                time.sleep(wait_sec)
+
+            # 1. Scanner: fetch + filter open 15-minute binary markets and save into SQLite
             markets = scanner.scan()
             print(f"1. Scanner: Fetched and upserted {len(markets)} open binary markets.")
 
-            # 2. Trader: risk checks + place orders and write OPEN to SQLite
-            orders = trader.trade()
-            print(f"2. Trader: Placed {len(orders)} new orders.")
-
-            # 3. Settler: check resolutions + compute PnL and write SETTLED to SQLite
+            # 2. Settler: settle the previous 15-minute positions that just closed
             settled = settler.settle()
-            print(f"3. Settler: Settled {len(settled)} expired positions.")
+            print(f"2. Settler: Settled {len(settled)} expired positions.")
+
+            # 3. Trader: place 1-contract bet on each new 15-minute market and let it ride
+            orders = trader.trade()
+            print(f"3. Trader: Placed {len(orders)} new orders.")
 
             # If user passed --once, exit after one cycle
             if single_cycle:
                 break
 
-            # Wait before next polling cycle
-            time.sleep(sleep_seconds)
+            # Pause 1s so we move past the current :30s boundary before computing the next slot
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("\nStopping bot. Bye!")
@@ -63,9 +79,10 @@ def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db", strateg
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simple prediction market trading bot")
-    parser.add_argument("--once", action="store_true", help="Run once and stop")
-    parser.add_argument("--interval", type=int, default=10, help="Seconds between cycles")
+    parser = argparse.ArgumentParser(description="Simple 15-minute prediction market trading bot")
+    parser.add_argument("--once", action="store_true", help="Run once immediately and stop")
+    parser.add_argument("--interval", type=int, default=900, help="Window length in seconds (default: 900 = 15 mins)")
+    parser.add_argument("--offset", type=int, default=30, help="Seconds past each window start (default: 30)")
     parser.add_argument("--db", type=str, default="trading_bot.db", help="Path to SQLite database file")
     parser.add_argument(
         "--strategy",
@@ -76,4 +93,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    main(single_cycle=args.once, sleep_seconds=args.interval, db_path=args.db, strategy=args.strategy)
+    main(
+        single_cycle=args.once,
+        sleep_seconds=args.interval,
+        offset_seconds=args.offset,
+        db_path=args.db,
+        strategy=args.strategy,
+    )

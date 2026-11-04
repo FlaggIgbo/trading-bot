@@ -105,18 +105,23 @@ class RiskEngine:
         return strategy_fn(past_results)
 
     def _extract_ask_cents(self, market, side):
-        # Extract ask price in cents (1-99), supporting both integer cents and dollar strings
+        # Extract ask price in cents (1-99), supporting both integer cents and dollar strings.
+        # If the orderbook has no ask (0 or 100 cents), default to 50 cents.
+        cents = None
         if side == PositionSide.YES:
             if market.get("yes_ask") is not None:
-                return int(market["yes_ask"])
-            if market.get("yes_ask_dollars") is not None:
-                return int(round(float(market["yes_ask_dollars"]) * 100))
+                cents = int(market["yes_ask"])
+            elif market.get("yes_ask_dollars") is not None:
+                cents = int(round(float(market["yes_ask_dollars"]) * 100))
         else:
             if market.get("no_ask") is not None:
-                return int(market["no_ask"])
-            if market.get("no_ask_dollars") is not None:
-                return int(round(float(market["no_ask_dollars"]) * 100))
-        return 50
+                cents = int(market["no_ask"])
+            elif market.get("no_ask_dollars") is not None:
+                cents = int(round(float(market["no_ask_dollars"]) * 100))
+
+        if cents is None or cents <= 0 or cents >= 100:
+            return 50
+        return cents
 
     def process_market(self, market, event_market_count=None):
         # Read the market ticker

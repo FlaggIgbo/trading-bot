@@ -220,15 +220,21 @@ class Database:
         return data
 
     def _extract_cents(self, market, cents_key, dollars_key):
-        # Helper to read integer cents or convert dollar string to cents
+        # Helper to read integer cents or convert dollar string to cents.
+        # In Kalshi, <= 0 or >= 100 means there is no resting order on the book -> default to 50 cents.
+        cents = None
         if market.get(cents_key) is not None:
-            return int(market[cents_key])
-        if market.get(dollars_key) is not None:
-            return int(round(float(market[dollars_key]) * 100))
-        return 50
+            cents = int(market[cents_key])
+        elif market.get(dollars_key) is not None:
+            cents = int(round(float(market[dollars_key]) * 100))
+
+        if cents is None or cents <= 0 or cents >= 100:
+            return 50
+        return cents
 
     def upsert_markets(self, markets, environment=None):
-        # Insert or update fetched markets in SQLite for the target environment using enums
+        # Insert or update fetched markets in SQLite for the target environment using enums.
+        # Keeps the initial opening yes_ask / no_ask instead of overwriting them on later polls.
         env = normalize_environment(environment or self.environment)
         cursor = self.conn.cursor()
         for m in markets:
@@ -252,8 +258,8 @@ class Database:
                     market_type = excluded.market_type,
                     status = excluded.status,
                     close_time = excluded.close_time,
-                    yes_ask = excluded.yes_ask,
-                    no_ask = excluded.no_ask,
+                    yes_ask = CASE WHEN markets.yes_ask <= 0 OR markets.yes_ask >= 100 THEN excluded.yes_ask ELSE markets.yes_ask END,
+                    no_ask = CASE WHEN markets.no_ask <= 0 OR markets.no_ask >= 100 THEN excluded.no_ask ELSE markets.no_ask END,
                     result = excluded.result
                 """,
                 (
