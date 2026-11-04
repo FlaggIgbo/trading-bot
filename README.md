@@ -1,16 +1,16 @@
 # Prediction Market Trading Bot
 
-A simple, human-readable prediction market trading bot for [Kalshi](https://kalshi.com).
+A lightweight, human-readable prediction market trading bot for [Kalshi](https://kalshi.com).
 
 ---
 
-## Strategy
+## Strategy & Trading Model
 
-The trading strategy is straightforward:
-- **If a market is open (and when it opens)**: Randomly place a bet of **1 contract** on one side (**"YES"** or **"NO"**).
-- **Never sell**: Hold the contract until expiration and hope for the best!
-- **No duplicate bets**: We only bet once per market while it is open.
-- **Settle & compute PnL**: Once `close_time` has passed and Kalshi resolves the market (`determined` / `finalized`), record the outcome and PnL in SQLite.
+- **Binary markets only**: Trades standalone binary (`YES` / `NO`) contracts when a market is open.
+- **Pluggable direction strategies**: Chooses a side (`YES` or `NO`) using a configurable strategy (e.g., `last_3` trend-following from recent series resolutions, or `random`) and places a **1-contract** order.
+- **Hold to expiration**: Never sells early; holds open contracts until market expiration.
+- **One bet per market per strategy**: Positions and `client_order_id`s are scoped by environment and strategy so multiple strategies can run side-by-side without duplicate bets.
+- **Automated settlement & PnL**: Once `close_time` passes and Kalshi resolves the market, records the final outcome and PnL in SQLite.
 
 ---
 
@@ -22,15 +22,15 @@ flowchart TD
 
     subgraph Bot [Bot: one process, one polling loop]
         Scanner["1. Scanner<br/>fetch + filter markets"]
-        Trader["2. Trader<br/>risk checks + place orders"]
+        Trader["2. Trader<br/>strategy + risk checks + place orders"]
         Settler["3. Settler<br/>check resolutions + compute PnL"]
     end
 
-    DB[("SQLite<br/>markets, orders/positions")]
+    DB[("SQLite<br/>markets, positions")]
 
     Kalshi -->|"GET markets"| Scanner
     Scanner -->|"upsert"| DB
-    DB -->|"candidates + open positions"| Trader
+    DB -->|"candidates + positions"| Trader
     Trader -->|"POST order (client_order_id)"| Kalshi
     Trader -->|"write OPEN"| DB
     DB -->|"OPEN where close_time < now"| Settler
@@ -38,57 +38,42 @@ flowchart TD
     Settler -->|"write SETTLED + PnL"| DB
 ```
 
-### System Design
+### Core Components
 
 1. **Ingestion & API Layer (`ingestion/`)**:
-   - `ingestion/api/client.py`: Connects to the Kalshi REST API v2, signs requests with RSA-PSS authentication, fetches open markets (`GET /markets`), submits orders (`POST /portfolio/events/orders` with `client_order_id`), and queries market resolutions (`GET /markets/{ticker}`).
-   - `ingestion/scanner.py` (**Step 1: Scanner**): Fetches open markets, filters for standalone binary markets, and upserts them into SQLite.
+   - `ingestion/api/client.py`: Kalshi REST API v2 client with RSA-PSS request signing, market queries, and order submission (supports both `demo.kalshi.co` and production, plus simulation mode).
+   - `ingestion/scanner.py` (**Step 1: Scanner**): Polls open markets, filters for standalone binary contracts, and upserts them into SQLite.
 
 2. **Trading & Settlement Layer (`risk_engine/`)**:
-   - `risk_engine/engine.py` (**Step 2: Trader**): Reads candidate markets and existing positions from SQLite, checks risk rules (binary, open, no existing position), randomly bets 1 contract on `YES` or `NO`, and writes `OPEN` positions to SQLite.
-   - `risk_engine/settler.py` (**Step 3: Settler**): Queries `OPEN` positions where `close_time < now`, checks Kalshi for market resolution (`result` in `yes`/`no`), computes PnL in cents, and marks the position `SETTLED` in SQLite.
+   - `risk_engine/engine.py` (**Step 2: Trader**): Evaluates open markets against risk rules and existing positions, selects `YES` or `NO` via the active strategy (`STRATEGIES`), places orders, and records `OPEN` positions.
+   - `risk_engine/settler.py` (**Step 3: Settler**): Checks expired `OPEN` positions against Kalshi resolutions, computes PnL in cents, and marks positions `SETTLED`.
 
-3. **SQLite Storage (`db.py`)**:
-   - Lightweight local SQLite database storing `markets` and `positions`.
+3. **Storage Layer (`db.py`)**:
+   - Local SQLite state (`markets` and `positions` tables) using `StrEnum`-enforced schemas, WAL mode, and isolation by environment (`demo.kalshi.co` vs `production`) and strategy.
 
-4. **Logging Layer (`logging/`) [TODO]**:
-   - Marked as **TODO** (ClickHouse in the future for fast market telemetry and analytics).
+4. **Telemetry Layer (`logging/`) [TODO]**:
+   - Reserved for future ClickHouse telemetry and analytics.
 
 ---
 
-## Folder Structure
+## Project Layout
 
 ```text
 trading-bot/
-├── ingestion/
-│   ├── api/                 # Kalshi REST API client & auth
-│   │   ├── __init__.py
-│   │   └── client.py
-│   ├── __init__.py
-│   ├── client.py            # Re-exports from ingestion.api.client
-│   └── scanner.py           # 1. Scanner: fetch + filter markets -> upsert to DB
-├── risk_engine/
-│   ├── __init__.py
-│   ├── engine.py            # 2. Trader: risk checks + place orders -> write OPEN
-│   └── settler.py           # 3. Settler: check resolutions + compute PnL -> write SETTLED
-├── logging/                 # Logging layer (TODO for ClickHouse)
-│   └── TODO.md
-├── tests/                   # Clean unit tests
-│   ├── conftest.py
-│   ├── test_smoke.py
-│   ├── test_ingestion.py
-│   ├── test_risk_engine.py
-│   └── test_main.py
-├── db.py                    # SQLite database helper (markets & positions tables)
-├── main.py                  # Bot entry point (one process, one polling loop)
-├── render.yaml              # Render worker deployment config
-├── requirements.txt         # Python packages
-└── README.md                # Documentation
+├── ingestion/           # Step 1: Scanner + Kalshi REST API client & auth
+├── risk_engine/         # Step 2: Trader (strategies & risk checks) + Step 3: Settler
+├── logging/             # Telemetry & analytics layer (TODO)
+├── tests/               # Unit and smoke tests (pytest)
+├── db.py                # SQLite schema, StrEnums, and state queries
+├── main.py              # CLI entry point and main polling loop
+├── pyproject.toml       # Project metadata, ruff, and pytest configuration
+├── render.yaml          # Render worker deployment config
+└── requirements.txt     # Python dependencies
 ```
 
 ---
 
-## Setup & Installation
+## Setup & Usage
 
 ### 1. Install dependencies
 
@@ -98,43 +83,39 @@ pip install -r requirements.txt
 
 ### 2. Configure environment variables
 
-Copy `.env.example` to `.env`:
+Copy `.env.example` to `.env` and set your Kalshi credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-Set your Kalshi credentials:
-```env
-KALSHI_API_KEY_ID=your_api_key_id
-KALSHI_PRIVATE_KEY_PATH=/path/to/your/kalshi.key
-KALSHI_BASE_URL=https://demo-api.kalshi.co/trade-api/v2
-ENABLE_LIVE_ORDERS=false
-```
+> **Note**: See `.env.example` for all supported variables (demo vs. production keys/URLs and `ENABLE_LIVE_ORDERS`, which defaults to `false` for safe simulation mode).
 
-> **Note**: `ENABLE_LIVE_ORDERS=false` keeps the bot in safe simulation mode. Set it to `true` to place real orders on Kalshi.
+### 3. Run the bot
 
----
-
-## Running the Bot
-
-### Run continuously (loop)
 ```bash
+# Run continuously with default settings
 python main.py
+
+# Run a single polling cycle and exit
+python main.py --once
+
+# Specify strategy, polling interval, or database path
+python main.py --strategy last_3 --interval 10 --db trading_bot.db
 ```
 
-### Run once and exit
-```bash
-python main.py --once
-```
+Run `python main.py --help` to see all available CLI options.
 
 ---
 
-## Running Tests
+## Testing
 
-Run the full pytest suite:
 ```bash
+# Full test suite
 pytest -v
+
+# Quick smoke tests
+pytest -m smoke
 ```
 
 ---
