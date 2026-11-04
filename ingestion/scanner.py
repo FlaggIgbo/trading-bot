@@ -4,24 +4,27 @@ Step 1: Scanner
 Fetches open markets from Kalshi, filters for standalone binary markets, and upserts them into SQLite.
 """
 
-from ingestion.api.client import is_binary_market
+from typing import Any, Optional
+
+from db import Database
+from ingestion.api.client import KalshiClient, is_binary_market
 
 
 class Scanner:
-    def __init__(self, client, db=None):
+    def __init__(self, client: Optional[KalshiClient], db: Optional[Database] = None) -> None:
         # Kalshi REST API client and SQLite database
-        self.client = client
-        self.db = db
+        self.client: Optional[KalshiClient] = client
+        self.db: Optional[Database] = db
 
-    def filter_markets(self, markets):
+    def filter_markets(self, markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Count markets per event_ticker so we only keep standalone 1-market binary events
-        event_counts = {}
+        event_counts: dict[str, int] = {}
         for market in markets:
             ev = market.get("event_ticker")
             if ev:
                 event_counts[ev] = event_counts.get(ev, 0) + 1
 
-        filtered = []
+        filtered: list[dict[str, Any]] = []
         for market in markets:
             ev = market.get("event_ticker")
             ev_count = event_counts.get(ev, 1) if ev else 1
@@ -30,7 +33,9 @@ class Scanner:
 
         return filtered
 
-    def scan(self, series_list=None, limit_per_series=20):
+    def scan(
+        self, series_list: Optional[list[str]] = None, limit_per_series: int = 20
+    ) -> list[dict[str, Any]]:
         # 1. GET open markets from Kalshi API
         raw_markets = self.client.get_open_markets(
             series_list=series_list,

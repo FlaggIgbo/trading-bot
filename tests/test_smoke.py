@@ -1,48 +1,24 @@
 """
-Smoke tests for basic bot initialization and flow (Scanner -> Trader -> Settler).
+Smoke test for the core bot pipeline (Scanner -> Trader -> Settler).
 """
 
-from db import Database
+from db import Database, PositionStatus
 from ingestion.api.client import KalshiClient
-from ingestion.scanner import Scanner
-from risk_engine.engine import RiskEngine
+from risk_engine.engine import Trader
 from risk_engine.settler import Settler
 
 
-def test_smoke_initialization():
-    # Test that database, client, scanner, trader, and settler can be initialized
+def test_smoke_pipeline():
     db = Database(":memory:")
     client = KalshiClient(live_orders=False)
-    scanner = Scanner(client=client, db=db)
-    engine = RiskEngine(client=client, db=db)
-    settler = Settler(client=client, db=db)
+    trader = Trader(client=client, db=db)
 
-    assert client is not None
-    assert scanner is not None
-    assert engine is not None
-    assert settler is not None
-    assert len(engine.bet_markets) == 0
-    db.close()
+    db.upsert_markets([{"ticker": "TEST-1", "status": "open", "yes_ask": 40, "no_ask": 60, "close_time": "2026-01-01T00:00:00Z"}])
+    assert len(trader.trade()) == 1
+    assert db.get_all_positions()[0]["status"] == PositionStatus.OPEN
 
-
-def test_smoke_cycle_with_mock_market():
-    # Test a basic simulated cycle through SQLite
-    db = Database(":memory:")
-    client = KalshiClient(live_orders=False)
-    engine = RiskEngine(client=client, db=db)
-
-    sample_market = {
-        "ticker": "TEST-TICKER-1",
-        "status": "open",
-        "yes_ask": 50,
-        "no_ask": 50,
-        "close_time": "2026-11-01T15:00:00Z",
-    }
-
-    db.upsert_markets([sample_market])
-    results = engine.trade()
-    assert len(results) == 1
-    assert "TEST-TICKER-1" in engine.bet_markets
-    assert results[0]["status"] == "simulated"
-    assert len(db.get_all_positions()) == 1
+    client.get_market = lambda ticker: {"ticker": ticker, "status": "finalized", "result": "yes"}
+    settled = Settler(client=client, db=db).settle(now_iso="2026-01-02T00:00:00Z")
+    assert len(settled) == 1
+    assert db.get_all_positions()[0]["status"] == PositionStatus.SETTLED
     db.close()

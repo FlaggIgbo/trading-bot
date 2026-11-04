@@ -7,6 +7,8 @@ computes PnL in cents, and marks the position SETTLED in SQLite.
 
 from datetime import datetime, timezone
 
+from db import MarketResult, MarketStatus, PositionStatus, normalize_market_result
+
 
 class Settler:
     def __init__(self, client, db):
@@ -16,7 +18,7 @@ class Settler:
 
     def compute_pnl_cents(self, side, price_cents, count, result):
         # Binary contract pays 100 cents if our side matches the result, or 0 cents if we lost
-        won = side.strip().lower() == result.strip().lower()
+        won = str(side).strip().lower() == str(result).strip().lower()
         if won:
             return (100 - int(price_cents)) * int(count)
         else:
@@ -27,9 +29,15 @@ class Settler:
         # and a populated result ('yes' or 'no')
         if not isinstance(market, dict):
             return False
-        status = market.get("status", "").lower()
-        result = market.get("result", "").lower()
-        return status in ("determined", "finalized", "settled") and result in ("yes", "no")
+        status = str(market.get("status", "")).lower()
+        result = str(market.get("result", "")).lower()
+        resolved_statuses = (
+            MarketStatus.DETERMINED.value,
+            MarketStatus.FINALIZED.value,
+            MarketStatus.SETTLED.value,
+        )
+        resolved_results = (MarketResult.YES.value, MarketResult.NO.value)
+        return status in resolved_statuses and result in resolved_results
 
     def settle(self, now_iso=None):
         # Default to current UTC time in ISO 8601 format (e.g. '2026-11-01T19:45:00Z')
@@ -49,7 +57,7 @@ class Settler:
             if not self.is_market_resolved(market):
                 continue
 
-            result = market.get("result", "").lower()
+            result = normalize_market_result(market.get("result", ""))
             pnl_cents = self.compute_pnl_cents(
                 side=pos["side"],
                 price_cents=pos["price_cents"],
@@ -71,7 +79,7 @@ class Settler:
                 "side": pos["side"],
                 "result": result.upper(),
                 "pnl_cents": pnl_cents,
-                "status": "SETTLED",
+                "status": PositionStatus.SETTLED,
             })
 
         return settled_positions

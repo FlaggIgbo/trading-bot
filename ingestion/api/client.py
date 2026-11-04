@@ -15,6 +15,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from dotenv import load_dotenv
 import requests
 
+from db import Environment, MarketType, PositionSide
+
 # Load environment variables (fall back to .env.example defaults if not set in .env)
 load_dotenv()
 load_dotenv(".env.example", override=False)
@@ -37,8 +39,8 @@ def is_binary_market(market, event_market_count=None):
         return False
 
     # Must have market_type == 'binary' (if specified)
-    market_type = market.get("market_type", "binary").lower()
-    if market_type != "binary":
+    market_type = str(market.get("market_type", MarketType.BINARY)).lower()
+    if market_type != MarketType.BINARY.value:
         return False
 
     # If event market count is known, event must have exactly 1 market
@@ -103,7 +105,7 @@ class KalshiClient:
 
         is_demo_url = "demo-api.kalshi.co" in self.base_url or "demo.kalshi.co" in self.base_url
         self.is_demo = is_demo_url
-        self.environment = "demo.kalshi.co" if is_demo_url else "production"
+        self.environment = Environment.DEMO if is_demo_url else Environment.PRODUCTION
 
         # API Key ID (use KALSHI_DEMO_API_KEY_ID when targeting demo environment)
         if api_key_id:
@@ -203,20 +205,33 @@ class KalshiClient:
             print(f"Error fetching market {ticker}: {error}")
             return None
 
+    def get_settled_markets(self, series_ticker, limit=3):
+        # GET /markets?series_ticker=...&status=settled&limit=... for recent resolved markets
+        url = f"{self.base_url}/markets?series_ticker={series_ticker}&status=settled&limit={limit}"
+        headers = self._build_auth_headers("GET", url)
+
+        try:
+            response = self.session.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("markets", [])
+        except Exception as error:
+            print(f"Error fetching settled markets for {series_ticker}: {error}")
+        return []
+
     def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None):
         # Reject multi-strike ladder tickers (only binary markets allowed)
-        if not is_binary_market({"ticker": ticker, "market_type": "binary"}):
+        if not is_binary_market({"ticker": ticker, "market_type": MarketType.BINARY}):
             raise ValueError(f"Non-binary multi-strike market '{ticker}' is not allowed.")
 
         # Normalize side ('yes'/'buy_yes' or 'no'/'buy_no')
-        side_clean = side.strip().lower()
+        side_clean = str(side).strip().lower()
 
         # In Kalshi event model, buying YES is 'bid', buying NO is 'ask'
         if side_clean in ("yes", "buy_yes"):
-            normalized_side = "yes"
+            normalized_side = PositionSide.YES
             order_side = "bid"
         elif side_clean in ("no", "buy_no"):
-            normalized_side = "no"
+            normalized_side = PositionSide.NO
             order_side = "ask"
         else:
             raise ValueError(f"Invalid order side '{side}'. Expected 'YES'/'BUY_YES' or 'NO'/'BUY_NO'.")
@@ -226,21 +241,21 @@ class KalshiClient:
 
         # Kalshi /portfolio/events/orders prices the book on the YES leg:
         # Buying YES ('bid') uses safe_price; Buying NO ('ask') uses (100 - safe_price)
-        book_price_cents = safe_price if normalized_side == "yes" else (100 - safe_price)
+        book_price_cents = safe_price if normalized_side == PositionSide.YES else (100 - safe_price)
         price_string = f"0.{book_price_cents:02d}00"
 
         # Generate safe client_order_id with only alphanumeric and underscore
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
-        order_id = client_order_id or f"buy_{normalized_side}_{safe_ticker}_{int(time.time() * 1000)}"
+        order_id = client_order_id or f"buy_{normalized_side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
 
         # If live orders are off, return simulated order
         if not self.live_orders:
-            print(f"[SIMULATION] Bet 1 contract on {normalized_side.upper()} for {ticker} at {safe_price} cents.")
+            print(f"[SIMULATION] Bet 1 contract on {normalized_side.value} for {ticker} at {safe_price} cents.")
             return {
                 "order_id": order_id,
                 "client_order_id": order_id,
                 "ticker": ticker,
-                "side": normalized_side.upper(),
+                "side": normalized_side,
                 "count": count,
                 "price": safe_price,
                 "status": "simulated",
@@ -263,7 +278,7 @@ class KalshiClient:
         try:
             response = self.session.post(url, headers=headers, json=payload, timeout=10)
             if response.status_code in [200, 201]:
-                print(f"[LIVE] Placed order: 1 contract on {normalized_side.upper()} for {ticker}!")
+                print(f"[LIVE] Placed order: 1 contract on {normalized_side.value} for {ticker}!")
                 data = response.json()
                 data["client_order_id"] = order_id
                 return data

@@ -3,7 +3,7 @@ Main Trading Bot (One Process, One Polling Loop)
 ================================================
 System design:
 1. Scanner: Fetch + filter open binary markets from Kalshi -> upsert into SQLite.
-2. Trader: Read candidates + open positions from SQLite -> place 1-contract random bet -> write OPEN to SQLite.
+2. Trader: Read candidates + open positions from SQLite -> place 1-contract bet -> write OPEN to SQLite.
 3. Settler: Read OPEN positions where close_time < now -> GET resolution from Kalshi -> write SETTLED + PnL to SQLite.
 """
 
@@ -21,9 +21,8 @@ from risk_engine.settler import Settler
 load_dotenv()
 
 
-def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db"):
-    print("Starting the simplified trading bot...")
-    print("Strategy: If market is open, randomly bet 1 contract on YES or NO. Never sell, hold and hope for the best.")
+def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db", strategy="last_3"):
+    print(f"Starting the simplified trading bot (strategy={strategy})...")
 
     # Initialize Kalshi REST API client and SQLite database (tagged by environment)
     client = KalshiClient()
@@ -32,7 +31,7 @@ def main(single_cycle=False, sleep_seconds=10, db_path="trading_bot.db"):
 
     # Initialize the 3 pipeline steps
     scanner = Scanner(client=client, db=db)
-    trader = Trader(client=client, db=db)
+    trader = Trader(client=client, db=db, strategy=strategy)
     settler = Settler(client=client, db=db)
 
     # Main polling loop
@@ -68,6 +67,13 @@ if __name__ == "__main__":
     parser.add_argument("--once", action="store_true", help="Run once and stop")
     parser.add_argument("--interval", type=int, default=10, help="Seconds between cycles")
     parser.add_argument("--db", type=str, default="trading_bot.db", help="Path to SQLite database file")
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default="last_3",
+        choices=["last_3", "random"],
+        help="Direction strategy: 'last_3' (majority of last 3 markets) or 'random'",
+    )
     args = parser.parse_args()
 
-    main(single_cycle=args.once, sleep_seconds=args.interval, db_path=args.db)
+    main(single_cycle=args.once, sleep_seconds=args.interval, db_path=args.db, strategy=args.strategy)

@@ -9,7 +9,7 @@ from ingestion.api.client import DEFAULT_DEMO_API_KEY_ID, DEMO_BASE_URL
 
 
 @pytest.fixture(autouse=True)
-def enforce_kalshi_demo_environment(monkeypatch):
+def enforce_kalshi_demo_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Automatically forces KALSHI_BASE_URL to the Kalshi Demo environment,
     sets the demo API key ID, and disables live orders during all test runs,
