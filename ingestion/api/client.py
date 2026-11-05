@@ -239,7 +239,7 @@ class KalshiClient:
             )
         return []
 
-    def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None):
+    def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None, action="buy"):
         # Reject multi-strike ladder tickers (only binary markets allowed)
         if not is_binary_market({"ticker": ticker, "market_type": MarketType.BINARY}):
             raise ValueError(f"Non-binary multi-strike market '{ticker}' is not allowed.")
@@ -250,10 +250,10 @@ class KalshiClient:
         # In Kalshi event model, buying YES is 'bid', buying NO is 'ask'
         if side_clean in ("yes", "buy_yes"):
             normalized_side = PositionSide.YES
-            order_side = "bid"
+            order_side = "bid" if action == "buy" else "ask"
         elif side_clean in ("no", "buy_no"):
             normalized_side = PositionSide.NO
-            order_side = "ask"
+            order_side = "ask" if action == "buy" else "bid"
         else:
             raise ValueError(f"Invalid order side '{side}'. Expected 'YES'/'BUY_YES' or 'NO'/'BUY_NO'.")
 
@@ -267,17 +267,19 @@ class KalshiClient:
 
         # Generate safe client_order_id with only alphanumeric and underscore
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
-        order_id = client_order_id or f"buy_{normalized_side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        order_id = client_order_id or f"{action}_{normalized_side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
 
         # If live orders are off, return simulated order
         if not self.live_orders:
+            action_label = "Bet" if action == "buy" else "Sold"
             analytics.track(
                 "order_simulated",
-                message=f"[SIMULATION] Bet 1 contract on {normalized_side.value} for {ticker} at {safe_price} cents.",
+                message=f"[SIMULATION] {action_label} {count} contract on {normalized_side.value} for {ticker} at {safe_price} cents.",
                 ticker=ticker,
                 side=normalized_side.value,
                 count=count,
                 price_cents=safe_price,
+                action=action,
             )
             return {
                 "order_id": order_id,
@@ -287,6 +289,7 @@ class KalshiClient:
                 "count": count,
                 "price": safe_price,
                 "status": "simulated",
+                "action": action,
             }
 
         # Payload for live order (POST /portfolio/events/orders)

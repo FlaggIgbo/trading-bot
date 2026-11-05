@@ -115,9 +115,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy",
         type=str,
-        default="last_3",
-        choices=["last_3", "random"],
-        help="Direction strategy: 'last_3' (majority of last 3 markets) or 'random'",
+        default="last_5",
+        choices=["last_5", "last_3", "random", "sell_3n"],
+        help="Direction strategy: 'last_5' (majority of last 5), 'last_3', 'sell_3n', or 'random'",
     )
     args = parser.parse_args()
 

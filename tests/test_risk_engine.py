@@ -13,7 +13,16 @@ from db import (
     PositionStatus,
 )
 from ingestion.api.client import KalshiClient
-from risk_engine.engine import Trader, choose_side_last_3, choose_side_random
+from risk_engine.engine import (
+    Trader,
+    choose_sell_if_3n,
+    choose_side_last_3,
+    choose_side_last_5,
+    choose_side_random,
+    is_checkin_time,
+    is_entry_time,
+    should_sell,
+)
 from risk_engine.settler import Settler
 
 
@@ -148,3 +157,98 @@ def test_db_enums_and_environment_isolation(tmp_path):
 
     demo_db.close()
     prod_db.close()
+
+
+def test_choose_side_last_5():
+    tests = [
+        (["yes", "yes", "yes", "no", "no"], PositionSide.YES),
+        (["yes", "no", "no", "no", "yes"], PositionSide.NO),
+        (["yes", "yes", "yes", "yes", "yes", "no", "no", "no"], PositionSide.YES),
+        (["no", "no", "no", "yes", "yes"], PositionSide.NO),
+    ]
+    for past_results, expected in tests:
+        assert choose_side_last_5(past_results) == expected
+
+
+def test_trader_uses_last_5_markets_for_direction():
+    db = Database(":memory:")
+    client = KalshiClient()
+    trader = Trader(client=client, db=db, strategy="last_5")
+
+    # 3 ups, 2 downs -> should bid YES
+    past_markets = [
+        {"ticker": "KXBTC15M-00", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:00:00Z"},
+        {"ticker": "KXBTC15M-15", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:15:00Z"},
+        {"ticker": "KXBTC15M-30", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:30:00Z"},
+        {"ticker": "KXBTC15M-45", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:45:00Z"},
+        {"ticker": "KXBTC15M-60", "status": "finalized", "result": "yes", "close_time": "2026-11-01T11:00:00Z"},
+    ]
+    db.upsert_markets(past_markets)
+
+    order = trader.process_market({"ticker": "KXBTC15M-75", "status": "open", "market_type": "binary"})
+    assert order["side"] == PositionSide.YES
+    db.close()
+
+
+def test_strategy_sell_3n_contract_selection():
+    # Pick whichever side is under 33c; if none, return None
+    assert choose_sell_if_3n({"yes_ask": 25, "no_ask": 75}) == PositionSide.YES
+    assert choose_sell_if_3n({"yes_ask": 80, "no_ask": 20}) == PositionSide.NO
+    assert choose_sell_if_3n({"yes_ask": 50, "no_ask": 50}) is None
+    assert choose_sell_if_3n({"yes_ask": 33, "no_ask": 67}) is None
+    assert choose_sell_if_3n({"yes_ask": 32, "no_ask": 68}) == PositionSide.YES
+    assert choose_sell_if_3n({"yes_ask": 20, "no_ask": 30}) == PositionSide.YES
+
+
+def test_strategy_sell_3n_timing_with_close_time():
+    market = {"ticker": "KXBTC15M-15", "close_time": "2026-11-01T10:15:00Z"}
+    # 10:00 start -> 10:02 is minute 2, 10:05 is minute 5, 10:10 is minute 10
+    assert not is_entry_time(market, now="2026-11-01T10:02:00Z")
+    assert is_entry_time(market, now="2026-11-01T10:05:00Z")
+    assert not is_checkin_time(market, now="2026-11-01T10:05:00Z")
+    assert is_checkin_time(market, now="2026-11-01T10:10:00Z")
+
+    # Sell if current value >= 3x entry price, else hold
+    assert not should_sell(entry_price_cents=25, current_price_cents=74)
+    assert should_sell(entry_price_cents=25, current_price_cents=75)
+    assert should_sell(entry_price_cents=25, current_price_cents=80)
+
+
+def test_strategy_sell_3n_trader_flow():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_3n")
+
+    # 1. Reject if before 5 minutes past (e.g. at minute 2)
+    m1 = {"ticker": "M-EARLY", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 2}
+    assert trader.process_market(m1) is None
+
+    # 2. Reject if at 5 min past but none < 33c
+    m2 = {"ticker": "M-NOPICK", "status": "open", "yes_ask": 50, "no_ask": 50, "minute": 5}
+    assert trader.process_market(m2) is None
+
+    # 3. Enter at 5 min past when contract < 33c (e.g. YES @ 25c)
+    m3 = {"ticker": "M-WIN", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 5}
+    order = trader.process_market(m3)
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 25
+
+    positions = db.get_all_positions()
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.OPEN
+
+    # 4. Check-in at 10 min past: current price 50c (< 3x 25c) -> hold
+    m3_hold = {"ticker": "M-WIN", "status": "open", "yes_ask": 50, "no_ask": 50, "minute": 10}
+    sold = trader.check_open_positions(markets=[m3_hold], now=None)
+    assert len(sold) == 0
+    assert db.get_all_positions()[0]["status"] == PositionStatus.OPEN
+
+    # 5. Check-in at 10 min past: current price 75c (3x 25c) -> sell
+    m3_sell = {"ticker": "M-WIN", "status": "open", "yes_ask": 75, "no_ask": 25, "minute": 10}
+    sold = trader.check_open_positions(markets=[m3_sell], now=None)
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == 50  # 75c - 25c = +50c
+    assert db.get_all_positions()[0]["status"] == PositionStatus.SETTLED
+
+    db.close()

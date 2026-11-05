@@ -56,6 +56,8 @@ class PositionStatus(StrEnum):
 class Strategy(StrEnum):
     RANDOM = "random"
     LAST_3 = "last_3"
+    LAST_5 = "last_5"
+    SELL_3N = "sell_3n"
 
 
 def normalize_environment(environment: Optional[str] = None) -> Environment:
@@ -125,8 +127,11 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
     if isinstance(strategy, Strategy):
         return strategy
     if not strategy:
-        return Strategy.LAST_3
-    return Strategy(str(strategy).strip().lower())
+        return Strategy.LAST_5
+    strat_clean = str(strategy).strip().lower()
+    if strat_clean in ("sell_if_3n", "sell3n"):
+        return Strategy.SELL_3N
+    return Strategy(strat_clean)
 
 
 class Database:
@@ -176,7 +181,7 @@ class Database:
                 client_order_id TEXT PRIMARY KEY,
                 ticker TEXT,
                 environment TEXT NOT NULL DEFAULT '{Environment.DEMO.value}' CHECK (environment IN ({env_values})),
-                strategy TEXT NOT NULL DEFAULT '{Strategy.LAST_3.value}' CHECK (strategy IN ({strat_values})),
+                strategy TEXT NOT NULL DEFAULT '{Strategy.LAST_5.value}' CHECK (strategy IN ({strat_values})),
                 side TEXT NOT NULL CHECK (side IN ({pside_values})),
                 count INTEGER,
                 price_cents INTEGER,
@@ -325,7 +330,7 @@ class Database:
         close_time="",
         environment=None,
         status: PositionStatus = PositionStatus.OPEN,
-        strategy: Strategy = Strategy.LAST_3,
+        strategy: Strategy = Strategy.LAST_5,
     ):
         # Write a new OPEN order/position into SQLite for the target environment using enums
         env = normalize_environment(environment or self.environment)
