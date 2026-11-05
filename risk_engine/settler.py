@@ -8,6 +8,7 @@ computes PnL in cents, and marks the position SETTLED in SQLite.
 from datetime import datetime, timezone
 
 from db import MarketResult, MarketStatus, PositionStatus, normalize_market_result
+from logging.analytics import analytics
 
 
 class Settler:
@@ -71,7 +72,14 @@ class Settler:
                 pnl_cents=pnl_cents,
                 result=result,
             )
-            print(f"Settled {ticker} ({pos['side']}): result={result.upper()}, PnL={pnl_cents} cents.")
+            analytics.track(
+                "settlement",
+                message=f"Settled {ticker} ({pos['side']}): result={result.upper()}, PnL={pnl_cents} cents.",
+                ticker=ticker,
+                side=str(pos["side"]),
+                result=result.upper(),
+                pnl_cents=pnl_cents,
+            )
 
             settled_positions.append({
                 "client_order_id": client_order_id,

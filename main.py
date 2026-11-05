@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from db import Database
 from ingestion.api.client import KalshiClient
 from ingestion.scanner import Scanner
+from logging.analytics import analytics
 from risk_engine.engine import Trader
 from risk_engine.settler import Settler
 
@@ -33,12 +34,23 @@ def seconds_until_next_slot(now=None, interval=900, offset=30):
 
 
 def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3"):
-    print(f"Starting trading bot (strategy={strategy}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...")
+    analytics.info(
+        f"Starting trading bot (strategy={strategy}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        event="bot_start",
+        strategy=strategy,
+        sleep_seconds=sleep_seconds,
+        offset_seconds=offset_seconds,
+    )
 
     # Initialize Kalshi REST API client and SQLite database (tagged by environment)
     client = KalshiClient()
     db = Database(db_path=db_path, environment=client.environment)
-    print(f"Environment: {client.environment} ({client.base_url})")
+    analytics.info(
+        f"Environment: {client.environment} ({client.base_url})",
+        event="environment_init",
+        environment=client.environment,
+        base_url=client.base_url,
+    )
 
     # Initialize the 3 pipeline steps
     scanner = Scanner(client=client, db=db)
@@ -50,20 +62,36 @@ def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trad
         while True:
             if not single_cycle and sleep_seconds > 0:
                 wait_sec = seconds_until_next_slot(interval=sleep_seconds, offset=offset_seconds)
-                print(f"Waiting {wait_sec:.1f}s until next :{offset_seconds:02d}s slot...")
+                analytics.info(
+                    f"Waiting {wait_sec:.1f}s until next :{offset_seconds:02d}s slot...",
+                    event="wait_slot",
+                    wait_seconds=round(wait_sec, 1),
+                )
                 time.sleep(wait_sec)
 
             # 1. Scanner: fetch + filter open 15-minute binary markets and save into SQLite
             markets = scanner.scan()
-            print(f"1. Scanner: Fetched and upserted {len(markets)} open binary markets.")
+            analytics.track(
+                "markets_scanned",
+                message=f"1. Scanner: Fetched and upserted {len(markets)} open binary markets.",
+                count=len(markets),
+            )
 
             # 2. Settler: settle the previous 15-minute positions that just closed
             settled = settler.settle()
-            print(f"2. Settler: Settled {len(settled)} expired positions.")
+            analytics.track(
+                "positions_settled",
+                message=f"2. Settler: Settled {len(settled)} expired positions.",
+                count=len(settled),
+            )
 
             # 3. Trader: place 1-contract bet on each new 15-minute market and let it ride
             orders = trader.trade()
-            print(f"3. Trader: Placed {len(orders)} new orders.")
+            analytics.track(
+                "orders_placed",
+                message=f"3. Trader: Placed {len(orders)} new orders.",
+                count=len(orders),
+            )
 
             # If user passed --once, exit after one cycle
             if single_cycle:
@@ -73,7 +101,7 @@ def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trad
             time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\nStopping bot. Bye!")
+        analytics.info("Stopping bot. Bye!", event="bot_stop")
     finally:
         db.close()
 

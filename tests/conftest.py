@@ -4,6 +4,16 @@ Ensures all test cases strictly target Kalshi's demo environment (demo-api.kalsh
 and have live order execution disabled so tests never make actual trades on production kalshi.com.
 """
 
+import os
+import sys
+import logging
+
+# Pytest loads Python's built-in logging first.
+# We add our local 'logging/' directory to its search path so tests can find logging.analytics.
+_local_log = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logging"))
+if _local_log not in logging.__path__:
+    logging.__path__.insert(0, _local_log)
+
 import pytest
 from ingestion.api.client import DEFAULT_DEMO_API_KEY_ID, DEMO_BASE_URL
 

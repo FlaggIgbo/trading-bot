@@ -13,6 +13,7 @@ from typing import Optional
 
 from db import Database, MarketResult, MarketStatus, PositionSide, PositionStatus, Strategy
 from ingestion.api.client import is_binary_market
+from logging.analytics import analytics
 
 
 def choose_side_random(past_results=None) -> PositionSide:
@@ -156,7 +157,14 @@ class RiskEngine:
         client_order_id = f"{self.strategy_name.value}_buy_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
 
         # Place the bet of 1 contract on Kalshi
-        print(f"Market {ticker} is open! Betting 1 contract on {side.value} (strategy={self.strategy_name.value}).")
+        analytics.track(
+            "order_intent",
+            message=f"Market {ticker} is open! Betting 1 contract on {side.value} (strategy={self.strategy_name.value}).",
+            ticker=ticker,
+            side=side.value,
+            strategy=self.strategy_name.value,
+            price_cents=price_cents,
+        )
         result = self.client.place_order(
             ticker=ticker,
             side=side,

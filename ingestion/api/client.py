@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 import requests
 
 from db import Environment, MarketType, PositionSide
+from logging.analytics import analytics
 
 # Load environment variables (fall back to .env.example defaults if not set in .env)
 load_dotenv()
@@ -182,9 +183,17 @@ class KalshiClient:
                         if is_binary_market(m, event_market_count=ev_count):
                             open_markets.append(m)
                 else:
-                    print(f"Could not fetch series {series}: {response.status_code}")
+                    analytics.warning(
+                        f"Could not fetch series {series}: {response.status_code}",
+                        series=series,
+                        status_code=response.status_code,
+                    )
             except Exception as error:
-                print(f"Error fetching markets for {series}: {error}")
+                analytics.error(
+                    f"Error fetching markets for {series}: {error}",
+                    series=series,
+                    error=str(error),
+                )
 
         return open_markets
 
@@ -199,10 +208,18 @@ class KalshiClient:
                 data = response.json()
                 return data.get("market", data)
             else:
-                print(f"Could not fetch market {ticker}: {response.status_code}")
+                analytics.warning(
+                    f"Could not fetch market {ticker}: {response.status_code}",
+                    ticker=ticker,
+                    status_code=response.status_code,
+                )
                 return None
         except Exception as error:
-            print(f"Error fetching market {ticker}: {error}")
+            analytics.error(
+                f"Error fetching market {ticker}: {error}",
+                ticker=ticker,
+                error=str(error),
+            )
             return None
 
     def get_settled_markets(self, series_ticker, limit=3):
@@ -215,7 +232,11 @@ class KalshiClient:
             if response.status_code == 200:
                 return response.json().get("markets", [])
         except Exception as error:
-            print(f"Error fetching settled markets for {series_ticker}: {error}")
+            analytics.error(
+                f"Error fetching settled markets for {series_ticker}: {error}",
+                series_ticker=series_ticker,
+                error=str(error),
+            )
         return []
 
     def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None):
@@ -250,7 +271,14 @@ class KalshiClient:
 
         # If live orders are off, return simulated order
         if not self.live_orders:
-            print(f"[SIMULATION] Bet 1 contract on {normalized_side.value} for {ticker} at {safe_price} cents.")
+            analytics.track(
+                "order_simulated",
+                message=f"[SIMULATION] Bet 1 contract on {normalized_side.value} for {ticker} at {safe_price} cents.",
+                ticker=ticker,
+                side=normalized_side.value,
+                count=count,
+                price_cents=safe_price,
+            )
             return {
                 "order_id": order_id,
                 "client_order_id": order_id,
@@ -278,13 +306,28 @@ class KalshiClient:
         try:
             response = self.session.post(url, headers=headers, json=payload, timeout=10)
             if response.status_code in [200, 201]:
-                print(f"[LIVE] Placed order: 1 contract on {normalized_side.value} for {ticker}!")
+                analytics.track(
+                    "order_live",
+                    message=f"[LIVE] Placed order: 1 contract on {normalized_side.value} for {ticker}!",
+                    ticker=ticker,
+                    side=normalized_side.value,
+                    count=count,
+                    order_id=order_id,
+                )
                 data = response.json()
                 data["client_order_id"] = order_id
                 return data
             else:
-                print(f"Order failed ({response.status_code}): {response.text[:100]}")
+                analytics.error(
+                    f"Order failed ({response.status_code}): {response.text[:100]}",
+                    status_code=response.status_code,
+                    ticker=ticker,
+                )
                 return {"error": response.text}
         except Exception as error:
-            print(f"Error placing order: {error}")
+            analytics.error(
+                f"Error placing order: {error}",
+                ticker=ticker,
+                error=str(error),
+            )
             return {"error": str(error)}
