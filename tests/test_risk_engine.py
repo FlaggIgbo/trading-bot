@@ -16,6 +16,7 @@ from ingestion.api.client import KalshiClient
 from risk_engine.engine import (
     Trader,
     choose_sell_if_2n,
+    choose_sell_if_2n_5m,
     choose_sell_if_3n,
     choose_side_last_3,
     choose_side_last_5,
@@ -313,4 +314,40 @@ def test_sell_2n_timing_helpers():
 
     assert get_strategy_resting_multiplier("sell_3n") == 3
     assert get_strategy_resting_multiplier("sell_2n") == 2
+    assert get_strategy_resting_multiplier("sell_2n_5m") == 2
     assert get_strategy_resting_multiplier("random") is None
+
+
+def test_strategy_sell_2n_5m_trader_flow():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_2n_5m")
+
+    # 1. Reject if before 5 minutes past (e.g. at minute 2)
+    m1 = {"ticker": "M-5M-EARLY", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 2}
+    assert trader.process_market(m1) is None
+
+    # 2. Enter at 5 min past (same as sell_3n) when contract < 33c (e.g. YES @ 25c)
+    m2 = {"ticker": "M-5M-WIN", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 5}
+    order = trader.process_market(m2)
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 25
+    # Places resting sell order for 2x (2 * 25c = 50c) instead of 3x
+    assert order["resting_price_cents"] == 50
+    assert order["resting_order"]["action"] == "sell"
+    assert order["resting_order"]["price"] == 50
+
+    positions = db.get_all_positions(strategy="sell_2n_5m")
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.OPEN
+    assert positions[0]["resting_order_id"] != ""
+
+    # 3. Check if resting sell order fills when price reaches 50c (2x)
+    m2_fill = {"ticker": "M-5M-WIN", "status": "open", "yes_ask": 50, "no_ask": 50, "minute": 8}
+    sold = trader.check_open_positions(markets=[m2_fill])
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == 25  # 50c - 25c = +25c
+    assert db.get_all_positions(strategy="sell_2n_5m")[0]["status"] == PositionStatus.SETTLED
+
+    db.close()

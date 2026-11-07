@@ -59,6 +59,7 @@ class Strategy(StrEnum):
     LAST_5 = "last_5"
     SELL_3N = "sell_3n"
     SELL_2N = "sell_2n"
+    SELL_2N_5M = "sell_2n_5m"
 
 
 def normalize_environment(environment: Optional[str] = None) -> Environment:
@@ -134,6 +135,8 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
         return Strategy.SELL_3N
     if strat_clean in ("sell_if_2n", "sell2n"):
         return Strategy.SELL_2N
+    if strat_clean in ("sell_2n_5m", "sell_5m_2n", "sell_2x_5m", "sell_3n_2x"):
+        return Strategy.SELL_2N_5M
     return Strategy(strat_clean)
 
 
