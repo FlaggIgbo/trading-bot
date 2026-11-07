@@ -82,8 +82,8 @@ def main():
     parser.add_argument(
         "--strategies",
         nargs="+",
-        default=["random", "last_5", "sell_3n"],
-        help="List of strategies to run (default: random last_5 sell_3n)",
+        default=["random", "last_5", "sell_3n", "sell_2n"],
+        help="List of strategies to run (default: random last_5 sell_3n sell_2n)",
     )
     args = parser.parse_args()
 

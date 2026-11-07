@@ -15,12 +15,16 @@ from db import (
 from ingestion.api.client import KalshiClient
 from risk_engine.engine import (
     Trader,
+    choose_sell_if_2n,
     choose_sell_if_3n,
     choose_side_last_3,
     choose_side_last_5,
     choose_side_random,
+    get_strategy_resting_multiplier,
     is_checkin_time,
     is_entry_time,
+    is_entry_time_5m,
+    is_entry_time_10m,
     should_sell,
 )
 from risk_engine.settler import Settler
@@ -233,10 +237,15 @@ def test_strategy_sell_3n_trader_flow():
     assert order is not None
     assert order["side"] == PositionSide.YES
     assert order["price"] == 25
+    # Immediately places resting sell order for 3x (3 * 25c = 75c)
+    assert order["resting_price_cents"] == 75
+    assert order["resting_order"]["action"] == "sell"
+    assert order["resting_order"]["price"] == 75
 
     positions = db.get_all_positions()
     assert len(positions) == 1
     assert positions[0]["status"] == PositionStatus.OPEN
+    assert positions[0]["resting_order_id"] != ""
 
     # 4. Check-in at 10 min past: current price 50c (< 3x 25c) -> hold
     m3_hold = {"ticker": "M-WIN", "status": "open", "yes_ask": 50, "no_ask": 50, "minute": 10}
@@ -244,7 +253,7 @@ def test_strategy_sell_3n_trader_flow():
     assert len(sold) == 0
     assert db.get_all_positions()[0]["status"] == PositionStatus.OPEN
 
-    # 5. Check-in at 10 min past: current price 75c (3x 25c) -> sell
+    # 5. Check-in: current price 75c (resting 3x reached) -> fills resting sell
     m3_sell = {"ticker": "M-WIN", "status": "open", "yes_ask": 75, "no_ask": 25, "minute": 10}
     sold = trader.check_open_positions(markets=[m3_sell], now=None)
     assert len(sold) == 1
@@ -252,3 +261,56 @@ def test_strategy_sell_3n_trader_flow():
     assert db.get_all_positions()[0]["status"] == PositionStatus.SETTLED
 
     db.close()
+
+
+def test_strategy_sell_2n_trader_flow():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_2n")
+
+    # 1. Reject if before 10 minutes past (e.g. at minute 5)
+    m1 = {"ticker": "M-2N-5M", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 5}
+    assert trader.process_market(m1) is None
+
+    # 2. Reject if at 10 min past but none < 33c
+    m2 = {"ticker": "M-2N-NOPICK", "status": "open", "yes_ask": 50, "no_ask": 50, "minute": 10}
+    assert trader.process_market(m2) is None
+
+    # 3. Enter at 10 min past when contract < 33c (e.g. NO @ 20c)
+    m3 = {"ticker": "M-2N-WIN", "status": "open", "yes_ask": 80, "no_ask": 20, "minute": 10}
+    order = trader.process_market(m3)
+    assert order is not None
+    assert order["side"] == PositionSide.NO
+    assert order["price"] == 20
+    # Immediately places resting sell order for 2x (2 * 20c = 40c)
+    assert order["resting_price_cents"] == 40
+    assert order["resting_order"]["action"] == "sell"
+    assert order["resting_order"]["price"] == 40
+
+    positions = db.get_all_positions(strategy="sell_2n")
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.OPEN
+    assert positions[0]["resting_order_id"] != ""
+
+    # 4. Check if resting sell order fills when price reaches 40c (2x)
+    m3_fill = {"ticker": "M-2N-WIN", "status": "open", "yes_ask": 60, "no_ask": 40, "minute": 12}
+    sold = trader.check_open_positions(markets=[m3_fill])
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == 20  # 40c - 20c = +20c
+    assert db.get_all_positions(strategy="sell_2n")[0]["status"] == PositionStatus.SETTLED
+
+    db.close()
+
+
+def test_sell_2n_timing_helpers():
+    # 5m window is for sell_3n; 10m window is for sell_2n
+    market = {"ticker": "M-TEST", "close_time": "2026-11-01T10:15:00Z"}
+    assert is_entry_time_5m(market, now="2026-11-01T10:05:00Z")
+    assert not is_entry_time_10m(market, now="2026-11-01T10:05:00Z")
+
+    assert not is_entry_time_5m(market, now="2026-11-01T10:10:00Z")
+    assert is_entry_time_10m(market, now="2026-11-01T10:10:00Z")
+
+    assert get_strategy_resting_multiplier("sell_3n") == 3
+    assert get_strategy_resting_multiplier("sell_2n") == 2
+    assert get_strategy_resting_multiplier("random") is None

@@ -58,6 +58,7 @@ class Strategy(StrEnum):
     LAST_3 = "last_3"
     LAST_5 = "last_5"
     SELL_3N = "sell_3n"
+    SELL_2N = "sell_2n"
 
 
 def normalize_environment(environment: Optional[str] = None) -> Environment:
@@ -131,6 +132,8 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
     strat_clean = str(strategy).strip().lower()
     if strat_clean in ("sell_if_3n", "sell3n"):
         return Strategy.SELL_3N
+    if strat_clean in ("sell_if_2n", "sell2n"):
+        return Strategy.SELL_2N
     return Strategy(strat_clean)
 
 
@@ -187,12 +190,13 @@ class Database:
                 price_cents INTEGER,
                 status TEXT NOT NULL DEFAULT '{PositionStatus.OPEN.value}' CHECK (status IN ({pstatus_values})),
                 close_time TEXT,
-                pnl_cents INTEGER
+                pnl_cents INTEGER,
+                resting_order_id TEXT
             )
             """
         )
 
-        # Ensure environment and strategy columns exist if migrating an older SQLite database file
+        # Ensure environment, strategy, and resting_order_id columns exist if migrating an older SQLite database file
         for table in ("markets", "positions"):
             cursor.execute(f"PRAGMA table_info({table})")
             cols = {row["name"] for row in cursor.fetchall()}
@@ -203,6 +207,10 @@ class Database:
             if table == "positions" and "strategy" not in cols:
                 cursor.execute(
                     f"ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT '{Strategy.RANDOM.value}'"
+                )
+            if table == "positions" and "resting_order_id" not in cols:
+                cursor.execute(
+                    "ALTER TABLE positions ADD COLUMN resting_order_id TEXT"
                 )
 
         self.conn.commit()
@@ -331,6 +339,7 @@ class Database:
         environment=None,
         status: PositionStatus = PositionStatus.OPEN,
         strategy: Strategy = Strategy.LAST_5,
+        resting_order_id: Optional[str] = None,
     ):
         # Write a new OPEN order/position into SQLite for the target environment using enums
         env = normalize_environment(environment or self.environment)
@@ -341,9 +350,9 @@ class Database:
         cursor.execute(
             """
             INSERT OR REPLACE INTO positions (
-                client_order_id, ticker, environment, strategy, side, count, price_cents, status, close_time, pnl_cents
+                client_order_id, ticker, environment, strategy, side, count, price_cents, status, close_time, pnl_cents, resting_order_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
             """,
             (
                 client_order_id,
@@ -355,6 +364,7 @@ class Database:
                 int(price_cents),
                 pos_status.value,
                 close_time or "",
+                resting_order_id or "",
             ),
         )
         self.conn.commit()
