@@ -116,8 +116,19 @@ if __name__ == "__main__":
         "--strategy",
         type=str,
         default="last_5",
-        choices=["last_5", "last_3", "random", "sell_3n", "sell_2n", "sell_2n_5m"],
-        help="Direction strategy: 'last_5', 'last_3', 'sell_3n', 'sell_2n', 'sell_2n_5m', or 'random'",
+        choices=[
+            "last_5",
+            "last_3",
+            "random",
+            "sell_3n",
+            "sell_2n",
+            "sell_2n_5m",
+            "sell_1.5n",
+            "sell_1_5n",
+            "sell_2.5n",
+            "sell_2_5n",
+        ],
+        help="Direction strategy: 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', or 'sell_2.5n'",
     )
     args = parser.parse_args()
 

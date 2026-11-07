@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,26 +54,44 @@ def get_performance(db_path: str):
 
 
 def print_report(strategies: list[str]):
-    print("\n" + "=" * 70)
-    print("STRATEGY PERFORMANCE EVALUATION SUMMARY")
-    print("=" * 70)
+    print("\n" + "=" * 70, flush=True)
+    print("STRATEGY PERFORMANCE EVALUATION SUMMARY", flush=True)
+    print("=" * 70, flush=True)
     header = f"{'Strategy':<12} | {'Trades':<8} | {'Open':<6} | {'Settled':<8} | {'W/L':<8} | {'Win Rate':<10} | {'PnL ($)':<10}"
-    print(header)
-    print("-" * len(header))
+    print(header, flush=True)
+    print("-" * len(header), flush=True)
 
     for strat in strategies:
         db_path = f"trading_bot_{strat}.db"
         perf = get_performance(db_path)
         if not perf or "error" in perf:
-            print(f"{strat:<12} | {'N/A':<8} | {'N/A':<6} | {'N/A':<8} | {'N/A':<8} | {'N/A':<10} | {'$0.00':<10}")
+            print(f"{strat:<12} | {'0':<8} | {'0':<6} | {'0':<8} | {'0/0':<8} | {'0.0%':<10} | {'$0.00':<10}", flush=True)
             continue
 
         wl = f"{perf['wins']}/{perf['losses']}"
         win_str = f"{perf['win_rate']:.1f}%"
         pnl_str = f"${perf['pnl_dollars']:+.2f}"
-        print(f"{strat:<12} | {perf['total']:<8} | {perf['open']:<6} | {perf['settled']:<8} | {wl:<8} | {win_str:<10} | {pnl_str:<10}")
+        print(f"{strat:<12} | {perf['total']:<8} | {perf['open']:<6} | {perf['settled']:<8} | {wl:<8} | {win_str:<10} | {pnl_str:<10}", flush=True)
 
-    print("=" * 70 + "\n")
+    print("=" * 70 + "\n", flush=True)
+
+
+def stream_process_output(proc, strat: str, log_file, combined_file=None):
+    """Read lines from child process, log to file, and echo immediately to stdout."""
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            if not line:
+                break
+            log_file.write(line)
+            log_file.flush()
+            clean = line.rstrip()
+            tagged = f"[{strat}] {clean}"
+            if combined_file is not None:
+                combined_file.write(tagged + "\n")
+                combined_file.flush()
+            print(tagged, flush=True)
+    except Exception:
+        pass
 
 
 def main():
@@ -82,17 +101,17 @@ def main():
     parser.add_argument(
         "--strategies",
         nargs="+",
-        default=["random", "last_5", "sell_3n", "sell_2n", "sell_2n_5m"],
-        help="List of strategies to run (default: random last_5 sell_3n sell_2n sell_2n_5m)",
+        default=["random", "last_5", "sell_3n", "sell_2n", "sell_2n_5m", "sell_1.5n", "sell_2.5n"],
+        help="List of strategies to run (default: random last_5 sell_3n sell_2n sell_2n_5m sell_1.5n sell_2.5n)",
     )
     args = parser.parse_args()
 
     start_time = time.time()
     end_time = start_time + args.duration
 
-    print(f"Starting parallel evaluation of strategies: {', '.join(args.strategies)}")
-    print(f"Duration: {args.duration}s ({args.duration / 3600:.2f} hours)")
-    print(f"Target completion time: {datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()}")
+    print(f"Starting parallel evaluation of strategies: {', '.join(args.strategies)}", flush=True)
+    print(f"Duration: {args.duration}s ({args.duration / 3600:.2f} hours)", flush=True)
+    print(f"Target completion time: {datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()}", flush=True)
 
     processes = {}
     log_files = {}
@@ -103,22 +122,31 @@ def main():
         log_file = open(log_path, "a")
         log_files[strat] = log_file
 
-        # Stagger offsets by 10s (:00, :10, :20) to prevent Kalshi API 429 rate limits
-        offset = i * 10
+        # Stagger offsets by 8s across interval to prevent Kalshi API rate limit collisions
+        offset = (i * 8) % args.interval
         cmd = [
             sys.executable,
+            "-u",
             "main.py",
             "--strategy", strat,
             "--interval", str(args.interval),
             "--offset", str(offset),
             "--db", db_path,
         ]
-        p = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+        p = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
         processes[strat] = p
-        print(f"  [+] Started '{strat}' strategy PID={p.pid} (offset=+{offset}s, DB={db_path}, Log={log_path})")
+        t = threading.Thread(target=stream_process_output, args=(p, strat, log_file), daemon=True)
+        t.start()
+        print(f"  [+] Started '{strat}' strategy PID={p.pid} (offset=+{offset}s, DB={db_path}, Log={log_path})", flush=True)
 
     def cleanup(signum=None, frame=None):
-        print("\nStopping strategy processes...")
+        print("\nStopping strategy processes...", flush=True)
         for strat, p in processes.items():
             if p.poll() is None:
                 p.terminate()
@@ -139,24 +167,44 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
+    last_interim_report = time.time()
     try:
         while time.time() < end_time:
-            time.sleep(min(15, max(1, int(end_time - time.time()))))
+            time.sleep(min(5, max(1, int(end_time - time.time()))))
+
+            # Periodic interim status report every 15 minutes (900s)
+            if time.time() - last_interim_report >= 900:
+                print("\n>>> [INTERIM 15-MINUTE PERFORMANCE UPDATE] <<<", flush=True)
+                print_report(args.strategies)
+                last_interim_report = time.time()
+
             # Verify child processes are healthy
-            for strat, p in processes.items():
-                if p.poll() is not None:
-                    print(f"WARNING: Process for '{strat}' exited unexpectedly with code {p.returncode}. Restarting...")
+            for i, strat in enumerate(args.strategies):
+                p = processes.get(strat)
+                if p and p.poll() is not None:
+                    print(f"WARNING: Process for '{strat}' exited unexpectedly with code {p.returncode}. Restarting...", flush=True)
                     db_path = f"trading_bot_{strat}.db"
                     log_file = log_files[strat]
+                    offset = (i * 8) % args.interval
                     cmd = [
                         sys.executable,
+                        "-u",
                         "main.py",
                         "--strategy", strat,
                         "--interval", str(args.interval),
-                        "--offset", "0",
+                        "--offset", str(offset),
                         "--db", db_path,
                     ]
-                    processes[strat] = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+                    p = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    processes[strat] = p
+                    t = threading.Thread(target=stream_process_output, args=(p, strat, log_file), daemon=True)
+                    t.start()
     except KeyboardInterrupt:
         pass
     finally:

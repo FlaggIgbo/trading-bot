@@ -70,18 +70,74 @@ def extract_contract_price(market: Optional[dict], side: PositionSide) -> Option
     return cents
 
 
-def choose_sell_if_3n(
+def sell_Xn_Ym(
     past_results_or_market: Any = None,
-    market: Optional[dict] = None,
+    n_or_market: Any = None,
+    y_val: Optional[Union[int, float]] = None,
+    z_val: Optional[Union[int, float]] = None,
     *,
+    n: Optional[float] = None,
+    y: Optional[float] = None,
+    z: Optional[Union[int, float]] = None,
+    zp: Optional[Union[int, float]] = None,
+    p: Optional[Union[int, float]] = None,
+    max_entry_price: Optional[Union[int, float]] = None,
+    market: Optional[dict] = None,
+    now: Any = None,
+    check_timing: bool = False,
     yes_ask: Optional[int] = None,
     no_ask: Optional[int] = None,
-) -> Optional[PositionSide]:
+    **kwargs,
+) -> Any:
     """
-    Strategy 3: Bet whichever side where the contract value is less than 33 cents.
-    If none are less than 33 cents, return None.
+    Generalized sell_Xn_Ym_Zp momentum strategy:
+    - n: resting sell order multiplier (e.g. 1.5x, 2x, 2.5x, 3x)
+    - y: entry minute into the 15m cycle (e.g. 5m past, 10m past)
+    - z: max entry price in cents (Zp). Optional; if not passed, defaults to int(100 / n) (e.g. 50 for 2n, 33 for 3n).
+    - Selects whichever side has an ask price < z cents.
+    - If both sides < z, selects the cheaper side.
+    - If check_timing is True, ensures current minute into market is between y and y + 5m.
     """
-    target_market = past_results_or_market if isinstance(past_results_or_market, dict) else market
+    target_market = market
+    if isinstance(past_results_or_market, dict):
+        target_market = past_results_or_market
+        if isinstance(n_or_market, (int, float)):
+            n = float(n_or_market)
+        if isinstance(y_val, (int, float)):
+            y = float(y_val)
+        if isinstance(z_val, (int, float)):
+            z = float(z_val)
+    elif isinstance(past_results_or_market, (int, float)):
+        n = float(past_results_or_market)
+        if isinstance(n_or_market, (int, float)):
+            y = float(n_or_market)
+        if isinstance(y_val, (int, float)):
+            z = float(y_val)
+    elif isinstance(n_or_market, dict):
+        target_market = n_or_market
+
+    n_num = float(n) if n is not None else 3.0
+    y_num = float(y) if y is not None else 5.0
+
+    z_input = z if z is not None else (zp if zp is not None else (p if p is not None else max_entry_price))
+    if z_input is not None:
+        effective_z = int(z_input)
+    else:
+        effective_z = int(100 / n_num) if n_num > 0 else 33
+
+    # If called as factory without market/prices: e.g. sell_Xn_Ym(2, 5) or sell_Xn_Ym(2, 5, 45)
+    if target_market is None and yes_ask is None and no_ask is None:
+        def _bound_strategy(past_or_m=None, m=None, **kw):
+            tm = past_or_m if isinstance(past_or_m, dict) else (m or target_market)
+            return sell_Xn_Ym(tm, n=n_num, y=y_num, z=effective_z, **kw)
+        _bound_strategy.n = n_num
+        _bound_strategy.y = y_num
+        _bound_strategy.z = effective_z
+        return _bound_strategy
+
+    if check_timing and target_market:
+        if not is_entry_time_ym(target_market, y_minutes=y_num, now=now):
+            return None
 
     yes_price = yes_ask
     if yes_price is None and target_market:
@@ -91,8 +147,8 @@ def choose_sell_if_3n(
     if no_price is None and target_market:
         no_price = extract_contract_price(target_market, PositionSide.NO)
 
-    yes_valid = yes_price is not None and 0 < yes_price < 33
-    no_valid = no_price is not None and 0 < no_price < 33
+    yes_valid = yes_price is not None and 0 < yes_price < effective_z
+    no_valid = no_price is not None and 0 < no_price < effective_z
 
     if yes_valid and no_valid:
         return PositionSide.YES if yes_price <= no_price else PositionSide.NO
@@ -103,15 +159,47 @@ def choose_sell_if_3n(
     return None
 
 
-choose_side_sell_if_3n = choose_sell_if_3n
+sell_xn_ym = sell_Xn_Ym
+sell_Xn_Ym_Zp = sell_Xn_Ym
+sell_xn_ym_zp = sell_Xn_Ym
 
-# Strategy 4: sell_2n uses the same contract selection (whichever side < 33c), but enters at 10m and sets 2x resting sell order
-choose_sell_if_2n = choose_sell_if_3n
-choose_side_sell_if_2n = choose_sell_if_2n
 
-# Strategy 5: sell_2n_5m enters at 5m (same as sell_3n), but sets 2x resting sell order
-choose_sell_if_2n_5m = choose_sell_if_3n
-choose_side_sell_2n_5m = choose_sell_if_2n_5m
+def sell_2n_5m(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+    """sell_2n_5m strategy: n=2x resting sell order, y=5m entry, z=max entry price (default 100/2 = 50c)."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=2, y=5, z=z, **kwargs)
+
+
+def sell_3n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+    """sell_3n strategy: n=3x resting sell order, y=5m entry, z=max entry price (default 100/3 = 33c)."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=3, y=5, z=z, **kwargs)
+
+
+def sell_2n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+    """sell_2n strategy: n=2x resting sell order, y=10m entry, z=max entry price (default 100/2 = 50c)."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=2, y=10, z=z, **kwargs)
+
+
+def sell_1_5n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+    """sell_1.5n strategy: n=1.5x resting sell order, y=5m entry, z=max entry price (default 100/1.5 = 66c)."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=z, **kwargs)
+
+
+def sell_2_5n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+    """sell_2.5n strategy: n=2.5x resting sell order, y=5m entry, z=max entry price (default 100/2.5 = 40c)."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=2.5, y=5, z=z, **kwargs)
+
+
+# Backward compatibility aliases
+choose_sell_if_3n = sell_3n
+choose_side_sell_if_3n = sell_3n
+choose_sell_if_2n = sell_2n
+choose_side_sell_if_2n = sell_2n
+choose_sell_if_2n_5m = sell_2n_5m
+choose_side_sell_2n_5m = sell_2n_5m
+choose_sell_if_1_5n = sell_1_5n
+choose_side_sell_1_5n = sell_1_5n
+choose_sell_if_2_5n = sell_2_5n
+choose_side_sell_2_5n = sell_2_5n
 
 
 def _parse_time(val: Any) -> Optional[datetime]:
@@ -165,29 +253,30 @@ def get_market_minute(market_or_pos: dict, now: Any = None) -> Optional[float]:
     return float(now_dt.minute % 15) + (now_dt.second / 60.0)
 
 
-def is_entry_time_5m(market: dict, now: Any = None) -> bool:
-    """Enter market at 5 minutes past (between 5 and 10 minutes into the market)."""
+def is_entry_time_ym(market: dict, y_minutes: float = 5.0, window_minutes: float = 5.0, now: Any = None) -> bool:
+    """Enter market at y_minutes past (between y and y + window_minutes into the 15m cycle)."""
     minute = get_market_minute(market, now=now)
     if minute is None:
         return True
-    return 5.0 <= minute < 10.0
+    return float(y_minutes) <= minute < float(y_minutes + window_minutes)
+
+
+def is_entry_time_5m(market: dict, now: Any = None) -> bool:
+    """Enter market at 5 minutes past (between 5 and 10 minutes into the market)."""
+    return is_entry_time_ym(market, y_minutes=5.0, now=now)
 
 
 def is_entry_time_10m(market: dict, now: Any = None) -> bool:
     """Enter market at 10 minutes past (between 10 and 15 minutes into the market)."""
-    minute = get_market_minute(market, now=now)
-    if minute is None:
-        return True
-    return 10.0 <= minute < 15.0
+    return is_entry_time_ym(market, y_minutes=10.0, now=now)
 
 
 def is_entry_time(market: dict, strategy: Any = None, now: Any = None) -> bool:
     """Check if current time is within entry window for the strategy."""
-    strat_str = str(getattr(strategy, "value", strategy) or "").lower()
-    # sell_2n (10m entry) without 5m; sell_3n and sell_2n_5m enter at 5m
-    if strat_str in ("sell_2n", "sell2n", "sell_if_2n"):
-        return is_entry_time_10m(market, now=now)
-    return is_entry_time_5m(market, now=now)
+    y = get_strategy_entry_minute(strategy)
+    if y is None:
+        y = 5.0
+    return is_entry_time_ym(market, y_minutes=float(y), now=now)
 
 
 def is_checkin_time(market_or_pos: dict, now: Any = None) -> bool:
@@ -198,14 +287,67 @@ def is_checkin_time(market_or_pos: dict, now: Any = None) -> bool:
     return minute >= 10.0
 
 
-def get_strategy_resting_multiplier(strategy: Any) -> Optional[int]:
-    """Return resting sell order multiplier: 3x for SELL_3N, 2x for SELL_2N and SELL_2N_5M."""
-    strat_str = str(getattr(strategy, "value", strategy) or "").lower()
-    if strat_str in ("sell_3n", "sell3n", "sell_if_3n"):
+def get_strategy_resting_multiplier(strategy: Any) -> Optional[Union[int, float]]:
+    """Return resting sell order multiplier: 3 for SELL_3N, 2 for SELL_2N / SELL_2N_5M, 1.5 for SELL_1.5N, 2.5 for SELL_2.5N."""
+    if hasattr(strategy, "n"):
+        n = getattr(strategy, "n")
+        return int(n) if float(n).is_integer() else float(n)
+    strat_str = str(getattr(strategy, "value", strategy) or "").lower().strip()
+    if not strat_str:
+        return None
+    if "1.5" in strat_str or "1_5" in strat_str:
+        return 1.5
+    if "2.5" in strat_str or "2_5" in strat_str:
+        return 2.5
+    if strat_str in ("sell_3n", "sell3n", "sell_if_3n") or "3n" in strat_str or "3x" in strat_str:
         return 3
     if "2n" in strat_str or "2x" in strat_str:
         return 2
+    match = re.search(r"sell_?([0-9.]+)n", strat_str)
+    if match:
+        val = float(match.group(1))
+        return int(val) if val.is_integer() else val
     return None
+
+
+def get_strategy_entry_minute(strategy: Any) -> Optional[Union[int, float]]:
+    """Return entry minute into 15m cycle: 10m for sell_2n, 5m for sell_3n, sell_2n_5m, sell_1.5n, sell_2.5n."""
+    if hasattr(strategy, "y"):
+        y = getattr(strategy, "y")
+        return int(y) if float(y).is_integer() else float(y)
+    strat_str = str(getattr(strategy, "value", strategy) or "").lower().strip()
+    if not strat_str:
+        return None
+    if strat_str in ("sell_2n", "sell2n", "sell_if_2n", "sell_2n_10m"):
+        return 10
+    if "10m" in strat_str:
+        return 10
+    if "5m" in strat_str or "sell" in strat_str:
+        return 5
+    match = re.search(r"_([0-9.]+)m", strat_str)
+    if match:
+        val = float(match.group(1))
+        return int(val) if val.is_integer() else val
+    return None
+
+
+def get_strategy_max_entry_price(strategy: Any) -> int:
+    r"""Return max entry price (Zp) for strategy: explicit .z / '_(\d+)p', or defaults to int(100 / n)."""
+    if hasattr(strategy, "z") and getattr(strategy, "z") is not None:
+        return int(getattr(strategy, "z"))
+    strat_str = str(getattr(strategy, "value", strategy) or "").lower().strip()
+    match = re.search(r"(\d+)p\b", strat_str)
+    if match:
+        return int(match.group(1))
+    n = get_strategy_resting_multiplier(strategy)
+    if n and n > 0:
+        return int(100 / n)
+    return 33
+
+
+def is_sell_strategy(strategy: Any) -> bool:
+    """Check if strategy is any sell_Xn_Ym strategy with a resting multiplier."""
+    return get_strategy_resting_multiplier(strategy) is not None
 
 
 def should_sell(entry_price_cents: int, current_price_cents: int, multiplier: float = 3.0) -> bool:
@@ -219,9 +361,13 @@ STRATEGIES = {
     Strategy.RANDOM.value: choose_side_random,
     Strategy.LAST_3.value: choose_side_last_5,
     Strategy.LAST_5.value: choose_side_last_5,
-    Strategy.SELL_3N.value: choose_sell_if_3n,
-    Strategy.SELL_2N.value: choose_sell_if_2n,
-    Strategy.SELL_2N_5M.value: choose_sell_if_2n_5m,
+    Strategy.SELL_3N.value: sell_3n,
+    Strategy.SELL_2N.value: sell_2n,
+    Strategy.SELL_2N_5M.value: sell_2n_5m,
+    Strategy.SELL_1_5N.value: sell_1_5n,
+    Strategy.SELL_2_5N.value: sell_2_5n,
+    "sell_1_5n": sell_1_5n,
+    "sell_2_5n": sell_2_5n,
 }
 
 
@@ -247,6 +393,10 @@ class RiskEngine:
                 self.strategy_name = Strategy.SELL_2N_5M
             elif strat_lower in ("sell_2n", "sell2n", "sell_if_2n"):
                 self.strategy_name = Strategy.SELL_2N
+            elif strat_lower in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n", "sell_1.5n_5m"):
+                self.strategy_name = Strategy.SELL_1_5N
+            elif strat_lower in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m"):
+                self.strategy_name = Strategy.SELL_2_5N
             else:
                 try:
                     self.strategy_name = Strategy(strat_lower)
@@ -255,16 +405,23 @@ class RiskEngine:
         elif callable(strategy):
             if strategy is choose_side_random:
                 self.strategy_name = Strategy.RANDOM
-            elif strategy in (choose_sell_if_3n, choose_side_sell_if_3n):
+            elif strategy in (sell_3n, choose_sell_if_3n, choose_side_sell_if_3n):
                 self.strategy_name = Strategy.SELL_3N
-            elif strategy in (choose_sell_if_2n_5m, choose_side_sell_2n_5m):
+            elif strategy in (sell_2n_5m, choose_sell_if_2n_5m, choose_side_sell_2n_5m):
                 self.strategy_name = Strategy.SELL_2N_5M
-            elif strategy in (choose_sell_if_2n, choose_side_sell_if_2n):
+            elif strategy in (sell_2n, choose_sell_if_2n, choose_side_sell_2n):
                 self.strategy_name = Strategy.SELL_2N
+            elif strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
+                self.strategy_name = Strategy.SELL_1_5N
+            elif strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):
+                self.strategy_name = Strategy.SELL_2_5N
             else:
                 self.strategy_name = Strategy.LAST_5
         else:
             self.strategy_name = Strategy.LAST_5
+
+        self.is_sell_strategy = is_sell_strategy(self.strategy_name)
+        self.max_entry_price = get_strategy_max_entry_price(self.strategy)
 
         # Set of market tickers where this strategy already placed its bet
         self.bet_markets = set()
@@ -321,13 +478,29 @@ class RiskEngine:
         if strategy_fn is choose_side_random:
             return choose_side_random()
 
-        if strategy_fn in (
-            choose_sell_if_3n,
-            choose_side_sell_if_3n,
-            choose_sell_if_2n,
-            choose_side_sell_if_2n,
-            choose_sell_if_2n_5m,
-            choose_side_sell_2n_5m,
+        if (
+            self.is_sell_strategy
+            or strategy_fn in (
+                sell_Xn_Ym,
+                sell_xn_ym,
+                sell_Xn_Ym_Zp,
+                sell_xn_ym_zp,
+                sell_3n,
+                sell_2n,
+                sell_2n_5m,
+                sell_1_5n,
+                sell_2_5n,
+                choose_sell_if_3n,
+                choose_side_sell_if_3n,
+                choose_sell_if_2n,
+                choose_side_sell_if_2n,
+                choose_sell_if_2n_5m,
+                choose_side_sell_2n_5m,
+                choose_sell_if_1_5n,
+                choose_side_sell_1_5n,
+                choose_sell_if_2_5n,
+                choose_side_sell_2_5n,
+            )
         ):
             if market is None and self.client is not None and hasattr(self.client, "get_market"):
                 market = self.client.get_market(ticker)
@@ -366,7 +539,8 @@ class RiskEngine:
         entry_price = int(position["price_cents"])
         client_order_id = position["client_order_id"]
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
-        sell_order_id = f"{self.strategy_name.value}_sell_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
+        sell_order_id = f"{safe_strategy}_sell_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
 
         order_result = None
         if self.client is not None and hasattr(self.client, "place_order"):
@@ -487,8 +661,8 @@ class RiskEngine:
         if ticker in self.bet_markets:
             return None
 
-        # For SELL_3N (5m, 3x), SELL_2N (10m, 2x), and SELL_2N_5M (5m, 2x):
-        if self.strategy_name in (Strategy.SELL_3N, Strategy.SELL_2N, Strategy.SELL_2N_5M) and check_timing:
+        # For sell strategies (e.g. sell_3n, sell_2n, sell_2n_5m, sell_1.5n, sell_2.5n):
+        if self.is_sell_strategy and check_timing:
             if not is_entry_time(market, strategy=self.strategy_name, now=now):
                 return None
 
@@ -500,13 +674,14 @@ class RiskEngine:
         # Choose price (use ask if available, otherwise 50 cents)
         price_cents = max(1, min(99, self._extract_ask_cents(market, side)))
 
-        # For SELL_3N, SELL_2N, and SELL_2N_5M: must be under 33 cents
-        if self.strategy_name in (Strategy.SELL_3N, Strategy.SELL_2N, Strategy.SELL_2N_5M) and price_cents >= 33:
+        # For sell strategies: must be under max entry price (Zp, default 100/n)
+        if self.is_sell_strategy and price_cents >= self.max_entry_price:
             return None
 
         # Generate client_order_id (tagged by strategy so parallel runs never collide)
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
-        client_order_id = f"{self.strategy_name.value}_buy_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
+        client_order_id = f"{safe_strategy}_buy_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
 
         # Place the bet of 1 contract on Kalshi
         analytics.track(
@@ -529,13 +704,13 @@ class RiskEngine:
         if isinstance(result, dict) and "error" in result:
             return result
 
-        # Immediately place resting sell order if strategy uses resting exit (SELL_3N=3x, SELL_2N=2x)
+        # Immediately place resting sell order if strategy uses resting exit (SELL_3N=3x, SELL_2N=2x, etc.)
         resting_order = None
         resting_order_id = None
         multiplier = get_strategy_resting_multiplier(self.strategy_name)
         if multiplier is not None:
             resting_price_cents = min(99, int(round(multiplier * price_cents)))
-            resting_order_id = f"{self.strategy_name.value}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+            resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
             analytics.track(
                 "resting_order_placed",
                 message=f"Market {ticker}: Placed resting sell order for 1 contract on {side.value} at {resting_price_cents}c ({multiplier}x entry {price_cents}c).",
@@ -594,8 +769,8 @@ class RiskEngine:
         return result
 
     def evaluate_all(self, markets=None, now: Any = None, check_timing: bool = True):
-        # If strategy is SELL_3N, SELL_2N, or SELL_2N_5M, check open positions to verify if resting orders filled
-        if self.strategy_name in (Strategy.SELL_3N, Strategy.SELL_2N, Strategy.SELL_2N_5M):
+        # If strategy is a sell strategy, check open positions to verify if resting orders filled
+        if self.is_sell_strategy:
             self.check_open_positions(markets=markets, now=now, check_timing=check_timing)
 
         # If no markets list was passed in, read open candidate markets from SQLite

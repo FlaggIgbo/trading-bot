@@ -21,11 +21,24 @@ from risk_engine.engine import (
     choose_side_last_3,
     choose_side_last_5,
     choose_side_random,
+    get_strategy_entry_minute,
+    get_strategy_max_entry_price,
     get_strategy_resting_multiplier,
     is_checkin_time,
     is_entry_time,
-    is_entry_time_5m,
     is_entry_time_10m,
+    is_entry_time_5m,
+    is_entry_time_ym,
+    is_sell_strategy,
+    sell_1_5n,
+    sell_2_5n,
+    sell_2n,
+    sell_2n_5m,
+    sell_3n,
+    sell_Xn_Ym,
+    sell_xn_ym,
+    sell_Xn_Ym_Zp,
+    sell_xn_ym_zp,
     should_sell,
 )
 from risk_engine.settler import Settler
@@ -351,3 +364,156 @@ def test_strategy_sell_2n_5m_trader_flow():
     assert db.get_all_positions(strategy="sell_2n_5m")[0]["status"] == PositionStatus.SETTLED
 
     db.close()
+
+
+def test_sell_xn_ym_parameterized():
+    # Direct calling with market and parameters
+    m_yes = {"yes_ask": 25, "no_ask": 75}
+    m_no = {"yes_ask": 80, "no_ask": 20}
+    m_none_33 = {"yes_ask": 50, "no_ask": 50}
+    m_none_66 = {"yes_ask": 70, "no_ask": 70}
+
+    # For n=2 (z=50): 25 is < 50
+    assert sell_Xn_Ym(m_yes, n=2, y=5) == PositionSide.YES
+    # For n=3 (z=33): 20 is < 33
+    assert sell_Xn_Ym(m_no, n=3, y=5) == PositionSide.NO
+    # For n=3 (z=33): 50 is >= 33 -> None
+    assert sell_Xn_Ym(m_none_33, n=3, y=5) is None
+    # For n=1.5 (default z=66): 50 is < 66 -> picks YES (50 <= 50)
+    assert sell_Xn_Ym(m_none_33, n=1.5, y=5) == PositionSide.YES
+    # For n=1.5 (default z=66): 70 is >= 66 -> None
+    assert sell_Xn_Ym(m_none_66, n=1.5, y=5) is None
+    # If z is explicitly passed (e.g. z=33), overrides default 100/n
+    assert sell_Xn_Ym(m_none_33, n=1.5, y=5, z=33) is None
+    assert sell_Xn_Ym(m_none_33, n=2, y=5, zp=33) is None
+
+    # Convenience aliases call sell_Xn_Ym with the configured params
+    assert sell_3n(m_yes) == PositionSide.YES
+    assert sell_2n(m_yes) == PositionSide.YES
+    assert sell_2n_5m(m_yes) == PositionSide.YES
+    assert sell_1_5n(m_yes) == PositionSide.YES
+    assert sell_2_5n(m_no) == PositionSide.NO
+
+    # Positional factory usage: sell_Xn_Ym(n, y, z) returns a bound strategy callable
+    bound_strat = sell_Xn_Ym(1.5, 5)
+    assert callable(bound_strat)
+    assert bound_strat.n == 1.5
+    assert bound_strat.y == 5
+    assert bound_strat.z == 66  # default 100/1.5
+    assert bound_strat(m_yes) == PositionSide.YES
+    assert bound_strat(m_no) == PositionSide.NO
+
+    # Positional factory with custom z
+    bound_strat_z = sell_Xn_Ym(2, 5, 30)
+    assert bound_strat_z.z == 30
+    assert bound_strat_z(m_yes) == PositionSide.YES  # 25 < 30
+    assert bound_strat_z({"yes_ask": 35, "no_ask": 65}) is None  # 35 >= 30
+
+
+def test_strategy_sell_1_5n_trader_flow():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_1.5n")
+
+    # 1. Reject if before 5 minutes past (e.g. at minute 2)
+    m1 = {"ticker": "M-1.5N-EARLY", "status": "open", "yes_ask": 20, "no_ask": 80, "minute": 2}
+    assert trader.process_market(m1) is None
+
+    # 2. Enter at 5 min past when contract < 33c (e.g. YES @ 20c)
+    m2 = {"ticker": "M-1.5N-WIN", "status": "open", "yes_ask": 20, "no_ask": 80, "minute": 5}
+    order = trader.process_market(m2)
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 20
+    # Places resting sell order for 1.5x (1.5 * 20c = 30c)
+    assert order["resting_price_cents"] == 30
+    assert order["resting_order"]["action"] == "sell"
+    assert order["resting_order"]["price"] == 30
+
+    positions = db.get_all_positions(strategy="sell_1.5n")
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.OPEN
+    assert positions[0]["resting_order_id"] != ""
+
+    # 3. Check if resting sell order fills when price reaches 30c (1.5x)
+    m2_fill = {"ticker": "M-1.5N-WIN", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 7}
+    sold = trader.check_open_positions(markets=[m2_fill])
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == 10  # 30c - 20c = +10c
+    assert db.get_all_positions(strategy="sell_1.5n")[0]["status"] == PositionStatus.SETTLED
+
+    db.close()
+
+
+def test_strategy_sell_2_5n_trader_flow():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_2.5n")
+
+    # 1. Reject if before 5 minutes past (e.g. at minute 3)
+    m1 = {"ticker": "M-2.5N-EARLY", "status": "open", "yes_ask": 80, "no_ask": 20, "minute": 3}
+    assert trader.process_market(m1) is None
+
+    # 2. Enter at 5 min past when contract < 33c (e.g. NO @ 20c)
+    m2 = {"ticker": "M-2.5N-WIN", "status": "open", "yes_ask": 80, "no_ask": 20, "minute": 6}
+    order = trader.process_market(m2)
+    assert order is not None
+    assert order["side"] == PositionSide.NO
+    assert order["price"] == 20
+    # Places resting sell order for 2.5x (2.5 * 20c = 50c)
+    assert order["resting_price_cents"] == 50
+    assert order["resting_order"]["action"] == "sell"
+    assert order["resting_order"]["price"] == 50
+
+    positions = db.get_all_positions(strategy="sell_2.5n")
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.OPEN
+    assert positions[0]["resting_order_id"] != ""
+
+    # 3. Check if resting sell order fills when price reaches 50c (2.5x)
+    m2_fill = {"ticker": "M-2.5N-WIN", "status": "open", "yes_ask": 50, "no_ask": 50, "minute": 9}
+    sold = trader.check_open_positions(markets=[m2_fill])
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == 30  # 50c - 20c = +30c
+    assert db.get_all_positions(strategy="sell_2.5n")[0]["status"] == PositionStatus.SETTLED
+
+    db.close()
+
+
+def test_strategy_resting_multiplier_and_entry_minute():
+    # Resting multipliers
+    assert get_strategy_resting_multiplier("sell_3n") == 3
+    assert get_strategy_resting_multiplier("sell_2n") == 2
+    assert get_strategy_resting_multiplier("sell_2n_5m") == 2
+    assert get_strategy_resting_multiplier("sell_1.5n") == 1.5
+    assert get_strategy_resting_multiplier("sell_1_5n") == 1.5
+    assert get_strategy_resting_multiplier("sell_2.5n") == 2.5
+    assert get_strategy_resting_multiplier("sell_2_5n") == 2.5
+    assert get_strategy_resting_multiplier("random") is None
+    assert get_strategy_resting_multiplier("last_5") is None
+
+    # Entry minute
+    assert get_strategy_entry_minute("sell_3n") == 5
+    assert get_strategy_entry_minute("sell_2n") == 10
+    assert get_strategy_entry_minute("sell_2n_5m") == 5
+    assert get_strategy_entry_minute("sell_1.5n") == 5
+    assert get_strategy_entry_minute("sell_2.5n") == 5
+
+    # Max entry price (Zp default 100/n, or explicit override)
+    assert get_strategy_max_entry_price("sell_3n") == 33
+    assert get_strategy_max_entry_price("sell_2n") == 50
+    assert get_strategy_max_entry_price("sell_2n_5m") == 50
+    assert get_strategy_max_entry_price("sell_1.5n") == 66
+    assert get_strategy_max_entry_price("sell_2.5n") == 40
+    assert get_strategy_max_entry_price("sell_2n_5m_33p") == 33
+    assert get_strategy_max_entry_price("sell_1.5n_45p") == 45
+    assert get_strategy_max_entry_price("random") == 33
+
+    # is_sell_strategy helper
+    assert is_sell_strategy("sell_3n")
+    assert is_sell_strategy("sell_2n")
+    assert is_sell_strategy("sell_2n_5m")
+    assert is_sell_strategy("sell_1.5n")
+    assert is_sell_strategy("sell_2.5n")
+    assert not is_sell_strategy("random")
+    assert not is_sell_strategy("last_5")

@@ -31,4 +31,6 @@ Thumbs.db
 
 # Local Data & Database Caches
 *.db
+*.db-shm
+*.db-wal
 .trading-bot-data/
