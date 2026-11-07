@@ -115,6 +115,8 @@ def main():
 
     processes = {}
     log_files = {}
+    combined_log_path = "parallel_run.log"
+    combined_file = open(combined_log_path, "a")
 
     for i, strat in enumerate(args.strategies):
         db_path = f"trading_bot_{strat}.db"
@@ -141,7 +143,7 @@ def main():
             bufsize=1,
         )
         processes[strat] = p
-        t = threading.Thread(target=stream_process_output, args=(p, strat, log_file), daemon=True)
+        t = threading.Thread(target=stream_process_output, args=(p, strat, log_file, combined_file), daemon=True)
         t.start()
         print(f"  [+] Started '{strat}' strategy PID={p.pid} (offset=+{offset}s, DB={db_path}, Log={log_path})", flush=True)
 
@@ -160,6 +162,10 @@ def main():
                 f.close()
             except Exception:
                 pass
+        try:
+            combined_file.close()
+        except Exception:
+            pass
         print_report(args.strategies)
         if signum is not None:
             sys.exit(0)
