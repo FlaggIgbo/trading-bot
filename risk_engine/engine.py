@@ -184,6 +184,11 @@ def sell_1_5n(past_results_or_market: Any = None, market: Optional[dict] = None,
     return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=z, **kwargs)
 
 
+def sell_1_5n_35p(past_results_or_market: Any = None, market: Optional[dict] = None, **kwargs) -> Optional[PositionSide]:
+    """sell_1.5n_35p strategy: n=1.5x resting sell order, y=5m entry, z=35c max entry price."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=35, **kwargs)
+
+
 def sell_2_5n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
     """sell_2.5n strategy: n=2.5x resting sell order, y=5m entry, z=max entry price (default 100/2.5 = 40c)."""
     return sell_Xn_Ym(past_results_or_market, market=market, n=2.5, y=5, z=z, **kwargs)
@@ -198,6 +203,8 @@ choose_sell_if_2n_5m = sell_2n_5m
 choose_side_sell_2n_5m = sell_2n_5m
 choose_sell_if_1_5n = sell_1_5n
 choose_side_sell_1_5n = sell_1_5n
+choose_sell_if_1_5n_35p = sell_1_5n_35p
+choose_side_sell_1_5n_35p = sell_1_5n_35p
 choose_sell_if_2_5n = sell_2_5n
 choose_side_sell_2_5n = sell_2_5n
 
@@ -365,8 +372,11 @@ STRATEGIES = {
     Strategy.SELL_2N.value: sell_2n,
     Strategy.SELL_2N_5M.value: sell_2n_5m,
     Strategy.SELL_1_5N.value: sell_1_5n,
+    Strategy.SELL_1_5N_35P.value: sell_1_5n_35p,
     Strategy.SELL_2_5N.value: sell_2_5n,
     "sell_1_5n": sell_1_5n,
+    "sell_1.5n_35p": sell_1_5n_35p,
+    "sell_1_5n_35p": sell_1_5n_35p,
     "sell_2_5n": sell_2_5n,
 }
 
@@ -393,6 +403,8 @@ class RiskEngine:
                 self.strategy_name = Strategy.SELL_2N_5M
             elif strat_lower in ("sell_2n", "sell2n", "sell_if_2n"):
                 self.strategy_name = Strategy.SELL_2N
+            elif strat_lower in ("sell_1.5n_35p", "sell_1_5n_35p", "sell1.5n_35p", "sell1_5n_35p"):
+                self.strategy_name = Strategy.SELL_1_5N_35P
             elif strat_lower in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n", "sell_1.5n_5m"):
                 self.strategy_name = Strategy.SELL_1_5N
             elif strat_lower in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m"):
@@ -411,6 +423,8 @@ class RiskEngine:
                 self.strategy_name = Strategy.SELL_2N_5M
             elif strategy in (sell_2n, choose_sell_if_2n, choose_side_sell_2n):
                 self.strategy_name = Strategy.SELL_2N
+            elif strategy in (sell_1_5n_35p, choose_sell_if_1_5n_35p, choose_side_sell_1_5n_35p):
+                self.strategy_name = Strategy.SELL_1_5N_35P
             elif strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
                 self.strategy_name = Strategy.SELL_1_5N
             elif strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):

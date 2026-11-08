@@ -487,6 +487,8 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert get_strategy_resting_multiplier("sell_2n_5m") == 2
     assert get_strategy_resting_multiplier("sell_1.5n") == 1.5
     assert get_strategy_resting_multiplier("sell_1_5n") == 1.5
+    assert get_strategy_resting_multiplier("sell_1.5n_35p") == 1.5
+    assert get_strategy_resting_multiplier("sell_1_5n_35p") == 1.5
     assert get_strategy_resting_multiplier("sell_2.5n") == 2.5
     assert get_strategy_resting_multiplier("sell_2_5n") == 2.5
     assert get_strategy_resting_multiplier("random") is None
@@ -497,6 +499,7 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert get_strategy_entry_minute("sell_2n") == 10
     assert get_strategy_entry_minute("sell_2n_5m") == 5
     assert get_strategy_entry_minute("sell_1.5n") == 5
+    assert get_strategy_entry_minute("sell_1.5n_35p") == 5
     assert get_strategy_entry_minute("sell_2.5n") == 5
 
     # Max entry price (Zp default 100/n, or explicit override)
@@ -504,6 +507,7 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert get_strategy_max_entry_price("sell_2n") == 50
     assert get_strategy_max_entry_price("sell_2n_5m") == 50
     assert get_strategy_max_entry_price("sell_1.5n") == 66
+    assert get_strategy_max_entry_price("sell_1.5n_35p") == 35
     assert get_strategy_max_entry_price("sell_2.5n") == 40
     assert get_strategy_max_entry_price("sell_2n_5m_33p") == 33
     assert get_strategy_max_entry_price("sell_1.5n_45p") == 45
@@ -514,6 +518,7 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert is_sell_strategy("sell_2n")
     assert is_sell_strategy("sell_2n_5m")
     assert is_sell_strategy("sell_1.5n")
+    assert is_sell_strategy("sell_1.5n_35p")
     assert is_sell_strategy("sell_2.5n")
     assert not is_sell_strategy("random")
     assert not is_sell_strategy("last_5")

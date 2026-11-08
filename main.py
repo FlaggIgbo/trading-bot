@@ -33,17 +33,20 @@ def seconds_until_next_slot(now=None, interval=900, offset=30):
     return 0.0 if wait == interval else wait
 
 
-def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3"):
+def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3", env="demo", live=False):
     analytics.info(
-        f"Starting trading bot (strategy={strategy}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
         strategy=strategy,
+        env=env,
+        live=live,
         sleep_seconds=sleep_seconds,
         offset_seconds=offset_seconds,
     )
 
     # Initialize Kalshi REST API client and SQLite database (tagged by environment)
-    client = KalshiClient()
+    base_url = "https://api.elections.kalshi.com/trade-api/v2" if str(env).lower() in ("prod", "production") else "https://demo-api.kalshi.co/trade-api/v2"
+    client = KalshiClient(base_url=base_url, live_orders=live)
     db = Database(db_path=db_path, environment=client.environment)
     analytics.info(
         f"Environment: {client.environment} ({client.base_url})",
@@ -113,6 +116,13 @@ if __name__ == "__main__":
     parser.add_argument("--offset", type=int, default=30, help="Seconds past each window start (default: 30)")
     parser.add_argument("--db", type=str, default="trading_bot.db", help="Path to SQLite database file")
     parser.add_argument(
+        "--env",
+        type=str,
+        default="demo",
+        choices=["demo", "prod", "production"],
+        help="Environment to target ('demo' for demo.kalshi.co, 'prod'/'production' for kalshi.com)",
+    )
+    parser.add_argument(
         "--strategy",
         type=str,
         default="last_5",
@@ -125,10 +135,17 @@ if __name__ == "__main__":
             "sell_2n_5m",
             "sell_1.5n",
             "sell_1_5n",
+            "sell_1.5n_35p",
+            "sell_1_5n_35p",
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', or 'sell_2.5n'",
+        help="Direction strategy: 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_35p', or 'sell_2.5n'",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Enable live order execution against Kalshi API (requires active credentials)",
     )
     args = parser.parse_args()
 
@@ -138,4 +155,6 @@ if __name__ == "__main__":
         offset_seconds=args.offset,
         db_path=args.db,
         strategy=args.strategy,
+        env=args.env,
+        live=args.live,
     )

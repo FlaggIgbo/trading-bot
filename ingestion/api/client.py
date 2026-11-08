@@ -133,7 +133,8 @@ class KalshiClient:
             key_path = os.getenv("KALSHI_DEMO_PRIVATE_KEY_PATH", os.getenv("KALSHI_PRIVATE_KEY_PATH"))
         else:
             key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH")
-        self.private_key = load_private_key(key_path=key_path)
+        key_content = os.getenv("KALSHI_DEMO_PRIVATE_KEY_CONTENT") if is_demo_url else (os.getenv("KALSHI_PRIVATE_KEY_CONTENT") or os.getenv("KALSHI_PRIVATE_KEY"))
+        self.private_key = load_private_key(key_path=key_path, key_content=key_content)
 
         # HTTP session
         self.session = requests.Session()

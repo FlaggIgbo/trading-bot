@@ -61,6 +61,7 @@ class Strategy(StrEnum):
     SELL_2N = "sell_2n"
     SELL_2N_5M = "sell_2n_5m"
     SELL_1_5N = "sell_1.5n"
+    SELL_1_5N_35P = "sell_1.5n_35p"
     SELL_2_5N = "sell_2.5n"
 
 
@@ -139,6 +140,8 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
         return Strategy.SELL_2N
     if strat_clean in ("sell_2n_5m", "sell_5m_2n", "sell_2x_5m", "sell_3n_2x"):
         return Strategy.SELL_2N_5M
+    if strat_clean in ("sell_1.5n_35p", "sell_1_5n_35p", "sell1.5n_35p", "sell1_5n_35p"):
+        return Strategy.SELL_1_5N_35P
     if strat_clean in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n", "sell_1.5n_5m", "sell_1_5n_5m"):
         return Strategy.SELL_1_5N
     if strat_clean in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m", "sell_2_5n_5m"):
