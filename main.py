@@ -138,6 +138,8 @@ if __name__ == "__main__":
             "sell_1_5n",
             "sell_1.5n_5m",
             "sell_1_5n_5m",
+            "sell_1.5n_5m_35p",
+            "sell_1_5n_5m_35p",
             "sell_1.5n_35p",
             "sell_1_5n_35p",
             "sell_2.5n",

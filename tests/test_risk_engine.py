@@ -509,6 +509,8 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert get_strategy_max_entry_price("sell_2n") == 50
     assert get_strategy_max_entry_price("sell_2n_5m") == 50
     assert get_strategy_max_entry_price("sell_1.5n") == 66
+    assert get_strategy_max_entry_price("sell_1.5n_5m") == 35
+    assert get_strategy_max_entry_price("sell_1.5n_5m_35p") == 35
     assert get_strategy_max_entry_price("sell_1.5n_35p") == 35
     assert get_strategy_max_entry_price("sell_2.5n") == 40
     assert get_strategy_max_entry_price("sell_2n_5m_33p") == 33
@@ -630,7 +632,10 @@ def test_sell_1_5n_5m_strategy():
     # Reject at minute 3
     assert trader.process_market({"ticker": "M-1.5N-5M", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 3}) is None
 
-    # Accept at minute 5 with ask <= 66c
+    # Reject at minute 5 if ask > 35c (e.g. 40c)
+    assert trader.process_market({"ticker": "M-1.5N-5M-EXPENSIVE", "status": "open", "yes_ask": 40, "no_ask": 60, "minute": 5}) is None
+
+    # Accept at minute 5 with ask <= 35c (e.g. 30c)
     order = trader.process_market({"ticker": "M-1.5N-5M", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 5})
     assert order is not None
     assert order["side"] == PositionSide.YES

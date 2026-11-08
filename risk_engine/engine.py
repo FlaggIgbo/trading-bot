@@ -187,12 +187,18 @@ def sell_1_5n(past_results_or_market: Any = None, market: Optional[dict] = None,
 
 
 def sell_1_5n_5m(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
-    """sell_1.5n_5m strategy: n=1.5x resting sell order, y=5m entry, optional stop_loss."""
-    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=z, stop_loss=stop_loss, **kwargs)
+    """sell_1.5n_5m strategy: n=1.5x resting sell order, y=5m entry, max entry price z=35c (default 35c), optional stop_loss."""
+    max_z = 35 if z is None else z
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=max_z, stop_loss=stop_loss, **kwargs)
+
+
+def sell_1_5n_5m_35p(past_results_or_market: Any = None, market: Optional[dict] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
+    """sell_1.5n_5m_35p strategy: n=1.5x resting sell order, y=5m entry, z=35c max entry price, optional stop_loss."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=35, stop_loss=stop_loss, **kwargs)
 
 
 def sell_1_5n_35p(past_results_or_market: Any = None, market: Optional[dict] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
-    """sell_1.5n_35p strategy: n=1.5x resting sell order, y=5m entry, z=35c max entry price."""
+    """sell_1.5n_35p strategy: n=1.5x resting sell order, y=5m entry, z=35c max entry price, optional stop_loss."""
     return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=35, stop_loss=stop_loss, **kwargs)
 
 
@@ -389,6 +395,10 @@ def get_strategy_max_entry_price(strategy: Any) -> int:
     match = re.search(r"(\d+)p\b", strat_str)
     if match:
         return int(match.group(1))
+    if "sell_1.5n_5m" in strat_str or "sell_1_5n_5m" in strat_str or "sell1.5n_5m" in strat_str or "sell1_5n_5m" in strat_str:
+        return 35
+    if "sell_1.5n_35p" in strat_str or "sell_1_5n_35p" in strat_str:
+        return 35
     n = get_strategy_resting_multiplier(strategy)
     if n and n > 0:
         return int(100 / n)
@@ -416,11 +426,14 @@ STRATEGIES = {
     Strategy.SELL_2N_5M.value: sell_2n_5m,
     Strategy.SELL_1_5N.value: sell_1_5n,
     Strategy.SELL_1_5N_5M.value: sell_1_5n_5m,
+    Strategy.SELL_1_5N_5M_35P.value: sell_1_5n_5m_35p,
     Strategy.SELL_1_5N_35P.value: sell_1_5n_35p,
     Strategy.SELL_2_5N.value: sell_2_5n,
     "sell_1_5n": sell_1_5n,
     "sell_1.5n_5m": sell_1_5n_5m,
     "sell_1_5n_5m": sell_1_5n_5m,
+    "sell_1.5n_5m_35p": sell_1_5n_5m_35p,
+    "sell_1_5n_5m_35p": sell_1_5n_5m_35p,
     "sell_1.5n_35p": sell_1_5n_35p,
     "sell_1_5n_35p": sell_1_5n_35p,
     "sell_2_5n": sell_2_5n,
@@ -452,6 +465,8 @@ class RiskEngine:
                 self.strategy_name = Strategy.SELL_2N_5M
             elif strat_lower in ("sell_2n", "sell2n", "sell_if_2n"):
                 self.strategy_name = Strategy.SELL_2N
+            elif strat_lower in ("sell_1.5n_5m_35p", "sell_1_5n_5m_35p", "sell1.5n_5m_35p", "sell1_5n_5m_35p"):
+                self.strategy_name = Strategy.SELL_1_5N_5M_35P
             elif strat_lower in ("sell_1.5n_35p", "sell_1_5n_35p", "sell1.5n_35p", "sell1_5n_35p"):
                 self.strategy_name = Strategy.SELL_1_5N_35P
             elif strat_lower in ("sell_1.5n_5m", "sell_1_5n_5m", "sell1.5n_5m", "sell1_5n_5m"):
