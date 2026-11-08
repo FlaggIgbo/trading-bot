@@ -119,7 +119,7 @@ def parse_instances(spec_list: list[str]) -> list[dict]:
         env = parts[1] if len(parts) > 1 else "demo"
         live = len(parts) > 2 and parts[2].lower() in ("live", "true", "1")
         stop_loss = (len(parts) > 3 and parts[3].lower() in ("sl", "stoploss", "stop_loss", "true", "1")) or ("_sl" in strat)
-        key = f"{strat}_{env}"
+        key = f"{strat}_{env}{'_sl' if stop_loss else ''}"
         live_str = ", LIVE" if live else ""
         sl_str = ", SL" if stop_loss else ""
         tag = f"{strat} ({env}{live_str}{sl_str})"
