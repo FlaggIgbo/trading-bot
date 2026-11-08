@@ -359,6 +359,12 @@ class KalshiClient:
                     order_id=order_id,
                 )
                 return response.json() if response.text else {"order_id": order_id, "status": "canceled"}
+            elif response.status_code == 404:
+                analytics.info(
+                    f"Resting order {order_id} no longer active on book (status 404, already filled or canceled).",
+                    order_id=order_id,
+                )
+                return {"order_id": order_id, "status": "not_found"}
             else:
                 analytics.warning(
                     f"Could not cancel order {order_id}: {response.status_code} {response.text[:100]}",

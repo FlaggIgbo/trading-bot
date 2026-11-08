@@ -840,6 +840,10 @@ class RiskEngine:
                         price_cents=resting_price_cents,
                         client_order_id=resting_order_id,
                     )
+            if isinstance(resting_order, dict):
+                server_order_id = resting_order.get("order", {}).get("order_id") or resting_order.get("order_id")
+                if server_order_id:
+                    resting_order_id = server_order_id
             if isinstance(result, dict):
                 result["resting_order"] = resting_order
                 result["resting_price_cents"] = resting_price_cents
