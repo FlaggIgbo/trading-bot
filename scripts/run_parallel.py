@@ -118,14 +118,17 @@ def parse_instances(spec_list: list[str]) -> list[dict]:
         strat = parts[0]
         env = parts[1] if len(parts) > 1 else "demo"
         live = len(parts) > 2 and parts[2].lower() in ("live", "true", "1")
+        stop_loss = (len(parts) > 3 and parts[3].lower() in ("sl", "stoploss", "stop_loss", "true", "1")) or ("_sl" in strat)
         key = f"{strat}_{env}"
         live_str = ", LIVE" if live else ""
-        tag = f"{strat} ({env}{live_str})"
+        sl_str = ", SL" if stop_loss else ""
+        tag = f"{strat} ({env}{live_str}{sl_str})"
         instances.append({
             "raw": item,
             "strategy": strat,
             "env": env,
             "live": live,
+            "stop_loss": stop_loss,
             "key": key,
             "tag": tag,
             "db_path": f"trading_bot_{key}.db",
@@ -196,6 +199,8 @@ def main():
         ]
         if inst.get("live"):
             cmd.append("--live")
+        if inst.get("stop_loss"):
+            cmd.append("--stop-loss")
         p = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,

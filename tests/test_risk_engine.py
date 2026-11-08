@@ -31,6 +31,7 @@ from risk_engine.engine import (
     is_entry_time_ym,
     is_sell_strategy,
     sell_1_5n,
+    sell_1_5n_5m,
     sell_2_5n,
     sell_2n,
     sell_2n_5m,
@@ -40,6 +41,7 @@ from risk_engine.engine import (
     sell_Xn_Ym_Zp,
     sell_xn_ym_zp,
     should_sell,
+    should_stop_loss,
 )
 from risk_engine.settler import Settler
 
@@ -522,3 +524,117 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert is_sell_strategy("sell_2.5n")
     assert not is_sell_strategy("random")
     assert not is_sell_strategy("last_5")
+
+
+def test_should_stop_loss():
+    # Minute < 10: never triggers stop loss regardless of price
+    assert not should_stop_loss(entry_price=35, current_price=10, minute=5)
+    assert not should_stop_loss(entry_price=35, current_price=15, minute=9)
+    assert not should_stop_loss(entry_price=50, current_price=10, minute=None)
+
+    # Minute >= 10: triggers if current_price <= 25c
+    assert should_stop_loss(entry_price=35, current_price=25, minute=10)
+    assert should_stop_loss(entry_price=35, current_price=20, minute=10)
+    assert should_stop_loss(entry_price=35, current_price=10, minute=12)
+
+    # Minute >= 10: triggers if current_price < 50% of entry_price
+    assert should_stop_loss(entry_price=60, current_price=28, minute=10)  # 28c < 30c (50% of 60c)
+    assert should_stop_loss(entry_price=54, current_price=26, minute=11)  # 26c < 27c (50% of 54c)
+
+    # Minute >= 10: does NOT trigger if > 25c and >= 50% entry price
+    assert not should_stop_loss(entry_price=35, current_price=26, minute=10)  # 26 > 25 and 26 >= 17.5
+    assert not should_stop_loss(entry_price=40, current_price=28, minute=10)  # 28 > 25 and 28 >= 20
+    assert not should_stop_loss(entry_price=60, current_price=35, minute=10)  # 35 > 25 and 35 >= 30
+
+    # Missing / None values should safely return False
+    assert not should_stop_loss(entry_price=None, current_price=10, minute=10)
+    assert not should_stop_loss(entry_price=35, current_price=None, minute=10)
+
+
+def test_trader_stop_loss_execution():
+    db = Database(":memory:")
+    canceled_orders = []
+
+    class MockClient(KalshiClient):
+        def __init__(self):
+            super().__init__(live_orders=False)
+
+        def cancel_order(self, order_id):
+            canceled_orders.append(order_id)
+            return {"order_id": order_id, "status": "canceled"}
+
+    client = MockClient()
+    trader_sl = Trader(client=client, db=db, strategy="sell_1.5n_5m", stop_loss=True)
+
+    # 1. Enter position at minute 5
+    market_entry = {
+        "ticker": "M-SL-TEST",
+        "status": "open",
+        "yes_ask": 30,
+        "no_ask": 70,
+        "minute": 5,
+        "open_time": "2026-11-01T10:00:00Z",
+    }
+    order = trader_sl.process_market(market_entry)
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 30
+    assert order["resting_price_cents"] == 45
+    resting_id = order["resting_order_id"]
+    assert resting_id != ""
+
+    # 2. Minute 8: price drops to 20c, but minute < 10 -> hold
+    market_m8 = {"ticker": "M-SL-TEST", "status": "open", "yes_ask": 20, "no_ask": 80, "minute": 8}
+    sold = trader_sl.check_open_positions(markets=[market_m8])
+    assert len(sold) == 0
+    assert len(canceled_orders) == 0
+
+    # 3. Minute 10: price drops to 20c (<= 25c) -> stop loss triggers!
+    market_m10 = {"ticker": "M-SL-TEST", "status": "open", "yes_ask": 20, "no_ask": 80, "minute": 10}
+    sold = trader_sl.check_open_positions(markets=[market_m10])
+    assert len(sold) == 1
+    assert sold[0]["reason"] == "stop_loss"
+    assert sold[0]["sell_price"] == 20
+    assert sold[0]["pnl_cents"] == -10  # 20c - 30c = -10c
+    assert resting_id in canceled_orders
+
+    # Verify db status is settled
+    positions = db.get_all_positions(strategy="sell_1.5n_5m")
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.SETTLED
+    assert positions[0]["pnl_cents"] == -10
+
+    # 4. Now test with stop_loss=False -> should NOT trigger stop loss at minute 10
+    db2 = Database(":memory:")
+    canceled_orders.clear()
+    trader_no_sl = Trader(client=client, db=db2, strategy="sell_1.5n_5m", stop_loss=False)
+
+    order2 = trader_no_sl.process_market(market_entry)
+    assert order2 is not None
+
+    sold_no_sl = trader_no_sl.check_open_positions(markets=[market_m10])
+    assert len(sold_no_sl) == 0
+    assert len(canceled_orders) == 0
+    pos_no_sl = db2.get_all_positions(strategy="sell_1.5n_5m")
+    assert pos_no_sl[0]["status"] == PositionStatus.OPEN
+
+    db.close()
+    db2.close()
+
+
+def test_sell_1_5n_5m_strategy():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_1.5n_5m")
+
+    # Reject at minute 3
+    assert trader.process_market({"ticker": "M-1.5N-5M", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 3}) is None
+
+    # Accept at minute 5 with ask <= 66c
+    order = trader.process_market({"ticker": "M-1.5N-5M", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 5})
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 30
+    assert order["resting_price_cents"] == 45  # 1.5 * 30c = 45c
+    db.close()
+

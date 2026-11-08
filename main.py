@@ -33,13 +33,14 @@ def seconds_until_next_slot(now=None, interval=900, offset=30):
     return 0.0 if wait == interval else wait
 
 
-def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3", env="demo", live=False):
+def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3", env="demo", live=False, stop_loss=False):
     analytics.info(
-        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
         strategy=strategy,
         env=env,
         live=live,
+        stop_loss=stop_loss,
         sleep_seconds=sleep_seconds,
         offset_seconds=offset_seconds,
     )
@@ -58,7 +59,7 @@ def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trad
     # Initialize the 3 pipeline steps
     scanner = Scanner(client=client, db=db)
     settler = Settler(client=client, db=db)
-    trader = Trader(client=client, db=db, strategy=strategy)
+    trader = Trader(client=client, db=db, strategy=strategy, stop_loss=stop_loss)
 
     # Main loop aligned to :00:30, :15:30, :30:30, :45:30
     try:
@@ -135,17 +136,24 @@ if __name__ == "__main__":
             "sell_2n_5m",
             "sell_1.5n",
             "sell_1_5n",
+            "sell_1.5n_5m",
+            "sell_1_5n_5m",
             "sell_1.5n_35p",
             "sell_1_5n_35p",
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_35p', or 'sell_2.5n'",
+        help="Direction strategy: 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
     )
     parser.add_argument(
         "--live",
         action="store_true",
         help="Enable live order execution against Kalshi API (requires active credentials)",
+    )
+    parser.add_argument(
+        "--stop-loss",
+        action="store_true",
+        help="Enable minute-10 stop loss for sell_Xn_5m strategies (exits if price <= 25c or < 50% entry)",
     )
     args = parser.parse_args()
 
@@ -157,4 +165,5 @@ if __name__ == "__main__":
         strategy=args.strategy,
         env=args.env,
         live=args.live,
+        stop_loss=args.stop_loss,
     )

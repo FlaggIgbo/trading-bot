@@ -87,6 +87,7 @@ def sell_Xn_Ym(
     check_timing: bool = False,
     yes_ask: Optional[int] = None,
     no_ask: Optional[int] = None,
+    stop_loss: bool = False,
     **kwargs,
 ) -> Any:
     """
@@ -133,6 +134,7 @@ def sell_Xn_Ym(
         _bound_strategy.n = n_num
         _bound_strategy.y = y_num
         _bound_strategy.z = effective_z
+        _bound_strategy.stop_loss = stop_loss
         return _bound_strategy
 
     if check_timing and target_market:
@@ -179,14 +181,55 @@ def sell_2n(past_results_or_market: Any = None, market: Optional[dict] = None, z
     return sell_Xn_Ym(past_results_or_market, market=market, n=2, y=10, z=z, **kwargs)
 
 
-def sell_1_5n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+def sell_1_5n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
     """sell_1.5n strategy: n=1.5x resting sell order, y=5m entry, z=max entry price (default 100/1.5 = 66c)."""
-    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=z, **kwargs)
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=z, stop_loss=stop_loss, **kwargs)
 
 
-def sell_1_5n_35p(past_results_or_market: Any = None, market: Optional[dict] = None, **kwargs) -> Optional[PositionSide]:
+def sell_1_5n_5m(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
+    """sell_1.5n_5m strategy: n=1.5x resting sell order, y=5m entry, optional stop_loss."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=z, stop_loss=stop_loss, **kwargs)
+
+
+def sell_1_5n_35p(past_results_or_market: Any = None, market: Optional[dict] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
     """sell_1.5n_35p strategy: n=1.5x resting sell order, y=5m entry, z=35c max entry price."""
-    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=35, **kwargs)
+    return sell_Xn_Ym(past_results_or_market, market=market, n=1.5, y=5, z=35, stop_loss=stop_loss, **kwargs)
+
+
+def should_stop_loss(
+    entry_price_cents: Optional[int] = None,
+    current_price_cents: Optional[int] = None,
+    minute: Optional[float] = None,
+    stop_minute: float = 10.0,
+    stop_price_threshold: int = 25,
+    stop_ratio_threshold: float = 0.5,
+    **kwargs,
+) -> bool:
+    """
+    Check if a position should be liquidated under the stop-loss rule for 5m sell strategies:
+    At minute >= 10, if the contract has not filled its resting order and:
+      - is trading at <= 25c OR
+      - current market price drops below 50% of entry price (< 0.5 * entry_price).
+    """
+    entry = kwargs.get("entry_price", entry_price_cents)
+    current = kwargs.get("current_price", current_price_cents)
+
+    if entry is None or current is None or entry <= 0:
+        return False
+
+    # Only exit at minute >= stop_minute (default 10.0)
+    if minute is None or minute < stop_minute:
+        return False
+
+    # Condition 1: trading at less than or equal to 25c
+    if current <= stop_price_threshold:
+        return True
+
+    # Condition 2: current market price drops below 50% of entry price
+    if current < (entry * stop_ratio_threshold):
+        return True
+
+    return False
 
 
 def sell_2_5n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
@@ -372,9 +415,12 @@ STRATEGIES = {
     Strategy.SELL_2N.value: sell_2n,
     Strategy.SELL_2N_5M.value: sell_2n_5m,
     Strategy.SELL_1_5N.value: sell_1_5n,
+    Strategy.SELL_1_5N_5M.value: sell_1_5n_5m,
     Strategy.SELL_1_5N_35P.value: sell_1_5n_35p,
     Strategy.SELL_2_5N.value: sell_2_5n,
     "sell_1_5n": sell_1_5n,
+    "sell_1.5n_5m": sell_1_5n_5m,
+    "sell_1_5n_5m": sell_1_5n_5m,
     "sell_1.5n_35p": sell_1_5n_35p,
     "sell_1_5n_35p": sell_1_5n_35p,
     "sell_2_5n": sell_2_5n,
@@ -382,15 +428,18 @@ STRATEGIES = {
 
 
 class RiskEngine:
-    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5):
+    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5, stop_loss: bool = False):
         # Kalshi REST API client and optional SQLite database
         self.client = client
         self.db: Optional[Database] = db
         self.strategy = strategy
+        self.stop_loss: bool = bool(stop_loss or getattr(strategy, "stop_loss", False))
         if isinstance(strategy, Strategy):
             self.strategy_name = strategy
         elif isinstance(strategy, str):
             strat_lower = strategy.strip().lower()
+            if "_sl" in strat_lower or "stop_loss" in strat_lower or "stoploss" in strat_lower:
+                self.stop_loss = True
             if strat_lower == "random":
                 self.strategy_name = Strategy.RANDOM
             elif strat_lower in ("last_5", "last5"):
@@ -405,7 +454,9 @@ class RiskEngine:
                 self.strategy_name = Strategy.SELL_2N
             elif strat_lower in ("sell_1.5n_35p", "sell_1_5n_35p", "sell1.5n_35p", "sell1_5n_35p"):
                 self.strategy_name = Strategy.SELL_1_5N_35P
-            elif strat_lower in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n", "sell_1.5n_5m"):
+            elif strat_lower in ("sell_1.5n_5m", "sell_1_5n_5m", "sell1.5n_5m", "sell1_5n_5m"):
+                self.strategy_name = Strategy.SELL_1_5N_5M
+            elif strat_lower in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n"):
                 self.strategy_name = Strategy.SELL_1_5N
             elif strat_lower in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m"):
                 self.strategy_name = Strategy.SELL_2_5N
@@ -425,6 +476,8 @@ class RiskEngine:
                 self.strategy_name = Strategy.SELL_2N
             elif strategy in (sell_1_5n_35p, choose_sell_if_1_5n_35p, choose_side_sell_1_5n_35p):
                 self.strategy_name = Strategy.SELL_1_5N_35P
+            elif strategy in (sell_1_5n_5m,):
+                self.strategy_name = Strategy.SELL_1_5N_5M
             elif strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
                 self.strategy_name = Strategy.SELL_1_5N
             elif strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):
@@ -545,7 +598,7 @@ class RiskEngine:
     def should_sell(self, entry_price_cents: int, current_price_cents: int, multiplier: float = 3.0) -> bool:
         return should_sell(entry_price_cents, current_price_cents, multiplier=multiplier)
 
-    def sell_position(self, position: dict, current_price_cents: int) -> dict:
+    def sell_position(self, position: dict, current_price_cents: int, reason: str = "take_profit") -> dict:
         """Sell position at current contract value and settle in SQLite."""
         ticker = position["ticker"]
         side = position["side"]
@@ -554,7 +607,15 @@ class RiskEngine:
         client_order_id = position["client_order_id"]
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
         safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
-        sell_order_id = f"{safe_strategy}_sell_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        action_prefix = "sl" if reason == "stop_loss" else "sell"
+        sell_order_id = f"{safe_strategy}_{action_prefix}_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+
+        # Cancel resting limit order if this is an early stop-loss exit
+        if reason == "stop_loss" and position.get("resting_order_id") and self.client is not None and hasattr(self.client, "cancel_order"):
+            try:
+                self.client.cancel_order(position["resting_order_id"])
+            except Exception as e:
+                analytics.warning(f"Could not cancel resting order {position['resting_order_id']}: {e}")
 
         order_result = None
         if self.client is not None and hasattr(self.client, "place_order"):
@@ -581,15 +642,18 @@ class RiskEngine:
         if self.db is not None:
             self.db.settle_position(client_order_id=client_order_id, pnl_cents=pnl_cents)
 
+        event_name = "order_stop_loss" if reason == "stop_loss" else "order_sold"
+        action_label = "[STOP LOSS] Exited" if reason == "stop_loss" else "Sold"
         analytics.track(
-            "order_sold",
-            message=f"Sold {count} contract on {side.value} for {ticker} at {current_price_cents}c (entered at {entry_price}c). PnL: {pnl_cents}c.",
+            event_name,
+            message=f"{action_label} {count} contract on {side.value} for {ticker} at {current_price_cents}c (entered at {entry_price}c). PnL: {pnl_cents}c.",
             ticker=ticker,
             side=side.value,
             strategy=self.strategy_name.value,
             entry_price=entry_price,
             sell_price=current_price_cents,
             pnl_cents=pnl_cents,
+            reason=reason,
         )
 
         return {
@@ -601,6 +665,7 @@ class RiskEngine:
             "sell_price": current_price_cents,
             "pnl_cents": pnl_cents,
             "status": PositionStatus.SETTLED,
+            "reason": reason,
             "order": order_result,
         }
 
@@ -635,8 +700,15 @@ class RiskEngine:
 
             current_price = self._extract_ask_cents(market, pos["side"])
             target_sell_price = min(99, int(round(multiplier * pos["price_cents"])))
+            minute = get_market_minute(market, now=now)
+            if minute is None and pos.get("open_time"):
+                minute = get_market_minute(pos, now=now)
+
             if self.should_sell(pos["price_cents"], current_price, multiplier=multiplier):
-                sold_info = self.sell_position(pos, target_sell_price)
+                sold_info = self.sell_position(pos, target_sell_price, reason="take_profit")
+                sold_positions.append(sold_info)
+            elif self.stop_loss and should_stop_loss(pos["price_cents"], current_price, minute=minute):
+                sold_info = self.sell_position(pos, current_price, reason="stop_loss")
                 sold_positions.append(sold_info)
             else:
                 analytics.track(

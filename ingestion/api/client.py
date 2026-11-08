@@ -335,3 +335,41 @@ class KalshiClient:
                 error=str(error),
             )
             return {"error": str(error)}
+
+    def cancel_order(self, order_id):
+        if not order_id:
+            return None
+
+        if not self.live_orders:
+            analytics.track(
+                "order_canceled",
+                message=f"[SIMULATION] Canceled order {order_id}.",
+                order_id=order_id,
+            )
+            return {"order_id": order_id, "status": "canceled"}
+
+        url = f"{self.base_url}/portfolio/events/orders/{order_id}"
+        headers = self._build_auth_headers("DELETE", url)
+        try:
+            response = self.session.delete(url, headers=headers, timeout=10)
+            if response.status_code in (200, 204):
+                analytics.track(
+                    "order_canceled",
+                    message=f"[LIVE] Canceled resting order {order_id}.",
+                    order_id=order_id,
+                )
+                return response.json() if response.text else {"order_id": order_id, "status": "canceled"}
+            else:
+                analytics.warning(
+                    f"Could not cancel order {order_id}: {response.status_code} {response.text[:100]}",
+                    order_id=order_id,
+                    status_code=response.status_code,
+                )
+                return {"error": response.text}
+        except Exception as error:
+            analytics.error(
+                f"Error canceling order {order_id}: {error}",
+                order_id=order_id,
+                error=str(error),
+            )
+            return {"error": str(error)}
