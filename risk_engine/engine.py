@@ -679,7 +679,7 @@ class RiskEngine:
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
         safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
         action_prefix = "sl" if reason == "stop_loss" else "sell"
-        sell_order_id = f"{safe_strategy}_{action_prefix}_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        sell_order_id = f"{safe_strategy}_{action_prefix}_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
 
         # Cancel resting limit order if this is an early stop-loss exit
         if reason == "stop_loss" and position.get("resting_order_id") and self.client is not None and hasattr(self.client, "cancel_order"):
@@ -841,7 +841,7 @@ class RiskEngine:
         # Generate client_order_id (tagged by strategy so parallel runs never collide)
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
         safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
-        client_order_id = f"{safe_strategy}_buy_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        client_order_id = f"{safe_strategy}_buy_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
 
         # Place the bet of 1 contract on Kalshi
         analytics.track(
@@ -870,7 +870,7 @@ class RiskEngine:
         multiplier = get_strategy_resting_multiplier(self.strategy_name)
         if multiplier is not None:
             resting_price_cents = min(99, int(round(multiplier * price_cents)))
-            resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+            resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
             analytics.track(
                 "resting_order_placed",
                 message=f"Market {ticker}: Placed resting sell order for 1 contract on {side.value} at {resting_price_cents}c ({multiplier}x entry {price_cents}c).",

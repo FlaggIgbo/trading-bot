@@ -292,9 +292,9 @@ class KalshiClient:
         book_price_cents = safe_price if normalized_side == PositionSide.YES else (100 - safe_price)
         price_string = f"0.{book_price_cents:02d}00"
 
-        # Generate safe client_order_id with only alphanumeric and underscore
+        # Generate safe client_order_id with only alphanumeric and underscore (max 64 chars)
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
-        order_id = client_order_id or f"{action}_{normalized_side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"
+        order_id = (client_order_id or f"{action}_{normalized_side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}")[:64]
 
         # If live orders are off, return simulated order
         if not self.live_orders:
