@@ -49,22 +49,49 @@ class Settler:
         open_positions = self.db.get_positions_to_settle(now_iso)
         settled_positions = []
 
+        # If running in live mode, fetch actual settlement records from Kalshi portfolio API
+        live_settlements = {}
+        if getattr(self.client, "live_orders", False) and hasattr(self.client, "get_settlements"):
+            try:
+                for s in self.client.get_settlements():
+                    t = s.get("ticker")
+                    if t:
+                        live_settlements[t] = s
+            except Exception as e:
+                analytics.warning(f"Could not fetch live settlements from Kalshi: {e}")
+
         for pos in open_positions:
             ticker = pos["ticker"]
             client_order_id = pos["client_order_id"]
 
-            # 2. GET market resolution from Kalshi
-            market = self.client.get_market(ticker)
-            if not self.is_market_resolved(market):
-                continue
+            # Check if Kalshi has settled this market in portfolio
+            if ticker in live_settlements:
+                s_info = live_settlements[ticker]
+                result = normalize_market_result(s_info.get("market_result", ""))
+                if "revenue" in s_info and s_info["revenue"] is not None:
+                    rev_cents = int(s_info["revenue"])
+                    cost_cents = int(pos["price_cents"]) * int(pos["count"])
+                    pnl_cents = rev_cents - cost_cents
+                else:
+                    pnl_cents = self.compute_pnl_cents(
+                        side=pos["side"],
+                        price_cents=pos["price_cents"],
+                        count=pos["count"],
+                        result=result,
+                    )
+            else:
+                # 2. GET market resolution from Kalshi
+                market = self.client.get_market(ticker)
+                if not self.is_market_resolved(market):
+                    continue
 
-            result = normalize_market_result(market.get("result", ""))
-            pnl_cents = self.compute_pnl_cents(
-                side=pos["side"],
-                price_cents=pos["price_cents"],
-                count=pos["count"],
-                result=result,
-            )
+                result = normalize_market_result(market.get("result", ""))
+                pnl_cents = self.compute_pnl_cents(
+                    side=pos["side"],
+                    price_cents=pos["price_cents"],
+                    count=pos["count"],
+                    result=result,
+                )
 
             # 3. Write SETTLED + PnL to SQLite
             self.db.settle_position(

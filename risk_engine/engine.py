@@ -417,9 +417,9 @@ def is_sell_strategy(strategy: Any) -> bool:
     return get_strategy_resting_multiplier(strategy) is not None
 
 
-def should_sell(entry_price_cents: int, current_price_cents: int, multiplier: float = 3.0) -> bool:
+def should_sell(entry_price_cents: int, current_price_cents: Optional[int], multiplier: float = 3.0) -> bool:
     """Check if current contract value is at least multiplier times what we entered at."""
-    if entry_price_cents <= 0:
+    if current_price_cents is None or entry_price_cents <= 0:
         return False
     return current_price_cents >= multiplier * entry_price_cents
 
@@ -649,27 +649,66 @@ class RiskEngine:
 
     def _extract_ask_cents(self, market, side):
         # Extract ask price in cents (1-99), supporting both integer cents and dollar strings.
-        # If the orderbook has no ask (0 or 100 cents), default to 50 cents.
+        # Returns None if the orderbook has no ask (never defaults to 50 cents).
         cents = None
         if side == PositionSide.YES:
             if market.get("yes_ask") is not None:
                 cents = int(market["yes_ask"])
             elif market.get("yes_ask_dollars") is not None:
                 cents = int(round(float(market["yes_ask_dollars"]) * 100))
+            elif market.get("no_bid") is not None:
+                cents = 100 - int(market["no_bid"])
+            elif market.get("no_bid_dollars") is not None:
+                cents = 100 - int(round(float(market["no_bid_dollars"]) * 100))
         else:
             if market.get("no_ask") is not None:
                 cents = int(market["no_ask"])
             elif market.get("no_ask_dollars") is not None:
                 cents = int(round(float(market["no_ask_dollars"]) * 100))
+            elif market.get("yes_bid") is not None:
+                cents = 100 - int(market["yes_bid"])
+            elif market.get("yes_bid_dollars") is not None:
+                cents = 100 - int(round(float(market["yes_bid_dollars"]) * 100))
 
         if cents is None or cents <= 0 or cents >= 100:
-            return 50
+            return None
         return cents
 
-    def should_sell(self, entry_price_cents: int, current_price_cents: int, multiplier: float = 3.0) -> bool:
+    def _extract_bid_cents(self, market, side):
+        # Extract bid price in cents (1-99), supporting both integer cents and dollar strings.
+        # Returns None if the orderbook has no bid.
+        cents = None
+        if side == PositionSide.YES:
+            if market.get("yes_bid") is not None:
+                cents = int(market["yes_bid"])
+            elif market.get("yes_bid_dollars") is not None:
+                cents = int(round(float(market["yes_bid_dollars"]) * 100))
+            elif market.get("no_ask") is not None:
+                cents = 100 - int(market["no_ask"])
+            elif market.get("no_ask_dollars") is not None:
+                cents = 100 - int(round(float(market["no_ask_dollars"]) * 100))
+            elif market.get("yes_ask") is not None:
+                cents = int(market["yes_ask"])
+        else:
+            if market.get("no_bid") is not None:
+                cents = int(market["no_bid"])
+            elif market.get("no_bid_dollars") is not None:
+                cents = int(round(float(market["no_bid_dollars"]) * 100))
+            elif market.get("yes_ask") is not None:
+                cents = 100 - int(market["yes_ask"])
+            elif market.get("yes_ask_dollars") is not None:
+                cents = 100 - int(round(float(market["yes_ask_dollars"]) * 100))
+            elif market.get("no_ask") is not None:
+                cents = int(market["no_ask"])
+
+        if cents is None or cents <= 0 or cents >= 100:
+            return None
+        return cents
+
+    def should_sell(self, entry_price_cents: int, current_price_cents: Optional[int], multiplier: float = 3.0) -> bool:
         return should_sell(entry_price_cents, current_price_cents, multiplier=multiplier)
 
-    def sell_position(self, position: dict, current_price_cents: int, reason: str = "take_profit") -> dict:
+    def sell_position(self, position: dict, current_price_cents: int, reason: str = "take_profit") -> Optional[dict]:
         """Sell position at current contract value and settle in SQLite."""
         ticker = position["ticker"]
         side = position["side"]
@@ -689,10 +728,9 @@ class RiskEngine:
                 analytics.warning(f"Could not cancel resting order {position['resting_order_id']}: {e}")
 
         order_result = None
-        # If this is a take-profit exit and a resting limit order was already placed on the book,
-        # the resting order is already working/filled on Kalshi — do not place a duplicate order.
-        if reason == "stop_loss" or not position.get("resting_order_id"):
-            if self.client is not None and hasattr(self.client, "place_order"):
+        is_live = bool(self.client and getattr(self.client, "live_orders", False))
+        if is_live and (reason == "stop_loss" or not position.get("resting_order_id")):
+            if hasattr(self.client, "place_order"):
                 try:
                     order_result = self.client.place_order(
                         ticker=ticker,
@@ -701,6 +739,8 @@ class RiskEngine:
                         price_cents=current_price_cents,
                         client_order_id=sell_order_id,
                         action="sell",
+                        time_in_force="immediate_or_cancel",
+                        reduce_only=True,
                     )
                 except TypeError:
                     order_result = self.client.place_order(
@@ -709,7 +749,15 @@ class RiskEngine:
                         count=count,
                         price_cents=current_price_cents,
                         client_order_id=sell_order_id,
+                        action="sell",
                     )
+                if not order_result or (isinstance(order_result, dict) and "error" in order_result):
+                    analytics.error(
+                        f"Failed to execute sell order on Kalshi for {ticker}: {order_result}. Position remains OPEN.",
+                        ticker=ticker,
+                        order_result=order_result,
+                    )
+                    return None
 
         pnl_cents = (current_price_cents - entry_price) * count
 
@@ -745,8 +793,8 @@ class RiskEngine:
 
     def check_open_positions(self, markets=None, now: Any = None, check_timing: bool = False) -> list[dict]:
         """
-        Check in on open positions. If current market price reaches or exceeds the resting sell order price
-        (3x for SELL_3N, 2x for SELL_2N), mark the position as filled/settled. Else, hold.
+        Check in on open positions. If resting order executed on Kalshi (live) or market bid reached
+        take-profit (simulation), mark position settled. Else check stop loss or hold.
         """
         if self.db is None:
             return []
@@ -763,8 +811,43 @@ class RiskEngine:
 
         sold_positions = []
         multiplier = get_strategy_resting_multiplier(self.strategy_name) or 3
+        is_live = bool(self.client and getattr(self.client, "live_orders", False))
+
         for pos in open_positions:
             ticker = pos["ticker"]
+            resting_order_id = pos.get("resting_order_id")
+
+            # 1. LIVE RECONCILIATION: Check if resting order executed on Kalshi exchange
+            if is_live and resting_order_id and hasattr(self.client, "get_order"):
+                order_info = self.client.get_order(resting_order_id)
+                if order_info and isinstance(order_info, dict):
+                    status = order_info.get("status")
+                    if status == "executed":
+                        target_sell_price = min(99, int(round(multiplier * pos["price_cents"])))
+                        pnl_cents = (target_sell_price - pos["price_cents"]) * int(pos.get("count", 1))
+                        self.db.settle_position(client_order_id=pos["client_order_id"], pnl_cents=pnl_cents)
+                        analytics.track(
+                            "order_sold",
+                            message=f"[LIVE EXECUTION] Resting limit order {resting_order_id} filled for {ticker}! Sold at {target_sell_price}c (entry {pos['price_cents']}c). PnL: {pnl_cents}c.",
+                            ticker=ticker,
+                            side=pos["side"].value,
+                            strategy=self.strategy_name.value,
+                            entry_price=pos["price_cents"],
+                            sell_price=target_sell_price,
+                            pnl_cents=pnl_cents,
+                            reason="take_profit",
+                        )
+                        sold_positions.append({
+                            "client_order_id": pos["client_order_id"],
+                            "ticker": ticker,
+                            "side": pos["side"],
+                            "pnl_cents": pnl_cents,
+                            "reason": "take_profit",
+                        })
+                        continue
+                    elif status == "canceled":
+                        pos["resting_order_id"] = None
+
             market = market_map.get(ticker)
             if market is None and self.client is not None and hasattr(self.client, "get_market"):
                 market = self.client.get_market(ticker)
@@ -772,25 +855,31 @@ class RiskEngine:
             if not market:
                 continue
 
-            current_price = self._extract_ask_cents(market, pos["side"])
+            current_bid = self._extract_bid_cents(market, pos["side"])
+            if current_bid is None:
+                current_bid = self._extract_ask_cents(market, pos["side"])
             target_sell_price = min(99, int(round(multiplier * pos["price_cents"])))
             minute = get_market_minute(market, now=now)
             if minute is None and pos.get("open_time"):
                 minute = get_market_minute(pos, now=now)
 
-            if self.should_sell(pos["price_cents"], current_price, multiplier=multiplier):
+            # In simulation mode (or if no resting order placed), check take-profit condition
+            if not is_live and self.should_sell(pos["price_cents"], current_bid, multiplier=multiplier):
                 sold_info = self.sell_position(pos, target_sell_price, reason="take_profit")
-                sold_positions.append(sold_info)
-            elif self.stop_loss and should_stop_loss(pos["price_cents"], current_price, minute=minute):
-                sold_info = self.sell_position(pos, current_price, reason="stop_loss")
-                sold_positions.append(sold_info)
+                if sold_info:
+                    sold_positions.append(sold_info)
+            elif self.stop_loss and current_bid is not None and should_stop_loss(pos["price_cents"], current_bid, minute=minute):
+                sold_info = self.sell_position(pos, current_bid, reason="stop_loss")
+                if sold_info:
+                    sold_positions.append(sold_info)
             else:
+                display_price = f"{current_bid}c" if current_bid is not None else "N/A"
                 analytics.track(
                     "order_hold",
-                    message=f"Holding {ticker} ({pos['side'].value}): current price {current_price}c < target resting {target_sell_price}c ({multiplier}x entry {pos['price_cents']}c).",
+                    message=f"Holding {ticker} ({pos['side'].value}): current price {display_price} < target resting {target_sell_price}c ({multiplier}x entry {pos['price_cents']}c).",
                     ticker=ticker,
                     side=pos["side"].value,
-                    current_price=current_price,
+                    current_price=current_bid,
                     entry_price=pos["price_cents"],
                     target_sell_price=target_sell_price,
                 )
@@ -831,8 +920,15 @@ class RiskEngine:
         if side is None:
             return None
 
-        # Choose price (use ask if available, otherwise 50 cents)
-        price_cents = max(1, min(99, self._extract_ask_cents(market, side)))
+        # Choose price (use ask if available, otherwise 50 cents for non-sell strategies)
+        ask_cents = self._extract_ask_cents(market, side)
+        if ask_cents is None:
+            if not self.is_sell_strategy:
+                price_cents = 50
+            else:
+                return None
+        else:
+            price_cents = max(1, min(99, ask_cents))
 
         # For sell strategies: must be under max entry price (Zp, default 100/n)
         if self.is_sell_strategy and price_cents >= self.max_entry_price:
@@ -858,17 +954,24 @@ class RiskEngine:
             count=1,
             price_cents=price_cents,
             client_order_id=client_order_id,
+            action="buy",
         )
 
         # If the API returned an error, do not record the position as OPEN
-        if isinstance(result, dict) and "error" in result:
+        if not result or (isinstance(result, dict) and "error" in result):
             return result
 
+        # Check if entry order actually executed (or is simulated)
+        is_live = bool(self.client and getattr(self.client, "live_orders", False))
+        order_status = result.get("order", {}).get("status") if isinstance(result, dict) else None
+        entry_filled = (not is_live) or (order_status == "executed")
+
         # Immediately place resting sell order if strategy uses resting exit (SELL_3N=3x, SELL_2N=2x, etc.)
+        # ONLY if entry order is filled (so we never sell before owning the contract)!
         resting_order = None
         resting_order_id = None
         multiplier = get_strategy_resting_multiplier(self.strategy_name)
-        if multiplier is not None:
+        if multiplier is not None and entry_filled:
             resting_price_cents = min(99, int(round(multiplier * price_cents)))
             resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
             analytics.track(
@@ -890,6 +993,7 @@ class RiskEngine:
                         price_cents=resting_price_cents,
                         client_order_id=resting_order_id,
                         action="sell",
+                        time_in_force="good_till_canceled",
                     )
                 except TypeError:
                     resting_order = self.client.place_order(
@@ -898,7 +1002,19 @@ class RiskEngine:
                         count=1,
                         price_cents=resting_price_cents,
                         client_order_id=resting_order_id,
+                        action="sell",
                     )
+            if isinstance(resting_order, dict) and "error" not in resting_order:
+                server_order_id = resting_order.get("order", {}).get("order_id") or resting_order.get("order_id")
+                if server_order_id:
+                    resting_order_id = server_order_id
+            else:
+                resting_order_id = None
+
+            if isinstance(result, dict):
+                result["resting_order"] = resting_order
+                result["resting_price_cents"] = resting_price_cents
+                result["resting_order_id"] = resting_order_id
             if isinstance(resting_order, dict):
                 server_order_id = resting_order.get("order", {}).get("order_id") or resting_order.get("order_id")
                 if server_order_id:

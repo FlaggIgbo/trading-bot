@@ -670,3 +670,87 @@ def test_sell_2n_5m_35p_strategy():
     db.close()
 
 
+def test_live_order_reconciliation_and_error_handling():
+    db = Database(":memory:")
+
+    class MockLiveKalshiClient:
+        def __init__(self):
+            self.live_orders = True
+            self.orders = {}
+            self.placed_orders = []
+
+        def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None, action="buy", time_in_force="good_till_canceled", reduce_only=False):
+            order_id = f"order_{len(self.placed_orders) + 1}"
+            payload = {
+                "order_id": order_id,
+                "client_order_id": client_order_id,
+                "ticker": ticker,
+                "side": side,
+                "count": count,
+                "price": price_cents,
+                "action": action,
+                "time_in_force": time_in_force,
+                "reduce_only": reduce_only,
+                "status": "executed",
+            }
+            self.placed_orders.append(payload)
+            self.orders[order_id] = payload
+            return {"order": payload, "order_id": order_id, "client_order_id": client_order_id}
+
+        def get_order(self, order_id):
+            return self.orders.get(order_id)
+
+        def cancel_order(self, order_id):
+            if order_id in self.orders:
+                self.orders[order_id]["status"] = "canceled"
+            return {"order_id": order_id, "status": "canceled"}
+
+    client = MockLiveKalshiClient()
+    trader = Trader(client=client, db=db, strategy="sell_2n_5m_35p", stop_loss=True)
+
+    # 1. Enter position with live_orders=True
+    market_entry = {"ticker": "KXBTC-LIVE", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 5}
+    order = trader.process_market(market_entry)
+    assert order is not None
+    assert order["resting_order_id"] != ""
+    resting_id = order["resting_order_id"]
+
+    # In mock, resting order was placed with GTC
+    resting_call = client.placed_orders[1]
+    assert resting_call["action"] == "sell"
+    assert resting_call["price"] == 60
+    assert resting_call["time_in_force"] == "good_till_canceled"
+
+    # Make the resting order "resting" (unfilled) on Kalshi
+    client.orders[resting_id]["status"] = "resting"
+
+    # 2. Check open positions when market fluctuates: order is still "resting" on Kalshi -> DO NOT SETTLE
+    market_fluct = {"ticker": "KXBTC-LIVE", "status": "open", "yes_bid": 65, "no_ask": 35, "minute": 7}
+    sold = trader.check_open_positions(markets=[market_fluct])
+    assert len(sold) == 0
+    assert db.get_all_positions(strategy="sell_2n_5m_35p")[0]["status"] == PositionStatus.OPEN
+
+    # 3. Simulate resting order filling on Kalshi: status becomes "executed"
+    client.orders[resting_id]["status"] = "executed"
+    sold = trader.check_open_positions(markets=[market_fluct])
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == 30  # 60c - 30c = 30c
+    assert db.get_all_positions(strategy="sell_2n_5m_35p")[0]["status"] == PositionStatus.SETTLED
+
+    # 4. Verify that failed sell_position does NOT settle position in SQLite
+    client.orders[resting_id]["status"] = "resting"
+    db.conn.execute("UPDATE positions SET status = 'OPEN'")
+    db.conn.commit()
+
+    # Make client.place_order return error on next call
+    client.place_order = lambda *args, **kwargs: {"error": "insufficient_balance"}
+    pos = db.get_all_positions(strategy="sell_2n_5m_35p")[0]
+    result = trader.sell_position(pos, current_price_cents=10, reason="stop_loss")
+    assert result is None  # Sell rejected
+    # Position must STILL be OPEN in SQLite!
+    assert db.get_all_positions(strategy="sell_2n_5m_35p")[0]["status"] == PositionStatus.OPEN
+
+    db.close()
+
+
+

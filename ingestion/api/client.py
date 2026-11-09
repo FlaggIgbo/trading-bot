@@ -266,7 +266,59 @@ class KalshiClient:
             )
         return []
 
-    def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None, action="buy"):
+    def get_order(self, order_id):
+        """Query Kalshi API for order execution status."""
+        if not order_id:
+            return None
+
+        if not self.live_orders:
+            return {"order_id": order_id, "status": "simulated"}
+
+        url = f"{self.base_url}/portfolio/orders/{order_id}"
+        headers = self._build_auth_headers("GET", url)
+        try:
+            response = self._request("GET", url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("order", data)
+            return None
+        except Exception as error:
+            analytics.error(
+                f"Error fetching order {order_id}: {error}",
+                order_id=order_id,
+                error=str(error),
+            )
+            return None
+
+    def get_settlements(self, limit=100):
+        """Query Kalshi API for settled portfolio contracts."""
+        if not self.live_orders:
+            return []
+        url = f"{self.base_url}/portfolio/settlements?limit={limit}"
+        headers = self._build_auth_headers("GET", url)
+        try:
+            response = self._request("GET", url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("settlements", [])
+            return []
+        except Exception as error:
+            analytics.error(
+                f"Error fetching settlements: {error}",
+                error=str(error),
+            )
+            return []
+
+    def place_order(
+        self,
+        ticker,
+        side,
+        count=1,
+        price_cents=50,
+        client_order_id=None,
+        action="buy",
+        time_in_force="good_till_canceled",
+        reduce_only=False,
+    ):
         # Reject multi-strike ladder tickers (only binary markets allowed)
         if not is_binary_market({"ticker": ticker, "market_type": MarketType.BINARY}):
             raise ValueError(f"Non-binary multi-strike market '{ticker}' is not allowed.")
@@ -326,9 +378,11 @@ class KalshiClient:
             "side": order_side,
             "count": str(count),
             "price": price_string,
-            "time_in_force": "good_till_canceled",
+            "time_in_force": time_in_force,
             "self_trade_prevention_type": "taker_at_cross",
         }
+        if reduce_only:
+            payload["reduce_only"] = True
 
         url = f"{self.base_url}/portfolio/events/orders"
         headers = self._build_auth_headers("POST", url)
