@@ -187,6 +187,9 @@ def main():
     stop_event = threading.Event()
     error_records = []
 
+    venv_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "bin", "python")
+    python_bin = venv_py if os.path.exists(venv_py) else sys.executable
+
     for i, inst in enumerate(instances):
         tag = inst["tag"]
         log_file = open(inst["log_path"], "a")
@@ -195,7 +198,7 @@ def main():
         # Stagger offsets by 8s across interval to prevent Kalshi API rate limit collisions
         offset = (i * 8) % args.interval
         cmd = [
-            sys.executable,
+            python_bin,
             "-u",
             "main.py",
             "--strategy", inst["strategy"],
