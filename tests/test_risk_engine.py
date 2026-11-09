@@ -753,4 +753,105 @@ def test_live_order_reconciliation_and_error_handling():
     db.close()
 
 
+def test_entry_fill_verification_and_stop_loss_ioc_check():
+    db = Database(":memory:")
+
+    class MockLiveExchange:
+        def __init__(self):
+            self.live_orders = True
+            self.orders = {}
+            self.canceled_order_ids = []
+            self.entry_status = "resting"
+            self.entry_fill_count = "0.00"
+            self.actual_taker_cost = "0.000000"
+            self.sl_status = "canceled"
+            self.sl_fill_count = "0.00"
+
+        def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None, action="buy", time_in_force="good_till_canceled", reduce_only=False):
+            order_id = f"ord_{len(self.orders) + 1}"
+            if action == "buy":
+                status = self.entry_status
+                fill_count = self.entry_fill_count
+                taker_cost = self.actual_taker_cost
+            else:
+                status = self.sl_status
+                fill_count = self.sl_fill_count
+                taker_cost = "0.000000"
+
+            payload = {
+                "order_id": order_id,
+                "client_order_id": client_order_id,
+                "ticker": ticker,
+                "side": side,
+                "count": count,
+                "price": price_cents,
+                "action": action,
+                "time_in_force": time_in_force,
+                "reduce_only": reduce_only,
+                "status": status,
+                "fill_count_fp": fill_count,
+                "taker_fill_cost_dollars": taker_cost,
+            }
+            self.orders[order_id] = payload
+            return {"order": payload, "order_id": order_id, "client_order_id": client_order_id}
+
+        def get_order(self, order_id):
+            return self.orders.get(order_id)
+
+        def cancel_order(self, order_id):
+            self.canceled_order_ids.append(order_id)
+            if order_id in self.orders:
+                self.orders[order_id]["status"] = "canceled"
+            return {"order_id": order_id, "status": "canceled"}
+
+    mock_ex = MockLiveExchange()
+    trader = Trader(client=mock_ex, db=db, strategy="sell_2n_5m_35p", stop_loss=True)
+
+    # 1. Entry order that stays resting and never fills
+    market = {"ticker": "KXTEST-1", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 5}
+    order_res = trader.process_market(market)
+    assert order_res is not None
+    assert order_res.get("status") == "unfilled"
+    # Unfilled resting entry order was canceled on the exchange
+    assert len(mock_ex.canceled_order_ids) == 1
+    # NO position was opened in SQLite
+    assert len(db.get_all_positions()) == 0
+
+    # 2. Entry order that executes immediately with real Kalshi fill cost (e.g. 18c instead of 25c)
+    mock_ex.entry_status = "executed"
+    mock_ex.entry_fill_count = "1.00"
+    mock_ex.actual_taker_cost = "0.180000"
+    market_2 = {"ticker": "KXTEST-2", "status": "open", "yes_ask": 25, "no_ask": 75, "minute": 5}
+    order_res_2 = trader.process_market(market_2)
+    assert order_res_2 is not None
+    # Position was opened in SQLite with the actual fill price (18c)
+    positions = db.get_all_positions()
+    assert len(positions) == 1
+    assert positions[0]["ticker"] == "KXTEST-2"
+    assert positions[0]["price_cents"] == 18
+    assert positions[0]["status"] == PositionStatus.OPEN
+
+    # 3. Stop-loss IOC order is canceled by Kalshi (no bid liquidity)
+    mock_ex.sl_status = "canceled"
+    mock_ex.sl_fill_count = "0.00"
+    pos = positions[0]
+    sl_res = trader.sell_position(pos, current_price_cents=9, reason="stop_loss")
+    # Must return None and keep position OPEN in SQLite!
+    assert sl_res is None
+    assert db.get_all_positions()[0]["status"] == PositionStatus.OPEN
+
+    # 4. Stop-loss IOC order executes when liquidity appears
+    mock_ex.sl_status = "executed"
+    mock_ex.sl_fill_count = "1.00"
+    mock_ex.orders.clear()
+    sl_res_2 = trader.sell_position(pos, current_price_cents=9, reason="stop_loss")
+    assert sl_res_2 is not None
+    assert sl_res_2["status"] == PositionStatus.SETTLED
+    assert db.get_all_positions()[0]["status"] == PositionStatus.SETTLED
+    assert db.get_all_positions()[0]["pnl_cents"] == -9  # 9c - 18c = -9c
+
+    db.close()
+
+
+
 

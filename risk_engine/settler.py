@@ -70,7 +70,15 @@ class Settler:
                 result = normalize_market_result(s_info.get("market_result", ""))
                 if "revenue" in s_info and s_info["revenue"] is not None:
                     rev_cents = int(s_info["revenue"])
-                    cost_cents = int(pos["price_cents"]) * int(pos["count"])
+                    side_key = "yes_total_cost_dollars" if str(pos["side"]).upper() in ("YES", "POSITIONSIDE.YES") else "no_total_cost_dollars"
+                    cost_val = s_info.get(side_key)
+                    if cost_val is not None:
+                        try:
+                            cost_cents = int(round(float(cost_val) * 100))
+                        except (ValueError, TypeError):
+                            cost_cents = int(pos["price_cents"]) * int(pos["count"])
+                    else:
+                        cost_cents = int(pos["price_cents"]) * int(pos["count"])
                     pnl_cents = rev_cents - cost_cents
                 else:
                     pnl_cents = self.compute_pnl_cents(

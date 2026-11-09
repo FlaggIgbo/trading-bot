@@ -759,6 +759,35 @@ class RiskEngine:
                     )
                     return None
 
+                # Check if the live order actually executed/filled on Kalshi
+                # For IOC orders, if no liquidity matched, Kalshi returns status="canceled" with fill_count=0
+                order_payload = order_result.get("order", order_result) if isinstance(order_result, dict) else {}
+                status = str(order_payload.get("status") or "").lower()
+                fill_count_str = str(order_payload.get("fill_count_fp") or order_payload.get("fill_count") or "0")
+                try:
+                    fill_count = float(fill_count_str)
+                except (ValueError, TypeError):
+                    fill_count = 0.0
+
+                if status != "executed" and fill_count <= 0:
+                    analytics.warning(
+                        f"Live {reason} order {sell_order_id} for {ticker} did not execute (status='{status}', fill_count={fill_count}). Position remains OPEN.",
+                        ticker=ticker,
+                        sell_order_id=sell_order_id,
+                        status=status,
+                        fill_count=fill_count,
+                    )
+                    return None
+
+                # If executed, use actual fill price from Kalshi if available
+                taker_cost = float(order_payload.get("taker_fill_cost_dollars") or 0)
+                maker_cost = float(order_payload.get("maker_fill_cost_dollars") or 0)
+                total_fill_dollars = taker_cost + maker_cost
+                if total_fill_dollars > 0 and fill_count > 0:
+                    actual_sell_price = int(round((total_fill_dollars / fill_count) * 100))
+                    if 1 <= actual_sell_price <= 99:
+                        current_price_cents = actual_sell_price
+
         pnl_cents = (current_price_cents - entry_price) * count
 
         if self.db is not None:
@@ -963,8 +992,79 @@ class RiskEngine:
 
         # Check if entry order actually executed (or is simulated)
         is_live = bool(self.client and getattr(self.client, "live_orders", False))
-        order_status = result.get("order", {}).get("status") if isinstance(result, dict) else None
-        entry_filled = (not is_live) or (order_status == "executed")
+        order_payload = result.get("order", result) if isinstance(result, dict) else {}
+        order_status = str(order_payload.get("status") or "").lower()
+        fill_count_str = str(order_payload.get("fill_count_fp") or order_payload.get("fill_count") or "0")
+        try:
+            fill_count = float(fill_count_str)
+        except (ValueError, TypeError):
+            fill_count = 0.0
+
+        entry_filled = (not is_live) or (order_status == "executed") or (fill_count > 0)
+        server_order_id = order_payload.get("order_id") or result.get("order_id") or client_order_id
+
+        # If live order is resting, poll briefly up to 1.5s to verify if matching engine executed it
+        if is_live and not entry_filled and order_status == "resting" and hasattr(self.client, "get_order"):
+            for _ in range(3):
+                time.sleep(0.5)
+                order_check = self.client.get_order(server_order_id)
+                if order_check and isinstance(order_check, dict):
+                    check_payload = order_check.get("order", order_check)
+                    check_status = str(check_payload.get("status") or "").lower()
+                    check_fill_str = str(check_payload.get("fill_count_fp") or check_payload.get("fill_count") or "0")
+                    try:
+                        check_fill = float(check_fill_str)
+                    except (ValueError, TypeError):
+                        check_fill = 0.0
+                    if check_status == "executed" or check_fill > 0:
+                        order_payload = check_payload
+                        order_status = check_status
+                        fill_count = check_fill
+                        entry_filled = True
+                        break
+                    elif check_status == "canceled":
+                        order_status = "canceled"
+                        break
+
+        # If live entry did NOT fill, cancel any lingering resting order and do NOT open position in SQLite
+        if is_live and not entry_filled:
+            if order_status == "resting" and hasattr(self.client, "cancel_order"):
+                try:
+                    self.client.cancel_order(server_order_id)
+                    analytics.track(
+                        "order_canceled",
+                        message=f"Canceled unfilled resting entry order {server_order_id} for {ticker}.",
+                        ticker=ticker,
+                        order_id=server_order_id,
+                    )
+                except Exception as e:
+                    analytics.warning(f"Could not cancel unfilled entry order {server_order_id}: {e}")
+
+            analytics.warning(
+                f"[LIVE ENTRY UNFILLED] Order {client_order_id} for {ticker} did not fill (status='{order_status}', fill_count={fill_count}). Position NOT opened.",
+                ticker=ticker,
+                order_id=server_order_id,
+                status=order_status,
+                fill_count=fill_count,
+            )
+            return {
+                "order_id": server_order_id,
+                "client_order_id": client_order_id,
+                "ticker": ticker,
+                "side": side,
+                "status": "unfilled",
+                "entry_filled": False,
+            }
+
+        # Extract actual execution price from Kalshi if available
+        if is_live:
+            taker_cost = float(order_payload.get("taker_fill_cost_dollars") or 0)
+            maker_cost = float(order_payload.get("maker_fill_cost_dollars") or 0)
+            total_fill_dollars = taker_cost + maker_cost
+            if total_fill_dollars > 0 and fill_count > 0:
+                actual_price = int(round((total_fill_dollars / fill_count) * 100))
+                if 1 <= actual_price <= 99:
+                    price_cents = actual_price
 
         # Immediately place resting sell order if strategy uses resting exit (SELL_3N=3x, SELL_2N=2x, etc.)
         # ONLY if entry order is filled (so we never sell before owning the contract)!
@@ -1011,14 +1111,6 @@ class RiskEngine:
             else:
                 resting_order_id = None
 
-            if isinstance(result, dict):
-                result["resting_order"] = resting_order
-                result["resting_price_cents"] = resting_price_cents
-                result["resting_order_id"] = resting_order_id
-            if isinstance(resting_order, dict):
-                server_order_id = resting_order.get("order", {}).get("order_id") or resting_order.get("order_id")
-                if server_order_id:
-                    resting_order_id = server_order_id
             if isinstance(result, dict):
                 result["resting_order"] = resting_order
                 result["resting_price_cents"] = resting_price_cents
