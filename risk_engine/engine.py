@@ -1024,8 +1024,8 @@ class RiskEngine:
         entry_filled = (not is_live) or (order_status == "executed") or (fill_count > 0)
         server_order_id = order_payload.get("order_id") or result.get("order_id") or client_order_id
 
-        # If live order is resting, poll briefly up to 1.5s to verify if matching engine executed it
-        if is_live and not entry_filled and order_status == "resting" and hasattr(self.client, "get_order"):
+        # If live order is not immediately filled, poll briefly up to 1.5s to verify if matching engine executed it
+        if is_live and not entry_filled and hasattr(self.client, "get_order") and server_order_id:
             for _ in range(3):
                 time.sleep(0.5)
                 order_check = self.client.get_order(server_order_id)
@@ -1049,7 +1049,7 @@ class RiskEngine:
 
         # If live entry did NOT fill, cancel any lingering resting order and do NOT open position in SQLite
         if is_live and not entry_filled:
-            if order_status == "resting" and hasattr(self.client, "cancel_order"):
+            if hasattr(self.client, "cancel_order"):
                 try:
                     self.client.cancel_order(server_order_id)
                     analytics.track(
@@ -1061,7 +1061,7 @@ class RiskEngine:
                 except Exception as e:
                     analytics.warning(f"Could not cancel unfilled entry order {server_order_id}: {e}")
 
-            analytics.warning(
+            analytics.info(
                 f"[LIVE ENTRY UNFILLED] Order {client_order_id} for {ticker} did not fill (status='{order_status}', fill_count={fill_count}). Position NOT opened.",
                 ticker=ticker,
                 order_id=server_order_id,
