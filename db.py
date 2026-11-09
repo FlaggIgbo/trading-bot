@@ -136,8 +136,10 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
     if isinstance(strategy, Strategy):
         return strategy
     if not strategy:
-        return Strategy.LAST_5
+        return Strategy.LAST_9
     strat_clean = str(strategy).strip().lower()
+    if strat_clean in ("last_5", "last5", "last_3", "last3"):
+        return Strategy.LAST_9
     if strat_clean in ("sell_if_3n", "sell3n"):
         return Strategy.SELL_3N
     if strat_clean in ("sell_if_2n", "sell2n"):
@@ -204,7 +206,7 @@ class Database:
                 client_order_id TEXT PRIMARY KEY,
                 ticker TEXT,
                 environment TEXT NOT NULL DEFAULT '{Environment.DEMO.value}' CHECK (environment IN ({env_values})),
-                strategy TEXT NOT NULL DEFAULT '{Strategy.LAST_5.value}' CHECK (strategy IN ({strat_values})),
+                strategy TEXT NOT NULL DEFAULT '{Strategy.LAST_9.value}' CHECK (strategy IN ({strat_values})),
                 side TEXT NOT NULL CHECK (side IN ({pside_values})),
                 count INTEGER,
                 price_cents INTEGER,

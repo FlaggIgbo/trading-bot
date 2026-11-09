@@ -129,8 +129,6 @@ if __name__ == "__main__":
         default="last_9",
         choices=[
             "last_9",
-            "last_5",
-            "last_3",
             "random",
             "sell_3n",
             "sell_2n",
@@ -148,7 +146,7 @@ if __name__ == "__main__":
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'last_9', 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
+        help="Direction strategy: 'last_9', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
     )
     parser.add_argument(
         "--live",

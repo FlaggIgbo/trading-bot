@@ -101,7 +101,7 @@ python main.py
 python main.py --once
 
 # Specify strategy, polling interval, or database path
-python main.py --strategy last_3 --interval 10 --db trading_bot.db
+python main.py --strategy last_9 --interval 10 --db trading_bot.db
 ```
 
 Run `python main.py --help` to see all available CLI options.

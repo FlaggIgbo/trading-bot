@@ -12,7 +12,7 @@ Replaces unstructured `print` statements across the codebase with structured eve
 from logging.analytics import analytics
 
 # Log informational messages with custom event tags and metadata
-analytics.info("Bot starting", event="bot_start", strategy="last_3")
+analytics.info("Bot starting", event="bot_start", strategy="last_9")
 
 # Track domain events with structured properties
 analytics.track("order_live", "Order executed", ticker="KXBTC15M", side="YES", count=1)

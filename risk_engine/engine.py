@@ -41,7 +41,7 @@ def choose_side_last_9(past_results) -> PositionSide:
     return PositionSide.NO
 
 
-# Backwards compatibility aliases
+# Deprecated backwards compatibility aliases (use choose_side_last_9)
 choose_side_last_5 = choose_side_last_9
 choose_side_last_3 = choose_side_last_9
 
@@ -490,11 +490,9 @@ class RiskEngine:
                 case "last_9" | "last9":
                     self.strategy_name = Strategy.LAST_9
 
-                case "last_5" | "last5":
-                    self.strategy_name = Strategy.LAST_5
-
-                case "last_3" | "last3":
-                    self.strategy_name = Strategy.LAST_3
+                case "last_5" | "last5" | "last_3" | "last3":
+                    analytics.warning(f"Strategy '{strat_lower}' is deprecated. Using 'last_9'.")
+                    self.strategy_name = Strategy.LAST_9
 
                 case "sell_3n" | "sell3n" | "sell_if_3n":
                     self.strategy_name = Strategy.SELL_3N

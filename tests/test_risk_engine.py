@@ -18,8 +18,6 @@ from risk_engine.engine import (
     choose_sell_if_2n,
     choose_sell_if_2n_5m,
     choose_sell_if_3n,
-    choose_side_last_3,
-    choose_side_last_5,
     choose_side_last_9,
     choose_side_random,
     get_strategy_entry_minute,
@@ -62,35 +60,6 @@ def test_is_market_open():
 
 def test_direction_strategies():
     assert choose_side_random() in (PositionSide.YES, PositionSide.NO)
-
-    tests = [
-        (["yes", "yes", "no"], PositionSide.YES),
-        (["yes", "yes", "yes"], PositionSide.YES),
-        (["yes", "no", "no"], PositionSide.NO),
-        (["no", "no", "no"], PositionSide.NO),
-        ([], PositionSide.NO),
-    ]
-    for past_results, expected_side in tests:
-        assert choose_side_last_3(past_results) == expected_side
-
-
-def test_trader_uses_last_3_markets_for_direction():
-    db = Database(":memory:")
-    client = KalshiClient()
-    client.get_settled_markets = lambda series, limit=3: []
-    trader = Trader(client=client, db=db, strategy="last_3")
-
-    # Seed :00, :15, :30 resolved markets for KXBTC15M (2 ups, 1 down -> should bid YES at :45)
-    past_markets = [
-        {"ticker": "KXBTC15M-00", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:00:00Z"},
-        {"ticker": "KXBTC15M-15", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:15:00Z"},
-        {"ticker": "KXBTC15M-30", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:30:00Z"},
-    ]
-    db.upsert_markets(past_markets)
-
-    order = trader.process_market({"ticker": "KXBTC15M-45", "status": "open", "market_type": "binary"})
-    assert order["side"] == PositionSide.YES
-    db.close()
 
 
 def test_trader_filtering_and_deduplication():
@@ -211,37 +180,6 @@ def test_trader_uses_last_9_markets_for_direction():
     db.upsert_markets(past_markets)
 
     order = trader.process_market({"ticker": "KXBTC15M-135", "status": "open", "market_type": "binary"})
-    assert order["side"] == PositionSide.YES
-    db.close()
-
-
-def test_choose_side_last_5():
-    tests = [
-        (["yes", "yes", "yes", "no", "no"], PositionSide.YES),
-        (["yes", "no", "no", "no", "yes"], PositionSide.NO),
-        (["yes", "yes", "yes", "yes", "yes", "no", "no", "no"], PositionSide.YES),
-        (["no", "no", "no", "yes", "yes"], PositionSide.NO),
-    ]
-    for past_results, expected in tests:
-        assert choose_side_last_5(past_results) == expected
-
-
-def test_trader_uses_last_5_markets_for_direction():
-    db = Database(":memory:")
-    client = KalshiClient()
-    trader = Trader(client=client, db=db, strategy="last_5")
-
-    # 3 ups, 2 downs -> should bid YES
-    past_markets = [
-        {"ticker": "KXBTC15M-00", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:00:00Z"},
-        {"ticker": "KXBTC15M-15", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:15:00Z"},
-        {"ticker": "KXBTC15M-30", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:30:00Z"},
-        {"ticker": "KXBTC15M-45", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:45:00Z"},
-        {"ticker": "KXBTC15M-60", "status": "finalized", "result": "yes", "close_time": "2026-11-01T11:00:00Z"},
-    ]
-    db.upsert_markets(past_markets)
-
-    order = trader.process_market({"ticker": "KXBTC15M-75", "status": "open", "market_type": "binary"})
     assert order["side"] == PositionSide.YES
     db.close()
 
@@ -530,7 +468,6 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert get_strategy_resting_multiplier("sell_2.5n") == 2.5
     assert get_strategy_resting_multiplier("sell_2_5n") == 2.5
     assert get_strategy_resting_multiplier("random") is None
-    assert get_strategy_resting_multiplier("last_5") is None
     assert get_strategy_resting_multiplier("last_9") is None
 
     # Entry minute
@@ -562,7 +499,6 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert is_sell_strategy("sell_1.5n_35p")
     assert is_sell_strategy("sell_2.5n")
     assert not is_sell_strategy("random")
-    assert not is_sell_strategy("last_5")
     assert not is_sell_strategy("last_9")
 
 
