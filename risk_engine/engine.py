@@ -689,24 +689,27 @@ class RiskEngine:
                 analytics.warning(f"Could not cancel resting order {position['resting_order_id']}: {e}")
 
         order_result = None
-        if self.client is not None and hasattr(self.client, "place_order"):
-            try:
-                order_result = self.client.place_order(
-                    ticker=ticker,
-                    side=side,
-                    count=count,
-                    price_cents=current_price_cents,
-                    client_order_id=sell_order_id,
-                    action="sell",
-                )
-            except TypeError:
-                order_result = self.client.place_order(
-                    ticker=ticker,
-                    side=side,
-                    count=count,
-                    price_cents=current_price_cents,
-                    client_order_id=sell_order_id,
-                )
+        # If this is a take-profit exit and a resting limit order was already placed on the book,
+        # the resting order is already working/filled on Kalshi — do not place a duplicate order.
+        if reason == "stop_loss" or not position.get("resting_order_id"):
+            if self.client is not None and hasattr(self.client, "place_order"):
+                try:
+                    order_result = self.client.place_order(
+                        ticker=ticker,
+                        side=side,
+                        count=count,
+                        price_cents=current_price_cents,
+                        client_order_id=sell_order_id,
+                        action="sell",
+                    )
+                except TypeError:
+                    order_result = self.client.place_order(
+                        ticker=ticker,
+                        side=side,
+                        count=count,
+                        price_cents=current_price_cents,
+                        client_order_id=sell_order_id,
+                    )
 
         pnl_cents = (current_price_cents - entry_price) * count
 
