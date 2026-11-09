@@ -22,14 +22,14 @@ def choose_side_random(past_results=None) -> PositionSide:
     return random.choice([PositionSide.YES, PositionSide.NO])
 
 
-def choose_side_last_5(past_results) -> PositionSide:
-    # Strategy 2: Look at the last 5 resolved markets for the same series.
+def choose_side_last_9(past_results) -> PositionSide:
+    # Strategy 2: Look at the last 9 resolved markets for the same series.
     # "yes" = resolved UP (above start price), "no" = resolved DOWN (below start price).
     # If there were more ups than downs, bid YES (up). Otherwise, bid NO (down).
-    last_5 = list(past_results or [])[:5]
+    last_9 = list(past_results or [])[:9]
     ups = 0
     downs = 0
-    for result in last_5:
+    for result in last_9:
         clean = str(result).strip().lower()
         if clean == MarketResult.YES.value:
             ups += 1
@@ -41,8 +41,9 @@ def choose_side_last_5(past_results) -> PositionSide:
     return PositionSide.NO
 
 
-# Backwards compatibility alias
-choose_side_last_3 = choose_side_last_5
+# Backwards compatibility aliases
+choose_side_last_5 = choose_side_last_9
+choose_side_last_3 = choose_side_last_9
 
 
 def extract_contract_price(market: Optional[dict], side: PositionSide) -> Optional[int]:
@@ -426,8 +427,15 @@ def should_sell(entry_price_cents: int, current_price_cents: Optional[int], mult
 
 STRATEGIES = {
     Strategy.RANDOM.value: choose_side_random,
-    Strategy.LAST_3.value: choose_side_last_5,
-    Strategy.LAST_5.value: choose_side_last_5,
+    Strategy.LAST_3.value: choose_side_last_9,
+    Strategy.LAST_5.value: choose_side_last_9,
+    Strategy.LAST_9.value: choose_side_last_9,
+    "last_9": choose_side_last_9,
+    "last9": choose_side_last_9,
+    "last_5": choose_side_last_9,
+    "last5": choose_side_last_9,
+    "last_3": choose_side_last_9,
+    "last3": choose_side_last_9,
     Strategy.SELL_3N.value: sell_3n,
     Strategy.SELL_2N.value: sell_2n,
     Strategy.SELL_2N_5M.value: sell_2n_5m,
@@ -451,7 +459,7 @@ STRATEGIES = {
 
 
 class RiskEngine:
-    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5, stop_loss: bool = False):
+    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_9, stop_loss: bool = False):
         # Kalshi REST API client and optional SQLite database
         self.client = client
         self.db: Optional[Database] = db
@@ -460,7 +468,7 @@ class RiskEngine:
 
         # Check what type of input 'strategy' is:
         # 1. An existing Strategy enum object
-        # 2. A string name (e.g. "random", "last_5")
+        # 2. A string name (e.g. "random", "last_9")
         # 3. A function/callable (e.g. choose_side_random)
         # 4. Anything else (default fallback)
         if isinstance(strategy, Strategy):
@@ -478,6 +486,9 @@ class RiskEngine:
             match strat_lower:
                 case "random":
                     self.strategy_name = Strategy.RANDOM
+
+                case "last_9" | "last9":
+                    self.strategy_name = Strategy.LAST_9
 
                 case "last_5" | "last5":
                     self.strategy_name = Strategy.LAST_5
@@ -579,17 +590,17 @@ class RiskEngine:
         # Randomly pick YES or NO
         return choose_side_random()
 
-    def get_last_5_results(self, ticker: str) -> list[str]:
-        # Get the last 5 resolved results ('yes' or 'no') for this market's series (e.g. 'KXBTC15M')
+    def get_last_9_results(self, ticker: str) -> list[str]:
+        # Get the last 9 resolved results ('yes' or 'no') for this market's series (e.g. 'KXBTC15M')
         series = ticker.split("-")[0]
         results = []
 
         if self.db is not None:
-            results = self.db.get_recent_results(series, limit=5)
+            results = self.db.get_recent_results(series, limit=9)
 
-        # If SQLite has fewer than 5 past resolved markets, check Kalshi API for recent settled markets
-        if len(results) < 5 and self.client is not None and hasattr(self.client, "get_settled_markets"):
-            settled_markets = self.client.get_settled_markets(series, limit=5)
+        # If SQLite has fewer than 9 past resolved markets, check Kalshi API for recent settled markets
+        if len(results) < 9 and self.client is not None and hasattr(self.client, "get_settled_markets"):
+            settled_markets = self.client.get_settled_markets(series, limit=9)
             if settled_markets:
                 if self.db is not None:
                     self.db.upsert_markets(settled_markets)
@@ -599,19 +610,20 @@ class RiskEngine:
                     if str(m.get("result", "")).strip().lower() in ("yes", "no")
                 ]
                 if api_results:
-                    results = api_results[:5]
+                    results = api_results[:9]
 
         return results
 
-    # Alias for backwards compatibility
-    get_last_3_results = get_last_5_results
+    # Aliases for backwards compatibility
+    get_last_5_results = get_last_9_results
+    get_last_3_results = get_last_9_results
 
     def choose_side(self, ticker: str, market: Optional[dict] = None) -> Optional[PositionSide]:
         # Run the configured strategy function to pick YES (up) or NO (down)
         if callable(self.strategy):
             strategy_fn = self.strategy
         else:
-            strategy_fn = STRATEGIES.get(str(self.strategy), choose_side_last_5)
+            strategy_fn = STRATEGIES.get(str(self.strategy), choose_side_last_9)
 
         if strategy_fn is choose_side_random:
             return choose_side_random()
@@ -644,7 +656,7 @@ class RiskEngine:
                 market = self.client.get_market(ticker)
             return strategy_fn(market=market)
 
-        past_results = self.get_last_5_results(ticker)
+        past_results = self.get_last_9_results(ticker)
         return strategy_fn(past_results)
 
     def _extract_ask_cents(self, market, side):

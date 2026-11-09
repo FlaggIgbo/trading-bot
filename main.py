@@ -33,7 +33,7 @@ def seconds_until_next_slot(now=None, interval=900, offset=30):
     return 0.0 if wait == interval else wait
 
 
-def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_3", env="demo", live=False, stop_loss=False):
+def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_9", env="demo", live=False, stop_loss=False):
     analytics.info(
         f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
@@ -126,8 +126,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy",
         type=str,
-        default="last_5",
+        default="last_9",
         choices=[
+            "last_9",
             "last_5",
             "last_3",
             "random",
@@ -147,7 +148,7 @@ if __name__ == "__main__":
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
+        help="Direction strategy: 'last_9', 'last_5', 'last_3', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
     )
     parser.add_argument(
         "--live",

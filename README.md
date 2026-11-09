@@ -7,7 +7,7 @@ A lightweight, human-readable prediction market trading bot for [Kalshi](https:/
 ## Strategy & Trading Model
 
 - **Binary markets only**: Trades standalone binary (`YES` / `NO`) contracts when a market is open.
-- **Pluggable direction strategies**: Chooses a side (`YES` or `NO`) using a configurable strategy (e.g., `last_3` trend-following from recent series resolutions, or `random`) and places a **1-contract** order.
+- **Pluggable direction strategies**: Chooses a side (`YES` or `NO`) using a configurable strategy (e.g., `last_9` trend-following from recent series resolutions, or `random`) and places a **1-contract** order.
 - **Hold to expiration**: Never sells early; holds open contracts until market expiration.
 - **One bet per market per strategy**: Positions and `client_order_id`s are scoped by environment and strategy so multiple strategies can run side-by-side without duplicate bets.
 - **Automated settlement & PnL**: Once `close_time` passes and Kalshi resolves the market, records the final outcome and PnL in SQLite.

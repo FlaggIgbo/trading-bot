@@ -20,6 +20,7 @@ from risk_engine.engine import (
     choose_sell_if_3n,
     choose_side_last_3,
     choose_side_last_5,
+    choose_side_last_9,
     choose_side_random,
     get_strategy_entry_minute,
     get_strategy_max_entry_price,
@@ -177,6 +178,41 @@ def test_db_enums_and_environment_isolation(tmp_path):
 
     demo_db.close()
     prod_db.close()
+
+
+def test_choose_side_last_9():
+    tests = [
+        (["yes", "yes", "yes", "yes", "yes", "no", "no", "no", "no"], PositionSide.YES),
+        (["yes", "yes", "yes", "yes", "no", "no", "no", "no", "no"], PositionSide.NO),
+        (["no", "no", "no", "no", "no", "yes", "yes", "yes", "yes"], PositionSide.NO),
+        (["yes", "yes", "yes", "no", "no"], PositionSide.YES),
+    ]
+    for past_results, expected in tests:
+        assert choose_side_last_9(past_results) == expected
+
+
+def test_trader_uses_last_9_markets_for_direction():
+    db = Database(":memory:")
+    client = KalshiClient()
+    trader = Trader(client=client, db=db, strategy="last_9")
+
+    # 5 ups, 4 downs -> should bid YES
+    past_markets = [
+        {"ticker": "KXBTC15M-00", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:00:00Z"},
+        {"ticker": "KXBTC15M-15", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:15:00Z"},
+        {"ticker": "KXBTC15M-30", "status": "finalized", "result": "yes", "close_time": "2026-11-01T10:30:00Z"},
+        {"ticker": "KXBTC15M-45", "status": "finalized", "result": "no", "close_time": "2026-11-01T10:45:00Z"},
+        {"ticker": "KXBTC15M-60", "status": "finalized", "result": "yes", "close_time": "2026-11-01T11:00:00Z"},
+        {"ticker": "KXBTC15M-75", "status": "finalized", "result": "no", "close_time": "2026-11-01T11:15:00Z"},
+        {"ticker": "KXBTC15M-90", "status": "finalized", "result": "yes", "close_time": "2026-11-01T11:30:00Z"},
+        {"ticker": "KXBTC15M-105", "status": "finalized", "result": "no", "close_time": "2026-11-01T11:45:00Z"},
+        {"ticker": "KXBTC15M-120", "status": "finalized", "result": "yes", "close_time": "2026-11-01T12:00:00Z"},
+    ]
+    db.upsert_markets(past_markets)
+
+    order = trader.process_market({"ticker": "KXBTC15M-135", "status": "open", "market_type": "binary"})
+    assert order["side"] == PositionSide.YES
+    db.close()
 
 
 def test_choose_side_last_5():
@@ -495,6 +531,7 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert get_strategy_resting_multiplier("sell_2_5n") == 2.5
     assert get_strategy_resting_multiplier("random") is None
     assert get_strategy_resting_multiplier("last_5") is None
+    assert get_strategy_resting_multiplier("last_9") is None
 
     # Entry minute
     assert get_strategy_entry_minute("sell_3n") == 5
@@ -526,6 +563,7 @@ def test_strategy_resting_multiplier_and_entry_minute():
     assert is_sell_strategy("sell_2.5n")
     assert not is_sell_strategy("random")
     assert not is_sell_strategy("last_5")
+    assert not is_sell_strategy("last_9")
 
 
 def test_should_stop_loss():

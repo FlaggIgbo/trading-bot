@@ -57,6 +57,7 @@ class Strategy(StrEnum):
     RANDOM = "random"
     LAST_3 = "last_3"
     LAST_5 = "last_5"
+    LAST_9 = "last_9"
     SELL_3N = "sell_3n"
     SELL_2N = "sell_2n"
     SELL_2N_5M = "sell_2n_5m"
