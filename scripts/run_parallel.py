@@ -100,7 +100,11 @@ def stream_process_output(proc, tag: str, log_file, combined_file=None, stop_eve
                     or "[CRITICAL]" in line
                     or "Traceback (most recent call last)" in line
                 )
-                is_warn = "[WARNING]" in line and "UNFILLED" not in line
+                is_warn = (
+                    "[WARNING]" in line
+                    and "UNFILLED" not in line
+                    and "did not execute" not in line
+                )
                 if is_err or is_warn:
                     issue_type = "ERROR" if is_err else "WARNING"
                     print(f"\n🚨 [SAFETY TRIGGER] Detected {issue_type} in [{tag}]: {clean}", flush=True)

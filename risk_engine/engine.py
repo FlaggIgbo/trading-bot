@@ -791,8 +791,9 @@ class RiskEngine:
                     fill_count = 0.0
 
                 if status != "executed" and fill_count <= 0:
-                    analytics.warning(
+                    analytics.info(
                         f"Live {reason} order {sell_order_id} for {ticker} did not execute (status='{status}', fill_count={fill_count}). Position remains OPEN.",
+                        event="order_unfilled",
                         ticker=ticker,
                         sell_order_id=sell_order_id,
                         status=status,
