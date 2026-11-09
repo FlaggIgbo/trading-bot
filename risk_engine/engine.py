@@ -441,65 +441,105 @@ STRATEGIES = {
 
 
 class RiskEngine:
-    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5, stop_loss: bool = False):
+def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5, stop_loss: bool = False):
         # Kalshi REST API client and optional SQLite database
         self.client = client
         self.db: Optional[Database] = db
         self.strategy = strategy
         self.stop_loss: bool = bool(stop_loss or getattr(strategy, "stop_loss", False))
+
+        # Check what type of input 'strategy' is:
+        # 1. An existing Strategy enum object
+        # 2. A string name (e.g. "random", "last_5")
+        # 3. A function/callable (e.g. choose_side_random)
+        # 4. Anything else (default fallback)
         if isinstance(strategy, Strategy):
             self.strategy_name = strategy
+
         elif isinstance(strategy, str):
             strat_lower = strategy.strip().lower()
+
+            # Enable stop-loss if common abbreviations appear in the name
             if "_sl" in strat_lower or "stop_loss" in strat_lower or "stoploss" in strat_lower:
                 self.stop_loss = True
-            if strat_lower == "random":
-                self.strategy_name = Strategy.RANDOM
-            elif strat_lower in ("last_5", "last5"):
-                self.strategy_name = Strategy.LAST_5
-            elif strat_lower in ("last_3", "last3"):
-                self.strategy_name = Strategy.LAST_3
-            elif strat_lower in ("sell_3n", "sell3n", "sell_if_3n"):
-                self.strategy_name = Strategy.SELL_3N
-            elif strat_lower in ("sell_2n_5m", "sell_5m_2n", "sell_2x_5m", "sell_3n_2x"):
-                self.strategy_name = Strategy.SELL_2N_5M
-            elif strat_lower in ("sell_2n", "sell2n", "sell_if_2n"):
-                self.strategy_name = Strategy.SELL_2N
-            elif strat_lower in ("sell_1.5n_5m_35p", "sell_1_5n_5m_35p", "sell1.5n_5m_35p", "sell1_5n_5m_35p"):
-                self.strategy_name = Strategy.SELL_1_5N_5M_35P
-            elif strat_lower in ("sell_1.5n_35p", "sell_1_5n_35p", "sell1.5n_35p", "sell1_5n_35p"):
-                self.strategy_name = Strategy.SELL_1_5N_35P
-            elif strat_lower in ("sell_1.5n_5m", "sell_1_5n_5m", "sell1.5n_5m", "sell1_5n_5m"):
-                self.strategy_name = Strategy.SELL_1_5N_5M
-            elif strat_lower in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n"):
-                self.strategy_name = Strategy.SELL_1_5N
-            elif strat_lower in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m"):
-                self.strategy_name = Strategy.SELL_2_5N
-            else:
-                try:
-                    self.strategy_name = Strategy(strat_lower)
-                except ValueError:
+
+            # Switch statement for string names:
+            # The '|' symbol means "OR" (matches any of the listed strings)
+            match strat_lower:
+                case "random":
+                    self.strategy_name = Strategy.RANDOM
+
+                case "last_5" | "last5":
                     self.strategy_name = Strategy.LAST_5
+
+                case "last_3" | "last3":
+                    self.strategy_name = Strategy.LAST_3
+
+                case "sell_3n" | "sell3n" | "sell_if_3n":
+                    self.strategy_name = Strategy.SELL_3N
+
+                case "sell_2n_5m" | "sell_5m_2n" | "sell_2x_5m" | "sell_3n_2x":
+                    self.strategy_name = Strategy.SELL_2N_5M
+
+                case "sell_2n" | "sell2n" | "sell_if_2n":
+                    self.strategy_name = Strategy.SELL_2N
+
+                case "sell_1.5n_5m_35p" | "sell_1_5n_5m_35p" | "sell1.5n_5m_35p" | "sell1_5n_5m_35p":
+                    self.strategy_name = Strategy.SELL_1_5N_5M_35P
+
+                case "sell_1.5n_35p" | "sell_1_5n_35p" | "sell1.5n_35p" | "sell1_5n_35p":
+                    self.strategy_name = Strategy.SELL_1_5N_35P
+
+                case "sell_1.5n_5m" | "sell_1_5n_5m" | "sell1.5n_5m" | "sell1_5n_5m":
+                    self.strategy_name = Strategy.SELL_1_5N_5M
+
+                case "sell_1.5n" | "sell_1_5n" | "sell1.5n" | "sell1_5n":
+                    self.strategy_name = Strategy.SELL_1_5N
+
+                case "sell_2.5n" | "sell_2_5n" | "sell2.5n" | "sell2_5n" | "sell_2.5n_5m":
+                    self.strategy_name = Strategy.SELL_2_5N
+
+                case _:
+                    # Default case: try converting directly to enum, fallback to LAST_5 if invalid
+                    try:
+                        self.strategy_name = Strategy(strat_lower)
+                    except ValueError:
+                        self.strategy_name = Strategy.LAST_5
+
         elif callable(strategy):
-            if strategy is choose_side_random:
-                self.strategy_name = Strategy.RANDOM
-            elif strategy in (sell_3n, choose_sell_if_3n, choose_side_sell_if_3n):
-                self.strategy_name = Strategy.SELL_3N
-            elif strategy in (sell_2n_5m, choose_sell_if_2n_5m, choose_side_sell_2n_5m):
-                self.strategy_name = Strategy.SELL_2N_5M
-            elif strategy in (sell_2n, choose_sell_if_2n, choose_side_sell_2n):
-                self.strategy_name = Strategy.SELL_2N
-            elif strategy in (sell_1_5n_35p, choose_sell_if_1_5n_35p, choose_side_sell_1_5n_35p):
-                self.strategy_name = Strategy.SELL_1_5N_35P
-            elif strategy in (sell_1_5n_5m,):
-                self.strategy_name = Strategy.SELL_1_5N_5M
-            elif strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
-                self.strategy_name = Strategy.SELL_1_5N
-            elif strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):
-                self.strategy_name = Strategy.SELL_2_5N
-            else:
-                self.strategy_name = Strategy.LAST_5
+            # Switch statement for function references:
+            # Matches whichever function is passed in
+            match strategy:
+                case _ if strategy is choose_side_random:
+                    self.strategy_name = Strategy.RANDOM
+
+                case sell_3n | choose_sell_if_3n | choose_side_sell_if_3n:
+                    self.strategy_name = Strategy.SELL_3N
+
+                case sell_2n_5m | choose_sell_if_2n_5m | choose_side_sell_2n_5m:
+                    self.strategy_name = Strategy.SELL_2N_5M
+
+                case sell_2n | choose_sell_if_2n | choose_side_sell_2n:
+                    self.strategy_name = Strategy.SELL_2N
+
+                case sell_1_5n_35p | choose_sell_if_1_5n_35p | choose_side_sell_1_5n_35p:
+                    self.strategy_name = Strategy.SELL_1_5N_35P
+
+                case _ if strategy is sell_1_5n_5m:
+                    self.strategy_name = Strategy.SELL_1_5N_5M
+
+                case sell_1_5n | choose_sell_if_1_5n | choose_side_sell_1_5n:
+                    self.strategy_name = Strategy.SELL_1_5N
+
+                case sell_2_5n | choose_sell_if_2_5n | choose_side_sell_2_5n:
+                    self.strategy_name = Strategy.SELL_2_5N
+
+                case _:
+                    # Default case: unknown function
+                    self.strategy_name = Strategy.LAST_5
+
         else:
+            # Default fallback if strategy is none of the above types
             self.strategy_name = Strategy.LAST_5
 
         self.is_sell_strategy = is_sell_strategy(self.strategy_name)
