@@ -526,28 +526,28 @@ class RiskEngine:
                 case _ if strategy is choose_side_random:
                     self.strategy_name = Strategy.RANDOM
 
-                case sell_3n | choose_sell_if_3n | choose_side_sell_if_3n:
+                case _ if strategy in (sell_3n, choose_sell_if_3n, choose_side_sell_if_3n):
                     self.strategy_name = Strategy.SELL_3N
 
-                case sell_2n_5m_35p | choose_sell_if_2n_5m_35p | choose_side_sell_2n_5m_35p:
+                case _ if strategy in (sell_2n_5m_35p, choose_sell_if_2n_5m_35p, choose_side_sell_2n_5m_35p):
                     self.strategy_name = Strategy.SELL_2N_5M_35P
 
-                case sell_2n_5m | choose_sell_if_2n_5m | choose_side_sell_2n_5m:
+                case _ if strategy in (sell_2n_5m, choose_sell_if_2n_5m, choose_side_sell_2n_5m):
                     self.strategy_name = Strategy.SELL_2N_5M
 
-                case sell_2n | choose_sell_if_2n | choose_side_sell_2n:
+                case _ if strategy in (sell_2n, choose_sell_if_2n, choose_side_sell_2n):
                     self.strategy_name = Strategy.SELL_2N
 
-                case sell_1_5n_35p | choose_sell_if_1_5n_35p | choose_side_sell_1_5n_35p:
+                case _ if strategy in (sell_1_5n_35p, choose_sell_if_1_5n_35p, choose_side_sell_1_5n_35p):
                     self.strategy_name = Strategy.SELL_1_5N_35P
 
                 case _ if strategy is sell_1_5n_5m:
                     self.strategy_name = Strategy.SELL_1_5N_5M
 
-                case sell_1_5n | choose_sell_if_1_5n | choose_side_sell_1_5n:
+                case _ if strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
                     self.strategy_name = Strategy.SELL_1_5N
 
-                case sell_2_5n | choose_sell_if_2_5n | choose_side_sell_2_5n:
+                case _ if strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):
                     self.strategy_name = Strategy.SELL_2_5N
 
                 case _:
