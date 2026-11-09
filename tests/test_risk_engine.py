@@ -11,6 +11,7 @@ from db import (
     MarketType,
     PositionSide,
     PositionStatus,
+    Strategy,
 )
 from ingestion.api.client import KalshiClient
 from risk_engine.engine import (
@@ -829,6 +830,33 @@ def test_entry_fill_verification_and_stop_loss_ioc_check():
     assert sl_res_2["status"] == PositionStatus.SETTLED
     assert db.get_all_positions()[0]["status"] == PositionStatus.SETTLED
     assert db.get_all_positions()[0]["pnl_cents"] == -9  # 9c - 18c = -9c
+
+    db.close()
+
+
+def test_direction_strategy_stop_loss_in_evaluate_all():
+    db = Database(":memory:")
+    client = KalshiClient()
+    trader = Trader(client=client, db=db, strategy="last_9", stop_loss=True)
+
+    # Insert an open position for last_9 entered at 50c
+    db.insert_open_position(
+        client_order_id="test_last9_open",
+        ticker="KXBTC15M-TEST",
+        side=PositionSide.YES,
+        count=1,
+        price_cents=50,
+        strategy=Strategy.LAST_9,
+    )
+
+    # Market at minute 5 drops to 20c -> evaluate_all should trigger stop-loss
+    market_m5 = {"ticker": "KXBTC15M-TEST", "status": "open", "yes_bid": 20, "minute": 5}
+    trader.evaluate_all(markets=[market_m5])
+
+    positions = db.get_all_positions(strategy=Strategy.LAST_9)
+    assert len(positions) == 1
+    assert positions[0]["status"] == PositionStatus.SETTLED
+    assert positions[0]["pnl_cents"] == -30  # 20c - 50c = -30c
 
     db.close()
 

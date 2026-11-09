@@ -1162,8 +1162,8 @@ class RiskEngine:
         return result
 
     def evaluate_all(self, markets=None, now: Any = None, check_timing: bool = True):
-        # If strategy is a sell strategy, check open positions to verify if resting orders filled
-        if self.is_sell_strategy:
+        # If strategy is a sell strategy or stop-loss is enabled, check open positions
+        if self.is_sell_strategy or self.stop_loss:
             self.check_open_positions(markets=markets, now=now, check_timing=check_timing)
 
         # If no markets list was passed in, read open candidate markets from SQLite
