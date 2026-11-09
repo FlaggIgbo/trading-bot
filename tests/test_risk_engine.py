@@ -526,6 +526,12 @@ def test_should_stop_loss():
     assert not should_stop_loss(entry_price=None, current_price=10, minute=10)
     assert not should_stop_loss(entry_price=35, current_price=None, minute=10)
 
+    # For last_9 and random: checks at minute >= 5 (5m and 10m into the market)
+    assert not should_stop_loss(entry_price=50, current_price=10, minute=4, strategy="last_9")
+    assert should_stop_loss(entry_price=50, current_price=20, minute=5, strategy="last_9")
+    assert should_stop_loss(entry_price=50, current_price=20, minute=10, strategy="random")
+    assert not should_stop_loss(entry_price=50, current_price=35, minute=5, strategy="last_9")
+
 
 def test_trader_stop_loss_execution():
     db = Database(":memory:")

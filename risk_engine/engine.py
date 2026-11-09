@@ -212,24 +212,35 @@ def should_stop_loss(
     entry_price_cents: Optional[int] = None,
     current_price_cents: Optional[int] = None,
     minute: Optional[float] = None,
-    stop_minute: float = 10.0,
+    stop_minute: Optional[float] = None,
     stop_price_threshold: int = 25,
     stop_ratio_threshold: float = 0.5,
+    strategy: Any = None,
     **kwargs,
 ) -> bool:
     """
-    Check if a position should be liquidated under the stop-loss rule for 5m sell strategies:
-    At minute >= 10, if the contract has not filled its resting order and:
+    Check if a position should be liquidated under the stop-loss rule:
+    For 5m sell strategies (entry at 5m): checks at minute >= 10.
+    For direction strategies (last_9, random): checks at minute >= 5 (5m and 10m into the market).
+    Triggers if:
       - is trading at <= 25c OR
       - current market price drops below 50% of entry price (< 0.5 * entry_price).
     """
     entry = kwargs.get("entry_price", entry_price_cents)
     current = kwargs.get("current_price", current_price_cents)
+    strat = kwargs.get("strategy", strategy)
 
     if entry is None or current is None or entry <= 0:
         return False
 
-    # Only exit at minute >= stop_minute (default 10.0)
+    if stop_minute is None:
+        strat_str = str(getattr(strat, "value", strat) or "").lower().strip()
+        if strat_str in ("random", "last_9", "last_5", "last_3") or "random" in strat_str or "last" in strat_str:
+            stop_minute = 5.0
+        else:
+            stop_minute = 10.0
+
+    # Only exit at minute >= stop_minute
     if minute is None or minute < stop_minute:
         return False
 
@@ -903,11 +914,11 @@ class RiskEngine:
                 minute = get_market_minute(pos, now=now)
 
             # In simulation mode (or if no resting order placed), check take-profit condition
-            if not is_live and self.should_sell(pos["price_cents"], current_bid, multiplier=multiplier):
+            if not is_live and self.is_sell_strategy and self.should_sell(pos["price_cents"], current_bid, multiplier=multiplier):
                 sold_info = self.sell_position(pos, target_sell_price, reason="take_profit")
                 if sold_info:
                     sold_positions.append(sold_info)
-            elif self.stop_loss and current_bid is not None and should_stop_loss(pos["price_cents"], current_bid, minute=minute):
+            elif self.stop_loss and current_bid is not None and should_stop_loss(pos["price_cents"], current_bid, minute=minute, strategy=self.strategy_name):
                 sold_info = self.sell_position(pos, current_bid, reason="stop_loss")
                 if sold_info:
                     sold_positions.append(sold_info)
