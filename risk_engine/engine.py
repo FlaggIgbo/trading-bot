@@ -166,9 +166,14 @@ sell_Xn_Ym_Zp = sell_Xn_Ym
 sell_xn_ym_zp = sell_Xn_Ym
 
 
-def sell_2n_5m(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
+def sell_2n_5m(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
     """sell_2n_5m strategy: n=2x resting sell order, y=5m entry, z=max entry price (default 100/2 = 50c)."""
-    return sell_Xn_Ym(past_results_or_market, market=market, n=2, y=5, z=z, **kwargs)
+    return sell_Xn_Ym(past_results_or_market, market=market, n=2, y=5, z=z, stop_loss=stop_loss, **kwargs)
+
+
+def sell_2n_5m_35p(past_results_or_market: Any = None, market: Optional[dict] = None, stop_loss: bool = False, **kwargs) -> Optional[PositionSide]:
+    """sell_2n_5m_35p strategy: n=2x resting sell order, y=5m entry, z=35c max entry price, optional stop_loss."""
+    return sell_Xn_Ym(past_results_or_market, market=market, n=2, y=5, z=35, stop_loss=stop_loss, **kwargs)
 
 
 def sell_3n(past_results_or_market: Any = None, market: Optional[dict] = None, z: Optional[Union[int, float]] = None, **kwargs) -> Optional[PositionSide]:
@@ -250,6 +255,8 @@ choose_sell_if_2n = sell_2n
 choose_side_sell_if_2n = sell_2n
 choose_sell_if_2n_5m = sell_2n_5m
 choose_side_sell_2n_5m = sell_2n_5m
+choose_sell_if_2n_5m_35p = sell_2n_5m_35p
+choose_side_sell_2n_5m_35p = sell_2n_5m_35p
 choose_sell_if_1_5n = sell_1_5n
 choose_side_sell_1_5n = sell_1_5n
 choose_sell_if_1_5n_35p = sell_1_5n_35p
@@ -424,11 +431,14 @@ STRATEGIES = {
     Strategy.SELL_3N.value: sell_3n,
     Strategy.SELL_2N.value: sell_2n,
     Strategy.SELL_2N_5M.value: sell_2n_5m,
+    Strategy.SELL_2N_5M_35P.value: sell_2n_5m_35p,
     Strategy.SELL_1_5N.value: sell_1_5n,
     Strategy.SELL_1_5N_5M.value: sell_1_5n_5m,
     Strategy.SELL_1_5N_5M_35P.value: sell_1_5n_5m_35p,
     Strategy.SELL_1_5N_35P.value: sell_1_5n_35p,
     Strategy.SELL_2_5N.value: sell_2_5n,
+    "sell_2n_5m_35p": sell_2n_5m_35p,
+    "sell_2_n_5m_35p": sell_2n_5m_35p,
     "sell_1_5n": sell_1_5n,
     "sell_1.5n_5m": sell_1_5n_5m,
     "sell_1_5n_5m": sell_1_5n_5m,
@@ -441,7 +451,7 @@ STRATEGIES = {
 
 
 class RiskEngine:
-def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5, stop_loss: bool = False):
+    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_5, stop_loss: bool = False):
         # Kalshi REST API client and optional SQLite database
         self.client = client
         self.db: Optional[Database] = db
@@ -477,6 +487,9 @@ def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, S
 
                 case "sell_3n" | "sell3n" | "sell_if_3n":
                     self.strategy_name = Strategy.SELL_3N
+
+                case "sell_2n_5m_35p" | "sell_2_n_5m_35p" | "sell2n_5m_35p":
+                    self.strategy_name = Strategy.SELL_2N_5M_35P
 
                 case "sell_2n_5m" | "sell_5m_2n" | "sell_2x_5m" | "sell_3n_2x":
                     self.strategy_name = Strategy.SELL_2N_5M
@@ -515,6 +528,9 @@ def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, S
 
                 case sell_3n | choose_sell_if_3n | choose_side_sell_if_3n:
                     self.strategy_name = Strategy.SELL_3N
+
+                case sell_2n_5m_35p | choose_sell_if_2n_5m_35p | choose_side_sell_2n_5m_35p:
+                    self.strategy_name = Strategy.SELL_2N_5M_35P
 
                 case sell_2n_5m | choose_sell_if_2n_5m | choose_side_sell_2n_5m:
                     self.strategy_name = Strategy.SELL_2N_5M

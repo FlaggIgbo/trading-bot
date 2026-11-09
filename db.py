@@ -60,6 +60,7 @@ class Strategy(StrEnum):
     SELL_3N = "sell_3n"
     SELL_2N = "sell_2n"
     SELL_2N_5M = "sell_2n_5m"
+    SELL_2N_5M_35P = "sell_2n_5m_35p"
     SELL_1_5N = "sell_1.5n"
     SELL_1_5N_5M = "sell_1.5n_5m"
     SELL_1_5N_5M_35P = "sell_1.5n_5m_35p"

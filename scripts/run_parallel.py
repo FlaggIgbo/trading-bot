@@ -118,7 +118,13 @@ def parse_instances(spec_list: list[str]) -> list[dict]:
         strat = parts[0]
         env = parts[1] if len(parts) > 1 else "demo"
         live = len(parts) > 2 and parts[2].lower() in ("live", "true", "1")
-        stop_loss = (len(parts) > 3 and parts[3].lower() in ("sl", "stoploss", "stop_loss", "true", "1")) or ("_sl" in strat)
+        explicit_sl = len(parts) > 3 and parts[3].lower() in ("sl", "stoploss", "stop_loss", "true", "1")
+        explicit_nosl = len(parts) > 3 and parts[3].lower() in ("nosl", "no_sl", "false", "0")
+        stop_loss = (
+            explicit_sl
+            or ("_sl" in strat)
+            or (live and "5m" in strat and not explicit_nosl)
+        )
         key = f"{strat}_{env}{'_sl' if stop_loss else ''}"
         live_str = ", LIVE" if live else ""
         sl_str = ", SL" if stop_loss else ""
@@ -164,6 +170,7 @@ def main():
     instances = parse_instances(args.strategies)
     start_time = time.time()
     end_time = start_time + args.duration
+    os.environ["PARALLEL_RUN_END_TIME"] = str(end_time)
 
     print(f"Starting parallel evaluation of {len(instances)} instances:", flush=True)
     for inst in instances:

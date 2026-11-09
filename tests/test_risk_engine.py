@@ -643,3 +643,30 @@ def test_sell_1_5n_5m_strategy():
     assert order["resting_price_cents"] == 45  # 1.5 * 30c = 45c
     db.close()
 
+
+def test_sell_2n_5m_35p_strategy():
+    db = Database(":memory:")
+    client = KalshiClient(live_orders=False)
+    trader = Trader(client=client, db=db, strategy="sell_2n_5m_35p", stop_loss=True)
+
+    # 1. Reject at minute 3 (before minute 5)
+    assert trader.process_market({"ticker": "M-2N-5M-EARLY", "status": "open", "yes_ask": 30, "no_ask": 70, "minute": 3}) is None
+
+    # 2. Reject at minute 5 if ask > 35c (e.g. 40c)
+    assert trader.process_market({"ticker": "M-2N-5M-EXPENSIVE", "status": "open", "yes_ask": 40, "no_ask": 60, "minute": 5}) is None
+
+    # 3. Accept at minute 5 with ask <= 35c (e.g. 28c)
+    order = trader.process_market({"ticker": "M-2N-5M-WIN", "status": "open", "yes_ask": 28, "no_ask": 72, "minute": 5})
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 28
+    assert order["resting_price_cents"] == 56  # 2.0 * 28c = 56c
+
+    # 4. Minute 10 stop loss trigger when price drops <= 25c or < 50%
+    market_sl = {"ticker": "M-2N-5M-WIN", "status": "open", "yes_ask": 12, "no_ask": 88, "minute": 10}
+    sold = trader.check_open_positions(markets=[market_sl])
+    assert len(sold) == 1
+    assert sold[0]["pnl_cents"] == -16  # 12c - 28c = -16c
+    db.close()
+
+

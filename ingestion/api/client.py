@@ -158,6 +158,32 @@ class KalshiClient:
             "Content-Type": "application/json",
         }
 
+    def _log_api_call(self, method: str, url: str):
+        """Log time remaining in parallel run whenever a Kalshi API call is made."""
+        end_time_str = os.getenv("PARALLEL_RUN_END_TIME")
+        if end_time_str:
+            try:
+                end_time = float(end_time_str)
+                remaining_sec = max(0, int(end_time - time.time()))
+                hours = remaining_sec // 3600
+                mins = (remaining_sec % 3600) // 60
+                secs = remaining_sec % 60
+                path = urlparse(url).path
+                analytics.info(
+                    f"Kalshi API {method.upper()} {path} | Time remaining: {hours:02d}h {mins:02d}m {secs:02d}s ({remaining_sec}s left)",
+                    event="api_call",
+                    method=method.upper(),
+                    path=path,
+                    time_remaining_seconds=remaining_sec,
+                    time_remaining=f"{hours:02d}h {mins:02d}m {secs:02d}s",
+                )
+            except Exception:
+                pass
+
+    def _request(self, method: str, url: str, **kwargs):
+        self._log_api_call(method, url)
+        return self.session.request(method, url, **kwargs)
+
     def get_open_markets(self, series_list=None, limit_per_series=20):
         # GET /markets?series_ticker=...&status=open
         series_to_query = series_list or DEFAULT_SERIES
@@ -168,7 +194,7 @@ class KalshiClient:
             headers = self._build_auth_headers("GET", url)
 
             try:
-                response = self.session.get(url, headers=headers, timeout=10)
+                response = self._request("GET", url, headers=headers, timeout=10)
                 if response.status_code == 200:
                     markets = response.json().get("markets", [])
                     # Group by event_ticker to ensure we only keep standalone binary events (1 market per event)
@@ -204,7 +230,7 @@ class KalshiClient:
         headers = self._build_auth_headers("GET", url)
 
         try:
-            response = self.session.get(url, headers=headers, timeout=10)
+            response = self._request("GET", url, headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 return data.get("market", data)
@@ -229,7 +255,7 @@ class KalshiClient:
         headers = self._build_auth_headers("GET", url)
 
         try:
-            response = self.session.get(url, headers=headers, timeout=10)
+            response = self._request("GET", url, headers=headers, timeout=10)
             if response.status_code == 200:
                 return response.json().get("markets", [])
         except Exception as error:
@@ -308,7 +334,7 @@ class KalshiClient:
         headers = self._build_auth_headers("POST", url)
 
         try:
-            response = self.session.post(url, headers=headers, json=payload, timeout=10)
+            response = self._request("POST", url, headers=headers, json=payload, timeout=10)
             if response.status_code in [200, 201]:
                 analytics.track(
                     "order_live",
@@ -351,7 +377,7 @@ class KalshiClient:
         url = f"{self.base_url}/portfolio/events/orders/{order_id}"
         headers = self._build_auth_headers("DELETE", url)
         try:
-            response = self.session.delete(url, headers=headers, timeout=10)
+            response = self._request("DELETE", url, headers=headers, timeout=10)
             if response.status_code in (200, 204):
                 analytics.track(
                     "order_canceled",

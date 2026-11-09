@@ -134,6 +134,8 @@ if __name__ == "__main__":
             "sell_3n",
             "sell_2n",
             "sell_2n_5m",
+            "sell_2n_5m_35p",
+            "sell_2_n_5m_35p",
             "sell_1.5n",
             "sell_1_5n",
             "sell_1.5n_5m",
