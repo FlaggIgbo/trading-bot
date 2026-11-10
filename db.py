@@ -63,6 +63,8 @@ class Strategy(StrEnum):
     LAST_5 = "last_5"
     LAST_9 = "last_9"
     LAST_9_SPOT = "last_9_spot"
+    LAST_21 = "last_21"
+    LAST_21_SPOT = "last_21_spot"
     SELL_3N = "sell_3n"
     SELL_2N = "sell_2n"
     SELL_2N_5M = "sell_2n_5m"
@@ -137,12 +139,63 @@ def normalize_position_status(status: Optional[str] = None) -> PositionStatus:
     return PositionStatus(str(status).strip().upper())
 
 
+class MarketResolution(str):
+    """
+    String subclass representing a resolved market result ('yes' or 'no').
+    Carries additional metadata: floor_strike, expiration_value, ticker, and magnitude weight.
+    Enables weighting markets by percentage price move (e.g. 1.0% vs 0.0001%).
+    """
+    def __new__(
+        cls,
+        result: Any,
+        floor_strike: Optional[float] = None,
+        expiration_value: Optional[float] = None,
+        weight: Optional[float] = None,
+        ticker: Optional[str] = None,
+    ):
+        clean_res = str(getattr(result, "value", result)).strip().lower()
+        obj = super().__new__(cls, clean_res)
+        obj.result = clean_res
+        try:
+            obj.floor_strike = float(floor_strike) if floor_strike is not None else None
+        except (ValueError, TypeError):
+            obj.floor_strike = None
+        try:
+            obj.expiration_value = float(expiration_value) if expiration_value is not None else None
+        except (ValueError, TypeError):
+            obj.expiration_value = None
+        obj.ticker = ticker
+
+        if weight is not None:
+            try:
+                obj.weight = float(weight)
+            except (ValueError, TypeError):
+                obj.weight = 1.0
+        elif obj.floor_strike is not None and obj.expiration_value is not None and obj.floor_strike > 0:
+            obj.weight = abs(obj.expiration_value - obj.floor_strike) / obj.floor_strike * 100.0
+        else:
+            obj.weight = 1.0
+        return obj
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, MarketResult):
+            return self.result == other.value
+        return super().__eq__(str(getattr(other, "value", other)).strip().lower())
+
+    def __hash__(self) -> int:
+        return hash(self.result)
+
+
 def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
     if isinstance(strategy, Strategy):
         return strategy
     if not strategy:
         return Strategy.LAST_9
     strat_clean = str(strategy).strip().lower()
+    if strat_clean in ("last_21", "last21"):
+        return Strategy.LAST_21
+    if strat_clean in ("last_21_spot", "last21_spot", "last_21_cf", "last21_cf"):
+        return Strategy.LAST_21_SPOT
     if strat_clean in ("last_5", "last5", "last_3", "last3"):
         return Strategy.LAST_9
     if strat_clean in ("last_9_spot", "last9_spot", "last_9_cf", "last9_cf"):
@@ -202,10 +255,21 @@ class Database:
                 yes_ask INTEGER,
                 no_ask INTEGER,
                 result TEXT NOT NULL DEFAULT '{MarketResult.PENDING.value}' CHECK (result IN ({mresult_values})),
+                floor_strike REAL,
+                expiration_value REAL,
                 PRIMARY KEY (ticker, environment)
             )
             """
         )
+
+        try:
+            cursor.execute("ALTER TABLE markets ADD COLUMN floor_strike REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE markets ADD COLUMN expiration_value REAL")
+        except sqlite3.OperationalError:
+            pass
 
         cursor.execute(
             f"""
@@ -328,20 +392,32 @@ class Database:
             result = normalize_market_result(m.get("result", MarketResult.PENDING))
             yes_ask = self._extract_cents(m, "yes_ask", "yes_ask_dollars")
             no_ask = self._extract_cents(m, "no_ask", "no_ask_dollars")
+            floor_strike = m.get("floor_strike")
+            try:
+                floor_strike = float(floor_strike) if floor_strike is not None else None
+            except (ValueError, TypeError):
+                floor_strike = None
+            expiration_value = m.get("expiration_value")
+            try:
+                expiration_value = float(expiration_value) if expiration_value is not None else None
+            except (ValueError, TypeError):
+                expiration_value = None
 
             cursor.execute(
                 """
                 INSERT INTO markets (
-                    ticker, environment, event_ticker, market_type, status, close_time, yes_ask, no_ask, result
+                    ticker, environment, event_ticker, market_type, status, close_time, yes_ask, no_ask, result, floor_strike, expiration_value
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(ticker, environment) DO UPDATE SET
                     market_type = excluded.market_type,
                     status = excluded.status,
                     close_time = excluded.close_time,
                     yes_ask = CASE WHEN markets.yes_ask <= 0 OR markets.yes_ask >= 100 THEN excluded.yes_ask ELSE markets.yes_ask END,
                     no_ask = CASE WHEN markets.no_ask <= 0 OR markets.no_ask >= 100 THEN excluded.no_ask ELSE markets.no_ask END,
-                    result = excluded.result
+                    result = excluded.result,
+                    floor_strike = COALESCE(excluded.floor_strike, markets.floor_strike),
+                    expiration_value = COALESCE(excluded.expiration_value, markets.expiration_value)
                 """,
                 (
                     ticker,
@@ -353,6 +429,8 @@ class Database:
                     yes_ask,
                     no_ask,
                     result.value,
+                    floor_strike,
+                    expiration_value,
                 ),
             )
         self.conn.commit()
@@ -367,20 +445,28 @@ class Database:
         )
         return [self._hydrate_market_row(row) for row in cursor.fetchall()]
 
-    def get_recent_results(self, series_ticker: str, limit: int = 3, environment=None) -> list[MarketResult]:
+    def get_recent_results(self, series_ticker: str, limit: int = 21, environment=None) -> list[Any]:
         # Return the last N resolved results ('yes' or 'no') for a market series (e.g. 'KXBTC15M')
+        # Returns MarketResolution instances that act as strings while providing floor_strike, expiration_value, and weight
         env = normalize_environment(environment or self.environment)
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT result FROM markets
+            SELECT ticker, result, floor_strike, expiration_value FROM markets
             WHERE ticker LIKE ? AND environment = ? AND result IN (?, ?)
             ORDER BY close_time DESC, ticker DESC
             LIMIT ?
             """,
             (f"{series_ticker}-%", env.value, MarketResult.YES.value, MarketResult.NO.value, int(limit)),
         )
-        return [normalize_market_result(row["result"]) for row in cursor.fetchall()]
+        results = []
+        for row in cursor.fetchall():
+            res_val = normalize_market_result(row["result"])
+            fs = row["floor_strike"] if "floor_strike" in row.keys() else None
+            ev = row["expiration_value"] if "expiration_value" in row.keys() else None
+            t = row["ticker"] if "ticker" in row.keys() else None
+            results.append(MarketResolution(res_val.value, floor_strike=fs, expiration_value=ev, ticker=t))
+        return results
 
     def get_positioned_tickers(self, environment=None, strategy=None):
         # Return set of tickers where we already placed an order (OPEN or SETTLED) in this environment

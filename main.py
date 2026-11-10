@@ -48,19 +48,21 @@ def main(
     check_spot=False,
     min_entry_price=None,
     max_entry_price=None,
+    take_profit=None,
     shadow_mode=False,
     max_open_positions=10,
     daily_loss_cap_cents=5000,
     kill_switch_path="KILL_SWITCH",
 ):
     analytics.info(
-        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, shadow={shadow_mode}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, take_profit={take_profit}, shadow={shadow_mode}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
         strategy=strategy,
         env=env,
         live=live,
         stop_loss=stop_loss,
         check_spot=check_spot,
+        take_profit=take_profit,
         shadow=shadow_mode,
         min_entry_price=min_entry_price,
         max_entry_price=max_entry_price,
@@ -110,6 +112,7 @@ def main(
         min_entry_price=min_entry_price,
         max_entry_price=max_entry_price,
         live_orders=live,
+        take_profit=take_profit,
     )
 
     # Initialize pipeline steps with injected dependencies
@@ -123,6 +126,7 @@ def main(
         check_spot=check_spot,
         min_entry_price=min_entry_price,
         max_entry_price=max_entry_price,
+        take_profit=take_profit,
         broker=broker,
         config=config,
     )
@@ -203,6 +207,8 @@ if __name__ == "__main__":
         type=str,
         default="last_9",
         choices=[
+            "last_21",
+            "last_21_spot",
             "last_9",
             "last_9_spot",
             "random",
@@ -252,6 +258,12 @@ if __name__ == "__main__":
         help="Maximum contract ask price in cents to enter (avoids poor risk/reward)",
     )
     parser.add_argument(
+        "--take-profit",
+        type=int,
+        default=None,
+        help="Take profit limit price in cents (e.g. 85 to place resting sell order at 85c)",
+    )
+    parser.add_argument(
         "--shadow",
         action="store_true",
         help="Run strategy in shadow mode (evaluate and log decisions, but do not place orders)",
@@ -288,6 +300,7 @@ if __name__ == "__main__":
         check_spot=args.check_spot,
         min_entry_price=args.min_price,
         max_entry_price=args.max_price,
+        take_profit=args.take_profit,
         shadow_mode=args.shadow,
         max_open_positions=args.max_open,
         daily_loss_cap_cents=args.daily_loss_cap,

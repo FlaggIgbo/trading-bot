@@ -861,5 +861,231 @@ def test_direction_strategy_stop_loss_in_evaluate_all():
     db.close()
 
 
+def test_check_open_positions_places_missing_resting_order_safety_net():
+    """Verify that check_open_positions detects an open position missing a resting order and places an 85c limit sell."""
+    db = Database(db_path=":memory:")
+
+    class MockKalshiClient:
+        def __init__(self):
+            self.live_orders = True
+            self.orders = {}
+            self.placed_orders = []
+
+        def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None, action="buy", time_in_force="good_till_canceled", reduce_only=False):
+            oid = client_order_id or f"ord_{len(self.placed_orders)}"
+            rec = {
+                "order_id": oid,
+                "client_order_id": oid,
+                "ticker": ticker,
+                "side": side.value if hasattr(side, "value") else side,
+                "price": price_cents,
+                "count": count,
+                "action": action,
+                "time_in_force": time_in_force,
+                "status": "resting",
+            }
+            self.orders[oid] = rec
+            self.placed_orders.append(rec)
+            return {"order": rec, "status": "resting"}
+
+        def get_order(self, order_id):
+            return self.orders.get(order_id)
+
+    client = MockKalshiClient()
+    trader = Trader(client=client, db=db, strategy="last_9_spot", take_profit=85, stop_loss=True)
+
+    # Insert an open position WITHOUT resting_order_id (e.g. entry matching lag or recovered order)
+    db.insert_open_position(
+        client_order_id="test_open_missing_resting",
+        ticker="KXETH15M-TEST",
+        side=PositionSide.YES,
+        count=1,
+        price_cents=40,
+        strategy=Strategy.LAST_9_SPOT,
+        resting_order_id=None,
+    )
+
+    market = {"ticker": "KXETH15M-TEST", "status": "open", "yes_bid": 60, "minute": 3}
+    sold = trader.check_open_positions(markets=[market])
+    assert len(sold) == 0  # Market at 60c, resting order at 85c: not sold yet
+
+    # Active safety net placed the missing resting order on Kalshi!
+    assert len(client.placed_orders) == 1
+    placed = client.placed_orders[0]
+    assert placed["ticker"] == "KXETH15M-TEST"
+    assert placed["action"] == "sell"
+    assert placed["price"] == 85
+    assert placed["time_in_force"] == "good_till_canceled"
+
+    # SQLite was updated with the new resting_order_id
+    pos_db = db.get_all_positions(strategy=Strategy.LAST_9_SPOT)[0]
+    assert pos_db["resting_order_id"] == placed["order_id"]
+    assert pos_db["status"] == PositionStatus.OPEN
+
+    # When resting order executes on Kalshi, next check settles it
+    client.orders[placed["order_id"]]["status"] = "executed"
+    sold_2 = trader.check_open_positions(markets=[market])
+    assert len(sold_2) == 1
+    assert sold_2[0]["reason"] == "take_profit"
+    assert sold_2[0]["pnl_cents"] == 45  # 85c - 40c = 45c
+    assert db.get_all_positions(strategy=Strategy.LAST_9_SPOT)[0]["status"] == PositionStatus.SETTLED
+
+    db.close()
+
+
+def test_check_open_positions_take_profit_immediate_exit_if_bid_already_reached():
+    """Verify that if an open position without resting order sees market bid >= 85c, it executes immediate take profit."""
+    db = Database(db_path=":memory:")
+
+    class MockKalshiClient:
+        def __init__(self):
+            self.live_orders = True
+            self.orders = {}
+            self.placed_orders = []
+
+        def place_order(self, ticker, side, count=1, price_cents=50, client_order_id=None, action="buy", time_in_force="good_till_canceled", reduce_only=False):
+            oid = client_order_id or f"ord_{len(self.placed_orders)}"
+            rec = {
+                "order_id": oid,
+                "client_order_id": oid,
+                "ticker": ticker,
+                "side": side.value if hasattr(side, "value") else side,
+                "price": price_cents,
+                "count": count,
+                "action": action,
+                "time_in_force": time_in_force,
+                "status": "executed",
+                "fill_count_fp": "1.00",
+                "taker_fill_cost_dollars": f"{price_cents / 100:.6f}",
+            }
+            self.orders[oid] = rec
+            self.placed_orders.append(rec)
+            return {"order": rec, "status": "executed"}
+
+        def get_order(self, order_id):
+            return self.orders.get(order_id)
+
+    client = MockKalshiClient()
+    trader = Trader(client=client, db=db, strategy="last_9_spot", take_profit=85, stop_loss=True)
+
+    db.insert_open_position(
+        client_order_id="test_open_surged",
+        ticker="KXSOL15M-TEST",
+        side=PositionSide.YES,
+        count=1,
+        price_cents=35,
+        strategy=Strategy.LAST_9_SPOT,
+        resting_order_id=None,
+    )
+
+    # Market bid is already 92c (> 85c target)
+    market = {"ticker": "KXSOL15M-TEST", "status": "open", "yes_bid": 92, "minute": 8}
+    sold = trader.check_open_positions(markets=[market])
+    assert len(sold) == 1
+    assert sold[0]["reason"] == "take_profit"
+    assert sold[0]["sell_price"] == 92
+    assert sold[0]["pnl_cents"] == 57  # 92c - 35c = 57c
+    assert db.get_all_positions(strategy=Strategy.LAST_9_SPOT)[0]["status"] == PositionStatus.SETTLED
+
+    db.close()
+
+
+def test_market_resolution_weighting():
+    """Verify MarketResolution calculates percentage magnitude weight from strike and expiration."""
+    from db import MarketResolution
+
+    # 1. BTC moved from 74,000 to 74,740 (+1.0% up)
+    res_up = MarketResolution("yes", floor_strike=74000.0, expiration_value=74740.0)
+    assert res_up == "yes"
+    assert res_up == PositionSide.YES.value
+    assert pytest.approx(res_up.weight, rel=1e-3) == 1.0  # 1.0%
+
+    # 2. BTC moved from 74,000 to 74,000.074 (+0.0001% up)
+    res_tiny = MarketResolution("yes", floor_strike=74000.0, expiration_value=74000.074)
+    assert res_tiny == "yes"
+    assert pytest.approx(res_tiny.weight, rel=1e-2) == 0.0001  # 0.0001%
+
+    # 3. Explicit weight passed directly
+    res_explicit = MarketResolution("no", weight=2.5)
+    assert res_explicit == "no"
+    assert res_explicit.weight == 2.5
+
+    # 4. Fallback weight without price data is 1.0
+    res_fallback = MarketResolution("yes")
+    assert res_fallback == "yes"
+    assert res_fallback.weight == 1.0
+
+
+def test_magnitude_weighting_1_percent_vs_fractional():
+    """Verify that a 1% up move outweighs multiple tiny 0.0001% down moves in trend evaluation."""
+    from risk_engine.engine import calculate_weighted_trend
+    from db import MarketResolution
+
+    # Construct scenario:
+    # 1 major UP move (+1.0%)
+    # 5 tiny DOWN moves (-0.0001% each, total down = 0.0005%)
+    resolutions = [
+        MarketResolution("yes", floor_strike=100.0, expiration_value=101.0),       # +1.0%
+        MarketResolution("no", floor_strike=100.0, expiration_value=99.9999),     # -0.0001%
+        MarketResolution("no", floor_strike=100.0, expiration_value=99.9999),     # -0.0001%
+        MarketResolution("no", floor_strike=100.0, expiration_value=99.9999),     # -0.0001%
+        MarketResolution("no", floor_strike=100.0, expiration_value=99.9999),     # -0.0001%
+        MarketResolution("no", floor_strike=100.0, expiration_value=99.9999),     # -0.0001%
+    ]
+
+    # Under unweighted counting, NO would win (5 NO vs 1 YES).
+    # Under magnitude weighting, YES wins (1.0% vs 0.0005%)!
+    side, up_w, down_w = calculate_weighted_trend(resolutions, limit=21)
+    assert side == PositionSide.YES
+    assert up_w > down_w
+    assert pytest.approx(up_w, rel=1e-2) == 1.0
+    assert pytest.approx(down_w, rel=1e-2) == 0.0005
+
+
+def test_trader_last_21_and_last_21_spot_strategy():
+    """Verify last_21 and last_21_spot strategies in Trader and SQLite integration."""
+    db = Database(":memory:")
+    client = KalshiClient()
+    trader = Trader(client=client, db=db, strategy="last_21_spot", take_profit=85)
+
+    assert trader.strategy_name == Strategy.LAST_21_SPOT
+    assert trader.check_spot is True
+    assert trader.min_entry_price == 20
+    assert trader.max_entry_price == 65
+
+    # Seed 21 resolved markets into SQLite
+    # 11 up moves (+0.5% each = 5.5% up) vs 10 down moves (-0.1% each = 1.0% down)
+    for i in range(11):
+        db.upsert_markets([{
+            "ticker": f"KXBTC15M-UP-{i:02d}",
+            "status": "finalized",
+            "result": "yes",
+            "floor_strike": 70000.0,
+            "expiration_value": 70350.0,  # +0.5%
+            "close_time": f"2026-11-01T{10 + i // 4:02d}:{(i % 4) * 15:02d}:00Z",
+        }])
+    for i in range(10):
+        db.upsert_markets([{
+            "ticker": f"KXBTC15M-DN-{i:02d}",
+            "status": "finalized",
+            "result": "no",
+            "floor_strike": 70000.0,
+            "expiration_value": 69930.0,  # -0.1%
+            "close_time": f"2026-11-01T{13 + i // 4:02d}:{(i % 4) * 15:02d}:00Z",
+        }])
+
+    # Disable spot client network call for unit test
+    trader.check_spot = False
+    open_market = {"ticker": "KXBTC15M-TESTOPEN", "status": "open", "yes_ask": 40, "no_ask": 60, "minute": 1}
+    order = trader.process_market(open_market)
+
+    assert order is not None
+    assert order["side"] == PositionSide.YES
+    assert order["price"] == 40
+    assert order["resting_price_cents"] == 85
+
+    db.close()
+
+
 
 

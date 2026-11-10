@@ -64,29 +64,25 @@ class Settler:
             ticker = pos["ticker"]
             client_order_id = pos["client_order_id"]
 
+            # If resting limit order was filled, let Trader/RiskEngine reconcile it via take-profit
+            if getattr(self.client, "live_orders", False) and pos.get("resting_order_id") and hasattr(self.client, "get_order"):
+                try:
+                    order_info = self.client.get_order(pos["resting_order_id"])
+                    if order_info and isinstance(order_info, dict) and order_info.get("status") == "executed":
+                        continue
+                except Exception:
+                    pass
+
             # Check if Kalshi has settled this market in portfolio
             if ticker in live_settlements:
                 s_info = live_settlements[ticker]
                 result = normalize_market_result(s_info.get("market_result", ""))
-                if "revenue" in s_info and s_info["revenue"] is not None:
-                    rev_cents = int(s_info["revenue"])
-                    side_key = "yes_total_cost_dollars" if str(pos["side"]).upper() in ("YES", "POSITIONSIDE.YES") else "no_total_cost_dollars"
-                    cost_val = s_info.get(side_key)
-                    if cost_val is not None:
-                        try:
-                            cost_cents = int(round(float(cost_val) * 100))
-                        except (ValueError, TypeError):
-                            cost_cents = int(pos["price_cents"]) * int(pos["count"])
-                    else:
-                        cost_cents = int(pos["price_cents"]) * int(pos["count"])
-                    pnl_cents = rev_cents - cost_cents
-                else:
-                    pnl_cents = self.compute_pnl_cents(
-                        side=pos["side"],
-                        price_cents=pos["price_cents"],
-                        count=pos["count"],
-                        result=result,
-                    )
+                pnl_cents = self.compute_pnl_cents(
+                    side=pos["side"],
+                    price_cents=pos["price_cents"],
+                    count=pos["count"],
+                    result=result,
+                )
             else:
                 # 2. GET market resolution from Kalshi
                 market = self.client.get_market(ticker)

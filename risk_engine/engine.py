@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional, Protocol, Union
 
 from db import (
     Database,
+    MarketResolution,
     MarketResult,
     MarketStatus,
     PositionSide,
@@ -57,27 +58,126 @@ def strategy_random(past_results=None, market=None, **kwargs) -> PositionSide:
     return random.choice([PositionSide.YES, PositionSide.NO])
 
 
+def calculate_weighted_trend(
+    past_results: Any = None,
+    limit: int = 21,
+) -> tuple[Optional[PositionSide], float, float]:
+    """
+    Calculate magnitude-weighted trend from recent market resolutions.
+    Each market's weight is its percentage return magnitude:
+      weight = |expiration_value - floor_strike| / floor_strike * 100
+    For example:
+      - A 1% market move has weight 1.0
+      - A 0.0001% market move has weight 0.0001
+    If strike/expiration values are not available (e.g. unweighted strings in tests),
+    weight defaults to 1.0.
+
+    Returns:
+      (candidate_side, up_weight, down_weight)
+    """
+    if not past_results:
+        return None, 0.0, 0.0
+
+    recent = list(past_results)[:limit]
+    up_weight = 0.0
+    down_weight = 0.0
+
+    for item in recent:
+        clean_result = None
+        weight = 1.0
+
+        if isinstance(item, MarketResolution):
+            clean_result = item.result
+            weight = getattr(item, "weight", 1.0)
+        elif isinstance(item, dict):
+            clean_result = str(item.get("result", "")).strip().lower()
+            if "weight" in item and item["weight"] is not None:
+                try:
+                    weight = float(item["weight"])
+                except (ValueError, TypeError):
+                    weight = 1.0
+            else:
+                fs = item.get("floor_strike")
+                ev = item.get("expiration_value")
+                if fs is not None and ev is not None:
+                    try:
+                        fs_f = float(fs)
+                        ev_f = float(ev)
+                        if fs_f > 0:
+                            weight = abs(ev_f - fs_f) / fs_f * 100.0
+                    except (ValueError, TypeError):
+                        weight = 1.0
+        elif isinstance(item, tuple) and len(item) >= 2:
+            clean_result = str(item[0]).strip().lower()
+            try:
+                weight = float(item[1])
+            except (ValueError, TypeError):
+                weight = 1.0
+        else:
+            clean_result = str(getattr(item, "value", item)).strip().lower()
+            weight = 1.0
+
+        effective_weight = max(1e-6, weight) if weight is not None else 1.0
+
+        if clean_result in (MarketResult.YES.value, "yes"):
+            up_weight += effective_weight
+        elif clean_result in (MarketResult.NO.value, "no"):
+            down_weight += effective_weight
+
+    if up_weight > down_weight:
+        side = PositionSide.YES
+    elif down_weight > up_weight:
+        side = PositionSide.NO
+    else:
+        side = None
+
+    return side, up_weight, down_weight
+
+
+def strategy_last_21(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    min_samples: int = 21,
+    **kwargs,
+) -> Optional[PositionSide]:
+    """
+    Pure strategy: trend-following from the last 21 resolutions with magnitude weighting.
+    Returns None if the series has fewer than min_samples resolutions (no opinion).
+    """
+    if not past_results:
+        return None
+    valid = [
+        r for r in past_results
+        if str(getattr(r, "value", r)).strip().lower() in (MarketResult.YES.value, MarketResult.NO.value)
+    ]
+    if len(valid) < min_samples:
+        return None
+    side, _, _ = calculate_weighted_trend(valid, limit=21)
+    return side
+
+
 def strategy_last_9(
     past_results: Any = None,
     market: Optional[dict] = None,
     min_samples: int = 9,
+    limit: int = 21,
     **kwargs,
 ) -> Optional[PositionSide]:
     """
-    Pure strategy: trend-following from the last 9 resolutions.
+    Trend-following strategy from recent resolutions with magnitude weighting.
+    Extended to 21 resolutions by default (or minimum 9 samples).
     Returns None if the series has fewer than min_samples resolutions (no opinion).
     """
-    clean = [
-        str(r).strip().lower()
-        for r in (past_results or [])
-        if str(r).strip().lower() in (MarketResult.YES.value, MarketResult.NO.value)
-    ]
-    if len(clean) < min_samples:
+    if not past_results:
         return None
-    recent = clean[:9]
-    ups = sum(1 for r in recent if r == MarketResult.YES.value)
-    downs = sum(1 for r in recent if r == MarketResult.NO.value)
-    return PositionSide.YES if ups > downs else PositionSide.NO
+    valid = [
+        r for r in past_results
+        if str(getattr(r, "value", r)).strip().lower() in (MarketResult.YES.value, MarketResult.NO.value)
+    ]
+    if len(valid) < min_samples:
+        return None
+    side, _, _ = calculate_weighted_trend(valid, limit=limit)
+    return side
 
 
 def choose_side_random(past_results=None) -> PositionSide:
@@ -85,7 +185,7 @@ def choose_side_random(past_results=None) -> PositionSide:
     return strategy_random(past_results=past_results)
 
 
-def choose_side_last_9(
+def choose_side_last_21(
     past_results: Any = None,
     market: Optional[dict] = None,
     spot_client: Optional[Any] = None,
@@ -93,30 +193,31 @@ def choose_side_last_9(
     min_entry_price: Optional[int] = None,
     max_entry_price: Optional[int] = None,
     require_spot_agreement: bool = True,
+    limit: int = 21,
     **kwargs,
 ) -> Optional[PositionSide]:
     """
-    Enhanced Strategy 2 (last_9):
-    - Historical trend: Look at the last 9 resolved markets for the same series.
-      If there were more ups than downs, candidate is YES. Otherwise, candidate is NO.
-    - Real-time Spot Alignment: If check_spot=True and market is provided, fetches
-      real-time spot price (Coinbase/Kraken CF Benchmarks constituent) and compares against
-      market strike (floor_strike). If spot conflicts with historical last_9, skips trade.
+    Magnitude-Weighted Strategy (last_21):
+    - Historical weighted trend: Analyzes the last 21 resolved markets weighted by
+      percentage return magnitude: |expiration_value - floor_strike| / floor_strike * 100
+      (e.g. 1% move vs 0.0001% move). Candidate is YES if up_weight > down_weight, else NO.
+    - Real-time Spot Alignment: If check_spot=True and market is provided, compares
+      real-time spot price against market strike (floor_strike). If spot conflicts, skips trade.
     - Price Cap & Value Filter: If min_entry_price or max_entry_price is set, ensures the
       contract ask price falls within acceptable risk/reward bounds (e.g. 20c - 65c).
     """
-    last_9 = list(past_results or [])[:9]
-    ups = 0
-    downs = 0
-    for result in last_9:
-        clean = str(result).strip().lower()
-        if clean == MarketResult.YES.value:
-            ups += 1
-        elif clean == MarketResult.NO.value:
-            downs += 1
+    hist_side, up_weight, down_weight = calculate_weighted_trend(past_results, limit=limit)
+    if hist_side is None:
+        hist_side = PositionSide.NO
 
-    # Determine historical candidate side (legacy: YES if ups > downs, else NO)
-    hist_side = PositionSide.YES if ups > downs else PositionSide.NO
+    analytics.track(
+        "trend_evaluation",
+        message=f"Last {limit} weighted trend: up_weight={up_weight:.4f}, down_weight={down_weight:.4f} -> candidate={hist_side.value}",
+        strategy=f"last_{limit}",
+        up_weight=up_weight,
+        down_weight=down_weight,
+        candidate_side=hist_side.value,
+    )
 
     # Exact legacy behavior if spot check and price filters are not active
     if not check_spot and min_entry_price is None and max_entry_price is None:
@@ -135,7 +236,7 @@ def choose_side_last_9(
             elif require_spot_agreement and hist_side != spot_side:
                 analytics.info(
                     f"Spot trend ({spot_side.value}, spot={spot_val} vs strike={strike_val}) "
-                    f"conflicts with last_9 historical ({hist_side.value}). Skipping trade."
+                    f"conflicts with last_{limit} weighted historical ({hist_side.value}). Skipping trade."
                 )
                 return None
             else:
@@ -159,20 +260,69 @@ def choose_side_last_9(
     return candidate_side
 
 
-def last_9_spot(market: Optional[dict] = None, past_results: Any = None, **kwargs) -> Optional[PositionSide]:
-    """last_9 strategy with real-time spot trend alignment and value filter enabled by default."""
+choose_side_last_9 = choose_side_last_21
+
+
+def last_21_spot(
+    past_results_or_market: Any = None,
+    market: Optional[dict] = None,
+    past_results: Any = None,
+    exit_multiplier: Optional[Union[int, float]] = None,
+    exit_price_cents: Optional[int] = None,
+    n: Optional[Union[int, float]] = None,
+    exit_price: Optional[int] = None,
+    **kwargs,
+) -> Any:
+    """
+    last_21 strategy with magnitude weighting, real-time spot trend alignment, and value filter.
+    Optional exit parameters for taking profit when winning:
+    - exit_multiplier (or n): Multiplier threshold (e.g. 1.75 to sell if contract is worth 1.75x entry price).
+    - exit_price_cents (or exit_price): Absolute price threshold (e.g. 85 or 90 to sell when contract passes target).
+    """
+    target_market = market
+    target_past = past_results
+
+    if isinstance(past_results_or_market, dict):
+        target_market = past_results_or_market
+    elif isinstance(past_results_or_market, (list, tuple)):
+        target_past = past_results_or_market
+
+    effective_multiplier = exit_multiplier if exit_multiplier is not None else (n if n is not None else kwargs.pop("n", None))
+    effective_price = exit_price_cents if exit_price_cents is not None else (exit_price if exit_price is not None else kwargs.pop("exit_price", None))
+
+    if target_market is None and target_past is None:
+        def _bound_strategy(past_res=None, m=None, **kw):
+            tm = m if m is not None else kw.pop("market", None)
+            tp = past_res if past_res is not None else kw.pop("past_results", None)
+            return last_21_spot(
+                market=tm,
+                past_results=tp,
+                exit_multiplier=effective_multiplier,
+                exit_price_cents=effective_price,
+                **kw,
+            )
+
+        _bound_strategy.exit_multiplier = effective_multiplier
+        _bound_strategy.exit_price_cents = effective_price
+        _bound_strategy.n = effective_multiplier
+        _bound_strategy.check_spot = True
+        return _bound_strategy
+
     kw = {
         "check_spot": True,
         "min_entry_price": kwargs.pop("min_entry_price", 20),
         "max_entry_price": kwargs.pop("max_entry_price", 65),
+        "limit": 21,
         **kwargs,
     }
-    return choose_side_last_9(past_results=past_results, market=market, **kw)
+    return choose_side_last_21(past_results=target_past, market=target_market, **kw)
 
 
-# Deprecated backwards compatibility aliases (use choose_side_last_9)
-choose_side_last_5 = choose_side_last_9
-choose_side_last_3 = choose_side_last_9
+last_9_spot = last_21_spot
+
+# Deprecated backwards compatibility aliases (use choose_side_last_21)
+choose_side_last_5 = choose_side_last_21
+choose_side_last_3 = choose_side_last_21
 
 
 def extract_contract_price(market: Optional[dict], side: PositionSide) -> Optional[int]:
@@ -567,10 +717,17 @@ def should_sell(entry_price_cents: int, current_price_cents: Optional[int], mult
 
 STRATEGIES = {
     Strategy.RANDOM.value: choose_side_random,
+    Strategy.LAST_21.value: choose_side_last_21,
+    Strategy.LAST_21_SPOT.value: last_21_spot,
     Strategy.LAST_3.value: choose_side_last_9,
     Strategy.LAST_5.value: choose_side_last_9,
     Strategy.LAST_9.value: choose_side_last_9,
     Strategy.LAST_9_SPOT.value: last_9_spot,
+    "last_21": choose_side_last_21,
+    "last21": choose_side_last_21,
+    "last_21_strict": strategy_last_21,
+    "last_21_spot": last_21_spot,
+    "last21_spot": last_21_spot,
     "last_9": choose_side_last_9,
     "last9": choose_side_last_9,
     "last_9_strict": strategy_last_9,
@@ -616,6 +773,7 @@ class Config:
     max_entry_price: Optional[int] = None
     default_contract_price: int = 50
     live_orders: bool = False
+    take_profit: Optional[int] = None
 
 
 class TradeEngine:
@@ -711,7 +869,7 @@ class TradeEngine:
 
         # 2. Get past resolutions for strategy
         series = ticker.split("-")[0]
-        past_results = self.repo.get_recent_results(series, limit=9) if self.repo else []
+        past_results = self.repo.get_recent_results(series, limit=21) if self.repo else []
 
         # 3. Pure strategy evaluation
         side = None
@@ -865,10 +1023,14 @@ class TradeEngine:
             strategy=self.strategy_name.value,
         )
 
-        # 10. For momentum sell strategies: place resting sell order if applicable
+        # 10. For momentum sell strategies or take_profit: place resting sell order if applicable
         multiplier = get_strategy_resting_multiplier(self.strategy_name)
-        if multiplier is not None:
-            resting_price_cents = min(99, int(round(multiplier * price_cents)))
+        take_profit = getattr(self.config, "take_profit", None)
+        if multiplier is not None or take_profit is not None:
+            if take_profit is not None:
+                resting_price_cents = min(99, int(take_profit))
+            else:
+                resting_price_cents = min(99, int(round(multiplier * price_cents)))
             resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
             try:
                 resting_res = self.broker.place_order(
@@ -906,6 +1068,7 @@ class RiskEngine:
         check_spot: bool = False,
         min_entry_price: Optional[int] = None,
         max_entry_price: Optional[int] = None,
+        take_profit: Optional[int] = None,
         broker: Optional[Broker] = None,
         config: Optional[Config] = None,
     ):
@@ -918,6 +1081,7 @@ class RiskEngine:
         self.check_spot: bool = bool(check_spot or getattr(strategy, "check_spot", False))
         self.min_entry_price: Optional[int] = min_entry_price if min_entry_price is not None else getattr(strategy, "min_entry_price", None)
         self.max_entry_price: Optional[int] = max_entry_price if max_entry_price is not None else getattr(strategy, "max_entry_price", None)
+        self.take_profit: Optional[int] = int(take_profit) if take_profit is not None else getattr(strategy, "take_profit", None)
 
         # Check what type of input 'strategy' is:
         # 1. An existing Strategy enum object
@@ -934,11 +1098,27 @@ class RiskEngine:
             if "_sl" in strat_lower or "stop_loss" in strat_lower or "stoploss" in strat_lower:
                 self.stop_loss = True
 
+            # Enable take-profit if tp85 or tp_85 appear in the name
+            m_tp = re.search(r"tp_?(\d+)", strat_lower)
+            if m_tp and self.take_profit is None:
+                self.take_profit = int(m_tp.group(1))
+
             # Switch statement for string names:
             # The '|' symbol means "OR" (matches any of the listed strings)
             match strat_lower:
                 case "random":
                     self.strategy_name = Strategy.RANDOM
+
+                case "last_21" | "last21":
+                    self.strategy_name = Strategy.LAST_21
+
+                case "last_21_spot" | "last21_spot" | "last_21_cf" | "last21_cf":
+                    self.strategy_name = Strategy.LAST_21_SPOT
+                    self.check_spot = True
+                    if self.min_entry_price is None:
+                        self.min_entry_price = 20
+                    if self.max_entry_price is None:
+                        self.max_entry_price = 65
 
                 case "last_9" | "last9":
                     self.strategy_name = Strategy.LAST_9
@@ -996,8 +1176,8 @@ class RiskEngine:
                 case _ if strategy is choose_side_random:
                     self.strategy_name = Strategy.RANDOM
 
-                case _ if strategy is last_9_spot:
-                    self.strategy_name = Strategy.LAST_9_SPOT
+                case _ if strategy in (last_21_spot, last_9_spot):
+                    self.strategy_name = Strategy.LAST_21_SPOT if strategy is last_21_spot else Strategy.LAST_9_SPOT
                     self.check_spot = True
                     if self.min_entry_price is None:
                         self.min_entry_price = 20
@@ -1090,40 +1270,51 @@ class RiskEngine:
         # Randomly pick YES or NO
         return choose_side_random()
 
-    def get_last_9_results(self, ticker: str) -> list[str]:
-        # Get the last 9 resolved results ('yes' or 'no') for this market's series (e.g. 'KXBTC15M')
+    def get_last_results(self, ticker: str, limit: int = 21) -> list[Any]:
+        # Get the last N resolved results for this market's series (e.g. 'KXBTC15M')
         series = ticker.split("-")[0]
         results = []
 
-        if self.db is not None:
-            results = self.db.get_recent_results(series, limit=9)
+        target_len = 21 if getattr(self, "strategy_name", None) in (Strategy.LAST_21, Strategy.LAST_21_SPOT) else 9
+        target_limit = max(limit, target_len)
 
-        # If SQLite has fewer than 9 past resolved markets, check Kalshi API for recent settled markets
-        if len(results) < 9 and self.client is not None and hasattr(self.client, "get_settled_markets"):
-            settled_markets = self.client.get_settled_markets(series, limit=9)
+        # 1. First check SQLite database
+        if self.db is not None:
+            results = self.db.get_recent_results(series, limit=target_limit)
+
+        # 2. If SQLite has fewer than target_len resolved markets, query Kalshi API for fresh settled markets
+        if len(results) < target_len and self.client is not None and hasattr(self.client, "get_settled_markets"):
+            settled_markets = self.client.get_settled_markets(series, limit=target_limit)
             if settled_markets:
                 if self.db is not None:
                     self.db.upsert_markets(settled_markets)
                 api_results = [
-                    m.get("result", "")
+                    MarketResolution(
+                        result=m.get("result", ""),
+                        floor_strike=m.get("floor_strike"),
+                        expiration_value=m.get("expiration_value"),
+                        ticker=m.get("ticker"),
+                    )
                     for m in settled_markets
                     if str(m.get("result", "")).strip().lower() in ("yes", "no")
                 ]
                 if api_results:
-                    results = api_results[:9]
+                    results = api_results[:target_limit]
 
         return results
 
     # Aliases for backwards compatibility
-    get_last_5_results = get_last_9_results
-    get_last_3_results = get_last_9_results
+    get_last_21_results = get_last_results
+    get_last_9_results = get_last_results
+    get_last_5_results = get_last_results
+    get_last_3_results = get_last_results
 
     def choose_side(self, ticker: str, market: Optional[dict] = None) -> Optional[PositionSide]:
         # Run the configured strategy function to pick YES (up) or NO (down)
         if callable(self.strategy):
             strategy_fn = self.strategy
         else:
-            strategy_fn = STRATEGIES.get(str(self.strategy), choose_side_last_9)
+            strategy_fn = STRATEGIES.get(str(self.strategy), choose_side_last_21)
 
         if strategy_fn is choose_side_random:
             return choose_side_random()
@@ -1157,25 +1348,26 @@ class RiskEngine:
             return strategy_fn(market=market)
 
         if (
-            self.strategy_name in (Strategy.LAST_9, Strategy.LAST_9_SPOT)
-            or strategy_fn in (choose_side_last_9, last_9_spot)
+            self.strategy_name in (Strategy.LAST_21, Strategy.LAST_21_SPOT, Strategy.LAST_9, Strategy.LAST_9_SPOT)
+            or strategy_fn in (choose_side_last_21, last_21_spot, choose_side_last_9, last_9_spot)
             or self.check_spot
             or self.min_entry_price is not None
             or self.max_entry_price is not None
         ):
             if market is None and self.client is not None and hasattr(self.client, "get_market"):
                 market = self.client.get_market(ticker)
-            past_results = self.get_last_9_results(ticker)
-            return choose_side_last_9(
+            past_results = self.get_last_results(ticker, limit=21)
+            return choose_side_last_21(
                 past_results=past_results,
                 market=market,
                 spot_client=self.spot_client,
                 check_spot=self.check_spot,
                 min_entry_price=self.min_entry_price,
                 max_entry_price=self.max_entry_price,
+                limit=21,
             )
 
-        past_results = self.get_last_9_results(ticker)
+        past_results = self.get_last_results(ticker, limit=21)
         return strategy_fn(past_results)
 
     def _extract_ask_cents(self, market, side):
@@ -1251,16 +1443,20 @@ class RiskEngine:
         action_prefix = "sl" if reason == "stop_loss" else "sell"
         sell_order_id = f"{safe_strategy}_{action_prefix}_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
 
-        # Cancel resting limit order if this is an early stop-loss exit
-        if reason == "stop_loss" and position.get("resting_order_id") and self.client is not None and hasattr(self.client, "cancel_order"):
+        # Cancel resting limit order if this is an early exit (stop-loss or immediate market take-profit)
+        if position.get("resting_order_id") and self.client is not None and hasattr(self.client, "cancel_order"):
             try:
-                self.client.cancel_order(position["resting_order_id"])
+                try:
+                    self.client.cancel_order(position["resting_order_id"], ticker=ticker)
+                except TypeError:
+                    self.client.cancel_order(position["resting_order_id"])
+                position["resting_order_id"] = None
             except Exception as e:
                 analytics.warning(f"Could not cancel resting order {position['resting_order_id']}: {e}")
 
         order_result = None
         is_live = bool(self.client and getattr(self.client, "live_orders", False))
-        if is_live and (reason == "stop_loss" or not position.get("resting_order_id")):
+        if is_live:
             if hasattr(self.client, "place_order"):
                 try:
                     order_result = self.client.place_order(
@@ -1372,11 +1568,19 @@ class RiskEngine:
 
         sold_positions = []
         multiplier = get_strategy_resting_multiplier(self.strategy_name) or 3
+        tp_target = getattr(self, "take_profit", None)
         is_live = bool(self.client and getattr(self.client, "live_orders", False))
 
         for pos in open_positions:
             ticker = pos["ticker"]
             resting_order_id = pos.get("resting_order_id")
+
+            if tp_target is not None:
+                target_sell_price = min(99, int(tp_target))
+            elif multiplier is not None:
+                target_sell_price = min(99, int(round(multiplier * pos["price_cents"])))
+            else:
+                target_sell_price = 85
 
             # 1. LIVE RECONCILIATION: Check if resting order executed on Kalshi exchange
             if is_live and resting_order_id and hasattr(self.client, "get_order"):
@@ -1384,7 +1588,6 @@ class RiskEngine:
                 if order_info and isinstance(order_info, dict):
                     status = order_info.get("status")
                     if status == "executed":
-                        target_sell_price = min(99, int(round(multiplier * pos["price_cents"])))
                         pnl_cents = (target_sell_price - pos["price_cents"]) * int(pos.get("count", 1))
                         self.db.settle_position(client_order_id=pos["client_order_id"], pnl_cents=pnl_cents)
                         analytics.track(
@@ -1408,6 +1611,11 @@ class RiskEngine:
                         continue
                     elif status == "canceled":
                         pos["resting_order_id"] = None
+                        resting_order_id = None
+                        if self.db is not None:
+                            self.db.update_position_status(
+                                pos["client_order_id"], PositionStatus.OPEN, resting_order_id=""
+                            )
 
             market = market_map.get(ticker)
             if market is None and self.client is not None and hasattr(self.client, "get_market"):
@@ -1419,13 +1627,66 @@ class RiskEngine:
             current_bid = self._extract_bid_cents(market, pos["side"])
             if current_bid is None:
                 current_bid = self._extract_ask_cents(market, pos["side"])
-            target_sell_price = min(99, int(round(multiplier * pos["price_cents"])))
             minute = get_market_minute(market, now=now)
             if minute is None and pos.get("open_time"):
                 minute = get_market_minute(pos, now=now)
 
-            # In simulation mode (or if no resting order placed), check take-profit condition
-            if not is_live and self.is_sell_strategy and self.should_sell(pos["price_cents"], current_bid, multiplier=multiplier):
+            # 2. ACTIVE SAFETY NET: If take-profit is configured but resting_order_id is missing, place it immediately!
+            has_take_profit = (tp_target is not None or self.is_sell_strategy)
+            if has_take_profit and not pos.get("resting_order_id"):
+                if current_bid is not None and current_bid >= target_sell_price:
+                    # Current market price already at or above take-profit target: execute immediate exit!
+                    sold_info = self.sell_position(pos, current_bid, reason="take_profit")
+                    if sold_info:
+                        sold_positions.append(sold_info)
+                        continue
+                else:
+                    # Place missing resting limit sell order on Kalshi / simulate
+                    side_val = pos["side"] if isinstance(pos["side"], PositionSide) else PositionSide(str(pos["side"]).upper())
+                    safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
+                    safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
+                    new_resting_client_id = f"{safe_strategy}_resting_{side_val.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
+
+                    if is_live and hasattr(self.client, "place_order"):
+                        try:
+                            resting_res = self.client.place_order(
+                                ticker=ticker,
+                                side=side_val,
+                                count=int(pos.get("count", 1)),
+                                price_cents=target_sell_price,
+                                client_order_id=new_resting_client_id,
+                                action="sell",
+                                time_in_force="good_till_canceled",
+                            )
+                            if resting_res and isinstance(resting_res, dict) and "error" not in resting_res:
+                                actual_id = (
+                                    resting_res.get("order", {}).get("order_id")
+                                    or resting_res.get("order_id")
+                                    or new_resting_client_id
+                                )
+                                pos["resting_order_id"] = actual_id
+                                if self.db is not None:
+                                    self.db.update_position_status(
+                                        pos["client_order_id"], PositionStatus.OPEN, resting_order_id=actual_id
+                                    )
+                                analytics.track(
+                                    "resting_order_placed",
+                                    message=f"Market {ticker}: Active safety net placed missing resting sell order for {pos.get('count', 1)} contract on {side_val.value} at {target_sell_price}c.",
+                                    ticker=ticker,
+                                    side=side_val.value,
+                                    price_cents=target_sell_price,
+                                )
+                        except Exception as e:
+                            analytics.warning(f"Could not place fallback resting order for {ticker}: {e}")
+                    elif not is_live:
+                        pos["resting_order_id"] = new_resting_client_id
+                        if self.db is not None:
+                            self.db.update_position_status(
+                                pos["client_order_id"], PositionStatus.OPEN, resting_order_id=new_resting_client_id
+                            )
+
+            # 3. TAKE-PROFIT (simulation) / STOP-LOSS / HOLD EVALUATION
+            if not is_live and has_take_profit and current_bid is not None and current_bid >= target_sell_price:
                 sold_info = self.sell_position(pos, target_sell_price, reason="take_profit")
                 if sold_info:
                     sold_positions.append(sold_info)
@@ -1435,9 +1696,10 @@ class RiskEngine:
                     sold_positions.append(sold_info)
             else:
                 display_price = f"{current_bid}c" if current_bid is not None else "N/A"
+                label = f"{tp_target}c take-profit" if tp_target is not None else f"{multiplier}x entry {pos['price_cents']}c"
                 analytics.track(
                     "order_hold",
-                    message=f"Holding {ticker} ({pos['side'].value}): current price {display_price} < target resting {target_sell_price}c ({multiplier}x entry {pos['price_cents']}c).",
+                    message=f"Holding {ticker} ({pos['side'].value}): current price {display_price} < target resting {target_sell_price}c ({label}).",
                     ticker=ticker,
                     side=pos["side"].value,
                     current_price=current_bid,
@@ -1502,11 +1764,12 @@ class RiskEngine:
         if self.is_sell_strategy and price_cents >= self.max_entry_price:
             return None
 
-        # Generate client_order_id (deterministic: env + strategy + ticker + side)
+        # Generate client_order_id (deterministic prefix + unique millisecond timestamp to prevent 409 collisions)
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
         safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
         safe_env = re.sub(r"[^a-zA-Z0-9_-]", "_", str(getattr(self.db, "environment", "demo")).lower())
-        client_order_id = f"{safe_env}_{safe_strategy}_{safe_ticker}_{side.value.lower()}"[:64]
+        ts_suffix = str(int(time.time() * 1000))[-6:]
+        client_order_id = f"{safe_env}_{safe_strategy}_{safe_ticker}_{side.value.lower()}_{ts_suffix}"[:64]
 
         # Write intent (PENDING) to SQLite before sending order to Kalshi
         if self.db is not None:
@@ -1541,6 +1804,7 @@ class RiskEngine:
 
         # If the API returned an error, mark position as FAILED
         if not result or (isinstance(result, dict) and "error" in result):
+            self.bet_markets.add(ticker)
             if self.db is not None:
                 self.db.update_position_status(client_order_id, PositionStatus.FAILED)
             return result
@@ -1558,9 +1822,9 @@ class RiskEngine:
         entry_filled = (not is_live) or (order_status == "executed") or (fill_count > 0)
         server_order_id = order_payload.get("order_id") or result.get("order_id") or client_order_id
 
-        # If live order is not immediately filled, poll briefly up to 1.5s to verify if matching engine executed it
+        # If live order is not immediately filled, poll briefly up to 2.5s to verify if matching engine executed it
         if is_live and not entry_filled and hasattr(self.client, "get_order") and server_order_id:
-            for _ in range(3):
+            for _ in range(5):
                 time.sleep(0.5)
                 order_check = self.client.get_order(server_order_id)
                 if order_check and isinstance(order_check, dict):
@@ -1581,42 +1845,51 @@ class RiskEngine:
                         order_status = "canceled"
                         break
 
-        # If live entry did NOT fill, cancel any lingering resting order and do NOT open position in SQLite
+        # If live entry did not fill immediately, attempt cancellation of the resting entry order
         if is_live and not entry_filled:
-            if self.db is not None:
-                cursor = self.db.conn.cursor()
-                cursor.execute(
-                    "DELETE FROM positions WHERE client_order_id = ? AND environment = ?",
-                    (client_order_id, self.db.environment.value),
-                )
-                self.db.conn.commit()
-            if hasattr(self.client, "cancel_order"):
+            self.bet_markets.add(ticker)
+            if hasattr(self.client, "cancel_order") and server_order_id:
                 try:
-                    self.client.cancel_order(server_order_id)
-                    analytics.track(
-                        "order_canceled",
-                        message=f"Canceled unfilled resting entry order {server_order_id} for {ticker}.",
-                        ticker=ticker,
-                        order_id=server_order_id,
-                    )
+                    try:
+                        self.client.cancel_order(server_order_id, ticker=ticker)
+                    except TypeError:
+                        self.client.cancel_order(server_order_id)
+                    time.sleep(0.2)
+                    # Check if cancellation actually succeeded or if order had already matched
+                    if hasattr(self.client, "get_order"):
+                        final_check = self.client.get_order(server_order_id)
+                        if final_check and isinstance(final_check, dict):
+                            fc_payload = final_check.get("order", final_check)
+                            fc_status = str(fc_payload.get("status") or "").lower()
+                            fc_fill = float(fc_payload.get("fill_count_fp") or fc_payload.get("fill_count") or 0.0)
+                            if fc_status == "executed" or fc_fill > 0:
+                                entry_filled = True
+                                order_payload = fc_payload
+                                fill_count = fc_fill
                 except Exception as e:
-                    analytics.warning(f"Could not cancel unfilled entry order {server_order_id}: {e}")
+                    analytics.warning(f"Error checking cancel status for {server_order_id}: {e}")
 
-            analytics.info(
-                f"[LIVE ENTRY UNFILLED] Order {client_order_id} for {ticker} did not fill (status='{order_status}', fill_count={fill_count}). Position NOT opened.",
-                ticker=ticker,
-                order_id=server_order_id,
-                status=order_status,
-                fill_count=fill_count,
-            )
-            return {
-                "order_id": server_order_id,
-                "client_order_id": client_order_id,
-                "ticker": ticker,
-                "side": side,
-                "status": "unfilled",
-                "entry_filled": False,
-            }
+            if not entry_filled:
+                if self.db is not None:
+                    cursor = self.db.conn.cursor()
+                    cursor.execute(
+                        "DELETE FROM positions WHERE client_order_id = ? AND environment = ?",
+                        (client_order_id, self.db.environment.value),
+                    )
+                    self.db.conn.commit()
+                analytics.info(
+                    f"[LIVE ENTRY UNFILLED] Order {client_order_id} for {ticker} canceled unfilled. Position NOT opened.",
+                    ticker=ticker,
+                    order_id=server_order_id,
+                )
+                return {
+                    "order_id": server_order_id,
+                    "client_order_id": client_order_id,
+                    "ticker": ticker,
+                    "side": side,
+                    "status": "unfilled",
+                    "entry_filled": False,
+                }
 
         # Extract actual execution price from Kalshi if available
         if is_live:
@@ -1629,16 +1902,23 @@ class RiskEngine:
                     price_cents = actual_price
 
         # Immediately place resting sell order if strategy uses resting exit (SELL_3N=3x, SELL_2N=2x, etc.)
+        # OR if take_profit is configured (e.g. 85c resting limit order)
         # ONLY if entry order is filled (so we never sell before owning the contract)!
         resting_order = None
         resting_order_id = None
         multiplier = get_strategy_resting_multiplier(self.strategy_name)
-        if multiplier is not None and entry_filled:
-            resting_price_cents = min(99, int(round(multiplier * price_cents)))
+        take_profit = getattr(self, "take_profit", None)
+        if (multiplier is not None or take_profit is not None) and entry_filled:
+            if take_profit is not None:
+                resting_price_cents = min(99, int(take_profit))
+                mult_label = f"target {resting_price_cents}c"
+            else:
+                resting_price_cents = min(99, int(round(multiplier * price_cents)))
+                mult_label = f"{multiplier}x entry {price_cents}c"
             resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
             analytics.track(
                 "resting_order_placed",
-                message=f"Market {ticker}: Placed resting sell order for 1 contract on {side.value} at {resting_price_cents}c ({multiplier}x entry {price_cents}c).",
+                message=f"Market {ticker}: Placed resting sell order for 1 contract on {side.value} at {resting_price_cents}c ({mult_label}).",
                 ticker=ticker,
                 side=side.value,
                 strategy=self.strategy_name.value,

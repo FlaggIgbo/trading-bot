@@ -34,3 +34,5 @@ Thumbs.db
 *.db-shm
 *.db-wal
 .trading-bot-data/
+live_data.json
+.parallel_run_meta.json

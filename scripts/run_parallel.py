@@ -9,6 +9,7 @@ and prints a comparative performance report.
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -94,9 +95,16 @@ def stream_process_output(proc, tag: str, log_file, combined_file=None, stop_eve
                 combined_file.flush()
             print(tagged, flush=True)
 
+            if "insufficient_balance" in line or "insufficient_funds" in line:
+                print(f"\n🚨 [OUT OF MONEY] Kalshi prod balance depleted in [{tag}]: {clean}", flush=True)
+                if error_records is not None:
+                    error_records.append((tag, "OUT_OF_MONEY", clean))
+                if stop_event is not None:
+                    stop_event.set()
+
             if stop_on_error and stop_event is not None and not stop_event.is_set():
                 is_err = (
-                    "[ERROR]" in line
+                    ("[ERROR]" in line and "order_already_exists" not in line)
                     or "[CRITICAL]" in line
                     or "Traceback (most recent call last)" in line
                 )
@@ -122,23 +130,33 @@ def parse_instances(spec_list: list[str]) -> list[dict]:
         strat = parts[0]
         env = parts[1] if len(parts) > 1 else "demo"
         live = len(parts) > 2 and parts[2].lower() in ("live", "true", "1")
-        explicit_sl = len(parts) > 3 and parts[3].lower() in ("sl", "stoploss", "stop_loss", "true", "1")
-        explicit_nosl = len(parts) > 3 and parts[3].lower() in ("nosl", "no_sl", "false", "0")
+        explicit_sl = any(p.lower() in ("sl", "stoploss", "stop_loss") for p in parts[3:]) or (len(parts) > 3 and parts[3].lower() in ("true", "1", "sl"))
+        explicit_nosl = any(p.lower() in ("nosl", "no_sl") for p in parts[3:]) or (len(parts) > 3 and parts[3].lower() in ("false", "0", "nosl"))
         stop_loss = (
             explicit_sl
             or ("_sl" in strat)
             or (live and "5m" in strat and not explicit_nosl)
         )
-        key = f"{strat}_{env}{'_sl' if stop_loss else ''}"
+
+        take_profit = None
+        for p in parts[3:]:
+            m_tp = re.search(r"tp_?(\d+)", p.lower())
+            if m_tp:
+                take_profit = int(m_tp.group(1))
+                break
+
+        key = f"{strat}_{env}{'_sl' if stop_loss else ''}{f'_tp{take_profit}' if take_profit else ''}"
         live_str = ", LIVE" if live else ""
         sl_str = ", SL" if stop_loss else ""
-        tag = f"{strat} ({env}{live_str}{sl_str})"
+        tp_str = f", TP{take_profit}c" if take_profit else ""
+        tag = f"{strat} ({env}{live_str}{sl_str}{tp_str})"
         instances.append({
             "raw": item,
             "strategy": strat,
             "env": env,
             "live": live,
             "stop_loss": stop_loss,
+            "take_profit": take_profit,
             "key": key,
             "tag": tag,
             "db_path": f"trading_bot_{key}.db",
@@ -175,6 +193,14 @@ def main():
     start_time = time.time()
     end_time = start_time + args.duration
     os.environ["PARALLEL_RUN_END_TIME"] = str(end_time)
+
+    meta_file = ROOT_DIR / ".parallel_run_meta.json"
+    try:
+        import json
+        with open(meta_file, "w") as f:
+            json.dump({"start_time": start_time, "end_time": end_time, "duration": args.duration}, f)
+    except Exception:
+        pass
 
     print(f"Starting parallel evaluation of {len(instances)} instances:", flush=True)
     for inst in instances:
@@ -215,6 +241,8 @@ def main():
             cmd.append("--live")
         if inst.get("stop_loss"):
             cmd.append("--stop-loss")
+        if inst.get("take_profit"):
+            cmd.extend(["--take-profit", str(inst["take_profit"])])
         p = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -262,6 +290,9 @@ def main():
     signal.signal(signal.SIGTERM, cleanup)
 
     last_interim_report = time.time()
+    last_balance_check = 0.0
+    has_live_prod = any(inst.get("live") and inst.get("env") == "prod" for inst in instances)
+
     try:
         while time.time() < end_time and not stop_event.is_set():
             time.sleep(min(2, max(1, int(end_time - time.time()))))
@@ -271,6 +302,33 @@ def main():
                 print("\n>>> [INTERIM 15-MINUTE PERFORMANCE UPDATE] <<<", flush=True)
                 print_report(instances)
                 last_interim_report = time.time()
+
+            # Check prod cash balance every 30s: halt entire run if out of money
+            if has_live_prod and time.time() - last_balance_check >= 30:
+                last_balance_check = time.time()
+                try:
+                    from ingestion.api.client import KalshiClient
+                    bal_client = KalshiClient(base_url="https://api.elections.kalshi.com/trade-api/v2", live_orders=True)
+                    url = f"{bal_client.base_url}/portfolio/balance"
+                    headers = bal_client._build_auth_headers("GET", url)
+                    res = bal_client._request("GET", url, headers=headers)
+                    if res.status_code == 200:
+                        bal_data = res.json()
+                        breakdowns = bal_data.get("balance_breakdown", [])
+                        crypto_bal = 0.0
+                        for b in breakdowns:
+                            if b.get("exchange_index") == 2:
+                                crypto_bal = float(b.get("balance", 0.0))
+                        port_val = float(bal_data.get("portfolio_value", 0)) / 100.0
+                        # If crypto cash is < $0.20 (min entry price) and portfolio value is < $0.20, funds are depleted
+                        if crypto_bal < 0.20 and port_val < 0.20:
+                            msg = f"Kalshi prod balance depleted! (Crypto cash: ${crypto_bal:.2f}, Portfolio: ${port_val:.2f})"
+                            print(f"\n🚨 [OUT OF MONEY] {msg} Halting entire parallel run.", flush=True)
+                            error_records.append(("prod", "OUT_OF_MONEY", msg))
+                            stop_event.set()
+                            break
+                except Exception:
+                    pass
 
             # Check if any child process died unexpectedly
             for inst in instances:

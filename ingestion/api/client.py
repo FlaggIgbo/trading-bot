@@ -483,7 +483,7 @@ class KalshiClient:
             )
             return {"error": str(error)}
 
-    def cancel_order(self, order_id):
+    def cancel_order(self, order_id, ticker=None):
         if not order_id:
             return None
 
@@ -496,6 +496,8 @@ class KalshiClient:
             return {"order_id": order_id, "status": "canceled"}
 
         url = f"{self.base_url}/portfolio/events/orders/{order_id}"
+        if ticker:
+            url += f"?market_ticker={ticker}"
         headers = self._build_auth_headers("DELETE", url)
         try:
             response = self._request("DELETE", url, headers=headers, timeout=10)
