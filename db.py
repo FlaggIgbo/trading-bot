@@ -58,6 +58,7 @@ class Strategy(StrEnum):
     LAST_3 = "last_3"
     LAST_5 = "last_5"
     LAST_9 = "last_9"
+    LAST_9_SPOT = "last_9_spot"
     SELL_3N = "sell_3n"
     SELL_2N = "sell_2n"
     SELL_2N_5M = "sell_2n_5m"
@@ -140,6 +141,8 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
     strat_clean = str(strategy).strip().lower()
     if strat_clean in ("last_5", "last5", "last_3", "last3"):
         return Strategy.LAST_9
+    if strat_clean in ("last_9_spot", "last9_spot", "last_9_cf", "last9_cf"):
+        return Strategy.LAST_9_SPOT
     if strat_clean in ("sell_if_3n", "sell3n"):
         return Strategy.SELL_3N
     if strat_clean in ("sell_if_2n", "sell2n"):

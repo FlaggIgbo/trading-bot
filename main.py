@@ -33,14 +33,29 @@ def seconds_until_next_slot(now=None, interval=900, offset=30):
     return 0.0 if wait == interval else wait
 
 
-def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trading_bot.db", strategy="last_9", env="demo", live=False, stop_loss=False):
+def main(
+    single_cycle=False,
+    sleep_seconds=900,
+    offset_seconds=30,
+    db_path="trading_bot.db",
+    strategy="last_9",
+    env="demo",
+    live=False,
+    stop_loss=False,
+    check_spot=False,
+    min_entry_price=None,
+    max_entry_price=None,
+):
     analytics.info(
-        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
         strategy=strategy,
         env=env,
         live=live,
         stop_loss=stop_loss,
+        check_spot=check_spot,
+        min_entry_price=min_entry_price,
+        max_entry_price=max_entry_price,
         sleep_seconds=sleep_seconds,
         offset_seconds=offset_seconds,
     )
@@ -59,7 +74,15 @@ def main(single_cycle=False, sleep_seconds=900, offset_seconds=30, db_path="trad
     # Initialize the 3 pipeline steps
     scanner = Scanner(client=client, db=db)
     settler = Settler(client=client, db=db)
-    trader = Trader(client=client, db=db, strategy=strategy, stop_loss=stop_loss)
+    trader = Trader(
+        client=client,
+        db=db,
+        strategy=strategy,
+        stop_loss=stop_loss,
+        check_spot=check_spot,
+        min_entry_price=min_entry_price,
+        max_entry_price=max_entry_price,
+    )
 
     # Main loop aligned to :00:30, :15:30, :30:30, :45:30
     try:
@@ -129,6 +152,7 @@ if __name__ == "__main__":
         default="last_9",
         choices=[
             "last_9",
+            "last_9_spot",
             "random",
             "sell_3n",
             "sell_2n",
@@ -146,7 +170,7 @@ if __name__ == "__main__":
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'last_9', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
+        help="Direction strategy: 'last_9', 'last_9_spot', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
     )
     parser.add_argument(
         "--live",
@@ -157,6 +181,23 @@ if __name__ == "__main__":
         "--stop-loss",
         action="store_true",
         help="Enable minute-10 stop loss for sell_Xn_5m strategies (exits if price <= 25c or < 50% entry)",
+    )
+    parser.add_argument(
+        "--check-spot",
+        action="store_true",
+        help="Enable real-time spot price trend alignment (Coinbase/CF Benchmarks) for last_9",
+    )
+    parser.add_argument(
+        "--min-price",
+        type=int,
+        default=None,
+        help="Minimum contract ask price in cents to enter (avoids low-probability longshots)",
+    )
+    parser.add_argument(
+        "--max-price",
+        type=int,
+        default=None,
+        help="Maximum contract ask price in cents to enter (avoids poor risk/reward)",
     )
     args = parser.parse_args()
 
@@ -169,4 +210,7 @@ if __name__ == "__main__":
         env=args.env,
         live=args.live,
         stop_loss=args.stop_loss,
+        check_spot=args.check_spot,
+        min_entry_price=args.min_price,
+        max_entry_price=args.max_price,
     )

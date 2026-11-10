@@ -22,10 +22,26 @@ def choose_side_random(past_results=None) -> PositionSide:
     return random.choice([PositionSide.YES, PositionSide.NO])
 
 
-def choose_side_last_9(past_results) -> PositionSide:
-    # Strategy 2: Look at the last 9 resolved markets for the same series.
-    # "yes" = resolved UP (above start price), "no" = resolved DOWN (below start price).
-    # If there were more ups than downs, bid YES (up). Otherwise, bid NO (down).
+def choose_side_last_9(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    spot_client: Optional[Any] = None,
+    check_spot: bool = False,
+    min_entry_price: Optional[int] = None,
+    max_entry_price: Optional[int] = None,
+    require_spot_agreement: bool = True,
+    **kwargs,
+) -> Optional[PositionSide]:
+    """
+    Enhanced Strategy 2 (last_9):
+    - Historical trend: Look at the last 9 resolved markets for the same series.
+      If there were more ups than downs, candidate is YES. Otherwise, candidate is NO.
+    - Real-time Spot Alignment: If check_spot=True and market is provided, fetches
+      real-time spot price (Coinbase/Kraken CF Benchmarks constituent) and compares against
+      market strike (floor_strike). If spot conflicts with historical last_9, skips trade.
+    - Price Cap & Value Filter: If min_entry_price or max_entry_price is set, ensures the
+      contract ask price falls within acceptable risk/reward bounds (e.g. 20c - 65c).
+    """
     last_9 = list(past_results or [])[:9]
     ups = 0
     downs = 0
@@ -36,9 +52,59 @@ def choose_side_last_9(past_results) -> PositionSide:
         elif clean == MarketResult.NO.value:
             downs += 1
 
-    if ups > downs:
-        return PositionSide.YES
-    return PositionSide.NO
+    # Determine historical candidate side (legacy: YES if ups > downs, else NO)
+    hist_side = PositionSide.YES if ups > downs else PositionSide.NO
+
+    # Exact legacy behavior if spot check and price filters are not active
+    if not check_spot and min_entry_price is None and max_entry_price is None:
+        return hist_side
+
+    # Real-time Spot Trend Alignment Check
+    if check_spot and market:
+        if spot_client is None:
+            from ingestion.spot import SpotClient
+            spot_client = SpotClient()
+        spot_side, spot_val, strike_val = spot_client.get_spot_trend(market)
+
+        if spot_side is not None:
+            if hist_side is None:
+                candidate_side = spot_side
+            elif require_spot_agreement and hist_side != spot_side:
+                analytics.info(
+                    f"Spot trend ({spot_side.value}, spot={spot_val} vs strike={strike_val}) "
+                    f"conflicts with last_9 historical ({hist_side.value}). Skipping trade."
+                )
+                return None
+            else:
+                candidate_side = spot_side
+        else:
+            candidate_side = hist_side or PositionSide.NO
+    else:
+        candidate_side = hist_side or PositionSide.NO
+
+    # Price Cap & Value Filter
+    if market and (min_entry_price is not None or max_entry_price is not None):
+        ask_cents = extract_contract_price(market, candidate_side)
+        if ask_cents is not None:
+            if min_entry_price is not None and ask_cents < min_entry_price:
+                analytics.info(f"Contract ask {ask_cents}c is below min entry price {min_entry_price}c. Skipping trade.")
+                return None
+            if max_entry_price is not None and ask_cents > max_entry_price:
+                analytics.info(f"Contract ask {ask_cents}c exceeds max entry price {max_entry_price}c. Skipping trade.")
+                return None
+
+    return candidate_side
+
+
+def last_9_spot(market: Optional[dict] = None, past_results: Any = None, **kwargs) -> Optional[PositionSide]:
+    """last_9 strategy with real-time spot trend alignment and value filter enabled by default."""
+    kw = {
+        "check_spot": True,
+        "min_entry_price": kwargs.pop("min_entry_price", 20),
+        "max_entry_price": kwargs.pop("max_entry_price", 65),
+        **kwargs,
+    }
+    return choose_side_last_9(past_results=past_results, market=market, **kw)
 
 
 # Deprecated backwards compatibility aliases (use choose_side_last_9)
@@ -441,8 +507,11 @@ STRATEGIES = {
     Strategy.LAST_3.value: choose_side_last_9,
     Strategy.LAST_5.value: choose_side_last_9,
     Strategy.LAST_9.value: choose_side_last_9,
+    Strategy.LAST_9_SPOT.value: last_9_spot,
     "last_9": choose_side_last_9,
     "last9": choose_side_last_9,
+    "last_9_spot": last_9_spot,
+    "last9_spot": last_9_spot,
     "last_5": choose_side_last_9,
     "last5": choose_side_last_9,
     "last_3": choose_side_last_9,
@@ -470,12 +539,26 @@ STRATEGIES = {
 
 
 class RiskEngine:
-    def __init__(self, client, db: Optional[Database] = None, strategy: Union[str, Strategy, Any] = Strategy.LAST_9, stop_loss: bool = False):
+    def __init__(
+        self,
+        client,
+        db: Optional[Database] = None,
+        strategy: Union[str, Strategy, Any] = Strategy.LAST_9,
+        stop_loss: bool = False,
+        spot_client: Optional[Any] = None,
+        check_spot: bool = False,
+        min_entry_price: Optional[int] = None,
+        max_entry_price: Optional[int] = None,
+    ):
         # Kalshi REST API client and optional SQLite database
         self.client = client
         self.db: Optional[Database] = db
         self.strategy = strategy
         self.stop_loss: bool = bool(stop_loss or getattr(strategy, "stop_loss", False))
+        self.spot_client = spot_client
+        self.check_spot: bool = bool(check_spot or getattr(strategy, "check_spot", False))
+        self.min_entry_price: Optional[int] = min_entry_price if min_entry_price is not None else getattr(strategy, "min_entry_price", None)
+        self.max_entry_price: Optional[int] = max_entry_price if max_entry_price is not None else getattr(strategy, "max_entry_price", None)
 
         # Check what type of input 'strategy' is:
         # 1. An existing Strategy enum object
@@ -500,6 +583,14 @@ class RiskEngine:
 
                 case "last_9" | "last9":
                     self.strategy_name = Strategy.LAST_9
+
+                case "last_9_spot" | "last9_spot" | "last_9_cf" | "last9_cf":
+                    self.strategy_name = Strategy.LAST_9_SPOT
+                    self.check_spot = True
+                    if self.min_entry_price is None:
+                        self.min_entry_price = 20
+                    if self.max_entry_price is None:
+                        self.max_entry_price = 65
 
                 case "last_5" | "last5" | "last_3" | "last3":
                     analytics.warning(f"Strategy '{strat_lower}' is deprecated. Using 'last_9'.")
@@ -546,6 +637,14 @@ class RiskEngine:
                 case _ if strategy is choose_side_random:
                     self.strategy_name = Strategy.RANDOM
 
+                case _ if strategy is last_9_spot:
+                    self.strategy_name = Strategy.LAST_9_SPOT
+                    self.check_spot = True
+                    if self.min_entry_price is None:
+                        self.min_entry_price = 20
+                    if self.max_entry_price is None:
+                        self.max_entry_price = 65
+
                 case _ if strategy in (sell_3n, choose_sell_if_3n, choose_side_sell_if_3n):
                     self.strategy_name = Strategy.SELL_3N
 
@@ -579,7 +678,12 @@ class RiskEngine:
             self.strategy_name = Strategy.LAST_5
 
         self.is_sell_strategy = is_sell_strategy(self.strategy_name)
-        self.max_entry_price = get_strategy_max_entry_price(self.strategy)
+        if self.is_sell_strategy:
+            self.max_entry_price = get_strategy_max_entry_price(self.strategy)
+
+        if self.check_spot and self.spot_client is None:
+            from ingestion.spot import SpotClient
+            self.spot_client = SpotClient()
 
         # Set of market tickers where this strategy already placed its bet
         self.bet_markets = set()
@@ -664,6 +768,25 @@ class RiskEngine:
             if market is None and self.client is not None and hasattr(self.client, "get_market"):
                 market = self.client.get_market(ticker)
             return strategy_fn(market=market)
+
+        if (
+            self.strategy_name in (Strategy.LAST_9, Strategy.LAST_9_SPOT)
+            or strategy_fn in (choose_side_last_9, last_9_spot)
+            or self.check_spot
+            or self.min_entry_price is not None
+            or self.max_entry_price is not None
+        ):
+            if market is None and self.client is not None and hasattr(self.client, "get_market"):
+                market = self.client.get_market(ticker)
+            past_results = self.get_last_9_results(ticker)
+            return choose_side_last_9(
+                past_results=past_results,
+                market=market,
+                spot_client=self.spot_client,
+                check_spot=self.check_spot,
+                min_entry_price=self.min_entry_price,
+                max_entry_price=self.max_entry_price,
+            )
 
         past_results = self.get_last_9_results(ticker)
         return strategy_fn(past_results)
@@ -980,6 +1103,13 @@ class RiskEngine:
                 return None
         else:
             price_cents = max(1, min(99, ask_cents))
+
+        # For non-sell strategies: apply value filter (price cap and floor) if configured
+        if not self.is_sell_strategy:
+            if self.min_entry_price is not None and price_cents < self.min_entry_price:
+                return None
+            if self.max_entry_price is not None and price_cents > self.max_entry_price:
+                return None
 
         # For sell strategies: must be under max entry price (Zp, default 100/n)
         if self.is_sell_strategy and price_cents >= self.max_entry_price:

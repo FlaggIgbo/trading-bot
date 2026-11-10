@@ -22,6 +22,19 @@ def test_main_single_cycle(tmp_path):
     main(single_cycle=True, sleep_seconds=0, db_path=db_file)
 
 
+def test_main_with_spot_and_price_caps(tmp_path):
+    db_file = str(tmp_path / "test_spot_bot.db")
+    main(
+        single_cycle=True,
+        sleep_seconds=0,
+        db_path=db_file,
+        strategy="last_9_spot",
+        check_spot=True,
+        min_entry_price=25,
+        max_entry_price=65,
+    )
+
+
 def test_parse_instances():
     from scripts.run_parallel import parse_instances
     specs = ["sell_1.5n_35p", "sell_1.5n_35p:prod:live", "sell_3n", "sell_2.5n:demo", "sell_1.5n_5m:prod:live:sl"]
