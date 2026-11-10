@@ -6,20 +6,83 @@ chooses a side (YES/up or NO/down) using a strategy function, and manages positi
 Supports last-5 resolved trend following, random selection, and sell-if-3x momentum strategy.
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 import random
 import re
 import time
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Protocol, Union
 
-from db import Database, MarketResult, MarketStatus, PositionSide, PositionStatus, Strategy
+from db import (
+    Database,
+    MarketResult,
+    MarketStatus,
+    PositionSide,
+    PositionStatus,
+    Strategy,
+    normalize_strategy,
+)
 from ingestion.api.client import is_binary_market
 from logging.analytics import analytics
+from risk_engine.broker import Broker, KalshiBroker, SimulatedBroker
+from risk_engine.decision import Decision
+from risk_engine.reconciler import Reconciler
+from risk_engine.rules import (
+    DEFAULT_RISK_RULES,
+    RiskContext,
+    evaluate_risk_rules,
+    rule_is_binary_market,
+    rule_kill_switch_not_active,
+    rule_market_is_open,
+    rule_no_existing_position,
+    rule_not_past_close,
+    rule_under_daily_loss_cap,
+    rule_under_max_open,
+)
+
+
+class StrategyProtocol(Protocol):
+    """Protocol for pure strategy functions: recent history -> Side.YES, Side.NO, or None."""
+    def __call__(
+        self,
+        past_results: Optional[list[str]] = None,
+        market: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Optional[PositionSide]:
+        ...
+
+
+def strategy_random(past_results=None, market=None, **kwargs) -> PositionSide:
+    """Baseline strategy: randomly pick YES or NO."""
+    return random.choice([PositionSide.YES, PositionSide.NO])
+
+
+def strategy_last_9(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    min_samples: int = 9,
+    **kwargs,
+) -> Optional[PositionSide]:
+    """
+    Pure strategy: trend-following from the last 9 resolutions.
+    Returns None if the series has fewer than min_samples resolutions (no opinion).
+    """
+    clean = [
+        str(r).strip().lower()
+        for r in (past_results or [])
+        if str(r).strip().lower() in (MarketResult.YES.value, MarketResult.NO.value)
+    ]
+    if len(clean) < min_samples:
+        return None
+    recent = clean[:9]
+    ups = sum(1 for r in recent if r == MarketResult.YES.value)
+    downs = sum(1 for r in recent if r == MarketResult.NO.value)
+    return PositionSide.YES if ups > downs else PositionSide.NO
 
 
 def choose_side_random(past_results=None) -> PositionSide:
     # Strategy 1: Randomly pick YES (up) or NO (down)
-    return random.choice([PositionSide.YES, PositionSide.NO])
+    return strategy_random(past_results=past_results)
 
 
 def choose_side_last_9(
@@ -510,6 +573,7 @@ STRATEGIES = {
     Strategy.LAST_9_SPOT.value: last_9_spot,
     "last_9": choose_side_last_9,
     "last9": choose_side_last_9,
+    "last_9_strict": strategy_last_9,
     "last_9_spot": last_9_spot,
     "last9_spot": last_9_spot,
     "last_5": choose_side_last_9,
@@ -538,6 +602,299 @@ STRATEGIES = {
 }
 
 
+@dataclass
+class Config:
+    """Configuration injected into TradeEngine and RiskEngine."""
+    env: str = "demo"
+    max_open_positions: int = 10
+    daily_loss_cap_cents: int = 5000  # $50 daily loss cap
+    kill_switch_path: str = "KILL_SWITCH"
+    shadow_mode: bool = False
+    stop_loss: bool = False
+    check_spot: bool = False
+    min_entry_price: Optional[int] = None
+    max_entry_price: Optional[int] = None
+    default_contract_price: int = 50
+    live_orders: bool = False
+
+
+class TradeEngine:
+    """
+    Pure orchestrator for evaluating markets, checking risk, and placing orders.
+    Decoupled from direct I/O:
+    - Logic (Strategy, RiskRules): pure functions, no network I/O
+    - Database: injected repository (Database)
+    - Execution: injected broker (KalshiBroker or SimulatedBroker)
+    """
+    def __init__(
+        self,
+        repo: Database,
+        broker: Broker,
+        strategy_fn: Any = choose_side_last_9,
+        strategy_name: Union[str, Strategy] = Strategy.LAST_9,
+        config: Optional[Config] = None,
+        rules: Optional[list[Callable[[RiskContext], Optional[str]]]] = None,
+    ):
+        self.repo = repo
+        self.broker = broker
+        self.strategy_fn = strategy_fn
+        self.strategy_name = (
+            normalize_strategy(strategy_name)
+            if isinstance(strategy_name, (str, Strategy))
+            else Strategy.LAST_9
+        )
+        self.config = config or Config()
+        self.rules = rules if rules is not None else DEFAULT_RISK_RULES
+        self.reconciler = Reconciler(broker=self.broker, db=self.repo)
+
+    def run_cycle(self) -> list[Decision]:
+        """
+        Orchestration only. Reads like a story:
+        Query candidate markets -> process each market -> catch exceptions so one bad market never kills the cycle.
+        """
+        # Periodic reconciliation of any lingering PENDING positions
+        try:
+            self.reconciler.reconcile()
+        except Exception as e:
+            analytics.warning(f"Reconciliation error in run_cycle: {e}")
+
+        candidates = self.repo.get_candidates(
+            environment=self.config.env,
+            strategy=self.strategy_name,
+        )
+        decisions: list[Decision] = []
+        for market in candidates:
+            try:
+                decision = self._process(market)
+                if decision:
+                    decisions.append(decision)
+            except Exception as e:
+                ticker = market.get("ticker", "unknown")
+                analytics.exception(
+                    f"Market {ticker} failed during cycle: {e}",
+                    extra={"ticker": ticker, "strategy": self.strategy_name.value},
+                )
+        return decisions
+
+    def _process(self, market: dict[str, Any], now: Optional[datetime] = None) -> Optional[Decision]:
+        ticker = market.get("ticker")
+        if not ticker:
+            return None
+
+        # 1. Evaluate pure risk rules
+        ctx = RiskContext(
+            market=market,
+            strategy_name=self.strategy_name.value,
+            db=self.repo,
+            max_open_positions=self.config.max_open_positions,
+            daily_loss_cap_cents=self.config.daily_loss_cap_cents,
+            kill_switch_path=self.config.kill_switch_path,
+            now=now,
+        )
+        reason = evaluate_risk_rules(ctx, self.rules)
+        if reason is not None:
+            decision = Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=None,
+                reason=reason,
+            )
+            self.repo.log_event(
+                stage="risk_check",
+                level="INFO",
+                message=f"Market {ticker} skipped: {reason}",
+                ticker=ticker,
+                strategy=self.strategy_name.value,
+            )
+            return decision
+
+        # 2. Get past resolutions for strategy
+        series = ticker.split("-")[0]
+        past_results = self.repo.get_recent_results(series, limit=9) if self.repo else []
+
+        # 3. Pure strategy evaluation
+        side = None
+        if callable(self.strategy_fn):
+            try:
+                side = self.strategy_fn(
+                    past_results=past_results,
+                    market=market,
+                    check_spot=self.config.check_spot,
+                    min_entry_price=self.config.min_entry_price,
+                    max_entry_price=self.config.max_entry_price,
+                )
+            except TypeError:
+                side = self.strategy_fn(past_results=past_results)
+
+        if side is None:
+            return Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=None,
+                reason="strategy_no_opinion",
+            )
+
+        # 4. Extract price in cents
+        ask_cents = extract_contract_price(market, side)
+        if ask_cents is None:
+            price_cents = self.config.default_contract_price
+        else:
+            price_cents = max(1, min(99, ask_cents))
+
+        # Check price bounds
+        if self.config.min_entry_price is not None and price_cents < self.config.min_entry_price:
+            return Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=side,
+                price_cents=price_cents,
+                reason=f"ask_{price_cents}c_below_min_{self.config.min_entry_price}c",
+            )
+        if self.config.max_entry_price is not None and price_cents > self.config.max_entry_price:
+            return Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=side,
+                price_cents=price_cents,
+                reason=f"ask_{price_cents}c_above_max_{self.config.max_entry_price}c",
+            )
+
+        # 5. Shadow Mode: log decision without placing order
+        if self.config.shadow_mode:
+            self.repo.log_event(
+                stage="trader",
+                level="INFO",
+                message=f"[SHADOW] Would bet 1 contract on {side.value} for {ticker} at {price_cents}c",
+                ticker=ticker,
+                strategy=self.strategy_name.value,
+            )
+            return Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=side,
+                price_cents=price_cents,
+                shadow=True,
+            )
+
+        # 6. Deterministic client_order_id: env + strategy + ticker + side
+        safe_env = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.config.env).lower())
+        safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value).lower())
+        safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
+        client_order_id = f"{safe_env}_{safe_strategy}_{safe_ticker}_{side.value.lower()}"[:64]
+
+        # 7. Write intent before API call (State machine: PENDING)
+        close_time = market.get("close_time", "")
+        self.repo.insert_pending_position(
+            client_order_id=client_order_id,
+            ticker=ticker,
+            side=side,
+            count=1,
+            price_cents=price_cents,
+            close_time=close_time,
+            environment=self.config.env,
+            strategy=self.strategy_name,
+        )
+        self.repo.log_event(
+            stage="trader",
+            level="INFO",
+            message=f"Write intent: PENDING 1 contract on {side.value} for {ticker} at {price_cents}c",
+            ticker=ticker,
+            strategy=self.strategy_name.value,
+        )
+
+        # 8. Submit order via Broker
+        order_result = None
+        try:
+            order_result = self.broker.place_order(
+                ticker=ticker,
+                side=side,
+                count=1,
+                price_cents=price_cents,
+                client_order_id=client_order_id,
+                action="buy",
+            )
+        except Exception as e:
+            self.repo.update_position_status(client_order_id, PositionStatus.FAILED)
+            self.repo.log_event(
+                stage="trader",
+                level="ERROR",
+                message=f"Broker error for {ticker}: {e}",
+                ticker=ticker,
+                strategy=self.strategy_name.value,
+            )
+            return Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=side,
+                price_cents=price_cents,
+                reason=f"broker_error_{e}",
+            )
+
+        # 9. Verify order success & update state machine
+        if not order_result or (isinstance(order_result, dict) and "error" in order_result):
+            self.repo.update_position_status(client_order_id, PositionStatus.FAILED)
+            self.repo.log_event(
+                stage="trader",
+                level="WARNING",
+                message=f"Order rejected on Kalshi for {ticker}: {order_result}. Marked FAILED.",
+                ticker=ticker,
+                strategy=self.strategy_name.value,
+            )
+            return Decision(
+                ticker=ticker,
+                market=market,
+                strategy=self.strategy_name.value,
+                side=side,
+                price_cents=price_cents,
+                reason="order_rejected_by_exchange",
+            )
+
+        # Transition PENDING -> OPEN in SQLite
+        self.repo.update_position_status(client_order_id, PositionStatus.OPEN)
+        self.repo.log_event(
+            stage="trader",
+            level="INFO",
+            message=f"Order filled: OPEN 1 contract on {side.value} for {ticker} at {price_cents}c",
+            ticker=ticker,
+            strategy=self.strategy_name.value,
+        )
+
+        # 10. For momentum sell strategies: place resting sell order if applicable
+        multiplier = get_strategy_resting_multiplier(self.strategy_name)
+        if multiplier is not None:
+            resting_price_cents = min(99, int(round(multiplier * price_cents)))
+            resting_order_id = f"{safe_strategy}_resting_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
+            try:
+                resting_res = self.broker.place_order(
+                    ticker=ticker,
+                    side=side,
+                    count=1,
+                    price_cents=resting_price_cents,
+                    client_order_id=resting_order_id,
+                    action="sell",
+                    time_in_force="good_till_canceled",
+                )
+                if resting_res and isinstance(resting_res, dict) and "error" not in resting_res:
+                    actual_rest_id = resting_res.get("order", {}).get("order_id") or resting_res.get("order_id") or resting_order_id
+                    self.repo.update_position_status(client_order_id, PositionStatus.OPEN, resting_order_id=actual_rest_id)
+            except Exception as e:
+                analytics.warning(f"Could not place resting sell order for {ticker}: {e}")
+
+        return Decision(
+            ticker=ticker,
+            market=market,
+            strategy=self.strategy_name.value,
+            side=side,
+            price_cents=price_cents,
+        )
+
+
 class RiskEngine:
     def __init__(
         self,
@@ -549,6 +906,8 @@ class RiskEngine:
         check_spot: bool = False,
         min_entry_price: Optional[int] = None,
         max_entry_price: Optional[int] = None,
+        broker: Optional[Broker] = None,
+        config: Optional[Config] = None,
     ):
         # Kalshi REST API client and optional SQLite database
         self.client = client
@@ -689,6 +1048,34 @@ class RiskEngine:
         self.bet_markets = set()
         if self.db is not None:
             self.bet_markets = self.db.get_positioned_tickers(strategy=self.strategy_name)
+
+        if broker is not None:
+            self.broker = broker
+        elif client is not None:
+            is_live = bool(getattr(client, "live_orders", False))
+            self.broker = KalshiBroker(client) if is_live else SimulatedBroker(client)
+        else:
+            self.broker = SimulatedBroker()
+
+        self.config = config or Config(
+            env=getattr(self.db, "environment", "demo") if self.db else "demo",
+            stop_loss=self.stop_loss,
+            check_spot=self.check_spot,
+            min_entry_price=self.min_entry_price,
+            max_entry_price=self.max_entry_price,
+            live_orders=bool(self.client and getattr(self.client, "live_orders", False)),
+        )
+
+        if self.db is not None:
+            self.trade_engine = TradeEngine(
+                repo=self.db,
+                broker=self.broker,
+                strategy_fn=self.strategy if callable(self.strategy) else STRATEGIES.get(str(self.strategy_name.value), choose_side_last_9),
+                strategy_name=self.strategy_name,
+                config=self.config,
+            )
+        else:
+            self.trade_engine = None
 
     def is_market_open(self, market):
         # Check if market status is open or active
@@ -1115,10 +1502,24 @@ class RiskEngine:
         if self.is_sell_strategy and price_cents >= self.max_entry_price:
             return None
 
-        # Generate client_order_id (tagged by strategy so parallel runs never collide)
+        # Generate client_order_id (deterministic: env + strategy + ticker + side)
         safe_ticker = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
         safe_strategy = re.sub(r"[^a-zA-Z0-9_-]", "_", str(self.strategy_name.value))
-        client_order_id = f"{safe_strategy}_buy_{side.value.lower()}_{safe_ticker}_{int(time.time() * 1000)}"[:64]
+        safe_env = re.sub(r"[^a-zA-Z0-9_-]", "_", str(getattr(self.db, "environment", "demo")).lower())
+        client_order_id = f"{safe_env}_{safe_strategy}_{safe_ticker}_{side.value.lower()}"[:64]
+
+        # Write intent (PENDING) to SQLite before sending order to Kalshi
+        if self.db is not None:
+            close_time = market.get("close_time", "")
+            self.db.insert_pending_position(
+                client_order_id=client_order_id,
+                ticker=ticker,
+                side=side,
+                count=1,
+                price_cents=price_cents,
+                close_time=close_time,
+                strategy=self.strategy_name,
+            )
 
         # Place the bet of 1 contract on Kalshi
         analytics.track(
@@ -1138,8 +1539,10 @@ class RiskEngine:
             action="buy",
         )
 
-        # If the API returned an error, do not record the position as OPEN
+        # If the API returned an error, mark position as FAILED
         if not result or (isinstance(result, dict) and "error" in result):
+            if self.db is not None:
+                self.db.update_position_status(client_order_id, PositionStatus.FAILED)
             return result
 
         # Check if entry order actually executed (or is simulated)
@@ -1180,6 +1583,13 @@ class RiskEngine:
 
         # If live entry did NOT fill, cancel any lingering resting order and do NOT open position in SQLite
         if is_live and not entry_filled:
+            if self.db is not None:
+                cursor = self.db.conn.cursor()
+                cursor.execute(
+                    "DELETE FROM positions WHERE client_order_id = ? AND environment = ?",
+                    (client_order_id, self.db.environment.value),
+                )
+                self.db.conn.commit()
             if hasattr(self.client, "cancel_order"):
                 try:
                     self.client.cancel_order(server_order_id)
@@ -1320,7 +1730,12 @@ class RiskEngine:
         return results
 
     def trade(self, markets=None, now: Any = None, check_timing: bool = True):
-        # Run Step 2 (Trader): check open positions, evaluate candidates, place orders
+        # Run Step 2 (Trader): reconcile pending orders, check open positions, evaluate candidates, place orders
+        if getattr(self, "trade_engine", None) is not None:
+            try:
+                self.trade_engine.reconciler.reconcile()
+            except Exception as e:
+                analytics.warning(f"Reconciliation error in trade(): {e}")
         return self.evaluate_all(markets=markets, now=now, check_timing=check_timing)
 
 

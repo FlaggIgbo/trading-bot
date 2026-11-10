@@ -9,6 +9,7 @@ System design:
 """
 
 import argparse
+import os
 import time
 from dotenv import load_dotenv
 
@@ -16,7 +17,9 @@ from db import Database
 from ingestion.api.client import KalshiClient
 from ingestion.scanner import Scanner
 from logging.analytics import analytics
-from risk_engine.engine import Trader
+from risk_engine.broker import KalshiBroker, SimulatedBroker
+from risk_engine.engine import Config, TradeEngine, Trader
+from risk_engine.reconciler import Reconciler
 from risk_engine.settler import Settler
 
 # Load environment variables from .env file
@@ -45,33 +48,71 @@ def main(
     check_spot=False,
     min_entry_price=None,
     max_entry_price=None,
+    shadow_mode=False,
+    max_open_positions=10,
+    daily_loss_cap_cents=5000,
+    kill_switch_path="KILL_SWITCH",
 ):
     analytics.info(
-        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, shadow={shadow_mode}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
         strategy=strategy,
         env=env,
         live=live,
         stop_loss=stop_loss,
         check_spot=check_spot,
+        shadow=shadow_mode,
         min_entry_price=min_entry_price,
         max_entry_price=max_entry_price,
+        max_open_positions=max_open_positions,
+        daily_loss_cap_cents=daily_loss_cap_cents,
         sleep_seconds=sleep_seconds,
         offset_seconds=offset_seconds,
     )
 
+    # Support DB_PATH env var for persistent disk mount on Render (/var/data/trading_bot.db)
+    effective_db_path = os.getenv("DB_PATH", db_path)
+
     # Initialize Kalshi REST API client and SQLite database (tagged by environment)
     base_url = "https://api.elections.kalshi.com/trade-api/v2" if str(env).lower() in ("prod", "production") else "https://demo-api.kalshi.co/trade-api/v2"
     client = KalshiClient(base_url=base_url, live_orders=live)
-    db = Database(db_path=db_path, environment=client.environment)
+    db = Database(db_path=effective_db_path, environment=client.environment)
     analytics.info(
-        f"Environment: {client.environment} ({client.base_url})",
+        f"Environment: {client.environment} ({client.base_url}) [DB: {effective_db_path}]",
         event="environment_init",
         environment=client.environment,
         base_url=client.base_url,
+        db_path=effective_db_path,
     )
 
-    # Initialize the 3 pipeline steps
+    # Pick broker once: KalshiBroker for live exchange orders, SimulatedBroker for simulation
+    broker = KalshiBroker(client=client) if live else SimulatedBroker(client=client)
+
+    # Startup reconciliation: check any PENDING positions from previous runs/crashes
+    reconciler = Reconciler(broker=broker, db=db)
+    reconciled = reconciler.reconcile()
+    if reconciled:
+        analytics.info(
+            f"Startup reconciler resolved {len(reconciled)} pending positions.",
+            event="startup_reconciliation",
+            count=len(reconciled),
+        )
+
+    # Build injected Config
+    config = Config(
+        env=client.environment.value,
+        max_open_positions=max_open_positions,
+        daily_loss_cap_cents=daily_loss_cap_cents,
+        kill_switch_path=kill_switch_path,
+        shadow_mode=shadow_mode,
+        stop_loss=stop_loss,
+        check_spot=check_spot,
+        min_entry_price=min_entry_price,
+        max_entry_price=max_entry_price,
+        live_orders=live,
+    )
+
+    # Initialize pipeline steps with injected dependencies
     scanner = Scanner(client=client, db=db)
     settler = Settler(client=client, db=db)
     trader = Trader(
@@ -82,11 +123,22 @@ def main(
         check_spot=check_spot,
         min_entry_price=min_entry_price,
         max_entry_price=max_entry_price,
+        broker=broker,
+        config=config,
     )
 
     # Main loop aligned to :00:30, :15:30, :30:30, :45:30
     try:
         while True:
+            # Check local kill switch every cycle
+            if (kill_switch_path and os.path.exists(kill_switch_path)) or os.getenv("KILL_SWITCH", "").lower() in ("1", "true", "yes"):
+                analytics.warning(
+                    "Kill switch is ACTIVE! Pausing cycle for 10 seconds.",
+                    event="kill_switch_active",
+                )
+                time.sleep(10)
+                continue
+
             if not single_cycle and sleep_seconds > 0:
                 wait_sec = seconds_until_next_slot(interval=sleep_seconds, offset=offset_seconds)
                 analytics.info(
@@ -199,6 +251,29 @@ if __name__ == "__main__":
         default=None,
         help="Maximum contract ask price in cents to enter (avoids poor risk/reward)",
     )
+    parser.add_argument(
+        "--shadow",
+        action="store_true",
+        help="Run strategy in shadow mode (evaluate and log decisions, but do not place orders)",
+    )
+    parser.add_argument(
+        "--max-open",
+        type=int,
+        default=10,
+        help="Bankroll limit: maximum simultaneous open positions allowed (default: 10)",
+    )
+    parser.add_argument(
+        "--daily-loss-cap",
+        type=int,
+        default=5000,
+        help="Bankroll limit: daily loss cap in cents (default: 5000 = $50)",
+    )
+    parser.add_argument(
+        "--kill-switch",
+        type=str,
+        default="KILL_SWITCH",
+        help="File path to check for local kill switch trigger (default: KILL_SWITCH)",
+    )
     args = parser.parse_args()
 
     main(
@@ -213,4 +288,8 @@ if __name__ == "__main__":
         check_spot=args.check_spot,
         min_entry_price=args.min_price,
         max_entry_price=args.max_price,
+        shadow_mode=args.shadow,
+        max_open_positions=args.max_open,
+        daily_loss_cap_cents=args.daily_loss_cap,
+        kill_switch_path=args.kill_switch,
     )

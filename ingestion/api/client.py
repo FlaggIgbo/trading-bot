@@ -6,6 +6,7 @@ Handles authentication, fetching open markets, placing orders, and checking mark
 
 import base64
 import os
+import random
 import re
 import time
 from urllib.parse import urlparse
@@ -136,8 +137,15 @@ class KalshiClient:
         key_content = os.getenv("KALSHI_DEMO_PRIVATE_KEY_CONTENT") if is_demo_url else (os.getenv("KALSHI_PRIVATE_KEY_CONTENT") or os.getenv("KALSHI_PRIVATE_KEY"))
         self.private_key = load_private_key(key_path=key_path, key_content=key_content)
 
-        # HTTP session
+        # HTTP session and resilience settings
         self.session = requests.Session()
+        self.min_request_interval: float = 0.1  # 10 req/s rate limit
+        self._last_request_time: float = 0.0
+        self.max_retries: int = 3
+        self.consecutive_failures: int = 0
+        self.circuit_breaker_threshold: int = 5
+        self.circuit_breaker_cooldown: float = 60.0  # seconds
+        self._circuit_open_until: float = 0.0
 
     def _build_auth_headers(self, method, full_url):
         # Extract path without domain name
@@ -181,8 +189,67 @@ class KalshiClient:
                 pass
 
     def _request(self, method: str, url: str, **kwargs):
-        self._log_api_call(method, url)
-        return self.session.request(method, url, **kwargs)
+        """
+        Execute HTTP request with:
+        - Circuit breaker protection
+        - Client-side rate limiting
+        - Exponential backoff and jitter on 5xx and network errors
+        - Default 10s timeout
+        """
+        now = time.time()
+        # 1. Check Circuit Breaker
+        if now < self._circuit_open_until:
+            wait_time = int(self._circuit_open_until - now)
+            analytics.warning(
+                f"[CIRCUIT BREAKER] Open due to {self.consecutive_failures} failures. Calls paused for {wait_time}s.",
+                event="circuit_breaker_active",
+                wait_seconds=wait_time,
+            )
+            raise RuntimeError(f"Circuit breaker is OPEN. Kalshi API calls paused for {wait_time}s.")
+
+        # 2. Client-side rate limit
+        elapsed = now - self._last_request_time
+        if elapsed < self.min_request_interval:
+            time.sleep(self.min_request_interval - elapsed)
+        self._last_request_time = time.time()
+
+        # 3. Timeout default
+        kwargs.setdefault("timeout", 10.0)
+
+        # 4. Exponential backoff and retry loop
+        last_exception = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                self._log_api_call(method, url)
+                response = self.session.request(method, url, **kwargs)
+
+                # Retry on 5xx server errors
+                if response.status_code >= 500:
+                    if attempt < self.max_retries:
+                        backoff = (0.5 * (2 ** attempt)) + random.uniform(0.05, 0.15)
+                        time.sleep(backoff)
+                        continue
+
+                # Successful request resets consecutive failure count
+                self.consecutive_failures = 0
+                return response
+
+            except (requests.exceptions.RequestException, TimeoutError) as e:
+                last_exception = e
+                if attempt < self.max_retries:
+                    backoff = (0.5 * (2 ** attempt)) + random.uniform(0.05, 0.15)
+                    time.sleep(backoff)
+                else:
+                    self.consecutive_failures += 1
+                    if self.consecutive_failures >= self.circuit_breaker_threshold:
+                        self._circuit_open_until = time.time() + self.circuit_breaker_cooldown
+                        analytics.error(
+                            f"[CIRCUIT BREAKER] Tripped after {self.consecutive_failures} consecutive failures. Pausing API for {self.circuit_breaker_cooldown}s.",
+                            event="circuit_breaker_tripped",
+                            failures=self.consecutive_failures,
+                            cooldown_seconds=self.circuit_breaker_cooldown,
+                        )
+                    raise last_exception
 
     def get_open_markets(self, series_list=None, limit_per_series=20):
         # GET /markets?series_ticker=...&status=open

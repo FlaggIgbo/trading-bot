@@ -6,8 +6,10 @@ Stores markets and orders/positions for the trading bot, differentiated by envir
 """
 
 from enum import StrEnum
+import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -49,8 +51,10 @@ OrderSide = PositionSide
 
 
 class PositionStatus(StrEnum):
+    PENDING = "PENDING"
     OPEN = "OPEN"
     SETTLED = "SETTLED"
+    FAILED = "FAILED"
 
 
 class Strategy(StrEnum):
@@ -216,12 +220,38 @@ class Database:
                 status TEXT NOT NULL DEFAULT '{PositionStatus.OPEN.value}' CHECK (status IN ({pstatus_values})),
                 close_time TEXT,
                 pnl_cents INTEGER,
-                resting_order_id TEXT
+                resting_order_id TEXT,
+                fees_cents INTEGER DEFAULT 0,
+                created_at TEXT,
+                settled_at TEXT
             )
             """
         )
 
-        # Ensure environment, strategy, and resting_order_id columns exist if migrating an older SQLite database file
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                level TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                ticker TEXT,
+                strategy TEXT,
+                message TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+
+        # Unique index: enforces at most one position per (environment, strategy, ticker)
+        try:
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_env_strat_ticker ON positions (environment, strategy, ticker)"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # Ensure all columns exist if migrating an older SQLite database file
         for table in ("markets", "positions"):
             cursor.execute(f"PRAGMA table_info({table})")
             cols = {row["name"] for row in cursor.fetchall()}
@@ -229,14 +259,27 @@ class Database:
                 cursor.execute(
                     f"ALTER TABLE {table} ADD COLUMN environment TEXT NOT NULL DEFAULT '{Environment.DEMO.value}'"
                 )
-            if table == "positions" and "strategy" not in cols:
-                cursor.execute(
-                    f"ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT '{Strategy.RANDOM.value}'"
-                )
-            if table == "positions" and "resting_order_id" not in cols:
-                cursor.execute(
-                    "ALTER TABLE positions ADD COLUMN resting_order_id TEXT"
-                )
+            if table == "positions":
+                if "strategy" not in cols:
+                    cursor.execute(
+                        f"ALTER TABLE positions ADD COLUMN strategy TEXT NOT NULL DEFAULT '{Strategy.RANDOM.value}'"
+                    )
+                if "resting_order_id" not in cols:
+                    cursor.execute(
+                        "ALTER TABLE positions ADD COLUMN resting_order_id TEXT"
+                    )
+                if "fees_cents" not in cols:
+                    cursor.execute(
+                        "ALTER TABLE positions ADD COLUMN fees_cents INTEGER DEFAULT 0"
+                    )
+                if "created_at" not in cols:
+                    cursor.execute(
+                        "ALTER TABLE positions ADD COLUMN created_at TEXT"
+                    )
+                if "settled_at" not in cols:
+                    cursor.execute(
+                        "ALTER TABLE positions ADD COLUMN settled_at TEXT"
+                    )
 
         self.conn.commit()
 
@@ -353,6 +396,212 @@ class Database:
             cursor.execute("SELECT ticker FROM positions WHERE environment = ?", (env.value,))
         return {row["ticker"] for row in cursor.fetchall()}
 
+    def log_event(
+        self,
+        stage: str,
+        level: str,
+        message: str,
+        ticker: Optional[str] = None,
+        strategy: Optional[str] = None,
+        payload: Optional[dict] = None,
+    ) -> None:
+        """Record an audit or debug event in the SQLite events table."""
+        cursor = self.conn.cursor()
+        ts = datetime.now(timezone.utc).isoformat()
+        payload_str = json.dumps(payload) if payload else "{}"
+        cursor.execute(
+            """
+            INSERT INTO events (timestamp, level, stage, ticker, strategy, message, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, level.upper(), stage, ticker or "", str(strategy or ""), message, payload_str),
+        )
+        self.conn.commit()
+
+    def get_events(
+        self,
+        stage: Optional[str] = None,
+        level: Optional[str] = None,
+        ticker: Optional[str] = None,
+        strategy: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent audit events from the SQLite events table."""
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM events WHERE 1=1"
+        params: list[Any] = []
+        if stage:
+            query += " AND stage = ?"
+            params.append(stage)
+        if level:
+            query += " AND level = ?"
+            params.append(level.upper())
+        if ticker:
+            query += " AND ticker = ?"
+            params.append(ticker)
+        if strategy:
+            query += " AND strategy = ?"
+            params.append(str(strategy))
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        cursor.execute(query, tuple(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+    def insert_pending_position(
+        self,
+        client_order_id: str,
+        ticker: str,
+        side: PositionSide,
+        count: int = 1,
+        price_cents: int = 50,
+        close_time: str = "",
+        environment: Optional[str] = None,
+        strategy: Strategy = Strategy.LAST_9,
+        resting_order_id: Optional[str] = None,
+        fees_cents: int = 0,
+    ) -> None:
+        """
+        Write intent before placing the order with the broker.
+        State machine begins at PENDING so crashes or retries never leave an unrecorded bet.
+        """
+        env = normalize_environment(environment or self.environment)
+        pos_side = normalize_position_side(side)
+        pos_strategy = normalize_strategy(strategy)
+        now_ts = datetime.now(timezone.utc).isoformat()
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO positions (
+                client_order_id, ticker, environment, strategy, side, count, price_cents, status, close_time, pnl_cents, resting_order_id, fees_cents, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+            """,
+            (
+                client_order_id,
+                ticker,
+                env.value,
+                pos_strategy.value,
+                pos_side.value,
+                int(count),
+                int(price_cents),
+                PositionStatus.PENDING.value,
+                close_time or "",
+                resting_order_id or "",
+                int(fees_cents),
+                now_ts,
+            ),
+        )
+        self.conn.commit()
+
+    def update_position_status(
+        self,
+        client_order_id: str,
+        status: PositionStatus,
+        pnl_cents: Optional[int] = None,
+        resting_order_id: Optional[str] = None,
+        fees_cents: Optional[int] = None,
+        price_cents: Optional[int] = None,
+        environment: Optional[str] = None,
+    ) -> None:
+        """Update position status (e.g. PENDING -> OPEN, PENDING -> FAILED, OPEN -> SETTLED)."""
+        env = normalize_environment(environment or self.environment)
+        pos_status = normalize_position_status(status)
+        cursor = self.conn.cursor()
+
+        updates = ["status = ?"]
+        params: list[Any] = [pos_status.value]
+
+        if pnl_cents is not None:
+            updates.append("pnl_cents = ?")
+            params.append(int(pnl_cents))
+        if resting_order_id is not None:
+            updates.append("resting_order_id = ?")
+            params.append(resting_order_id)
+        if fees_cents is not None:
+            updates.append("fees_cents = ?")
+            params.append(int(fees_cents))
+        if price_cents is not None:
+            updates.append("price_cents = ?")
+            params.append(int(price_cents))
+        if pos_status == PositionStatus.SETTLED:
+            updates.append("settled_at = ?")
+            params.append(datetime.now(timezone.utc).isoformat())
+
+        params.extend([client_order_id, env.value])
+        sql = f"UPDATE positions SET {', '.join(updates)} WHERE client_order_id = ? AND environment = ?"
+        cursor.execute(sql, tuple(params))
+        self.conn.commit()
+
+    def get_pending_positions(self, environment: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return positions in PENDING status for reconciliation on startup or periodic sync."""
+        env = normalize_environment(environment or self.environment)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM positions WHERE status = ? AND environment = ?",
+            (PositionStatus.PENDING.value, env.value),
+        )
+        return [self._hydrate_position_row(row) for row in cursor.fetchall()]
+
+    def get_open_position_count(self, environment: Optional[str] = None, strategy: Optional[str] = None) -> int:
+        """Return the count of currently OPEN positions (used for bankroll max open positions check)."""
+        env = normalize_environment(environment or self.environment)
+        cursor = self.conn.cursor()
+        if strategy is not None:
+            strat = normalize_strategy(strategy)
+            cursor.execute(
+                "SELECT COUNT(*) AS c FROM positions WHERE status = ? AND environment = ? AND strategy = ?",
+                (PositionStatus.OPEN.value, env.value, strat.value),
+            )
+        else:
+            cursor.execute(
+                "SELECT COUNT(*) AS c FROM positions WHERE status = ? AND environment = ?",
+                (PositionStatus.OPEN.value, env.value),
+            )
+        row = cursor.fetchone()
+        return int(row["c"]) if row else 0
+
+    def get_daily_loss_cents(
+        self,
+        date_str: Optional[str] = None,
+        environment: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> int:
+        """
+        Calculate total net losses in cents for today.
+        Returns positive integer representing total loss amount in cents.
+        """
+        env = normalize_environment(environment or self.environment)
+        if not date_str:
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        cursor = self.conn.cursor()
+        query = """
+            SELECT SUM(pnl_cents) as total_pnl FROM positions
+            WHERE environment = ? AND status = ? AND pnl_cents IS NOT NULL
+            AND (settled_at LIKE ? OR created_at LIKE ?)
+        """
+        params: list[Any] = [env.value, PositionStatus.SETTLED.value, f"{date_str}%", f"{date_str}%"]
+        if strategy is not None:
+            strat = normalize_strategy(strategy)
+            query += " AND strategy = ?"
+            params.append(strat.value)
+
+        cursor.execute(query, tuple(params))
+        row = cursor.fetchone()
+        total_pnl = row["total_pnl"] if row and row["total_pnl"] is not None else 0
+        # If total_pnl is negative (e.g. -1500), return 1500 as the loss cents
+        return max(0, -int(total_pnl))
+
+    def get_candidates(self, environment: Optional[str] = None, strategy: Optional[str] = None) -> list[dict[str, Any]]:
+        """
+        Return candidate markets from SQLite for trading:
+        Open/active markets that don't already have an existing position for this strategy.
+        """
+        env = normalize_environment(environment or self.environment)
+        positioned = self.get_positioned_tickers(environment=env, strategy=strategy)
+        open_markets = self.get_open_markets(environment=env)
+        return [m for m in open_markets if m.get("ticker") not in positioned]
+
     def insert_open_position(
         self,
         client_order_id,
@@ -365,19 +614,21 @@ class Database:
         status: PositionStatus = PositionStatus.OPEN,
         strategy: Strategy = Strategy.LAST_5,
         resting_order_id: Optional[str] = None,
+        fees_cents: int = 0,
     ):
         # Write a new OPEN order/position into SQLite for the target environment using enums
         env = normalize_environment(environment or self.environment)
         pos_side = normalize_position_side(side)
         pos_status = normalize_position_status(status)
         pos_strategy = normalize_strategy(strategy)
+        now_ts = datetime.now(timezone.utc).isoformat()
         cursor = self.conn.cursor()
         cursor.execute(
             """
             INSERT OR REPLACE INTO positions (
-                client_order_id, ticker, environment, strategy, side, count, price_cents, status, close_time, pnl_cents, resting_order_id
+                client_order_id, ticker, environment, strategy, side, count, price_cents, status, close_time, pnl_cents, resting_order_id, fees_cents, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
             """,
             (
                 client_order_id,
@@ -390,6 +641,8 @@ class Database:
                 pos_status.value,
                 close_time or "",
                 resting_order_id or "",
+                int(fees_cents),
+                now_ts,
             ),
         )
         self.conn.commit()
@@ -410,14 +663,15 @@ class Database:
     def settle_position(self, client_order_id, pnl_cents, result="", environment=None):
         # Mark a position as SETTLED and record its PnL in cents for the target environment
         env = normalize_environment(environment or self.environment)
+        now_ts = datetime.now(timezone.utc).isoformat()
         cursor = self.conn.cursor()
         cursor.execute(
             """
             UPDATE positions
-            SET status = ?, pnl_cents = ?
+            SET status = ?, pnl_cents = ?, settled_at = ?
             WHERE client_order_id = ? AND environment = ?
             """,
-            (PositionStatus.SETTLED.value, int(pnl_cents), client_order_id, env.value),
+            (PositionStatus.SETTLED.value, int(pnl_cents), now_ts, client_order_id, env.value),
         )
         if result:
             market_result = normalize_market_result(result)

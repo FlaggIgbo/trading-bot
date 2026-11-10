@@ -1,129 +1,120 @@
 # Prediction Market Trading Bot
 
-A lightweight, human-readable prediction market trading bot for [Kalshi](https://kalshi.com).
+A lightweight, robust prediction market trading bot for [Kalshi](https://kalshi.com).
 
 ---
 
-## Strategy & Trading Model
+## Overview
 
-- **Binary markets only**: Trades standalone binary (`YES` / `NO`) contracts when a market is open.
-- **Pluggable direction strategies**: Chooses a side (`YES` or `NO`) using a configurable strategy (e.g., `last_9` trend-following from recent series resolutions, or `random`) and places a **1-contract** order.
-- **Hold to expiration**: Never sells early; holds open contracts until market expiration.
-- **One bet per market per strategy**: Positions and `client_order_id`s are scoped by environment and strategy so multiple strategies can run side-by-side without duplicate bets.
-- **Automated settlement & PnL**: Once `close_time` passes and Kalshi resolves the market, records the final outcome and PnL in SQLite.
+The bot operates as an idempotent, single-process pipeline designed for reliability and simplicity:
+
+1. **Scanner**: Discovers and filters open binary prediction markets and persists them to the local database.
+2. **Trader (TradeEngine)**: Evaluates candidates against composable risk rules and pluggable strategies, writes order intent before execution, and tracks positions through a clean state machine.
+3. **Settler**: Queries market resolutions once contracts expire, computes PnL in cents, and settles positions.
+4. **Reconciler**: Runs on startup and periodically to reconcile pending and open orders with exchange records, guaranteeing resilience against process crashes and network partitions.
 
 ---
 
-## Architecture
+## Architecture & Data Flow
 
 ```mermaid
 flowchart TD
-    Kalshi["Kalshi REST API"]
+    Kalshi["Kalshi API"]
 
-    subgraph Bot [Bot: one process, one polling loop]
-        Scanner["1. Scanner<br/>fetch + filter markets"]
-        Trader["2. Trader<br/>strategy + risk checks + place orders"]
-        Settler["3. Settler<br/>check resolutions + compute PnL"]
+    subgraph Proc["Single Worker Process"]
+        Sched["Scheduler Loop<br/>cadences + kill-switch check"]
+        Scan["Scanner"]
+        Eng["TradeEngine<br/>strategy + risk rules"]
+        Sett["Settler"]
+        Recon["Reconciler<br/>startup + periodic sync"]
+        Broker["Broker Interface<br/>KalshiBroker | SimulatedBroker"]
+        Client["Kalshi Client<br/>retries, rate limit, circuit breaker"]
     end
 
-    DB[("SQLite<br/>markets, positions")]
+    DB[("SQLite (WAL)<br/>markets, positions, events")]
+    Report["report.py<br/>PnL, exposure, win rate"]
 
-    Kalshi -->|"GET markets"| Scanner
-    Scanner -->|"upsert"| DB
-    DB -->|"candidates + positions"| Trader
-    Trader -->|"POST order (client_order_id)"| Kalshi
-    Trader -->|"write OPEN"| DB
-    DB -->|"OPEN where close_time < now"| Settler
-    Settler -->|"GET resolution"| Kalshi
-    Settler -->|"write SETTLED + PnL"| DB
+    Sched --> Scan & Recon & Eng & Sett
+    Scan & Recon & Eng & Sett <--> DB
+    Eng --> Broker
+    Recon --> Broker
+    Broker <--> Client
+    Client <--> Kalshi
+    DB --> Report
 ```
 
-### Core Components
+### Order State Machine
 
-1. **Ingestion & API Layer (`ingestion/`)**:
-   - `ingestion/api/client.py`: Kalshi REST API v2 client with RSA-PSS request signing, market queries, and order submission (supports both `demo.kalshi.co` and production, plus simulation mode).
-   - `ingestion/scanner.py` (**Step 1: Scanner**): Polls open markets, filters for standalone binary contracts, and upserts them into SQLite.
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: write intent to DB (before API call)
+    PENDING --> OPEN: broker / exchange accepts order
+    PENDING --> FAILED: broker rejects, or retries exhausted
+    PENDING --> OPEN: startup reconcile finds order on exchange
+    PENDING --> FAILED: startup reconcile finds order missing
+    OPEN --> SETTLED: market resolved, PnL recorded
+    FAILED --> [*]
+    SETTLED --> [*]
+```
 
-2. **Trading & Settlement Layer (`risk_engine/`)**:
-   - `risk_engine/engine.py` (**Step 2: Trader**): Evaluates open markets against risk rules and existing positions, selects `YES` or `NO` via the active strategy (`STRATEGIES`), places orders, and records `OPEN` positions.
-   - `risk_engine/settler.py` (**Step 3: Settler**): Checks expired `OPEN` positions against Kalshi resolutions, computes PnL in cents, and marks positions `SETTLED`.
-
-3. **Storage Layer (`db.py`)**:
-   - Local SQLite state (`markets` and `positions` tables) using `StrEnum`-enforced schemas, WAL mode, and isolation by environment (`demo.kalshi.co` vs `production`) and strategy.
-
-4. **Telemetry Layer (`logging/`) [TODO]**:
-   - Reserved for future ClickHouse telemetry and analytics.
+- **Write-ahead intent**: Orders are recorded as `PENDING` before any network call is dispatched.
+- **Deterministic IDs**: `client_order_id` is derived from `(env, strategy, ticker, side)`, making retries idempotent.
+- **Database constraints**: Enforces one bet per market per strategy at the database level.
 
 ---
 
-## Project Layout
+## Risk & Resilience Guardrails
 
-```text
-trading-bot/
-├── ingestion/           # Step 1: Scanner + Kalshi REST API client & auth
-├── risk_engine/         # Step 2: Trader (strategies & risk checks) + Step 3: Settler
-├── logging/             # Telemetry & analytics layer (TODO)
-├── tests/               # Unit and smoke tests (pytest)
-├── db.py                # SQLite schema, StrEnums, and state queries
-├── main.py              # CLI entry point and main polling loop
-├── pyproject.toml       # Project metadata, ruff, and pytest configuration
-├── render.yaml          # Render worker deployment config
-└── requirements.txt     # Python dependencies
-```
+- **Safe by Default**: Runs in simulated paper-trading mode unless live trading is explicitly enabled.
+- **Risk Rules**: Composable, pure checks evaluated before order placement (market status, expiration time, bankroll position caps, daily loss cap, and local kill switch).
+- **Client Resilience**: Outgoing API requests include timeouts, client-side rate limiting, exponential backoff with jitter on transient errors, and a circuit breaker that pauses requests if failures persist.
+- **Audit Logging**: All lifecycle events (scans, skips, rejects, fills, and settlements) are recorded in an `events` table in SQLite for auditing and debugging.
 
 ---
 
-## Setup & Usage
+## Quick Start
 
-### 1. Install dependencies
+### 1. Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment variables
+### 2. Configuration
 
-Copy `.env.example` to `.env` and set your Kalshi credentials:
+Copy the example configuration to `.env` and set your Kalshi credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-> **Note**: See `.env.example` for all supported variables (demo vs. production keys/URLs and `ENABLE_LIVE_ORDERS`, which defaults to `false` for safe simulation mode).
-
-### 3. Run the bot
+### 3. Running the Bot
 
 ```bash
-# Run continuously with default settings
+# Run continuously with default settings (demo simulation mode)
 python main.py
 
-# Run a single polling cycle and exit
+# Run a single cycle and exit
 python main.py --once
 
-# Specify strategy, polling interval, or database path
-python main.py --strategy last_9 --interval 10 --db trading_bot.db
+# Run with a specific strategy or database file
+python main.py --strategy last_9 --db trading_bot.db
 ```
 
-Run `python main.py --help` to see all available CLI options.
-
----
-
-## Testing
+### 4. Viewing Performance Reports
 
 ```bash
-# Full test suite
-pytest -v
+python report.py
+```
 
-# Quick smoke tests
-pytest -m smoke
+### 5. Running Tests
+
+```bash
+pytest
 ```
 
 ---
 
-## TODO / Future Extensions
+## Deployment
 
-- **Real-Time Kalshi Order Execution & Kill-Switch Daemon**:
-  - **Overview**: Move beyond basic API trading scripts to a low-latency, resilient order manager that runs 24/7 on a headless box. Manages live Kalshi market orders, enforces strict drawdown stop-outs, and hedges positions automatically when event probabilities swing.
-  - **State Machine & Finite Execution Engine**: Manage order lifecycles (`PENDING_SUBMIT`, `ACKNOWLEDGED`, `PARTIALLY_FILLED`, `FILLED`, `CANCELED`) using a deterministic state machine to avoid orphan limit orders or ghost fills during network timeouts.
-  - **Heartbeat & Fail-Safe Circuit Breaker**: Implement a watchdog process. If the WebSocket stream drops or exchange latency exceeds a tight threshold (e.g., >500ms), trip a circuit breaker that immediately cancels open resting orders and blocks new executions.
-  - **In-Memory Order Book State**: Maintain a localized, fast in-memory representation of resting bids/asks fed by a persistent WebSocket delta stream, decoupled from strategy decision threads via bounded channels or worker queues.
+The bot runs as a single worker process on platforms like Render or any Linux host. When deploying to containerized or cloud environments, attach a persistent volume to mount your SQLite database file (e.g. `/var/data/trading_bot.db`) to ensure state persists across redeploys.

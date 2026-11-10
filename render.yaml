@@ -5,9 +5,18 @@ services:
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    disk:
+      name: trading-bot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DB_PATH
+        value: /var/data/trading_bot.db
     buildFilter:
       paths:
         - "main.py"
+        - "db.py"
+        - "report.py"
         - "ingestion/**"
         - "risk_engine/**"
         - "logging/**"
