@@ -4,6 +4,7 @@ Risk engine package (Trader and Settler).
 
 from risk_engine.broker import Broker, KalshiBroker, SimulatedBroker
 from risk_engine.decision import Decision
+from risk_engine.regime import MarketRegimeResult, detect_market_regime
 from risk_engine.engine import (
     Config,
     RiskEngine,
@@ -64,6 +65,9 @@ from risk_engine.reconciler import Reconciler
 from risk_engine.rules import (
     DEFAULT_RISK_RULES,
     RiskContext,
+    RiskRejectReason,
+    RiskRuleReason,
+    RuleRejectReason,
     evaluate_risk_rules,
     rule_is_binary_market,
     rule_kill_switch_not_active,
@@ -126,4 +130,7 @@ __all__ = [
     "get_strategy_max_entry_price",
     "is_sell_strategy",
     "extract_contract_price",
+    "RiskRejectReason",
+    "RuleRejectReason",
+    "RiskRuleReason",
 ]

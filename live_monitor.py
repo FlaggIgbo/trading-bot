@@ -22,11 +22,14 @@ def get_stats():
     remaining_sec = 0
 
     meta_file = ROOT_DIR / ".parallel_run_meta.json"
+    instances = INSTANCES
     if meta_file.exists():
         try:
             with open(meta_file, "r") as f:
                 meta = json.load(f)
             remaining_sec = max(0, int(meta.get("end_time", now_ts) - now_ts))
+            if meta.get("instances"):
+                instances = meta["instances"]
         except Exception:
             pass
     elif (ROOT_DIR / "parallel_run.log").exists():
@@ -58,16 +61,18 @@ def get_stats():
     strategy_stats = []
     all_positions = []
 
-    for inst in INSTANCES:
-        db_path = ROOT_DIR / inst["db"]
-        log_path = ROOT_DIR / inst["log"]
+    for inst in instances:
+        db_name = inst.get("db") or inst.get("db_path")
+        log_name = inst.get("log") or inst.get("log_path")
+        db_path = ROOT_DIR / db_name
+        log_path = ROOT_DIR / log_name
         
         positions = []
         if db_path.exists():
             try:
                 conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
                 c = conn.cursor()
-                c.execute("SELECT client_order_id, ticker, strategy, side, count, price_cents, status, close_time, pnl_cents FROM positions ORDER BY rowid DESC")
+                c.execute("SELECT client_order_id, ticker, strategy, side, count, price_cents, status, close_time, pnl_cents FROM positions WHERE status IN ('OPEN', 'SETTLED') ORDER BY rowid DESC")
                 positions = c.fetchall()
                 conn.close()
             except Exception:
@@ -122,6 +127,8 @@ def get_stats():
         for p in positions:
             all_positions.append({
                 "strategy": inst["tag"],
+                "env": inst["env"],
+                "live": inst["live"],
                 "ticker": p[1],
                 "side": p[3],
                 "price": p[5],
@@ -157,7 +164,7 @@ def get_stats():
             "sl_triggers": overall_sl_count,
         },
         "strategies": strategy_stats,
-        "positions": all_positions[:30],
+        "positions": all_positions[:200],
         "logs": latest_logs,
     }
 

@@ -79,6 +79,12 @@ def sign_request(private_key, timestamp_ms, http_method, request_path):
     clean_path = request_path.split("?")[0]
     message_to_sign = f"{timestamp_ms}{http_method}{clean_path}".encode("utf-8")
 
+    # Support modern Ed25519 keys as well as legacy RSA keys
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    if isinstance(private_key, ed25519.Ed25519PrivateKey):
+        signature = private_key.sign(message_to_sign)
+        return base64.b64encode(signature).decode("utf-8")
+
     # Generate RSA-PSS signature
     signature = private_key.sign(
         message_to_sign,
@@ -333,6 +339,23 @@ class KalshiClient:
             )
         return []
 
+    def get_candlesticks(self, series_ticker, ticker, start_ts, end_ts, period_interval=1):
+        """Query Kalshi API for market candlesticks (OHLCV and bid/ask history)."""
+        url = f"{self.base_url}/series/{series_ticker}/markets/{ticker}/candlesticks?start_ts={start_ts}&end_ts={end_ts}&period_interval={period_interval}"
+        headers = self._build_auth_headers("GET", url)
+        try:
+            response = self._request("GET", url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("candlesticks", [])
+            return []
+        except Exception as error:
+            analytics.error(
+                f"Error fetching candlesticks for {ticker}: {error}",
+                ticker=ticker,
+                error=str(error),
+            )
+            return []
+
     def get_order(self, order_id):
         """Query Kalshi API for order execution status."""
         if not order_id:
@@ -371,6 +394,28 @@ class KalshiClient:
         except Exception as error:
             analytics.error(
                 f"Error fetching settlements: {error}",
+                error=str(error),
+            )
+            return []
+
+    def get_fills(self, order_id=None, ticker=None, limit=100):
+        """Query Kalshi API for portfolio fills."""
+        if not self.live_orders:
+            return []
+        url = f"{self.base_url}/portfolio/fills?limit={limit}"
+        if order_id:
+            url += f"&order_id={order_id}"
+        if ticker:
+            url += f"&ticker={ticker}"
+        headers = self._build_auth_headers("GET", url)
+        try:
+            response = self._request("GET", url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json().get("fills", [])
+            return []
+        except Exception as error:
+            analytics.error(
+                f"Error fetching fills: {error}",
                 error=str(error),
             )
             return []

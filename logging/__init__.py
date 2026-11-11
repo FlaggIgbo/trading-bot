@@ -37,8 +37,16 @@ for _p in sys.path:
                 _stdlib_logging = _mod
             break
 
-# Export analytics library
-from logging.analytics import Analytics, AnalyticsEvent, ClickHouseBackend, analytics
+# Export analytics library on demand to prevent circular imports with stdlib asyncio/concurrent.futures
+def __getattr__(name):
+    if name in ("Analytics", "AnalyticsEvent", "ClickHouseBackend", "analytics"):
+        from logging.analytics import Analytics, AnalyticsEvent, ClickHouseBackend, analytics
+        globals()["Analytics"] = Analytics
+        globals()["AnalyticsEvent"] = AnalyticsEvent
+        globals()["ClickHouseBackend"] = ClickHouseBackend
+        globals()["analytics"] = analytics
+        return globals()[name]
+    raise AttributeError(f"module 'logging' has no attribute '{name}'")
 
 __all__ = [
     "Analytics",

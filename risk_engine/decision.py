@@ -7,9 +7,10 @@ Every market evaluation (accepted, skipped, or rejected) produces a Decision rec
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from db import PositionSide
+from risk_engine.rules import RiskRejectReason
 
 
 @dataclass
@@ -19,7 +20,7 @@ class Decision:
     strategy: str
     side: Optional[PositionSide] = None
     price_cents: Optional[int] = None
-    reason: Optional[str] = None  # None indicates OK to trade; non-empty string is reject reason
+    reason: Optional[Union[RiskRejectReason, str]] = None  # None indicates OK to trade; non-empty reason is reject reason
     shadow: bool = False
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -36,7 +37,7 @@ class Decision:
             "strategy": self.strategy,
             "side": self.side.value if self.side else None,
             "price_cents": self.price_cents,
-            "reason": self.reason,
+            "reason": self.reason.value if hasattr(self.reason, "value") else self.reason,
             "shadow": self.shadow,
             "timestamp": self.timestamp,
         }

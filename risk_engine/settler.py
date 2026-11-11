@@ -87,6 +87,20 @@ class Settler:
                 # 2. GET market resolution from Kalshi
                 market = self.client.get_market(ticker)
                 if not self.is_market_resolved(market):
+                    # In demo environment, demo API often delays populating resolution results.
+                    # Fallback to querying public production Kalshi API for real resolution.
+                    if "demo" in getattr(self.client, "base_url", "").lower():
+                        try:
+                            import requests
+                            prod_url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}"
+                            resp = requests.get(prod_url, timeout=5)
+                            if resp.status_code == 200:
+                                prod_m = resp.json().get("market", {})
+                                if self.is_market_resolved(prod_m):
+                                    market = prod_m
+                        except Exception:
+                            pass
+                if not self.is_market_resolved(market):
                     continue
 
                 result = normalize_market_result(market.get("result", ""))

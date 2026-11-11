@@ -263,6 +263,132 @@ def choose_side_last_21(
 choose_side_last_9 = choose_side_last_21
 
 
+def choose_side_regime_aware(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    spot_client: Optional[Any] = None,
+    check_spot: bool = False,
+    min_entry_price: Optional[int] = 20,
+    max_entry_price: Optional[int] = 65,
+    min_volatility: float = 0.03,
+    min_edge_ratio: float = 0.20,
+    max_trend_flip_ratio: float = 0.40,
+    require_spot_agreement: bool = False,
+    **kwargs,
+) -> Optional[PositionSide]:
+    """
+    Regime-Aware Strategy with Volatility Gate:
+    1. Evaluates past market resolutions through detect_market_regime:
+       - If streak >= 2: Fades the streak (Mean-Reversion, 57%+ win rate on 15m crypto).
+       - If flip_ratio <= 0.40 and edge >= 0.20: Follows trending breakout.
+       - If choppy noise or compressed volatility (< 0.03%): Abstains (returns None).
+    2. Real-time Spot Trend Alignment (optional if check_spot=True).
+    3. Price Cap & Value Filter: ensures contract ask is within bounds [min_entry_price, max_entry_price].
+    """
+    from risk_engine.regime import detect_market_regime
+
+    regime_res = detect_market_regime(
+        past_results=past_results,
+        min_volatility=min_volatility,
+        min_edge_ratio=min_edge_ratio,
+        max_trend_flip_ratio=max_trend_flip_ratio,
+    )
+
+    analytics.track(
+        "regime_evaluation",
+        message=f"Market regime: {regime_res.regime} (streak={regime_res.streak}, flip_ratio={regime_res.flip_ratio:.2f}, edge={regime_res.edge_ratio:.2f}) -> {regime_res.reason}",
+        regime=regime_res.regime,
+        streak=regime_res.streak,
+        flip_ratio=regime_res.flip_ratio,
+        edge_ratio=regime_res.edge_ratio,
+        recommended_side=regime_res.recommended_side.value if regime_res.recommended_side else None,
+        is_high_edge=regime_res.is_high_edge,
+    )
+
+    if not regime_res.should_trade:
+        return None
+
+    candidate_side = regime_res.recommended_side
+
+    # Spot Trend Check if enabled
+    if check_spot and market:
+        if spot_client is None:
+            from ingestion.spot import SpotClient
+            spot_client = SpotClient()
+        spot_side, spot_val, strike_val = spot_client.get_spot_trend(market)
+        if spot_side is not None and require_spot_agreement and spot_side != candidate_side:
+            analytics.info(
+                f"Spot trend ({spot_side.value}, spot={spot_val} vs strike={strike_val}) "
+                f"conflicts with regime candidate ({candidate_side.value}). Skipping trade."
+            )
+            return None
+
+    # Price bounds check
+    if market and (min_entry_price is not None or max_entry_price is not None):
+        ask_cents = extract_contract_price(market, candidate_side)
+        if ask_cents is not None:
+            if min_entry_price is not None and ask_cents < min_entry_price:
+                return None
+            if max_entry_price is not None and ask_cents > max_entry_price:
+                return None
+
+    return candidate_side
+
+
+def regime_aware(
+    past_results_or_market: Any = None,
+    market: Optional[dict] = None,
+    past_results: Any = None,
+    exit_multiplier: Optional[Union[int, float]] = None,
+    exit_price_cents: Optional[int] = None,
+    n: Optional[Union[int, float]] = None,
+    exit_price: Optional[int] = None,
+    **kwargs,
+) -> Any:
+    """Regime-Aware strategy factory with optional TP / SL modifiers."""
+    target_market = market
+    target_past = past_results
+
+    if isinstance(past_results_or_market, dict):
+        target_market = past_results_or_market
+    elif isinstance(past_results_or_market, (list, tuple)):
+        target_past = past_results_or_market
+
+    effective_multiplier = exit_multiplier if exit_multiplier is not None else (n if n is not None else kwargs.pop("n", None))
+    effective_price = exit_price_cents if exit_price_cents is not None else (exit_price if exit_price is not None else kwargs.pop("exit_price", None))
+
+    if target_market is None and target_past is None:
+        def _bound_strategy(past_res=None, m=None, **kw):
+            tm = m if m is not None else kw.pop("market", None)
+            tp = past_res if past_res is not None else kw.pop("past_results", None)
+            return regime_aware(
+                market=tm,
+                past_results=tp,
+                exit_multiplier=effective_multiplier,
+                exit_price_cents=effective_price,
+                **kw,
+            )
+
+        _bound_strategy.exit_multiplier = effective_multiplier
+        _bound_strategy.exit_price_cents = effective_price
+        _bound_strategy.n = effective_multiplier
+        _bound_strategy.taker_ioc = True
+        return _bound_strategy
+
+    kw = {
+        "check_spot": kwargs.pop("check_spot", False),
+        "min_entry_price": kwargs.pop("min_entry_price", 20),
+        "max_entry_price": kwargs.pop("max_entry_price", 65),
+        **kwargs,
+    }
+    return choose_side_regime_aware(past_results=target_past, market=target_market, **kw)
+
+
+def regime_spot(past_results_or_market: Any = None, market: Optional[dict] = None, **kwargs) -> Any:
+    """Regime-aware strategy with real-time spot alignment active."""
+    return regime_aware(past_results_or_market=past_results_or_market, market=market, check_spot=True, **kwargs)
+
+
 def last_21_spot(
     past_results_or_market: Any = None,
     market: Optional[dict] = None,
@@ -596,15 +722,22 @@ def get_market_minute(market_or_pos: dict, now: Any = None) -> Optional[float]:
     if market_or_pos.get("open_time"):
         open_dt = _parse_time(market_or_pos["open_time"])
         if open_dt:
-            return (now_dt - open_dt).total_seconds() / 60.0
+            diff_min = (now_dt - open_dt).total_seconds() / 60.0
+            if now is not None or (0 <= diff_min <= 30.0):
+                return diff_min
 
     if market_or_pos.get("close_time"):
         close_dt = _parse_time(market_or_pos["close_time"])
         if close_dt:
             start_dt = close_dt - timedelta(minutes=15)
-            return (now_dt - start_dt).total_seconds() / 60.0
+            diff_min = (now_dt - start_dt).total_seconds() / 60.0
+            if now is not None or (0 <= diff_min <= 30.0):
+                return diff_min
 
-    return float(now_dt.minute % 15) + (now_dt.second / 60.0)
+    if now is not None:
+        return float(now_dt.minute % 15) + (now_dt.second / 60.0)
+
+    return None
 
 
 def is_entry_time_ym(market: dict, y_minutes: float = 5.0, window_minutes: float = 5.0, now: Any = None) -> bool:
@@ -625,8 +758,52 @@ def is_entry_time_10m(market: dict, now: Any = None) -> bool:
     return is_entry_time_ym(market, y_minutes=10.0, now=now)
 
 
+def is_last_n_strategy(strategy: Any) -> bool:
+    """Return True if strategy is a last_N direction strategy."""
+    strat_clean = str(getattr(strategy, "value", strategy) or "").strip().lower()
+    return (
+        strat_clean.startswith("last_")
+        or strat_clean.startswith("last")
+        or strat_clean in ("last_21", "last_21_spot", "last_9", "last_9_spot", "last_5", "last_3", "regime_aware", "regime_spot", "regime")
+        or strategy in (
+            Strategy.LAST_21,
+            Strategy.LAST_21_SPOT,
+            Strategy.REGIME_AWARE,
+            Strategy.REGIME_SPOT,
+            Strategy.LAST_9,
+            Strategy.LAST_9_SPOT,
+            Strategy.LAST_5,
+            Strategy.LAST_3,
+            choose_side_regime_aware,
+            regime_aware,
+            regime_spot,
+            choose_side_last_21,
+            last_21_spot,
+            choose_side_last_9,
+            last_9_spot,
+            strategy_last_21,
+            strategy_last_9,
+        )
+    )
+
+
+def is_last_n_entry_time(market: dict, now: Any = None) -> bool:
+    """
+    Check if current time is within valid entry windows for last_N strategies:
+    - Initial entry: between 0 and 5 minutes into the 15m market (0.0 <= minute < 5.0)
+    - 5-minute entry: between 5 and 10 minutes into the 15m market (5.0 <= minute < 10.0)
+    Reject if >= 10 minutes past (final 5 minutes before expiration).
+    """
+    minute = get_market_minute(market, now=now)
+    if minute is None:
+        return True
+    return 0.0 <= minute < 10.0
+
+
 def is_entry_time(market: dict, strategy: Any = None, now: Any = None) -> bool:
     """Check if current time is within entry window for the strategy."""
+    if is_last_n_strategy(strategy):
+        return is_last_n_entry_time(market, now=now)
     y = get_strategy_entry_minute(strategy)
     if y is None:
         y = 5.0
@@ -719,6 +896,12 @@ STRATEGIES = {
     Strategy.RANDOM.value: choose_side_random,
     Strategy.LAST_21.value: choose_side_last_21,
     Strategy.LAST_21_SPOT.value: last_21_spot,
+    Strategy.REGIME_AWARE.value: choose_side_regime_aware,
+    Strategy.REGIME_SPOT.value: regime_spot,
+    "regime_aware": choose_side_regime_aware,
+    "regime": choose_side_regime_aware,
+    "regime_spot": regime_spot,
+    "regimespot": regime_spot,
     Strategy.LAST_3.value: choose_side_last_9,
     Strategy.LAST_5.value: choose_side_last_9,
     Strategy.LAST_9.value: choose_side_last_9,
@@ -774,6 +957,8 @@ class Config:
     default_contract_price: int = 50
     live_orders: bool = False
     take_profit: Optional[int] = None
+    regime_filter: bool = False
+    taker_ioc: bool = False
 
 
 class TradeEngine:
@@ -1071,6 +1256,7 @@ class RiskEngine:
         take_profit: Optional[int] = None,
         broker: Optional[Broker] = None,
         config: Optional[Config] = None,
+        entry_timeout_seconds: Optional[float] = None,
     ):
         # Kalshi REST API client and optional SQLite database
         self.client = client
@@ -1082,6 +1268,9 @@ class RiskEngine:
         self.min_entry_price: Optional[int] = min_entry_price if min_entry_price is not None else getattr(strategy, "min_entry_price", None)
         self.max_entry_price: Optional[int] = max_entry_price if max_entry_price is not None else getattr(strategy, "max_entry_price", None)
         self.take_profit: Optional[int] = int(take_profit) if take_profit is not None else getattr(strategy, "take_profit", None)
+        self.entry_timeout_seconds: Optional[float] = (
+            float(entry_timeout_seconds) if entry_timeout_seconds is not None else getattr(strategy, "entry_timeout_seconds", None)
+        )
 
         # Check what type of input 'strategy' is:
         # 1. An existing Strategy enum object
@@ -1103,114 +1292,105 @@ class RiskEngine:
             if m_tp and self.take_profit is None:
                 self.take_profit = int(m_tp.group(1))
 
-            # Switch statement for string names:
-            # The '|' symbol means "OR" (matches any of the listed strings)
-            match strat_lower:
-                case "random":
-                    self.strategy_name = Strategy.RANDOM
-
-                case "last_21" | "last21":
-                    self.strategy_name = Strategy.LAST_21
-
-                case "last_21_spot" | "last21_spot" | "last_21_cf" | "last21_cf":
-                    self.strategy_name = Strategy.LAST_21_SPOT
-                    self.check_spot = True
-                    if self.min_entry_price is None:
-                        self.min_entry_price = 20
-                    if self.max_entry_price is None:
-                        self.max_entry_price = 65
-
-                case "last_9" | "last9":
-                    self.strategy_name = Strategy.LAST_9
-
-                case "last_9_spot" | "last9_spot" | "last_9_cf" | "last9_cf":
-                    self.strategy_name = Strategy.LAST_9_SPOT
-                    self.check_spot = True
-                    if self.min_entry_price is None:
-                        self.min_entry_price = 20
-                    if self.max_entry_price is None:
-                        self.max_entry_price = 65
-
-                case "last_5" | "last5" | "last_3" | "last3":
-                    analytics.warning(f"Strategy '{strat_lower}' is deprecated. Using 'last_9'.")
-                    self.strategy_name = Strategy.LAST_9
-
-                case "sell_3n" | "sell3n" | "sell_if_3n":
-                    self.strategy_name = Strategy.SELL_3N
-
-                case "sell_2n_5m_35p" | "sell_2_n_5m_35p" | "sell2n_5m_35p":
-                    self.strategy_name = Strategy.SELL_2N_5M_35P
-
-                case "sell_2n_5m" | "sell_5m_2n" | "sell_2x_5m" | "sell_3n_2x":
-                    self.strategy_name = Strategy.SELL_2N_5M
-
-                case "sell_2n" | "sell2n" | "sell_if_2n":
-                    self.strategy_name = Strategy.SELL_2N
-
-                case "sell_1.5n_5m_35p" | "sell_1_5n_5m_35p" | "sell1.5n_5m_35p" | "sell1_5n_5m_35p":
-                    self.strategy_name = Strategy.SELL_1_5N_5M_35P
-
-                case "sell_1.5n_35p" | "sell_1_5n_35p" | "sell1.5n_35p" | "sell1_5n_35p":
-                    self.strategy_name = Strategy.SELL_1_5N_35P
-
-                case "sell_1.5n_5m" | "sell_1_5n_5m" | "sell1.5n_5m" | "sell1_5n_5m":
-                    self.strategy_name = Strategy.SELL_1_5N_5M
-
-                case "sell_1.5n" | "sell_1_5n" | "sell1.5n" | "sell1_5n":
-                    self.strategy_name = Strategy.SELL_1_5N
-
-                case "sell_2.5n" | "sell_2_5n" | "sell2.5n" | "sell2_5n" | "sell_2.5n_5m":
-                    self.strategy_name = Strategy.SELL_2_5N
-
-                case _:
-                    # Default case: try converting directly to enum, fallback to LAST_5 if invalid
-                    try:
-                        self.strategy_name = Strategy(strat_lower)
-                    except ValueError:
-                        self.strategy_name = Strategy.LAST_5
+            if strat_lower == "random":
+                self.strategy_name = Strategy.RANDOM
+            elif strat_lower in ("last_21", "last21"):
+                self.strategy_name = Strategy.LAST_21
+            elif strat_lower in ("last_21_spot", "last21_spot", "last_21_cf", "last21_cf"):
+                self.strategy_name = Strategy.LAST_21_SPOT
+                self.check_spot = True
+                if self.min_entry_price is None:
+                    self.min_entry_price = 20
+                if self.max_entry_price is None:
+                    self.max_entry_price = 65
+            elif strat_lower in ("regime_spot", "regimespot"):
+                self.strategy_name = Strategy.REGIME_SPOT
+                self.check_spot = True
+                self.taker_ioc = True
+                if self.min_entry_price is None:
+                    self.min_entry_price = 20
+                if self.max_entry_price is None:
+                    self.max_entry_price = 65
+            elif strat_lower in ("regime_aware", "regime", "regimeaware"):
+                self.strategy_name = Strategy.REGIME_AWARE
+                self.taker_ioc = True
+                if self.min_entry_price is None:
+                    self.min_entry_price = 20
+                if self.max_entry_price is None:
+                    self.max_entry_price = 65
+            elif strat_lower in ("last_9", "last9"):
+                self.strategy_name = Strategy.LAST_9
+            elif strat_lower in ("last_9_spot", "last9_spot", "last_9_cf", "last9_cf"):
+                self.strategy_name = Strategy.LAST_9_SPOT
+                self.check_spot = True
+                if self.min_entry_price is None:
+                    self.min_entry_price = 20
+                if self.max_entry_price is None:
+                    self.max_entry_price = 65
+            elif strat_lower in ("last_5", "last5", "last_3", "last3"):
+                analytics.warning(f"Strategy '{strat_lower}' is deprecated. Using 'last_9'.")
+                self.strategy_name = Strategy.LAST_9
+            elif strat_lower in ("sell_3n", "sell3n", "sell_if_3n"):
+                self.strategy_name = Strategy.SELL_3N
+            elif strat_lower in ("sell_2n_5m_35p", "sell_2_n_5m_35p", "sell2n_5m_35p"):
+                self.strategy_name = Strategy.SELL_2N_5M_35P
+            elif strat_lower in ("sell_2n_5m", "sell_5m_2n", "sell_2x_5m", "sell_3n_2x"):
+                self.strategy_name = Strategy.SELL_2N_5M
+            elif strat_lower in ("sell_2n", "sell2n", "sell_if_2n"):
+                self.strategy_name = Strategy.SELL_2N
+            elif strat_lower in ("sell_1.5n_5m_35p", "sell_1_5n_5m_35p", "sell1.5n_5m_35p", "sell1_5n_5m_35p"):
+                self.strategy_name = Strategy.SELL_1_5N_5M_35P
+            elif strat_lower in ("sell_1.5n_35p", "sell_1_5n_35p", "sell1.5n_35p", "sell1_5n_35p"):
+                self.strategy_name = Strategy.SELL_1_5N_35P
+            elif strat_lower in ("sell_1.5n_5m", "sell_1_5n_5m", "sell1.5n_5m", "sell1_5n_5m"):
+                self.strategy_name = Strategy.SELL_1_5N_5M
+            elif strat_lower in ("sell_1.5n", "sell_1_5n", "sell1.5n", "sell1_5n"):
+                self.strategy_name = Strategy.SELL_1_5N
+            elif strat_lower in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m"):
+                self.strategy_name = Strategy.SELL_2_5N
+            else:
+                try:
+                    self.strategy_name = Strategy(strat_lower)
+                except ValueError:
+                    self.strategy_name = Strategy.LAST_5
 
         elif callable(strategy):
-            # Switch statement for function references:
-            # Matches whichever function is passed in
-            match strategy:
-                case _ if strategy is choose_side_random:
-                    self.strategy_name = Strategy.RANDOM
-
-                case _ if strategy in (last_21_spot, last_9_spot):
-                    self.strategy_name = Strategy.LAST_21_SPOT if strategy is last_21_spot else Strategy.LAST_9_SPOT
+            if strategy is choose_side_random:
+                self.strategy_name = Strategy.RANDOM
+            elif strategy in (last_21_spot, last_9_spot):
+                self.strategy_name = Strategy.LAST_21_SPOT if strategy is last_21_spot else Strategy.LAST_9_SPOT
+                self.check_spot = True
+                if self.min_entry_price is None:
+                    self.min_entry_price = 20
+                if self.max_entry_price is None:
+                    self.max_entry_price = 65
+            elif strategy in (regime_spot, choose_side_regime_aware, regime_aware):
+                self.strategy_name = Strategy.REGIME_SPOT if strategy is regime_spot else Strategy.REGIME_AWARE
+                self.taker_ioc = True
+                if strategy is regime_spot:
                     self.check_spot = True
-                    if self.min_entry_price is None:
-                        self.min_entry_price = 20
-                    if self.max_entry_price is None:
-                        self.max_entry_price = 65
-
-                case _ if strategy in (sell_3n, choose_sell_if_3n, choose_side_sell_if_3n):
-                    self.strategy_name = Strategy.SELL_3N
-
-                case _ if strategy in (sell_2n_5m_35p, choose_sell_if_2n_5m_35p, choose_side_sell_2n_5m_35p):
-                    self.strategy_name = Strategy.SELL_2N_5M_35P
-
-                case _ if strategy in (sell_2n_5m, choose_sell_if_2n_5m, choose_side_sell_2n_5m):
-                    self.strategy_name = Strategy.SELL_2N_5M
-
-                case _ if strategy in (sell_2n, choose_sell_if_2n, choose_side_sell_2n):
-                    self.strategy_name = Strategy.SELL_2N
-
-                case _ if strategy in (sell_1_5n_35p, choose_sell_if_1_5n_35p, choose_side_sell_1_5n_35p):
-                    self.strategy_name = Strategy.SELL_1_5N_35P
-
-                case _ if strategy is sell_1_5n_5m:
-                    self.strategy_name = Strategy.SELL_1_5N_5M
-
-                case _ if strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
-                    self.strategy_name = Strategy.SELL_1_5N
-
-                case _ if strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):
-                    self.strategy_name = Strategy.SELL_2_5N
-
-                case _:
-                    # Default case: unknown function
-                    self.strategy_name = Strategy.LAST_5
+                if self.min_entry_price is None:
+                    self.min_entry_price = 20
+                if self.max_entry_price is None:
+                    self.max_entry_price = 65
+            elif strategy in (sell_3n, choose_sell_if_3n, choose_side_sell_if_3n):
+                self.strategy_name = Strategy.SELL_3N
+            elif strategy in (sell_2n_5m_35p, choose_sell_if_2n_5m_35p, choose_side_sell_2n_5m_35p):
+                self.strategy_name = Strategy.SELL_2N_5M_35P
+            elif strategy in (sell_2n_5m, choose_sell_if_2n_5m, choose_side_sell_2n_5m):
+                self.strategy_name = Strategy.SELL_2N_5M
+            elif strategy in (sell_2n, choose_sell_if_2n, choose_side_sell_2n):
+                self.strategy_name = Strategy.SELL_2N
+            elif strategy in (sell_1_5n_35p, choose_sell_if_1_5n_35p, choose_side_sell_1_5n_35p):
+                self.strategy_name = Strategy.SELL_1_5N_35P
+            elif strategy is sell_1_5n_5m:
+                self.strategy_name = Strategy.SELL_1_5N_5M
+            elif strategy in (sell_1_5n, choose_sell_if_1_5n, choose_side_sell_1_5n):
+                self.strategy_name = Strategy.SELL_1_5N
+            elif strategy in (sell_2_5n, choose_sell_if_2_5n, choose_side_sell_2_5n):
+                self.strategy_name = Strategy.SELL_2_5N
+            else:
+                self.strategy_name = Strategy.LAST_5
 
         else:
             # Default fallback if strategy is none of the above types
@@ -1226,8 +1406,11 @@ class RiskEngine:
 
         # Set of market tickers where this strategy already placed its bet
         self.bet_markets = set()
+        self.open_contract_tickers = set()
         if self.db is not None:
             self.bet_markets = self.db.get_positioned_tickers(strategy=self.strategy_name)
+            if hasattr(self.db, "get_open_positioned_tickers"):
+                self.open_contract_tickers = self.db.get_open_positioned_tickers(strategy=self.strategy_name)
 
         if broker is not None:
             self.broker = broker
@@ -1257,6 +1440,23 @@ class RiskEngine:
         else:
             self.trade_engine = None
 
+    def _is_contract_held(self, ticker: str) -> bool:
+        """Check if an open contract is currently being held for this market and strategy."""
+        if self.db is not None:
+            if hasattr(self.db, "has_open_position"):
+                return self.db.has_open_position(ticker, strategy=self.strategy_name)
+            try:
+                open_pos = [
+                    p for p in self.db.get_all_positions()
+                    if str(p.get("status", "")).upper() in (PositionStatus.OPEN.value, PositionStatus.PENDING.value)
+                    and p.get("strategy") == self.strategy_name
+                    and p.get("ticker") == ticker
+                ]
+                return bool(open_pos)
+            except Exception:
+                pass
+        return ticker in self.open_contract_tickers
+
     def is_market_open(self, market):
         # Check if market status is open or active
         status = str(market.get("status", "")).lower()
@@ -1275,7 +1475,7 @@ class RiskEngine:
         series = ticker.split("-")[0]
         results = []
 
-        target_len = 21 if getattr(self, "strategy_name", None) in (Strategy.LAST_21, Strategy.LAST_21_SPOT) else 9
+        target_len = 21 if getattr(self, "strategy_name", None) in (Strategy.LAST_21, Strategy.LAST_21_SPOT, Strategy.REGIME_AWARE, Strategy.REGIME_SPOT) else 9
         target_limit = max(limit, target_len)
 
         # 1. First check SQLite database
@@ -1346,6 +1546,22 @@ class RiskEngine:
             if market is None and self.client is not None and hasattr(self.client, "get_market"):
                 market = self.client.get_market(ticker)
             return strategy_fn(market=market)
+
+        if (
+            self.strategy_name in (Strategy.REGIME_AWARE, Strategy.REGIME_SPOT)
+            or strategy_fn in (choose_side_regime_aware, regime_aware, regime_spot)
+        ):
+            if market is None and self.client is not None and hasattr(self.client, "get_market"):
+                market = self.client.get_market(ticker)
+            past_results = self.get_last_results(ticker, limit=21)
+            return choose_side_regime_aware(
+                past_results=past_results,
+                market=market,
+                spot_client=self.spot_client,
+                check_spot=self.check_spot,
+                min_entry_price=self.min_entry_price,
+                max_entry_price=self.max_entry_price,
+            )
 
         if (
             self.strategy_name in (Strategy.LAST_21, Strategy.LAST_21_SPOT, Strategy.LAST_9, Strategy.LAST_9_SPOT)
@@ -1508,18 +1724,41 @@ class RiskEngine:
                     return None
 
                 # If executed, use actual fill price from Kalshi if available
-                taker_cost = float(order_payload.get("taker_fill_cost_dollars") or 0)
-                maker_cost = float(order_payload.get("maker_fill_cost_dollars") or 0)
-                total_fill_dollars = taker_cost + maker_cost
-                if total_fill_dollars > 0 and fill_count > 0:
-                    actual_sell_price = int(round((total_fill_dollars / fill_count) * 100))
-                    if 1 <= actual_sell_price <= 99:
-                        current_price_cents = actual_sell_price
+                server_order_id = order_payload.get("order_id")
+                net_fill_proceeds = None
+                if is_live and server_order_id and hasattr(self.client, "get_fills"):
+                    try:
+                        time.sleep(0.3)
+                        fills = self.client.get_fills(order_id=server_order_id)
+                        if fills:
+                            total_proceeds = 0.0
+                            for f in fills:
+                                fill_price = float(f.get("no_price_dollars") if side == PositionSide.NO else f.get("yes_price_dollars") or 0)
+                                fill_fees = float(f.get("fee_cost") or 0)
+                                total_proceeds += (fill_price - fill_fees)
+                            if total_proceeds > 0:
+                                net_fill_proceeds = total_proceeds
+                                current_price_cents = round((total_proceeds / fill_count) * 100, 2)
+                    except Exception as e:
+                        analytics.warning(f"Could not fetch fills for sell order {server_order_id}: {e}")
 
-        pnl_cents = (current_price_cents - entry_price) * count
+                if net_fill_proceeds is None:
+                    taker_cost = float(order_payload.get("taker_fill_cost_dollars") or 0)
+                    maker_cost = float(order_payload.get("maker_fill_cost_dollars") or 0)
+                    total_fill_dollars = taker_cost + maker_cost
+                    if total_fill_dollars > 0 and fill_count > 0:
+                        actual_sell_price = int(round((total_fill_dollars / fill_count) * 100))
+                        if 1 <= actual_sell_price <= 99:
+                            current_price_cents = actual_sell_price
+
+        if is_live and net_fill_proceeds is not None:
+            pnl_cents = int(round((net_fill_proceeds - (entry_price * count / 100)) * 100))
+        else:
+            pnl_cents = int(round((current_price_cents - entry_price) * count))
 
         if self.db is not None:
             self.db.settle_position(client_order_id=client_order_id, pnl_cents=pnl_cents)
+        self.open_contract_tickers.discard(ticker)
 
         event_name = "order_stop_loss" if reason == "stop_loss" else "order_sold"
         action_label = "[STOP LOSS] Exited" if reason == "stop_loss" else "Sold"
@@ -1729,12 +1968,15 @@ class RiskEngine:
         if self.db is not None:
             self.bet_markets.update(self.db.get_positioned_tickers(strategy=self.strategy_name))
 
-        # If we already bet on this market, skip it
-        if ticker in self.bet_markets:
+        # If an open contract is held or market was already entered/traded, skip it
+        if ticker in self.bet_markets or self._is_contract_held(ticker):
             return None
 
-        # For sell strategies (e.g. sell_3n, sell_2n, sell_2n_5m, sell_1.5n, sell_2.5n):
-        if self.is_sell_strategy and check_timing:
+        # Check entry timing
+        if is_last_n_strategy(self.strategy_name):
+            if check_timing and not is_last_n_entry_time(market, now=now):
+                return None
+        elif self.is_sell_strategy and check_timing:
             if not is_entry_time(market, strategy=self.strategy_name, now=now):
                 return None
 
@@ -1771,6 +2013,37 @@ class RiskEngine:
         ts_suffix = str(int(time.time() * 1000))[-6:]
         client_order_id = f"{safe_env}_{safe_strategy}_{safe_ticker}_{side.value.lower()}_{ts_suffix}"[:64]
 
+        is_live = bool(self.client and getattr(self.client, "live_orders", False))
+
+        # Margin guard: ensure available cash covers order cost to prevent 400 insufficient_balance
+        if is_live and hasattr(self.client, "base_url") and self.client:
+            try:
+                now_t = time.time()
+                if not hasattr(self, "_last_bal_check") or (now_t - getattr(self, "_last_bal_check", 0)) > 15:
+                    self._last_bal_check = now_t
+                    url = f"{self.client.base_url}/portfolio/balance"
+                    headers = self.client._build_auth_headers("GET", url)
+                    bal_res = self.client._request("GET", url, headers=headers, timeout=5)
+                    if bal_res.status_code == 200:
+                        bd = bal_res.json()
+                        crypto_cash = 0.0
+                        for b in bd.get("balance_breakdown", []):
+                            if b.get("exchange_index") == 2:
+                                crypto_cash = float(b.get("balance", 0.0))
+                        total_cash = float(bd.get("balance_dollars", 0.0))
+                        self._cached_avail_cash = crypto_cash if crypto_cash > 0 else total_cash
+                cached_cash = getattr(self, "_cached_avail_cash", None)
+                if cached_cash is not None and cached_cash < (price_cents / 100.0):
+                    analytics.warning(
+                        f"[MARGIN CHECK] Skipping {ticker}: available cash ${cached_cash:.2f} < contract cost ${price_cents/100:.2f}. Protecting account from 400 rejection.",
+                        ticker=ticker,
+                        available_cash=cached_cash,
+                        price_cents=price_cents,
+                    )
+                    return None
+            except Exception:
+                pass
+
         # Write intent (PENDING) to SQLite before sending order to Kalshi
         if self.db is not None:
             close_time = market.get("close_time", "")
@@ -1784,14 +2057,19 @@ class RiskEngine:
                 strategy=self.strategy_name,
             )
 
+        # Determine time_in_force: use IOC for regime_aware / taker strategies when edge is high
+        use_ioc = getattr(self, "taker_ioc", False) or "regime" in str(self.strategy_name.value).lower() or getattr(self.strategy, "taker_ioc", False)
+        time_in_force = "immediate_or_cancel" if use_ioc else "good_till_canceled"
+
         # Place the bet of 1 contract on Kalshi
         analytics.track(
             "order_intent",
-            message=f"Market {ticker} is open! Betting 1 contract on {side.value} (strategy={self.strategy_name.value}).",
+            message=f"Market {ticker} is open! Betting 1 contract on {side.value} (strategy={self.strategy_name.value}, TIF={time_in_force}).",
             ticker=ticker,
             side=side.value,
             strategy=self.strategy_name.value,
             price_cents=price_cents,
+            time_in_force=time_in_force,
         )
         result = self.client.place_order(
             ticker=ticker,
@@ -1800,17 +2078,21 @@ class RiskEngine:
             price_cents=price_cents,
             client_order_id=client_order_id,
             action="buy",
+            time_in_force=time_in_force,
         )
+
+        if isinstance(result, dict):
+            result["time_in_force"] = time_in_force
 
         # If the API returned an error, mark position as FAILED
         if not result or (isinstance(result, dict) and "error" in result):
-            self.bet_markets.add(ticker)
+            if not is_last_n_strategy(self.strategy_name):
+                self.bet_markets.add(ticker)
             if self.db is not None:
                 self.db.update_position_status(client_order_id, PositionStatus.FAILED)
             return result
 
         # Check if entry order actually executed (or is simulated)
-        is_live = bool(self.client and getattr(self.client, "live_orders", False))
         order_payload = result.get("order", result) if isinstance(result, dict) else {}
         order_status = str(order_payload.get("status") or "").lower()
         fill_count_str = str(order_payload.get("fill_count_fp") or order_payload.get("fill_count") or "0")
@@ -1822,10 +2104,35 @@ class RiskEngine:
         entry_filled = (not is_live) or (order_status == "executed") or (fill_count > 0)
         server_order_id = order_payload.get("order_id") or result.get("order_id") or client_order_id
 
-        # If live order is not immediately filled, poll briefly up to 2.5s to verify if matching engine executed it
+        # For IOC taker orders: if not filled immediately, it was canceled by Kalshi without resting
+        if is_live and use_ioc and not entry_filled:
+            analytics.info(
+                f"[IOC TAKER UNFILLED] Order {client_order_id} did not execute at ask {price_cents}c. Canceled immediately without adverse resting.",
+                event="order_unfilled_ioc",
+                ticker=ticker,
+                order_id=server_order_id,
+            )
+            if self.db is not None:
+                self.db.update_position_status(client_order_id, PositionStatus.FAILED)
+            return result
+
+        # Determine resting entry order timeout (default 60s for last_N strategies, 2.5s for fast simulation)
+        resting_timeout = self.entry_timeout_seconds
+        if resting_timeout is None:
+            resting_timeout = 60.0 if is_last_n_strategy(self.strategy_name) else 2.5
+
+        # If live order is not immediately filled, poll up to resting_timeout to verify if matching engine executed it
         if is_live and not entry_filled and hasattr(self.client, "get_order") and server_order_id:
-            for _ in range(5):
-                time.sleep(0.5)
+            poll_interval = 1.0 if resting_timeout >= 10.0 else 0.5
+            start_poll = time.time()
+            analytics.info(
+                f"[LIVE ENTRY RESTING] Order {client_order_id} ({server_order_id}) for {ticker} resting on book. Waiting up to {resting_timeout:.0f}s for match...",
+                ticker=ticker,
+                order_id=server_order_id,
+                timeout=resting_timeout,
+            )
+            while (time.time() - start_poll) < resting_timeout:
+                time.sleep(poll_interval)
                 order_check = self.client.get_order(server_order_id)
                 if order_check and isinstance(order_check, dict):
                     check_payload = order_check.get("order", order_check)
@@ -1840,6 +2147,11 @@ class RiskEngine:
                         order_status = check_status
                         fill_count = check_fill
                         entry_filled = True
+                        analytics.info(
+                            f"[LIVE ENTRY FILLED] Order {client_order_id} filled after {time.time() - start_poll:.1f}s resting on book!",
+                            ticker=ticker,
+                            order_id=server_order_id,
+                        )
                         break
                     elif check_status == "canceled":
                         order_status = "canceled"
@@ -1847,7 +2159,8 @@ class RiskEngine:
 
         # If live entry did not fill immediately, attempt cancellation of the resting entry order
         if is_live and not entry_filled:
-            self.bet_markets.add(ticker)
+            if not is_last_n_strategy(self.strategy_name):
+                self.bet_markets.add(ticker)
             if hasattr(self.client, "cancel_order") and server_order_id:
                 try:
                     try:
@@ -1893,11 +2206,27 @@ class RiskEngine:
 
         # Extract actual execution price from Kalshi if available
         if is_live:
-            taker_cost = float(order_payload.get("taker_fill_cost_dollars") or 0)
-            maker_cost = float(order_payload.get("maker_fill_cost_dollars") or 0)
-            total_fill_dollars = taker_cost + maker_cost
+            order_info = order_payload.get("order", order_payload) if isinstance(order_payload, dict) else {}
+            taker_cost = float(order_info.get("taker_fill_cost_dollars") or 0)
+            maker_cost = float(order_info.get("maker_fill_cost_dollars") or 0)
+            fees = float(order_info.get("taker_fees_dollars") or 0) + float(order_info.get("maker_fees_dollars") or 0)
+            total_fill_dollars = taker_cost + maker_cost + fees
+            if total_fill_dollars == 0 and hasattr(self.client, "get_order") and server_order_id:
+                try:
+                    time.sleep(0.3)
+                    fetched = self.client.get_order(server_order_id)
+                    if fetched and isinstance(fetched, dict):
+                        f_info = fetched.get("order", fetched)
+                        t_cost = float(f_info.get("taker_fill_cost_dollars") or 0)
+                        m_cost = float(f_info.get("maker_fill_cost_dollars") or 0)
+                        f_fees = float(f_info.get("taker_fees_dollars") or 0) + float(f_info.get("maker_fees_dollars") or 0)
+                        if t_cost + m_cost > 0:
+                            total_fill_dollars = t_cost + m_cost + f_fees
+                            order_payload = f_info
+                except Exception:
+                    pass
             if total_fill_dollars > 0 and fill_count > 0:
-                actual_price = int(round((total_fill_dollars / fill_count) * 100))
+                actual_price = round((total_fill_dollars / fill_count) * 100, 2)
                 if 1 <= actual_price <= 99:
                     price_cents = actual_price
 
@@ -1960,6 +2289,7 @@ class RiskEngine:
 
         # Record that we bet on this market so we do not bet again
         self.bet_markets.add(ticker)
+        self.open_contract_tickers.add(ticker)
 
         # Write OPEN position to SQLite
         if self.db is not None:

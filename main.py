@@ -53,9 +53,12 @@ def main(
     max_open_positions=10,
     daily_loss_cap_cents=5000,
     kill_switch_path="KILL_SWITCH",
+    entry_timeout=None,
+    regime_filter=False,
+    taker_ioc=False,
 ):
     analytics.info(
-        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, take_profit={take_profit}, shadow={shadow_mode}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
+        f"Starting trading bot (strategy={strategy}, env={env}, live={live}, stop_loss={stop_loss}, check_spot={check_spot}, take_profit={take_profit}, shadow={shadow_mode}, regime_filter={regime_filter}, taker_ioc={taker_ioc}, schedule=every {sleep_seconds}s at +{offset_seconds}s)...",
         event="bot_start",
         strategy=strategy,
         env=env,
@@ -64,6 +67,8 @@ def main(
         check_spot=check_spot,
         take_profit=take_profit,
         shadow=shadow_mode,
+        regime_filter=regime_filter,
+        taker_ioc=taker_ioc,
         min_entry_price=min_entry_price,
         max_entry_price=max_entry_price,
         max_open_positions=max_open_positions,
@@ -113,6 +118,8 @@ def main(
         max_entry_price=max_entry_price,
         live_orders=live,
         take_profit=take_profit,
+        regime_filter=regime_filter,
+        taker_ioc=taker_ioc,
     )
 
     # Initialize pipeline steps with injected dependencies
@@ -129,6 +136,7 @@ def main(
         take_profit=take_profit,
         broker=broker,
         config=config,
+        entry_timeout_seconds=entry_timeout,
     )
 
     # Main loop aligned to :00:30, :15:30, :30:30, :45:30
@@ -207,6 +215,10 @@ if __name__ == "__main__":
         type=str,
         default="last_9",
         choices=[
+            "regime_aware",
+            "regime",
+            "regime_spot",
+            "regimespot",
             "last_21",
             "last_21_spot",
             "last_9",
@@ -228,7 +240,7 @@ if __name__ == "__main__":
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'last_9', 'last_9_spot', 'random', 'sell_3n', 'sell_2n', 'sell_2n_5m', 'sell_1.5n', 'sell_1.5n_5m', 'sell_1.5n_35p', or 'sell_2.5n'",
+        help="Direction strategy: 'regime_aware', 'regime_spot', 'last_21', 'last_21_spot', 'last_9', 'random', etc.",
     )
     parser.add_argument(
         "--live",
@@ -238,12 +250,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--stop-loss",
         action="store_true",
-        help="Enable minute-10 stop loss for sell_Xn_5m strategies (exits if price <= 25c or < 50% entry)",
+        help="Enable minute-10 stop loss for sell_Xn_5m strategies (exits if price <= 25c or < 50%% entry)",
     )
     parser.add_argument(
         "--check-spot",
         action="store_true",
         help="Enable real-time spot price trend alignment (Coinbase/CF Benchmarks) for last_9",
+    )
+    parser.add_argument(
+        "--regime-filter",
+        action="store_true",
+        help="Enable market regime detection & volatility gate filter",
+    )
+    parser.add_argument(
+        "--taker-ioc",
+        action="store_true",
+        help="Use Immediate-Or-Cancel (IOC) taker market orders crossing spread when edge is high",
     )
     parser.add_argument(
         "--min-price",
@@ -286,6 +308,12 @@ if __name__ == "__main__":
         default="KILL_SWITCH",
         help="File path to check for local kill switch trigger (default: KILL_SWITCH)",
     )
+    parser.add_argument(
+        "--entry-timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for resting entry orders before canceling (default: 60s for last_N, 2.5s for others)",
+    )
     args = parser.parse_args()
 
     main(
@@ -305,4 +333,7 @@ if __name__ == "__main__":
         max_open_positions=args.max_open,
         daily_loss_cap_cents=args.daily_loss_cap,
         kill_switch_path=args.kill_switch,
+        entry_timeout=args.entry_timeout,
+        regime_filter=args.regime_filter,
+        taker_ioc=args.taker_ioc,
     )

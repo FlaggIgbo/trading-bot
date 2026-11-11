@@ -162,9 +162,12 @@
   <div class="top-bar">
     <div>
       <div style="font-size: 1.3rem; font-weight: 700; color: #f0f6fc;">🚀 Kalshi Multi-Strategy Live Monitor</div>
-      <div style="font-size: 0.85rem; color: #8b949e; margin-top: 4px;">Parallel Evaluation: 1 Prod Live + 4 Demo Instances</div>
+      <div style="font-size: 0.85rem; color: #8b949e; margin-top: 4px;">Parallel Evaluation: 5 Demo Instances</div>
     </div>
-    <div style="display: flex; gap: 14px; align-items: center;">
+    <div style="display: flex; gap: 14px; align-items: center; flex-wrap: wrap;">
+      <div class="status-pill" id="wakelock-pill" style="background: rgba(88, 166, 255, 0.15); color: #58a6ff; border-color: #388bfd;">
+        ☕ Chromebox Keep-Awake: <span id="wakelock-status">Active</span>
+      </div>
       <div class="status-pill">
         <div class="status-dot"></div>
         LIVE IN PROGRESS
@@ -227,8 +230,14 @@
     </tbody>
   </table>
 
-  <div class="section-title">
+  <div class="section-title" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
     <span>Recent Positions Activity</span>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <label for="strategy-filter" style="font-size:0.85rem; color:#8b949e; font-weight:normal;">Filter by Strategy:</label>
+      <select id="strategy-filter" onchange="renderPositions()" style="background:#161b22; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:4px 10px; font-size:0.85rem; cursor:pointer;">
+        <option value="ALL">All Strategies</option>
+      </select>
+    </div>
   </div>
 
   <table>
@@ -254,6 +263,70 @@
   <div class="log-box" id="log-box">Connecting to log stream...</div>
 
   <script>
+    let globalPositions = [];
+    let knownStrategies = new Set();
+
+    function renderPositions() {
+      const posBody = document.getElementById('positions-table');
+      const filterSelect = document.getElementById('strategy-filter');
+      const selectedStrat = filterSelect ? filterSelect.value : 'ALL';
+
+      let displayList = globalPositions;
+      if (selectedStrat && selectedStrat !== 'ALL') {
+        displayList = globalPositions.filter(p => p.strategy === selectedStrat);
+      }
+
+      if (!displayList || displayList.length === 0) {
+        posBody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#8b949e;">No positions found${selectedStrat !== 'ALL' ? ' for ' + selectedStrat : ''}.</td></tr>`;
+        return;
+      }
+
+      posBody.innerHTML = displayList.map(p => {
+        let statusBadge = '<span class="badge badge-open">OPEN</span>';
+        if (p.status === 'SETTLED') {
+          statusBadge = '<span class="badge badge-win">SETTLED</span>';
+        } else if (p.status === 'PENDING') {
+          statusBadge = '<span class="badge" style="background:#1f6feb; color:#fff;">PENDING</span>';
+        } else if (p.status === 'FAILED') {
+          statusBadge = '<span class="badge" style="background:#30363d; color:#8b949e;">FAILED</span>';
+        }
+        const pnlStr = p.pnl_dollars !== null ? ((p.pnl_dollars >= 0 ? '+$' : '-$') + Math.abs(p.pnl_dollars).toFixed(2)) : '—';
+        const pnlClass = (p.pnl_dollars || 0) > 0 ? 'pnl-pos' : ((p.pnl_dollars || 0) < 0 ? 'pnl-neg' : 'pnl-zero');
+        const sideClass = p.side === 'YES' ? 'badge-win' : 'badge-loss';
+        const closeShort = (p.close_time || '').replace('2026-', '').replace('Z', ' UTC');
+
+        // Only trades against prod LIVE and demo LIVE should be hyperlinked
+        let tickerHtml = `<strong>${p.ticker}</strong>`;
+        const isLive = Boolean(p.live || (p.strategy && p.strategy.includes('LIVE')));
+        if (isLive) {
+          const isProd = Boolean(p.env === 'prod' || p.env === 'production' || (p.strategy && p.strategy.includes('prod')));
+          const domain = isProd ? 'kalshi.com' : 'demo.kalshi.co';
+          const series = p.ticker.split('-')[0].toLowerCase();
+          const targetUrl = `https://${domain}/markets/${series}#${p.ticker.toLowerCase()}`;
+          const badgeStyle = isProd ? 'background:rgba(210,153,34,0.2); color:#d29922; border:1px solid rgba(210,153,34,0.4);' : 'background:rgba(88,166,255,0.15); color:#58a6ff; border:1px solid rgba(88,166,255,0.3);';
+          const badgeText = isProd ? 'PROD' : 'DEMO';
+          tickerHtml = `
+            <a href="${targetUrl}" target="_blank" rel="noopener noreferrer" style="color:#58a6ff; text-decoration:underline; font-weight:bold;" title="View on ${domain}">
+              ${p.ticker}
+            </a>
+            <span class="badge" style="font-size:0.65rem; padding:1px 5px; margin-left:4px; vertical-align:middle; ${badgeStyle}">${badgeText}</span>
+          `;
+        }
+
+        return `
+          <tr>
+            <td><span style="font-size:0.85rem; color:#8b949e;">${p.strategy}</span></td>
+            <td>${tickerHtml}</td>
+            <td><span class="badge ${sideClass}">${p.side}</span></td>
+            <td>${p.price}¢</td>
+            <td>${statusBadge}</td>
+            <td class="${pnlClass}">${pnlStr}</td>
+            <td style="font-size:0.85rem; color:#8b949e;">${closeShort}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
     async function updateDashboard() {
       try {
         const res = await fetch('/live_data.json?t=' + Date.now());
@@ -277,8 +350,9 @@
         document.getElementById('settled-trades').textContent = `${data.summary.settled_trades || 0} settled`;
         document.getElementById('sl-triggers').textContent = data.summary.sl_triggers || 0;
 
-        // Strategies Table
+        // Strategies Table & Filter Population
         const stratBody = document.getElementById('strategies-table');
+        const filterSelect = document.getElementById('strategy-filter');
         if (data.strategies && data.strategies.length > 0) {
           stratBody.innerHTML = data.strategies.map(s => {
             const spnl = s.pnl_dollars || 0;
@@ -304,30 +378,26 @@
               </tr>
             `;
           }).join('');
+
+          // Update filter options if new strategies appear
+          let changed = false;
+          data.strategies.forEach(s => {
+            if (!knownStrategies.has(s.tag)) {
+              knownStrategies.add(s.tag);
+              changed = true;
+            }
+          });
+          if (changed && filterSelect) {
+            const currentVal = filterSelect.value;
+            filterSelect.innerHTML = '<option value="ALL">All Strategies</option>' +
+              Array.from(knownStrategies).map(st => `<option value="${st}" ${st === currentVal ? 'selected' : ''}>${st}</option>`).join('');
+          }
         }
 
         // Positions Table
-        const posBody = document.getElementById('positions-table');
-        if (data.positions && data.positions.length > 0) {
-          posBody.innerHTML = data.positions.map(p => {
-            const statusBadge = p.status === 'SETTLED' ? '<span class="badge badge-win">SETTLED</span>' : '<span class="badge badge-open">OPEN</span>';
-            const pnlStr = p.pnl_dollars !== null ? ((p.pnl_dollars >= 0 ? '+$' : '-$') + Math.abs(p.pnl_dollars).toFixed(2)) : '—';
-            const pnlClass = (p.pnl_dollars || 0) > 0 ? 'pnl-pos' : ((p.pnl_dollars || 0) < 0 ? 'pnl-neg' : 'pnl-zero');
-            const sideClass = p.side === 'YES' ? 'badge-win' : 'badge-loss';
-            const closeShort = (p.close_time || '').replace('2026-', '').replace('Z', ' UTC');
-
-            return `
-              <tr>
-                <td><span style="font-size:0.85rem; color:#8b949e;">${p.strategy}</span></td>
-                <td><strong>${p.ticker}</strong></td>
-                <td><span class="badge ${sideClass}">${p.side}</span></td>
-                <td>${p.price}¢</td>
-                <td>${statusBadge}</td>
-                <td class="${pnlClass}">${pnlStr}</td>
-                <td style="font-size:0.85rem; color:#8b949e;">${closeShort}</td>
-              </tr>
-            `;
-          }).join('');
+        if (data.positions) {
+          globalPositions = data.positions;
+          renderPositions();
         }
 
         // Log box
@@ -344,6 +414,31 @@
 
     setInterval(updateDashboard, 2000);
     updateDashboard();
+
+    // Screen Wake Lock API to keep Chromebox display and system on
+    let wakeLock = null;
+    async function requestWakeLock() {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen');
+          document.getElementById('wakelock-status').textContent = 'Active (Screen Locked On)';
+          wakeLock.addEventListener('release', () => {
+            document.getElementById('wakelock-status').textContent = 'Released';
+          });
+        } else {
+          document.getElementById('wakelock-status').textContent = 'Active (System)';
+        }
+      } catch (err) {
+        console.warn('Wake Lock request failed:', err);
+        document.getElementById('wakelock-status').textContent = 'Active (System)';
+      }
+    }
+    requestWakeLock();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        requestWakeLock();
+      }
+    });
   </script>
 </body>
 </html>

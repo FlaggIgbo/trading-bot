@@ -28,6 +28,7 @@ from risk_engine.reconciler import Reconciler
 from risk_engine.rules import (
     DEFAULT_RISK_RULES,
     RiskContext,
+    RiskRejectReason,
     evaluate_risk_rules,
     rule_is_binary_market,
     rule_kill_switch_not_active,
@@ -59,30 +60,48 @@ def test_pure_risk_rules_in_isolation(tmp_path):
     ctx_open = RiskContext(market={"status": "open"}, strategy_name="last_9", db=db)
     ctx_closed = RiskContext(market={"status": "closed"}, strategy_name="last_9", db=db)
     assert rule_market_is_open(ctx_open) is None
-    assert rule_market_is_open(ctx_closed) == "market_not_open_closed"
+    assert rule_market_is_open(ctx_closed) == RiskRejectReason.MARKET_NOT_OPEN
+    assert isinstance(rule_market_is_open(ctx_closed), RiskRejectReason)
 
     # 2. Binary market rule
     assert rule_is_binary_market(RiskContext(market={"market_type": "binary"}, strategy_name="last_9")) is None
-    assert rule_is_binary_market(RiskContext(market={"market_type": "scalar"}, strategy_name="last_9")) == "not_standalone_binary_market"
+    res_not_bin = rule_is_binary_market(RiskContext(market={"market_type": "scalar"}, strategy_name="last_9"))
+    assert res_not_bin == RiskRejectReason.NOT_STANDALONE_BINARY_MARKET
+    assert isinstance(res_not_bin, RiskRejectReason)
 
     # 3. Not past close rule
     future_iso = (now_utc + timedelta(minutes=10)).isoformat()
     past_iso = (now_utc - timedelta(minutes=5)).isoformat()
     assert rule_not_past_close(RiskContext(market={"close_time": future_iso}, strategy_name="last_9", now=now_utc)) is None
-    assert rule_not_past_close(RiskContext(market={"close_time": past_iso}, strategy_name="last_9", now=now_utc)) == "market_already_past_close_time"
+    res_past = rule_not_past_close(RiskContext(market={"close_time": past_iso}, strategy_name="last_9", now=now_utc))
+    assert res_past == RiskRejectReason.MARKET_ALREADY_PAST_CLOSE_TIME
+    assert isinstance(res_past, RiskRejectReason)
 
-    # 4. No existing position rule
+    # 4. No existing position rule (returns POSITION_ALREADY_HELD for last_N when open, or POSITION_ALREADY_EXISTS)
     db.insert_open_position("ord_1", "T-1", PositionSide.YES, 1, 50, strategy=Strategy.LAST_9)
-    assert rule_no_existing_position(RiskContext(market={"ticker": "T-1"}, strategy_name="last_9", db=db)) == "position_already_exists"
+    res_held = rule_no_existing_position(RiskContext(market={"ticker": "T-1"}, strategy_name="last_9", db=db))
+    assert res_held == RiskRejectReason.POSITION_ALREADY_HELD
+    assert isinstance(res_held, RiskRejectReason)
     assert rule_no_existing_position(RiskContext(market={"ticker": "T-2"}, strategy_name="last_9", db=db)) is None
 
+    # Test POSITION_ALREADY_EXISTS when already traded for non-last_N strategy
+    db.insert_open_position("ord_2", "T-3", PositionSide.YES, 1, 50, strategy=Strategy.RANDOM)
+    db.settle_position("ord_2", pnl_cents=50)
+    res_exists = rule_no_existing_position(RiskContext(market={"ticker": "T-3"}, strategy_name="random", db=db))
+    assert res_exists == RiskRejectReason.POSITION_ALREADY_EXISTS
+    assert isinstance(res_exists, RiskRejectReason)
+
     # 5. Under max open positions rule
-    assert rule_under_max_open(RiskContext(market={}, strategy_name="last_9", db=db, max_open_positions=1)) == "max_open_positions_reached_1_of_1"
+    res_max = rule_under_max_open(RiskContext(market={}, strategy_name="last_9", db=db, max_open_positions=1))
+    assert res_max == RiskRejectReason.MAX_OPEN_POSITIONS_REACHED
+    assert isinstance(res_max, RiskRejectReason)
     assert rule_under_max_open(RiskContext(market={}, strategy_name="last_9", db=db, max_open_positions=5)) is None
 
     # 6. Daily loss cap rule
     db.settle_position("ord_1", pnl_cents=-6000)
-    assert rule_under_daily_loss_cap(RiskContext(market={}, strategy_name="last_9", db=db, daily_loss_cap_cents=5000)) is not None
+    res_loss = rule_under_daily_loss_cap(RiskContext(market={}, strategy_name="last_9", db=db, daily_loss_cap_cents=5000))
+    assert res_loss == RiskRejectReason.DAILY_LOSS_CAP_EXCEEDED
+    assert isinstance(res_loss, RiskRejectReason)
     assert rule_under_daily_loss_cap(RiskContext(market={}, strategy_name="last_9", db=db, daily_loss_cap_cents=10000)) is None
 
     # 7. Kill switch rule
@@ -90,7 +109,9 @@ def test_pure_risk_rules_in_isolation(tmp_path):
     assert rule_kill_switch_not_active(RiskContext(market={}, strategy_name="last_9", kill_switch_path=ks_file)) is None
     with open(ks_file, "w") as f:
         f.write("STOP")
-    assert rule_kill_switch_not_active(RiskContext(market={}, strategy_name="last_9", kill_switch_path=ks_file)) == "kill_switch_file_detected"
+    res_ks = rule_kill_switch_not_active(RiskContext(market={}, strategy_name="last_9", kill_switch_path=ks_file))
+    assert res_ks == RiskRejectReason.KILL_SWITCH_FILE_DETECTED
+    assert isinstance(res_ks, RiskRejectReason)
 
     db.close()
 
@@ -128,10 +149,41 @@ def test_decision_dataclass():
         market=market,
         strategy="last_9",
         side=None,
-        reason="max_open_positions_reached",
+        reason=RiskRejectReason.MAX_OPEN_POSITIONS_REACHED,
     )
     assert dec_rejected.is_accepted is False
+    assert dec_rejected.reason == RiskRejectReason.MAX_OPEN_POSITIONS_REACHED
     assert dec_rejected.reason == "max_open_positions_reached"
+    assert dec_rejected.to_dict()["reason"] == "max_open_positions_reached"
+
+
+def test_risk_reject_reasons_enumeration():
+    # Verify all members are StrEnum instances
+    for reason in RiskRejectReason:
+        assert isinstance(reason, str)
+        assert isinstance(reason, RiskRejectReason)
+        assert reason.value == str(reason)
+
+    # Test key members
+    assert RiskRejectReason.POSITION_ALREADY_HELD == "position_already_held"
+    assert RiskRejectReason.POSITION_ALREADY_EXISTS == "position_already_exists"
+    assert RiskRejectReason.MARKET_NOT_OPEN == "market_not_open"
+    assert RiskRejectReason.NOT_STANDALONE_BINARY_MARKET == "not_standalone_binary_market"
+    assert RiskRejectReason.MARKET_ALREADY_PAST_CLOSE_TIME == "market_already_past_close_time"
+    assert RiskRejectReason.KILL_SWITCH_FILE_DETECTED == "kill_switch_file_detected"
+    assert RiskRejectReason.KILL_SWITCH_ENV_DETECTED == "kill_switch_env_detected"
+    assert RiskRejectReason.MAX_OPEN_POSITIONS_REACHED == "max_open_positions_reached"
+    assert RiskRejectReason.DAILY_LOSS_CAP_EXCEEDED == "daily_loss_cap_exceeded"
+    assert RiskRejectReason.MISSING_TICKER == "missing_ticker"
+
+    # Missing ticker check
+    assert rule_no_existing_position(RiskContext(market={}, strategy_name="last_9")) == RiskRejectReason.MISSING_TICKER
+
+    # evaluate_risk_rules returns Enum directly
+    ctx_blocked = RiskContext(market={"status": "closed"}, strategy_name="last_9")
+    eval_res = evaluate_risk_rules(ctx_blocked)
+    assert eval_res == RiskRejectReason.MARKET_NOT_OPEN
+    assert isinstance(eval_res, RiskRejectReason)
 
 
 def test_trade_engine_run_cycle_and_order_state_machine():

@@ -5,7 +5,15 @@ Stores markets and orders/positions for the trading bot, differentiated by envir
 ('demo.kalshi.co' vs 'production') and typed with StrEnums for categorical columns.
 """
 
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):
+        def __str__(self):
+            return str(self.value)
+        def __format__(self, format_spec):
+            return str(self.value).__format__(format_spec)
 import json
 import os
 import sqlite3
@@ -74,6 +82,8 @@ class Strategy(StrEnum):
     SELL_1_5N_5M_35P = "sell_1.5n_5m_35p"
     SELL_1_5N_35P = "sell_1.5n_35p"
     SELL_2_5N = "sell_2.5n"
+    REGIME_AWARE = "regime_aware"
+    REGIME_SPOT = "regime_spot"
 
 
 def normalize_environment(environment: Optional[str] = None) -> Environment:
@@ -152,6 +162,7 @@ class MarketResolution(str):
         expiration_value: Optional[float] = None,
         weight: Optional[float] = None,
         ticker: Optional[str] = None,
+        close_time: Optional[str] = None,
     ):
         clean_res = str(getattr(result, "value", result)).strip().lower()
         obj = super().__new__(cls, clean_res)
@@ -165,6 +176,7 @@ class MarketResolution(str):
         except (ValueError, TypeError):
             obj.expiration_value = None
         obj.ticker = ticker
+        obj.close_time = close_time
 
         if weight is not None:
             try:
@@ -196,6 +208,10 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
         return Strategy.LAST_21
     if strat_clean in ("last_21_spot", "last21_spot", "last_21_cf", "last21_cf"):
         return Strategy.LAST_21_SPOT
+    if strat_clean in ("regime_aware", "regime", "regimeaware"):
+        return Strategy.REGIME_AWARE
+    if strat_clean in ("regime_spot", "regimespot"):
+        return Strategy.REGIME_SPOT
     if strat_clean in ("last_5", "last5", "last_3", "last3"):
         return Strategy.LAST_9
     if strat_clean in ("last_9_spot", "last9_spot", "last_9_cf", "last9_cf"):
@@ -452,7 +468,7 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT ticker, result, floor_strike, expiration_value FROM markets
+            SELECT ticker, result, floor_strike, expiration_value, close_time FROM markets
             WHERE ticker LIKE ? AND environment = ? AND result IN (?, ?)
             ORDER BY close_time DESC, ticker DESC
             LIMIT ?
@@ -465,22 +481,50 @@ class Database:
             fs = row["floor_strike"] if "floor_strike" in row.keys() else None
             ev = row["expiration_value"] if "expiration_value" in row.keys() else None
             t = row["ticker"] if "ticker" in row.keys() else None
-            results.append(MarketResolution(res_val.value, floor_strike=fs, expiration_value=ev, ticker=t))
+            ct = row["close_time"] if "close_time" in row.keys() else None
+            results.append(MarketResolution(res_val.value, floor_strike=fs, expiration_value=ev, ticker=t, close_time=ct))
         return results
 
     def get_positioned_tickers(self, environment=None, strategy=None):
         # Return set of tickers where we already placed an order (OPEN or SETTLED) in this environment
         env = normalize_environment(environment or self.environment)
         cursor = self.conn.cursor()
+        valid_statuses = (PositionStatus.OPEN.value, PositionStatus.SETTLED.value)
         if strategy is not None:
             strat = normalize_strategy(strategy)
             cursor.execute(
-                "SELECT ticker FROM positions WHERE environment = ? AND strategy = ?",
-                (env.value, strat.value),
+                "SELECT ticker FROM positions WHERE status IN (?, ?) AND environment = ? AND strategy = ?",
+                (*valid_statuses, env.value, strat.value),
             )
         else:
-            cursor.execute("SELECT ticker FROM positions WHERE environment = ?", (env.value,))
+            cursor.execute(
+                "SELECT ticker FROM positions WHERE status IN (?, ?) AND environment = ?",
+                (*valid_statuses, env.value),
+            )
         return {row["ticker"] for row in cursor.fetchall()}
+
+    def get_open_positioned_tickers(self, environment=None, strategy=None) -> set[str]:
+        """Return set of tickers that currently have an OPEN (or PENDING) contract in this environment."""
+        env = normalize_environment(environment or self.environment)
+        cursor = self.conn.cursor()
+        open_statuses = (PositionStatus.OPEN.value, PositionStatus.PENDING.value)
+        if strategy is not None:
+            strat = normalize_strategy(strategy)
+            cursor.execute(
+                "SELECT ticker FROM positions WHERE status IN (?, ?) AND environment = ? AND strategy = ?",
+                (*open_statuses, env.value, strat.value),
+            )
+        else:
+            cursor.execute(
+                "SELECT ticker FROM positions WHERE status IN (?, ?) AND environment = ?",
+                (*open_statuses, env.value),
+            )
+        return {row["ticker"] for row in cursor.fetchall()}
+
+    def has_open_position(self, ticker: str, environment=None, strategy=None) -> bool:
+        """Check if an open contract is currently being held for this ticker."""
+        open_tickers = self.get_open_positioned_tickers(environment=environment, strategy=strategy)
+        return ticker in open_tickers
 
     def log_event(
         self,
@@ -682,11 +726,18 @@ class Database:
         """
         Return candidate markets from SQLite for trading:
         Open/active markets that don't already have an existing position for this strategy.
+        For last_N strategies: only excludes markets where an OPEN contract is currently being held,
+        allowing minute-5 evaluation if no contract is held.
         """
         env = normalize_environment(environment or self.environment)
-        positioned = self.get_positioned_tickers(environment=env, strategy=strategy)
+        strat_clean = str(getattr(strategy, "value", strategy) or "").strip().lower()
+        is_last_n = strat_clean.startswith("last_") or strat_clean.startswith("last")
+        if is_last_n:
+            blocked = self.get_open_positioned_tickers(environment=env, strategy=strategy)
+        else:
+            blocked = self.get_positioned_tickers(environment=env, strategy=strategy)
         open_markets = self.get_open_markets(environment=env)
-        return [m for m in open_markets if m.get("ticker") not in positioned]
+        return [m for m in open_markets if m.get("ticker") not in blocked]
 
     def insert_open_position(
         self,

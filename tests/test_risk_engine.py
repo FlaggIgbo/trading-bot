@@ -1087,5 +1087,118 @@ def test_trader_last_21_and_last_21_spot_strategy():
     db.close()
 
 
+def test_detect_market_regime_mean_reversion():
+    from risk_engine.regime import detect_market_regime
+    # 5 history items with last 3 YES in a streak with healthy volatility
+    past = [
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70200},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70250},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70300},
+    ]
+    res = detect_market_regime(past)
+    assert res.regime == "MEAN_REVERSION"
+    assert res.recommended_side == PositionSide.NO  # Fades the streak of 3 YES
+    assert res.is_high_edge is True
+    assert res.streak == 3
+    assert res.should_trade is True
+
+
+def test_detect_market_regime_volatility_gate():
+    from risk_engine.regime import detect_market_regime
+    # Move is micro (0.001%), below min_volatility 0.03%
+    past = [
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70000.5},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70000.5},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70000.5},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70000.5},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70000.5},
+    ]
+    res = detect_market_regime(past, min_volatility=0.03)
+    assert res.regime == "CHOP_ABSTAIN"
+    assert res.should_trade is False
+    assert "Volatility gate" in res.reason
+
+
+def test_trader_regime_aware_taker_ioc(tmp_path):
+    from risk_engine.broker import SimulatedBroker
+    db_file = str(tmp_path / "regime_test.db")
+    db = Database(db_path=db_file)
+    client = KalshiClient(base_url="https://demo-api.kalshi.co/trade-api/v2")
+    broker = SimulatedBroker(client=client)
+
+    trader = Trader(
+        client=client,
+        db=db,
+        strategy="regime_aware",
+        broker=broker,
+    )
+    assert trader.taker_ioc is True
+
+    # Pre-populate 21 historical resolutions: streak of 2 YES at the end
+    for i in range(21):
+        res = "yes" if i >= 19 else "no"
+        db.upsert_markets([{
+            "ticker": f"KXBTC15M-HIST-{i:02d}",
+            "series_ticker": "KXBTC15M",
+            "status": "finalized",
+            "result": res,
+            "floor_strike": 70000.0,
+            "expiration_value": 70200.0 if res == "yes" else 69800.0,
+            "close_time": f"2026-11-01T{10 + i // 4:02d}:{(i % 4) * 15:02d}:00Z",
+        }])
+
+    market = {
+        "ticker": "KXBTC15M-REGIME-1",
+        "status": "open",
+        "strike_price": 70000.0,
+        "yes_ask": 50,
+        "no_ask": 48,
+        "minute": 1,
+    }
+
+    order = trader.process_market(market)
+    assert order is not None
+    assert order["side"] == PositionSide.NO  # Fades 2-streak YES
+    assert order["price"] == 48
+    assert order["time_in_force"] == "immediate_or_cancel"
+
+    db.close()
+
+
+def test_trader_cash_margin_guard(tmp_path):
+    from risk_engine.broker import KalshiBroker
+    db_file = str(tmp_path / "cash_test.db")
+    db = Database(db_path=db_file)
+    client = KalshiClient(base_url="https://api.elections.kalshi.com/trade-api/v2", live_orders=True)
+    broker = KalshiBroker(client=client)
+
+    trader = Trader(
+        client=client,
+        db=db,
+        strategy="regime_aware",
+        broker=broker,
+    )
+
+    # Simulate empty cash balance ($0.10 available, contract costs $0.50)
+    trader._cached_avail_cash = 0.10
+    trader._last_bal_check = 10000000000.0  # Prevent refetch
+
+    market = {
+        "ticker": "KXBTC15M-CASH-TEST",
+        "status": "open",
+        "strike_price": 70000.0,
+        "yes_ask": 50,
+        "no_ask": 50,
+        "minute": 1,
+    }
+
+    order = trader.process_market(market)
+    assert order is None  # Guarded from placing order due to insufficient margin!
+    db.close()
+
+
+
 
 
