@@ -215,6 +215,10 @@ if __name__ == "__main__":
         type=str,
         default="last_9",
         choices=[
+            "trend",
+            "fade",
+            "cheap2x",
+            "cheap1.5x",
             "regime_aware",
             "regime",
             "regime_spot",
@@ -240,7 +244,7 @@ if __name__ == "__main__":
             "sell_2.5n",
             "sell_2_5n",
         ],
-        help="Direction strategy: 'regime_aware', 'regime_spot', 'last_21', 'last_21_spot', 'last_9', 'random', etc.",
+        help="Strategy to run: core signals ('trend', 'fade', 'cheap2x', 'cheap1.5x', 'random') or parameterized variants ('last_21_spot', 'last_9', etc.)",
     )
     parser.add_argument(
         "--live",

@@ -291,3 +291,97 @@ def test_reconciler_resolves_pending_orders():
     assert len(db.get_pending_positions()) == 0
 
     db.close()
+
+
+def test_simplified_strategy_dataclass_and_registry():
+    from risk_engine.engine import (
+        Strategy as StratData,
+        STRATEGIES,
+        get_strategy,
+        trend_signal,
+        regime_signal,
+        cheapest_side,
+        random_signal,
+        in_band,
+    )
+
+    # Core simplified strategies
+    assert "trend" in STRATEGIES
+    assert "fade" in STRATEGIES
+    assert "cheap2x" in STRATEGIES
+    assert "cheap1.5x" in STRATEGIES
+    assert "random" in STRATEGIES
+
+    strat_trend = get_strategy("trend")
+    assert isinstance(strat_trend, StratData)
+    assert strat_trend.price_band == (20, 65)
+
+    strat_cheap = get_strategy("cheap2x")
+    assert strat_cheap.take_profit == 2.0
+    assert strat_cheap.entry_window == (5.0, 10.0)
+    assert strat_cheap.price_band == (1, 35)
+
+    # Runtime overrides
+    custom = get_strategy("trend", price_band=(25, 75), stop_loss=True, take_profit=85)
+    assert custom.price_band == (25, 75)
+    assert custom.stop_loss is True
+    assert custom.take_profit == 85
+
+    # Pure signals
+    assert in_band(45, (20, 65))
+    assert not in_band(15, (20, 65))
+    assert not in_band(70, (20, 65))
+
+    # cheapest_side pure signal
+    assert cheapest_side(market={"yes_ask": 25, "no_ask": 75}) == PositionSide.YES
+    assert cheapest_side(market={"yes_ask": 80, "no_ask": 20}) == PositionSide.NO
+    assert cheapest_side(market={"yes_ask": 40, "no_ask": 40}) == PositionSide.YES
+
+
+def test_reject_single_home_for_risk_rules():
+    from risk_engine.engine import get_strategy
+    from risk_engine.rules import reject, RiskContext, RiskRejectReason
+
+    db = Database(":memory:")
+    strat_trend = get_strategy("trend")
+
+    # 1. Closed market rejected
+    ctx_closed = RiskContext(market={"status": "closed"}, strategy_name="trend", db=db)
+    assert reject({"status": "closed"}, strat_trend, ctx_closed) == RiskRejectReason.MARKET_NOT_OPEN
+
+    # 2. Timing outside entry window rejected
+    strat_cheap = get_strategy("cheap2x")  # entry window (5.0, 10.0)
+    ctx_m2 = RiskContext(market={"status": "open", "market_type": "binary", "ticker": "T-1", "minute": 2.0}, strategy_name="cheap2x", db=db)
+    assert reject({"status": "open", "market_type": "binary", "ticker": "T-1", "minute": 2.0}, strat_cheap, ctx_m2) == "outside_entry_window"
+
+    # 3. Valid in window accepted
+    ctx_m6 = RiskContext(market={"status": "open", "market_type": "binary", "ticker": "T-1", "minute": 6.0}, strategy_name="cheap2x", db=db)
+    assert reject({"status": "open", "market_type": "binary", "ticker": "T-1", "minute": 6.0}, strat_cheap, ctx_m6) is None
+
+    db.close()
+
+
+def test_linear_run_cycle_pipeline():
+    from risk_engine.engine import get_strategy, run_cycle, TradeEngine
+
+    db = Database(":memory:")
+    broker = SimulatedBroker(db=db)
+    strat = get_strategy("trend", price_band=(20, 65))
+
+    db.upsert_markets([
+        {"ticker": "KXBTC-OPEN1", "status": "open", "market_type": "binary", "yes_ask": 45, "no_ask": 55},
+        {"ticker": "KXBTC-HIGHASK", "status": "open", "market_type": "binary", "yes_ask": 85, "no_ask": 15},
+    ])
+
+    engine = TradeEngine(repo=db, broker=broker, strategy_name="trend")
+    decisions = run_cycle(strat, engine)
+
+    assert len(decisions) >= 1
+    # Check that position was opened
+    positions = db.get_all_positions()
+    assert len(positions) == 1
+    assert positions[0]["ticker"] == "KXBTC-OPEN1"
+    assert positions[0]["status"] == PositionStatus.OPEN
+
+    db.close()
+

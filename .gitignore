@@ -40,3 +40,4 @@ live_data.json
 trading-bot-demo-v2.txt
 *.key
 
+archive_runs/

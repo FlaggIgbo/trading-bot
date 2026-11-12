@@ -66,6 +66,10 @@ class PositionStatus(StrEnum):
 
 
 class Strategy(StrEnum):
+    TREND = "trend"
+    FADE = "fade"
+    CHEAP2X = "cheap2x"
+    CHEAP1_5X = "cheap1.5x"
     RANDOM = "random"
     LAST_3 = "last_3"
     LAST_5 = "last_5"
@@ -206,6 +210,14 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
     strat_clean = str(strategy).strip().lower()
     if strat_clean in ("last_21", "last21"):
         return Strategy.LAST_21
+    if strat_clean in ("trend",):
+        return Strategy.TREND
+    if strat_clean in ("fade",):
+        return Strategy.FADE
+    if strat_clean in ("cheap2x", "cheap_2x"):
+        return Strategy.CHEAP2X
+    if strat_clean in ("cheap1.5x", "cheap_1.5x", "cheap1_5x"):
+        return Strategy.CHEAP1_5X
     if strat_clean in ("last_21_spot", "last21_spot", "last_21_cf", "last21_cf"):
         return Strategy.LAST_21_SPOT
     if strat_clean in ("regime_aware", "regime", "regimeaware"):

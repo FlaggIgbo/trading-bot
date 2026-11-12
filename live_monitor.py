@@ -10,11 +10,11 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 
 INSTANCES = [
-    {"tag": "last_9_spot (prod, LIVE, SL, TP85c)", "db": "trading_bot_last_9_spot_prod_sl_tp85.db", "log": "trading_bot_last_9_spot_prod_sl_tp85.log", "env": "prod", "live": True},
-    {"tag": "last_9_spot (demo, SL)", "db": "trading_bot_last_9_spot_demo_sl.db", "log": "trading_bot_last_9_spot_demo_sl.log", "env": "demo", "live": False},
-    {"tag": "last_9 (demo, SL)", "db": "trading_bot_last_9_demo_sl.db", "log": "trading_bot_last_9_demo_sl.log", "env": "demo", "live": False},
-    {"tag": "random (demo, SL)", "db": "trading_bot_random_demo_sl.db", "log": "trading_bot_random_demo_sl.log", "env": "demo", "live": False},
-    {"tag": "sell_2n (demo, SL)", "db": "trading_bot_sell_2n_demo_sl.db", "log": "trading_bot_sell_2n_demo_sl.log", "env": "demo", "live": False},
+    {"tag": "regime_aware (prod, LIVE, SL, TP85c)", "db": "trading_bot_regime_aware_prod_sl_tp85.db", "log": "trading_bot_regime_aware_prod_sl_tp85.log", "env": "prod", "live": True},
+    {"tag": "regime_aware (demo, LIVE, SL, TP85c)", "db": "trading_bot_regime_aware_demo_sl_tp85.db", "log": "trading_bot_regime_aware_demo_sl_tp85.log", "env": "demo", "live": True},
+    {"tag": "sell_1.5n (demo)", "db": "trading_bot_sell_1.5n_demo.db", "log": "trading_bot_sell_1.5n_demo.log", "env": "demo", "live": False},
+    {"tag": "last_21_spot (demo, SL, TP85c)", "db": "trading_bot_last_21_spot_demo_sl_tp85.db", "log": "trading_bot_last_21_spot_demo_sl_tp85.log", "env": "demo", "live": False},
+    {"tag": "random (demo)", "db": "trading_bot_random_demo.db", "log": "trading_bot_random_demo.log", "env": "demo", "live": False},
 ]
 
 def get_stats():
@@ -100,13 +100,16 @@ def get_stats():
         gross_loss = abs(sum(p[8] for p in losses)) / 100.0
         profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
 
-        overall_trades += total
-        overall_settled += len(settled)
-        overall_open += len(open_pos)
-        overall_wins += len(wins)
-        overall_losses += len(losses)
-        overall_pnl_cents += pnl
-        overall_sl_count += sl_count
+        # Exclude 'random' baseline strategy from aggregate metric boxes
+        is_random = "random" in str(inst.get("tag", "")).lower() or "random" in str(inst.get("strategy", "")).lower()
+        if not is_random:
+            overall_trades += total
+            overall_settled += len(settled)
+            overall_open += len(open_pos)
+            overall_wins += len(wins)
+            overall_losses += len(losses)
+            overall_pnl_cents += pnl
+            overall_sl_count += sl_count
 
         strategy_stats.append({
             "tag": inst["tag"],
