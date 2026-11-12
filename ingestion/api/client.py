@@ -573,3 +573,52 @@ class KalshiClient:
                 error=str(error),
             )
             return {"error": str(error)}
+
+    def get_balance(self):
+        """Fetch portfolio balance and breakdown by exchange shard."""
+        url = f"{self.base_url}/portfolio/balance"
+        headers = self._build_auth_headers("GET", url)
+        try:
+            response = self._request("GET", url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as error:
+            analytics.error(f"Error fetching balance: {error}", error=str(error))
+            return None
+
+    def transfer_between_shards(self, source_shard: int, dest_shard: int, amount_dollars: float):
+        """Transfer cash between exchange shards (e.g. 0=elections/general, 2=crypto contracts)."""
+        import uuid
+        url = f"{self.base_url}/portfolio/intra_exchange_instance_transfer"
+        headers = self._build_auth_headers("POST", url)
+        # 1 dollar = 10,000 centicents
+        centicents = int(round(amount_dollars * 10000))
+        payload = {
+            "source": "event_contract",
+            "destination": "event_contract",
+            "source_exchange_shard": source_shard,
+            "destination_exchange_shard": dest_shard,
+            "amount": centicents,
+            "client_transfer_id": str(uuid.uuid4()),
+        }
+        try:
+            response = self._request("POST", url, headers=headers, json=payload, timeout=10)
+            if response.status_code == 200:
+                analytics.info(
+                    f"Transferred ${amount_dollars:.2f} from shard {source_shard} to shard {dest_shard}.",
+                    source_shard=source_shard,
+                    dest_shard=dest_shard,
+                    amount=amount_dollars,
+                )
+                return response.json()
+            else:
+                analytics.error(
+                    f"Shard transfer failed ({response.status_code}): {response.text}",
+                    status_code=response.status_code,
+                )
+                return {"error": response.text}
+        except Exception as error:
+            analytics.error(f"Error during shard transfer: {error}", error=str(error))
+            return {"error": str(error)}
+
