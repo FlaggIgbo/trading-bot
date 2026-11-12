@@ -35,7 +35,7 @@ class Broker(Protocol):
     def get_order(self, order_id: str) -> Optional[dict[str, Any]]:
         ...
 
-    def cancel_order(self, order_id: str) -> Optional[dict[str, Any]]:
+    def cancel_order(self, order_id: str, ticker: Optional[str] = None) -> Optional[dict[str, Any]]:
         ...
 
     def buy(
@@ -331,10 +331,15 @@ class SimulatedBroker(BaseBroker):
     def get_order(self, order_id: str) -> Optional[dict[str, Any]]:
         return self._orders.get(order_id)
 
-    def cancel_order(self, order_id: str) -> Optional[dict[str, Any]]:
+    def cancel_order(self, order_id: str, ticker: Optional[str] = None) -> Optional[dict[str, Any]]:
         if self.client and hasattr(self.client, "cancel_order"):
             try:
-                self.client.cancel_order(order_id)
+                self.client.cancel_order(order_id, ticker=ticker)
+            except TypeError:
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception:
+                    pass
             except Exception:
                 pass
         order = self._orders.get(order_id)
@@ -396,8 +401,11 @@ class KalshiBroker(BaseBroker):
             return self.client.get_order(order_id)
         return None
 
-    def cancel_order(self, order_id: str) -> Optional[dict[str, Any]]:
+    def cancel_order(self, order_id: str, ticker: Optional[str] = None) -> Optional[dict[str, Any]]:
         """Cancel an unfilled or resting order on Kalshi."""
         if hasattr(self.client, "cancel_order"):
-            return self.client.cancel_order(order_id)
+            try:
+                return self.client.cancel_order(order_id, ticker=ticker)
+            except TypeError:
+                return self.client.cancel_order(order_id)
         return None

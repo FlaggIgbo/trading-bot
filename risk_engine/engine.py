@@ -491,9 +491,15 @@ def sell_position(
     if resting_order_id:
         try:
             if broker:
-                broker.cancel_order(resting_order_id)
+                try:
+                    broker.cancel_order(resting_order_id, ticker=ticker)
+                except TypeError:
+                    broker.cancel_order(resting_order_id)
             elif client and hasattr(client, "cancel_order"):
-                client.cancel_order(resting_order_id)
+                try:
+                    client.cancel_order(resting_order_id, ticker=ticker)
+                except TypeError:
+                    client.cancel_order(resting_order_id)
         except Exception:
             pass
 
