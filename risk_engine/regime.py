@@ -35,7 +35,8 @@ def detect_market_regime(
     min_samples: int = 5,
     min_volatility: float = 0.03,
     min_edge_ratio: float = 0.20,
-    max_trend_flip_ratio: float = 0.40,
+    max_trend_flip_ratio: float = 0.35,
+    min_reversion_streak: int = 4,
 ) -> MarketRegimeResult:
     """
     Evaluate recent market resolutions through the volatility gate and regime detector.
@@ -139,11 +140,25 @@ def detect_market_regime(
     tot_w = up_w + dn_w
     edge_ratio = abs(up_w - dn_w) / tot_w if tot_w > 0 else 0.0
 
-    # REGIME DECISION 1: Mean-Reversion Setup (Streak >= 2)
-    # At 15-minute resolution, streaks of 2 reverse 56.5% of the time, and streaks of 3 reverse 61.4%
-    if streak >= 2:
+    # CHOP GATE: High alternation / flip frequency -> Abstain
+    # Check this FIRST before evaluating streaks or breakout trends
+    if flip_ratio > max_trend_flip_ratio:
+        return MarketRegimeResult(
+            regime="CHOP_ABSTAIN",
+            recommended_side=None,
+            is_high_edge=False,
+            streak=streak,
+            flip_ratio=flip_ratio,
+            edge_ratio=edge_ratio,
+            avg_volatility=avg_vol,
+            reason=f"Choppy consolidation: flip_ratio={flip_ratio:.2f} > {max_trend_flip_ratio:.2f} -> abstaining",
+        )
+
+    # REGIME DECISION 1: Mean-Reversion Setup (Streak >= min_reversion_streak, default 4)
+    # Require an extended streak (e.g. 4+ consecutive candles) in structured flow before fading
+    if streak >= min_reversion_streak:
         fade_side = PositionSide.NO if last_res == "yes" else PositionSide.YES
-        is_high_edge = (streak >= 2)
+        is_high_edge = (streak >= min_reversion_streak)
         return MarketRegimeResult(
             regime="MEAN_REVERSION",
             recommended_side=fade_side,
@@ -152,12 +167,12 @@ def detect_market_regime(
             flip_ratio=flip_ratio,
             edge_ratio=edge_ratio,
             avg_volatility=avg_vol,
-            reason=f"Mean-reversion signal: {streak} consecutive {last_res.upper()}s -> fading with {fade_side.value}",
+            reason=f"Mean-reversion signal: {streak} consecutive {last_res.upper()}s (flip_ratio={flip_ratio:.2f} <= {max_trend_flip_ratio:.2f}) -> fading with {fade_side.value}",
         )
 
     # REGIME DECISION 2: Trending Breakout Setup
     # Low alternating flips + dominant directional volume magnitude
-    if flip_ratio <= max_trend_flip_ratio and edge_ratio >= min_edge_ratio:
+    if edge_ratio >= min_edge_ratio:
         trend_side = PositionSide.YES if up_w > dn_w else PositionSide.NO
         is_high_edge = (edge_ratio >= 0.30)
         return MarketRegimeResult(
@@ -171,7 +186,7 @@ def detect_market_regime(
             reason=f"Trending breakout: edge={edge_ratio:.2f}, flip_ratio={flip_ratio:.2f} -> following {trend_side.value}",
         )
 
-    # REGIME DECISION 3: Choppy Noise Consolidation -> Abstain
+    # REGIME DECISION 3: Indecisive Noise Consolidation -> Abstain
     return MarketRegimeResult(
         regime="CHOP_ABSTAIN",
         recommended_side=None,
@@ -180,5 +195,5 @@ def detect_market_regime(
         flip_ratio=flip_ratio,
         edge_ratio=edge_ratio,
         avg_volatility=avg_vol,
-        reason=f"Choppy consolidation (flip_ratio={flip_ratio:.2f}, edge={edge_ratio:.2f}) -> abstaining",
+        reason=f"Indecisive consolidation (flip_ratio={flip_ratio:.2f}, edge={edge_ratio:.2f}) -> abstaining",
     )

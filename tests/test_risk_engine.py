@@ -1089,20 +1089,78 @@ def test_trader_last_21_and_last_21_spot_strategy():
 
 def test_detect_market_regime_mean_reversion():
     from risk_engine.regime import detect_market_regime
-    # 5 history items with last 3 YES in a streak with healthy volatility
+    # 6 history items with last 4 YES in a streak with healthy volatility and low flip ratio
     past = [
         {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
         {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
         {"result": "yes", "floor_strike": 70000, "expiration_value": 70200},
         {"result": "yes", "floor_strike": 70000, "expiration_value": 70250},
         {"result": "yes", "floor_strike": 70000, "expiration_value": 70300},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70350},
     ]
-    res = detect_market_regime(past)
+    res = detect_market_regime(past, min_reversion_streak=4)
     assert res.regime == "MEAN_REVERSION"
-    assert res.recommended_side == PositionSide.NO  # Fades the streak of 3 YES
+    assert res.recommended_side == PositionSide.NO  # Fades the streak of 4 YES
     assert res.is_high_edge is True
-    assert res.streak == 3
+    assert res.streak == 4
     assert res.should_trade is True
+
+
+def test_detect_market_regime_chop_gate():
+    from risk_engine.regime import detect_market_regime
+    # Alternating resolutions: yes, no, yes, no, yes, no (high flip_ratio > 0.35)
+    past = [
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70200},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70200},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70200},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+    ]
+    res = detect_market_regime(past, max_trend_flip_ratio=0.35)
+    assert res.regime == "CHOP_ABSTAIN"
+    assert res.should_trade is False
+    assert "Choppy consolidation" in res.reason
+
+
+def test_regime_signal_spot_confirmation():
+    from risk_engine.engine import regime_signal
+    # Past with 4 consecutive NOs -> candidate_side is YES
+    past = [
+        {"result": "yes", "floor_strike": 70000, "expiration_value": 70200},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+        {"result": "no", "floor_strike": 70000, "expiration_value": 69800},
+    ]
+    market = {"ticker": "KXBTC15M-TEST", "floor_strike": 70000.0}
+
+    class MockSpotClient:
+        def __init__(self, spot_side):
+            self.spot_side = spot_side
+        def get_spot_trend(self, m):
+            return self.spot_side, 70100.0, 70000.0
+
+    # 1. Spot disagrees (spot says NO while candidate is YES) -> Abstain
+    disagree_client = MockSpotClient(PositionSide.NO)
+    sig_disagree = regime_signal(past_results=past, market=market, spot_client=disagree_client, check_spot=True, require_spot_agreement=True)
+    assert sig_disagree is None
+
+    # 2. Spot agrees (spot says YES and candidate is YES) -> Trade confirmed
+    agree_client = MockSpotClient(PositionSide.YES)
+    sig_agree = regime_signal(past_results=past, market=market, spot_client=agree_client, check_spot=True, require_spot_agreement=True)
+    assert sig_agree == PositionSide.YES
+
+
+def test_regime_aware_widened_stop_loss():
+    from risk_engine.engine import should_stop_loss
+    # For regime_aware:
+    # 1. At minute 10, does NOT stop out (stop_minute is 11.5)
+    assert not should_stop_loss(entry_price=50, current_price=20, minute=10.0, strategy="regime_aware")
+    # 2. At minute 12, does NOT stop out if price is 20c (stop_price_threshold is widened to 15c and ratio 0.35 = 17.5c)
+    assert not should_stop_loss(entry_price=50, current_price=20, minute=12.0, strategy="regime_aware")
+    # 3. At minute 12, triggers if price collapsed to <= 15c
+    assert should_stop_loss(entry_price=50, current_price=14, minute=12.0, strategy="regime_aware")
 
 
 def test_detect_market_regime_volatility_gate():

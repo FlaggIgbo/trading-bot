@@ -281,15 +281,16 @@ def trend_signal(
 def regime_signal(
     past_results: Any = None,
     market: Optional[dict] = None,
-    check_spot: bool = False,
+    check_spot: bool = True,
     spot_client: Optional[Any] = None,
-    require_spot_agreement: bool = False,
+    require_spot_agreement: bool = True,
     min_volatility: float = 0.03,
     min_edge_ratio: float = 0.20,
-    max_trend_flip_ratio: float = 0.40,
+    max_trend_flip_ratio: float = 0.35,
+    min_reversion_streak: int = 4,
     **kwargs: Any,
 ) -> Optional[PositionSide]:
-    """Regime-aware signal fading streaks and gating chopped volatility."""
+    """Regime-aware signal fading extended streaks and gating chopped volatility with spot confirmation."""
     from risk_engine.regime import detect_market_regime
 
     regime_res = detect_market_regime(
@@ -297,18 +298,27 @@ def regime_signal(
         min_volatility=min_volatility,
         min_edge_ratio=min_edge_ratio,
         max_trend_flip_ratio=max_trend_flip_ratio,
+        min_reversion_streak=min_reversion_streak,
     )
     if not regime_res.should_trade:
         return None
 
     candidate_side = regime_res.recommended_side
+
+    # Real-Time Spot Confirmation
     if check_spot and market and candidate_side:
         if spot_client is None:
             from ingestion.spot import SpotClient
             spot_client = SpotClient()
         spot_side, spot_val, strike_val = spot_client.get_spot_trend(market)
-        if spot_side is not None and require_spot_agreement and spot_side != candidate_side:
-            return None
+        if spot_side is not None:
+            if require_spot_agreement and spot_side != candidate_side:
+                analytics.info(
+                    f"Spot disagreement on {market.get('ticker')}: candidate={candidate_side.value}, spot={spot_side.value} (spot={spot_val}, strike={strike_val}) -> abstaining",
+                    event="spot_disagreement",
+                )
+                return None
+            return candidate_side
 
     return candidate_side
 
@@ -371,9 +381,9 @@ STRATEGIES: dict[str, Strategy] = {
     "last_21_spot": Strategy("last_21_spot", trend_signal, price_band=(20, 65), check_spot=True),
     "last_9": Strategy("last_9", trend_signal, price_band=(1, 99)),
     "last_9_spot": Strategy("last_9_spot", trend_signal, price_band=(20, 65), check_spot=True),
-    "regime_aware": Strategy("regime_aware", regime_signal, price_band=(20, 65), taker_ioc=True),
+    "regime_aware": Strategy("regime_aware", regime_signal, price_band=(20, 65), check_spot=True, taker_ioc=True),
     "regime_spot": Strategy("regime_spot", regime_signal, price_band=(20, 65), check_spot=True, taker_ioc=True),
-    "regime": Strategy("regime", regime_signal, price_band=(20, 65), taker_ioc=True),
+    "regime": Strategy("regime", regime_signal, price_band=(20, 65), check_spot=True, taker_ioc=True),
     "sell_3n": Strategy("sell_3n", cheapest_side, entry_window=(5.0, 10.0), price_band=(1, 33), take_profit=3.0),
     "sell_2n": Strategy("sell_2n", cheapest_side, entry_window=(10.0, 15.0), price_band=(1, 50), take_profit=2.0),
     "sell_2n_5m": Strategy("sell_2n_5m", cheapest_side, entry_window=(5.0, 10.0), price_band=(1, 50), take_profit=2.0),
@@ -455,12 +465,22 @@ def should_stop_loss(
     if entry is None or current is None or entry <= 0:
         return False
 
+    strat_str = str(getattr(strat, "value", getattr(strat, "name", strat)) or "").lower().strip()
+
     if stop_minute is None:
-        strat_str = str(getattr(strat, "value", getattr(strat, "name", strat)) or "").lower().strip()
         if strat_str in ("random", "last_9", "last_21", "trend") or "random" in strat_str or "last" in strat_str:
             stop_minute = 5.0
+        elif "regime" in strat_str:
+            stop_minute = 11.5  # Protect against early-to-mid candle noise
         else:
             stop_minute = 10.0
+
+    # For regime-aware strategies, widen stop loss thresholds to absorb intra-bar volatility
+    if "regime" in strat_str:
+        if "stop_price_threshold" not in kwargs and stop_price_threshold == 25:
+            stop_price_threshold = 15
+        if "stop_ratio_threshold" not in kwargs and stop_ratio_threshold == 0.5:
+            stop_ratio_threshold = 0.35
 
     if minute is None or minute < stop_minute:
         return False
@@ -1283,7 +1303,7 @@ def choose_side_regime_aware(
     past_results: Any = None,
     market: Optional[dict] = None,
     spot_client: Optional[Any] = None,
-    check_spot: bool = False,
+    check_spot: bool = True,
     min_entry_price: Optional[int] = 20,
     max_entry_price: Optional[int] = 65,
     **kwargs: Any,
