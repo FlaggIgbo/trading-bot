@@ -10,10 +10,11 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 
 INSTANCES = [
-    {"tag": "regime_aware (prod, LIVE, SL, TP85c)", "db": "trading_bot_regime_aware_prod_sl_tp85.db", "log": "trading_bot_regime_aware_prod_sl_tp85.log", "env": "prod", "live": True},
     {"tag": "regime_aware (demo, LIVE, SL, TP85c)", "db": "trading_bot_regime_aware_demo_sl_tp85.db", "log": "trading_bot_regime_aware_demo_sl_tp85.log", "env": "demo", "live": True},
+    {"tag": "regime_aware (demo, TP85c)", "db": "trading_bot_regime_aware_demo_tp85.db", "log": "trading_bot_regime_aware_demo_tp85.log", "env": "demo", "live": False},
+    {"tag": "regime_aware (demo, SL)", "db": "trading_bot_regime_aware_demo_sl.db", "log": "trading_bot_regime_aware_demo_sl.log", "env": "demo", "live": False},
     {"tag": "sell_1.5n (demo)", "db": "trading_bot_sell_1.5n_demo.db", "log": "trading_bot_sell_1.5n_demo.log", "env": "demo", "live": False},
-    {"tag": "last_21_spot (demo, SL, TP85c)", "db": "trading_bot_last_21_spot_demo_sl_tp85.db", "log": "trading_bot_last_21_spot_demo_sl_tp85.log", "env": "demo", "live": False},
+    {"tag": "last_21_spot (demo)", "db": "trading_bot_last_21_spot_demo.db", "log": "trading_bot_last_21_spot_demo.log", "env": "demo", "live": False},
     {"tag": "random (demo)", "db": "trading_bot_random_demo.db", "log": "trading_bot_random_demo.log", "env": "demo", "live": False},
 ]
 
