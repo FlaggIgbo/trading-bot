@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   minio:
-    image: minio/minio:latest
+    image: pgsty/silo:latest
     container_name: trading-bot-minio
     restart: unless-stopped
     ports:
@@ -21,7 +21,7 @@ services:
       retries: 3
 
   create-buckets:
-    image: minio/mc:latest
+    image: pgsty/mc:latest
     depends_on:
       minio:
         condition: service_healthy
