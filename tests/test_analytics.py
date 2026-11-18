@@ -91,3 +91,54 @@ def test_clickhouse_backend():
     for backend, expected_connected, can_insert in tests:
         assert backend.is_connected == expected_connected
         assert backend.insert_event("test_evt", "msg") == can_insert
+
+
+def test_clickhouse_issues_only_filtering():
+    inserted_events = []
+
+    class MockClickHouseBackend:
+        is_connected = True
+
+        def insert_event(self, event, message, level="INFO", properties=None, timestamp=None):
+            inserted_events.append({"event": event, "message": message, "level": level})
+            return True
+
+    tracker = Analytics(console_output=False, clickhouse=MockClickHouseBackend())
+    tracker.clickhouse_only_issues = True
+    tracker.clickhouse_min_level = "WARNING"
+
+    # info should NOT be dispatched to ClickHouse
+    tracker.info("Normal scanner run", event="scan_ok")
+    assert len(inserted_events) == 0
+
+    # warning should be dispatched
+    tracker.warning("Rate limit throttle", event="rate_limit")
+    assert len(inserted_events) == 1
+    assert inserted_events[0]["level"] == "WARNING"
+
+    # error should be dispatched
+    tracker.error("API 500 error", event="api_failure")
+    assert len(inserted_events) == 2
+    assert inserted_events[1]["level"] == "ERROR"
+
+
+def test_analytics_logging_handler():
+    import logging as stdlib_logging
+    from logging.analytics import AnalyticsLoggingHandler
+
+    tracker = Analytics(console_output=False)
+    handler = AnalyticsLoggingHandler(analytics_instance=tracker, min_level=stdlib_logging.WARNING)
+
+    test_logger = stdlib_logging.getLogger("test_bot_subsystem")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(stdlib_logging.DEBUG)
+
+    test_logger.info("Informational message - should ignore")
+    assert len(tracker.get_events()) == 0
+
+    test_logger.warning("Caution: slippage detected")
+    assert len(tracker.get_events(level="WARNING")) == 1
+
+    test_logger.error("Critical: connection drop")
+    assert len(tracker.get_events(level="ERROR")) == 1
+

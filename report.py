@@ -31,6 +31,9 @@ def format_cents(cents: Optional[int]) -> str:
 
 
 def run_report(db_path: str = "trading_bot.db", environment: Optional[str] = None) -> None:
+    if not os.path.exists(db_path) and os.path.exists(os.path.join("db", os.path.basename(db_path))):
+        db_path = os.path.join("db", os.path.basename(db_path))
+
     if not os.path.exists(db_path):
         print(f"[!] Database file '{db_path}' not found. Run the bot first to generate data.")
         return

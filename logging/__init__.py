@@ -37,14 +37,23 @@ for _p in sys.path:
                 _stdlib_logging = _mod
             break
 
-# Export analytics library on demand to prevent circular imports with stdlib asyncio/concurrent.futures
+# Export analytics and storage libraries on demand to prevent circular imports with stdlib asyncio/concurrent.futures
 def __getattr__(name):
-    if name in ("Analytics", "AnalyticsEvent", "ClickHouseBackend", "analytics"):
-        from logging.analytics import Analytics, AnalyticsEvent, ClickHouseBackend, analytics
+    if name in ("Analytics", "AnalyticsEvent", "ClickHouseBackend", "analytics", "AnalyticsLoggingHandler", "setup_logging_bridge"):
+        from logging.analytics import Analytics, AnalyticsEvent, ClickHouseBackend, analytics, AnalyticsLoggingHandler, setup_logging_bridge
         globals()["Analytics"] = Analytics
         globals()["AnalyticsEvent"] = AnalyticsEvent
         globals()["ClickHouseBackend"] = ClickHouseBackend
         globals()["analytics"] = analytics
+        globals()["AnalyticsLoggingHandler"] = AnalyticsLoggingHandler
+        globals()["setup_logging_bridge"] = setup_logging_bridge
+        return globals()[name]
+    if name in ("LogStorageManager", "StorageConfig", "storage_manager", "PurePythonS3Client"):
+        from logging.storage import LogStorageManager, StorageConfig, storage_manager, PurePythonS3Client
+        globals()["LogStorageManager"] = LogStorageManager
+        globals()["StorageConfig"] = StorageConfig
+        globals()["storage_manager"] = storage_manager
+        globals()["PurePythonS3Client"] = PurePythonS3Client
         return globals()[name]
     raise AttributeError(f"module 'logging' has no attribute '{name}'")
 
@@ -53,6 +62,12 @@ __all__ = [
     "AnalyticsEvent",
     "ClickHouseBackend",
     "analytics",
+    "AnalyticsLoggingHandler",
+    "setup_logging_bridge",
+    "LogStorageManager",
+    "StorageConfig",
+    "storage_manager",
+    "PurePythonS3Client",
 ]
 if _stdlib_logging and hasattr(_stdlib_logging, "__all__"):
     __all__.extend(_stdlib_logging.__all__)

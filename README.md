@@ -115,6 +115,75 @@ pytest
 
 ---
 
+## Log Storage & Object Archiving (Cloudflare R2 & MinIO)
+
+Run logs and evaluation databases can be stored and synchronized with S3-compatible object storage:
+- **Production**: [Cloudflare R2](https://developers.cloudflare.com/r2/)
+- **Local Development**: [MinIO](https://min.io/) running locally in Docker
+
+### Local Development Setup (MinIO via Docker)
+
+Start the MinIO server and automatic bucket provisioning:
+
+```bash
+docker compose up -d
+```
+
+- **S3 API Endpoint**: `http://localhost:9000`
+- **Web Console UI**: `http://localhost:9001` (User: `minioadmin` / Pass: `minioadmin`)
+- **Bucket**: `trading-bot-logs-dev`
+
+*(Note: On systems without Docker installed, the bot automatically and gracefully falls back to local storage without interruption).*
+
+### Production Setup (Cloudflare R2)
+
+Configure in `.env`:
+```ini
+LOG_STORAGE_BACKEND=r2
+R2_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=your_r2_access_key_id
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key
+R2_BUCKET_NAME=trading-bot-logs-prod
+```
+
+### Syncing Logs CLI
+
+```bash
+# Check connectivity status
+python scripts/sync_logs.py --status
+
+# Upload recent run logs
+python scripts/sync_logs.py --upload-recent
+
+# Upload all historical archive folders
+python scripts/sync_logs.py --upload-archives
+
+# List remote log files
+python scripts/sync_logs.py --list
+
+# Download remote logs locally
+python scripts/sync_logs.py --download-prefix runs/20261117/ --output-dir ./downloaded_logs
+```
+
+### ClickHouse Issue Tracking (Docker)
+
+To stream structured warning (`log.warn`) and error (`log.error`) events into ClickHouse:
+
+1. Launch ClickHouse with Docker Compose:
+   ```bash
+   docker compose up -d clickhouse
+   ```
+2. Configure in `.env`:
+   ```ini
+   CLICKHOUSE_HOST=localhost
+   CLICKHOUSE_PORT=8123
+   CLICKHOUSE_LOG_LEVEL=WARNING
+   CLICKHOUSE_ONLY_ISSUES=true
+   ```
+   *(Only entries with severity `WARNING`, `ERROR`, or `CRITICAL` will be ingested into the `trading_events` table in ClickHouse).*
+
+---
+
 ## Deployment
 
 The bot runs as a single worker process on platforms like Render or any Linux host. When deploying to containerized or cloud environments, attach a persistent volume to mount your SQLite database file (e.g. `/var/data/trading_bot.db`) to ensure state persists across redeploys.

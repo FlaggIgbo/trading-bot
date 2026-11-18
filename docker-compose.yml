@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: trading-bot-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # MinIO S3 API Endpoint
+      - "9001:9001"   # MinIO Web Console UI
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  create-buckets:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set localminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb localminio/trading-bot-logs-dev --ignore-existing;
+      /usr/bin/mc anonymous set download localminio/trading-bot-logs-dev;
+      exit 0;
+      "
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: trading-bot-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"   # ClickHouse HTTP Client Interface
+      - "9004:9000"   # ClickHouse Native Protocol (mapped to 9004 to prevent conflict with MinIO port 9000)
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse123
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+volumes:
+  minio_data:
+  clickhouse_data:

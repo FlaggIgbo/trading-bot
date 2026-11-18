@@ -8,6 +8,7 @@ ClickHouse integration (https://clickhouse.com/docs) for the trading bot.
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import logging as stdlib_logging
 import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
@@ -57,6 +58,9 @@ class Analytics:
         else:
             self.clickhouse = None
 
+        self.clickhouse_min_level: str = os.getenv("CLICKHOUSE_LOG_LEVEL", "WARNING").upper()
+        self.clickhouse_only_issues: bool = os.getenv("CLICKHOUSE_ONLY_ISSUES", "true").lower() in ("true", "1", "yes")
+
     @staticmethod
     def _default_formatter(event: AnalyticsEvent) -> str:
         ts = event.timestamp
@@ -98,7 +102,20 @@ class Analytics:
             except Exception:
                 pass
 
-        if self.clickhouse and self.clickhouse.is_connected:
+        # Dispatch issues (or all events) to ClickHouse
+        LEVEL_SEVERITY = {
+            "DEBUG": 10,
+            "INFO": 20,
+            "WARN": 30,
+            "WARNING": 30,
+            "ERROR": 40,
+            "CRITICAL": 50,
+        }
+        min_sev = LEVEL_SEVERITY.get(self.clickhouse_min_level, 30)
+        entry_sev = LEVEL_SEVERITY.get(entry.level, 20)
+        should_send_to_ch = (not self.clickhouse_only_issues) or (entry_sev >= min_sev)
+
+        if should_send_to_ch and self.clickhouse and self.clickhouse.is_connected:
             try:
                 self.clickhouse.insert_event(
                     event=entry.event,
@@ -223,3 +240,35 @@ class Analytics:
 
 # Global default instance for repository-wide convenience
 analytics = Analytics()
+
+
+class AnalyticsLoggingHandler(stdlib_logging.Handler):
+    """
+    Standard library logging handler that intercepts log.warning / log.error calls
+    and routes them directly into Analytics (and ClickHouse).
+    """
+
+    def __init__(self, analytics_instance: Optional[Analytics] = None, min_level: int = stdlib_logging.WARNING):
+        super().__init__(level=min_level)
+        self.analytics_instance = analytics_instance
+
+    def emit(self, record: stdlib_logging.LogRecord):
+        try:
+            target = self.analytics_instance or analytics
+            msg = self.format(record)
+            if record.levelno >= stdlib_logging.ERROR:
+                target.error(msg, event=f"log_{record.name}", logger=record.name)
+            elif record.levelno >= stdlib_logging.WARNING:
+                target.warning(msg, event=f"log_{record.name}", logger=record.name)
+        except Exception:
+            pass
+
+
+def setup_logging_bridge(analytics_instance: Optional[Analytics] = None, min_level: int = stdlib_logging.WARNING) -> AnalyticsLoggingHandler:
+    """Attach the AnalyticsLoggingHandler to Python's root logger."""
+    handler = AnalyticsLoggingHandler(analytics_instance=analytics_instance, min_level=min_level)
+    root = stdlib_logging.getLogger()
+    if not any(isinstance(h, AnalyticsLoggingHandler) for h in root.handlers):
+        root.addHandler(handler)
+    return handler
+

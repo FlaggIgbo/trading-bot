@@ -36,6 +36,9 @@ Thumbs.db
 .trading-bot-data/
 live_data.json
 .parallel_run_meta.json
+log/
+db/
+localhost.html
 
 trading-bot-demo-v2.txt
 *.key

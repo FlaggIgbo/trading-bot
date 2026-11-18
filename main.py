@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from db import Database
 from ingestion.api.client import KalshiClient
 from ingestion.scanner import Scanner
-from logging.analytics import analytics
+from logging.analytics import analytics, setup_logging_bridge
 from risk_engine.broker import KalshiBroker, SimulatedBroker
 from risk_engine.engine import Config, TradeEngine, Trader
 from risk_engine.reconciler import Reconciler
@@ -24,6 +24,9 @@ from risk_engine.settler import Settler
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Bridge standard library logging warnings and errors to Analytics & ClickHouse
+setup_logging_bridge(analytics_instance=analytics)
 
 
 def seconds_until_next_slot(now=None, interval=900, offset=30):

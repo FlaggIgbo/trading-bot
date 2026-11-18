@@ -118,6 +118,14 @@ def stream_process_output(proc, tag: str, log_file, combined_file=None, stop_eve
                     print(f"\n🚨 [SAFETY TRIGGER] Detected {issue_type} in [{tag}]: {clean}", flush=True)
                     if error_records is not None:
                         error_records.append((tag, issue_type, clean))
+                    try:
+                        from logging.analytics import analytics
+                        if is_err:
+                            analytics.error(clean, event="parallel_run_error", instance=tag)
+                        else:
+                            analytics.warning(clean, event="parallel_run_warning", instance=tag)
+                    except Exception:
+                        pass
                     stop_event.set()
     except Exception:
         pass
@@ -154,6 +162,8 @@ def parse_instances(spec_list: list[str]) -> list[dict]:
         explicit_regime = any(p.lower() in ("regime", "regime_filter") for p in parts[2:])
         regime_filter = explicit_regime or ("regime" in strat.lower())
 
+        check_spot = any(p.lower() in ("spot", "check_spot") for p in parts[2:]) or ("spot" in strat.lower())
+
         key = f"{strat}_{env}{'_sl' if stop_loss else ''}{f'_tp{take_profit}' if take_profit else ''}"
         live_str = ", LIVE" if live else ""
         sl_str = ", SL" if stop_loss else ""
@@ -169,10 +179,11 @@ def parse_instances(spec_list: list[str]) -> list[dict]:
             "entry_timeout": entry_timeout,
             "taker_ioc": taker_ioc,
             "regime_filter": regime_filter,
+            "check_spot": check_spot,
             "key": key,
             "tag": tag,
-            "db_path": f"trading_bot_{key}.db",
-            "log_path": f"trading_bot_{key}.log",
+            "db_path": f"db/trading_bot_{key}.db",
+            "log_path": f"log/trading_bot_{key}.log",
         })
     return instances
 
@@ -184,8 +195,8 @@ def main():
     parser.add_argument(
         "--strategies",
         nargs="+",
-        default=["sell_1.5n_35p", "sell_1.5n_35p:prod:live", "sell_3n", "sell_2.5n"],
-        help="List of strategies in format 'strat', 'strat:env', or 'strat:env:live' (e.g. sell_1.5n_35p sell_1.5n_35p:prod:live sell_3n sell_2.5n)",
+        default=["last_9_spot:demo:live:sl:tp85", "last_9:demo", "sell_2n_5m_35p:demo:sl", "regime_aware:demo", "random:demo"],
+        help="List of strategies in format 'strat', 'strat:env', or 'strat:env:live' (e.g. last_9_spot:demo:live:sl:tp85 last_9:demo)",
     )
     parser.add_argument(
         "--stop-on-error",
@@ -204,6 +215,18 @@ def main():
         type=str,
         default=None,
         help="Target end time in local/ET time (e.g. '3pm', '15:00', '15:00:00')",
+    )
+    parser.add_argument(
+        "--upload-logs",
+        action="store_true",
+        default=True,
+        help="Upload run logs to Cloudflare R2 (prod) or MinIO (dev) after completion (default: True)",
+    )
+    parser.add_argument(
+        "--no-upload-logs",
+        dest="upload_logs",
+        action="store_false",
+        help="Do not upload run logs to remote object storage",
     )
     args = parser.parse_args()
 
@@ -254,9 +277,12 @@ def main():
     print(f"Safety Stop-On-Error: {'ENABLED' if args.stop_on_error else 'DISABLED'}", flush=True)
     print(f"Target completion time: {datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()}", flush=True)
 
+    os.makedirs(ROOT_DIR / "db", exist_ok=True)
+    os.makedirs(ROOT_DIR / "log", exist_ok=True)
+
     processes = {}
     log_files = {}
-    combined_log_path = "parallel_run.log"
+    combined_log_path = "log/parallel_run.log"
     combined_file = open(combined_log_path, "a")
 
     stop_event = threading.Event()
@@ -286,6 +312,8 @@ def main():
             cmd.append("--live")
         if inst.get("stop_loss"):
             cmd.append("--stop-loss")
+        if inst.get("check_spot"):
+            cmd.append("--check-spot")
         if inst.get("take_profit"):
             cmd.extend(["--take-profit", str(inst["take_profit"])])
         if inst.get("entry_timeout"):
@@ -373,6 +401,31 @@ def main():
             print("Summary of safety triggers / errors:", flush=True)
             for t, lvl, msg in error_records:
                 print(f"  [{lvl}] [{t}] {msg}", flush=True)
+
+        if getattr(args, "upload_logs", False):
+            try:
+                from storage import LogStorageManager, get_default_config
+                run_env = "prod" if any(inst.get("env") in ("prod", "production") for inst in instances) else "demo"
+                mgr = LogStorageManager(get_default_config(env=run_env))
+                if mgr.is_configured:
+                    print("\n" + "=" * 70, flush=True)
+                    print(f"UPLOADING RUN LOGS TO {mgr.config.backend.upper()} OBJECT STORAGE...", flush=True)
+                    run_tag = f"parallel_run_{int(start_time)}"
+                    run_files = [ROOT_DIR / "parallel_run.log", ROOT_DIR / ".parallel_run_meta.json"]
+                    for inst in instances:
+                        if Path(inst["db_path"]).exists():
+                            run_files.append(ROOT_DIR / inst["db_path"])
+                        if Path(inst["log_path"]).exists():
+                            run_files.append(ROOT_DIR / inst["log_path"])
+                    uploaded = mgr.upload_run_logs(run_tag=run_tag, files=run_files)
+                    if uploaded:
+                        print(f"Successfully uploaded {len(uploaded)} files to s3://{mgr.config.bucket_name}/runs/.../{run_tag}/", flush=True)
+                    else:
+                        print(f"Notice: Storage endpoint ({mgr.config.endpoint_url}) was not reachable. Run logs safely preserved on disk.", flush=True)
+                    print("=" * 70, flush=True)
+            except Exception as e:
+                print(f"Notice: Log upload to object storage skipped ({e}). Logs are safely preserved locally.", flush=True)
+
         if signum is not None:
             sys.exit(0)
 

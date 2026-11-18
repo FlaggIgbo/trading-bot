@@ -66,7 +66,11 @@ def get_stats():
         db_name = inst.get("db") or inst.get("db_path")
         log_name = inst.get("log") or inst.get("log_path")
         db_path = ROOT_DIR / db_name
+        if not db_path.exists():
+            db_path = ROOT_DIR / "db" / Path(db_name).name
         log_path = ROOT_DIR / log_name
+        if not log_path.exists():
+            log_path = ROOT_DIR / "log" / Path(log_name).name
         
         positions = []
         if db_path.exists():
@@ -130,11 +134,13 @@ def get_stats():
 
         for p in positions:
             all_positions.append({
+                "client_order_id": p[0],
                 "strategy": inst["tag"],
                 "env": inst["env"],
                 "live": inst["live"],
                 "ticker": p[1],
                 "side": p[3],
+                "count": p[4],
                 "price": p[5],
                 "status": p[6],
                 "close_time": p[7],
@@ -144,12 +150,14 @@ def get_stats():
 
     # Read latest logs from parallel_run.log
     latest_logs = []
-    combined_log = ROOT_DIR / "parallel_run.log"
+    combined_log = ROOT_DIR / "log" / "parallel_run.log"
+    if not combined_log.exists():
+        combined_log = ROOT_DIR / "parallel_run.log"
     if combined_log.exists():
         try:
             with open(combined_log, "r", errors="ignore") as f:
                 lines = f.readlines()
-                latest_logs = [line.strip() for line in lines[-20:] if line.strip()]
+                latest_logs = [line.strip() for line in lines[-25:] if line.strip()]
         except Exception:
             pass
 
@@ -172,7 +180,56 @@ def get_stats():
         "logs": latest_logs,
     }
 
+def sync_positions_to_postgres(positions: list[dict]):
+    pg_host = os.getenv("POSTGRES_HOST", "192.168.1.180")
+    pg_port = int(os.getenv("POSTGRES_PORT", "5432"))
+    pg_user = os.getenv("POSTGRES_USER", "postgres")
+    pg_password = os.getenv("POSTGRES_PASSWORD", "postgres")
+    pg_db = os.getenv("POSTGRES_DB", "postgres")
+
+    if not positions:
+        return
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=pg_host,
+            port=pg_port,
+            user=pg_user,
+            password=pg_password,
+            dbname=pg_db,
+            connect_timeout=2,
+        )
+        cur = conn.cursor()
+        for p in positions:
+            coid = p.get("client_order_id") or f"{p.get('ticker')}_{p.get('side')}_{p.get('close_time')}"
+            cur.execute("""
+                INSERT INTO positions (client_order_id, ticker, environment, side, count, price_cents, status, close_time, pnl_cents, strategy)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (client_order_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    pnl_cents = EXCLUDED.pnl_cents,
+                    close_time = EXCLUDED.close_time;
+            """, (
+                coid,
+                p.get("ticker"),
+                p.get("env"),
+                p.get("side"),
+                p.get("count", 1),
+                p.get("price"),
+                p.get("status"),
+                p.get("close_time"),
+                p.get("pnl_cents"),
+                p.get("strategy"),
+            ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def main():
+    last_pg_sync = 0.0
     while True:
         try:
             data = get_stats()
@@ -181,6 +238,18 @@ def main():
             with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2)
             os.replace(tmp_path, target_path)
+
+            # Ensure localhost.html exists and is kept in sync
+            lh_path = ROOT_DIR / "localhost.html"
+            idx_path = ROOT_DIR / "index.html"
+            if idx_path.exists() and not lh_path.exists():
+                import shutil
+                shutil.copyfile(idx_path, lh_path)
+
+            # Sync active positions to MacBook PostgreSQL every 10 seconds
+            if time.time() - last_pg_sync >= 10:
+                last_pg_sync = time.time()
+                sync_positions_to_postgres(data.get("positions", []))
         except Exception as e:
             pass
         time.sleep(2)
