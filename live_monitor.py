@@ -24,11 +24,20 @@ def get_stats():
 
     meta_file = ROOT_DIR / ".parallel_run_meta.json"
     instances = INSTANCES
+    phase_num = 1
+    total_phases = 4
+    phase_name = ""
+    phase_live_strat = ""
+
     if meta_file.exists():
         try:
             with open(meta_file, "r") as f:
                 meta = json.load(f)
             remaining_sec = max(0, int(meta.get("end_time", now_ts) - now_ts))
+            phase_num = meta.get("phase", 1)
+            total_phases = meta.get("total_phases", 4)
+            phase_name = meta.get("phase_name", "")
+            phase_live_strat = meta.get("phase_live_strategy", "")
             if meta.get("instances"):
                 instances = meta["instances"]
         except Exception:
@@ -165,6 +174,10 @@ def get_stats():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "time_remaining_seconds": remaining_sec,
         "time_remaining_str": f"{remaining_sec // 3600:02d}h {(remaining_sec % 3600) // 60:02d}m {remaining_sec % 60:02d}s",
+        "phase": phase_num,
+        "total_phases": total_phases,
+        "phase_name": phase_name,
+        "phase_live_strategy": phase_live_strat,
         "summary": {
             "total_trades": overall_trades,
             "settled_trades": overall_settled,

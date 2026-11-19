@@ -165,6 +165,9 @@
       <div style="font-size: 0.85rem; color: #8b949e; margin-top: 4px;">Parallel Evaluation: 5 Demo Instances</div>
     </div>
     <div style="display: flex; gap: 14px; align-items: center; flex-wrap: wrap;">
+      <div class="status-pill" id="phase-pill" style="background: rgba(163, 113, 247, 0.15); color: #d2a8ff; border-color: #a371f7;">
+        ⚡ <span id="phase-label">Phase 1: spot_lag LIVE</span>
+      </div>
       <div class="status-pill" id="wakelock-pill" style="background: rgba(88, 166, 255, 0.15); color: #58a6ff; border-color: #388bfd;">
         ☕ Chromebox Keep-Awake: <span id="wakelock-status">Active</span>
       </div>
@@ -336,6 +339,10 @@
         // Update countdown
         document.getElementById('countdown').textContent = data.time_remaining_str || '--h --m --s';
         document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+        if (data.phase_name) {
+          const pl = document.getElementById('phase-label');
+          if (pl) pl.textContent = data.phase_name;
+        }
 
         // Summary cards
         const pnl = data.summary.pnl_dollars || 0;
