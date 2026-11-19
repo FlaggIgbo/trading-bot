@@ -246,6 +246,12 @@ if __name__ == "__main__":
             "sell_1_5n_35p",
             "sell_2.5n",
             "sell_2_5n",
+            "spot_lag",
+            "spot-lag",
+            "panic_fade",
+            "panic-fade",
+            "late_window_scalp",
+            "late_scalp",
         ],
         help="Strategy to run: core signals ('trend', 'fade', 'cheap2x', 'cheap1.5x', 'random') or parameterized variants ('last_21_spot', 'last_9', etc.)",
     )

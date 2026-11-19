@@ -108,7 +108,12 @@ def is_last_n_strategy(strategy: Any) -> bool:
     return (
         strat_clean.startswith("last_")
         or strat_clean.startswith("last")
-        or strat_clean in ("trend", "fade", "last_21", "last_21_spot", "last_9", "last_9_spot", "last_5", "last_3", "regime_aware", "regime_spot", "regime")
+        or strat_clean in (
+            "trend", "fade", "last_21", "last_21_spot", "last_9", "last_9_spot",
+            "last_5", "last_3", "regime_aware", "regime_spot", "regime",
+            "spot_lag", "spot-lag", "panic_fade", "panic-fade",
+            "late_window_scalp", "late_scalp", "late-window-scalp",
+        )
     )
 
 

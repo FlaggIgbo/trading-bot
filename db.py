@@ -88,6 +88,9 @@ class Strategy(StrEnum):
     SELL_2_5N = "sell_2.5n"
     REGIME_AWARE = "regime_aware"
     REGIME_SPOT = "regime_spot"
+    SPOT_LAG = "spot_lag"
+    PANIC_FADE = "panic_fade"
+    LATE_WINDOW_SCALP = "late_window_scalp"
 
 
 def normalize_environment(environment: Optional[str] = None) -> Environment:
@@ -244,6 +247,12 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
         return Strategy.SELL_1_5N
     if strat_clean in ("sell_2.5n", "sell_2_5n", "sell2.5n", "sell2_5n", "sell_2.5n_5m", "sell_2_5n_5m"):
         return Strategy.SELL_2_5N
+    if strat_clean in ("spot_lag", "spot-lag", "spotlag", "latency"):
+        return Strategy.SPOT_LAG
+    if strat_clean in ("panic_fade", "panic-fade", "panicfade", "panic"):
+        return Strategy.PANIC_FADE
+    if strat_clean in ("late_window_scalp", "late_scalp", "late-window-scalp", "late-scalp", "latescalp", "late_window"):
+        return Strategy.LATE_WINDOW_SCALP
     return Strategy(strat_clean)
 
 

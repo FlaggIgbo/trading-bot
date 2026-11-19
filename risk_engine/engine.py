@@ -364,6 +364,193 @@ strategy_random = random_signal
 choose_side_random = random_signal
 
 
+def spot_lag_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    min_buffer_pct: float = 0.05,
+    max_contract_ask: int = 68,
+    min_contract_ask: int = 20,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    Spot / Cross-Venue Latency Edge Signal.
+    Compares live spot price against Kalshi contract order book.
+    If spot has moved decisively beyond the strike (by min_buffer_pct),
+    but the leading binary contract is still priced cheap (<= max_contract_ask),
+    buys the lagging contract to capture the repricing edge before the book catches up.
+    """
+    target_market = market
+    if isinstance(past_results, dict) and target_market is None:
+        target_market = past_results
+    if not target_market or not isinstance(target_market, dict):
+        return None
+
+    from ingestion.spot import SpotClient, extract_market_strike
+    strike = extract_market_strike(target_market)
+    if strike is None or strike <= 0:
+        return None
+
+    if spot_client is None:
+        spot_client = SpotClient()
+
+    ticker = target_market.get("ticker", "")
+    spot = spot_client.get_spot_price(ticker)
+    if spot is None or spot <= 0:
+        return None
+
+    buffer_pct = (spot - strike) / strike * 100.0
+
+    # Spot is decisively higher than strike -> YES is fundamentally favored
+    if buffer_pct >= min_buffer_pct:
+        yes_ask = extract_contract_price(target_market, PositionSide.YES)
+        if yes_ask is not None and min_contract_ask <= yes_ask <= max_contract_ask:
+            return PositionSide.YES
+
+    # Spot is decisively lower than strike -> NO is fundamentally favored
+    elif buffer_pct <= -min_buffer_pct:
+        no_ask = extract_contract_price(target_market, PositionSide.NO)
+        if no_ask is not None and min_contract_ask <= no_ask <= max_contract_ask:
+            return PositionSide.NO
+
+    return None
+
+
+def panic_fade_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    panic_threshold: int = 75,
+    max_fade_ask: int = 40,
+    max_spot_deviation_pct: float = 0.60,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    Panic Fade Strategy.
+    Fades sharp, short-term spot spikes or drops when contract pricing overreacts
+    to temporary volatility in 15-minute crypto markets.
+    Buys the severely discounted side (<= max_fade_ask) when the other side has panicked
+    up to >= panic_threshold, provided the underlying spot move is not a runaway breakout.
+    """
+    target_market = market
+    if isinstance(past_results, dict) and target_market is None:
+        target_market = past_results
+    if not target_market or not isinstance(target_market, dict):
+        return None
+
+    yes_ask = extract_contract_price(target_market, PositionSide.YES)
+    no_ask = extract_contract_price(target_market, PositionSide.NO)
+
+    if yes_ask is None or no_ask is None:
+        return None
+
+    # Check that spot is not in a runaway trend beyond max_spot_deviation_pct
+    if check_spot:
+        from ingestion.spot import SpotClient, extract_market_strike
+        strike = extract_market_strike(target_market)
+        if strike and strike > 0:
+            if spot_client is None:
+                spot_client = SpotClient()
+            ticker = target_market.get("ticker", "")
+            spot = spot_client.get_spot_price(ticker)
+            if spot and spot > 0:
+                spot_dev_pct = abs(spot - strike) / strike * 100.0
+                if spot_dev_pct > max_spot_deviation_pct:
+                    return None
+
+    # Panic condition 1: YES spiked up (panic buy YES / dump NO), NO is cheap -> buy NO
+    if yes_ask >= panic_threshold and no_ask <= max_fade_ask:
+        return PositionSide.NO
+
+    # Panic condition 2: NO spiked up (panic buy NO / dump YES), YES is cheap -> buy YES
+    if no_ask >= panic_threshold and yes_ask <= max_fade_ask:
+        return PositionSide.YES
+
+    return None
+
+
+def late_window_scalp_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    min_prob_ask: int = 78,
+    max_prob_ask: int = 96,
+    min_spot_buffer_pct: float = 0.08,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    Late-Window High-Probability Scalp Signal.
+    Waits until the final minutes (e.g. minutes 7.5 to 13.5, <= 7.5 mins remaining)
+    when the leading side trades around $0.80-$0.96 and price has sufficient room/buffer
+    from strike.
+    Protects against asymmetric tail risk by validating spot room from strike and avoiding
+    the final 60-second settlement benchmark average calculation.
+    """
+    target_market = market
+    if isinstance(past_results, dict) and target_market is None:
+        target_market = past_results
+    if not target_market or not isinstance(target_market, dict):
+        return None
+
+    minute = kwargs.get("minute")
+    if minute is None:
+        minute = get_market_minute(target_market, now=kwargs.get("now"))
+
+    # Must be in late window, but before the 60-second settlement benchmark average window (minute 14+)
+    if minute is not None and (minute < 7.5 or minute >= 13.8):
+        return None
+
+    from ingestion.spot import SpotClient, extract_market_strike
+    strike = extract_market_strike(target_market)
+    if strike is None or strike <= 0:
+        return None
+
+    if spot_client is None:
+        spot_client = SpotClient()
+
+    ticker = target_market.get("ticker", "")
+    spot = spot_client.get_spot_price(ticker)
+    if spot is None or spot <= 0:
+        return None
+
+    buffer_pct = (spot - strike) / strike * 100.0
+
+    # Spot is safely above strike by at least min_spot_buffer_pct
+    if buffer_pct >= min_spot_buffer_pct:
+        yes_ask = extract_contract_price(target_market, PositionSide.YES)
+        if yes_ask is not None and min_prob_ask <= yes_ask <= max_prob_ask:
+            return PositionSide.YES
+
+    # Spot is safely below strike by at least min_spot_buffer_pct
+    elif buffer_pct <= -min_spot_buffer_pct:
+        no_ask = extract_contract_price(target_market, PositionSide.NO)
+        if no_ask is not None and min_prob_ask <= no_ask <= max_prob_ask:
+            return PositionSide.NO
+
+    return None
+
+
+def choose_side_spot_lag(past_results: Any = None, market: Optional[dict] = None, **kwargs: Any) -> Optional[PositionSide]:
+    return spot_lag_signal(past_results=past_results, market=market, **kwargs)
+
+
+def choose_side_panic_fade(past_results: Any = None, market: Optional[dict] = None, **kwargs: Any) -> Optional[PositionSide]:
+    return panic_fade_signal(past_results=past_results, market=market, **kwargs)
+
+
+def choose_side_late_window_scalp(past_results: Any = None, market: Optional[dict] = None, **kwargs: Any) -> Optional[PositionSide]:
+    return late_window_scalp_signal(past_results=past_results, market=market, **kwargs)
+
+
+spot_lag = choose_side_spot_lag
+panic_fade = choose_side_panic_fade
+late_window_scalp = choose_side_late_window_scalp
+late_scalp = choose_side_late_window_scalp
+
+
 # ---------------------------------------------------------------------------
 # Strategy Registry
 # ---------------------------------------------------------------------------
@@ -399,6 +586,103 @@ STRATEGIES: dict[str, Strategy] = {
     "sell_1_5n_35p": Strategy("sell_1.5n_35p", cheapest_side, entry_window=(5.0, 10.0), price_band=(1, 35), take_profit=1.5),
     "sell_2.5n": Strategy("sell_2.5n", cheapest_side, entry_window=(5.0, 10.0), price_band=(1, 40), take_profit=2.5),
     "sell_2_5n": Strategy("sell_2.5n", cheapest_side, entry_window=(5.0, 10.0), price_band=(1, 40), take_profit=2.5),
+    "spot_lag": Strategy(
+        "spot_lag",
+        spot_lag_signal,
+        entry_window=(1.0, 12.0),
+        price_band=(20, 70),
+        take_profit=88,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "spot-lag": Strategy(
+        "spot_lag",
+        spot_lag_signal,
+        entry_window=(1.0, 12.0),
+        price_band=(20, 70),
+        take_profit=88,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "spotlag": Strategy(
+        "spot_lag",
+        spot_lag_signal,
+        entry_window=(1.0, 12.0),
+        price_band=(20, 70),
+        take_profit=88,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "panic_fade": Strategy(
+        "panic_fade",
+        panic_fade_signal,
+        entry_window=(2.0, 11.0),
+        price_band=(15, 45),
+        take_profit=2.0,
+        stop_loss=True,
+        check_spot=True,
+    ),
+    "panic-fade": Strategy(
+        "panic_fade",
+        panic_fade_signal,
+        entry_window=(2.0, 11.0),
+        price_band=(15, 45),
+        take_profit=2.0,
+        stop_loss=True,
+        check_spot=True,
+    ),
+    "panicfade": Strategy(
+        "panic_fade",
+        panic_fade_signal,
+        entry_window=(2.0, 11.0),
+        price_band=(15, 45),
+        take_profit=2.0,
+        stop_loss=True,
+        check_spot=True,
+    ),
+    "late_window_scalp": Strategy(
+        "late_window_scalp",
+        late_window_scalp_signal,
+        entry_window=(7.5, 13.5),
+        price_band=(78, 96),
+        take_profit=98,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "late_scalp": Strategy(
+        "late_window_scalp",
+        late_window_scalp_signal,
+        entry_window=(7.5, 13.5),
+        price_band=(78, 96),
+        take_profit=98,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "late-window-scalp": Strategy(
+        "late_window_scalp",
+        late_window_scalp_signal,
+        entry_window=(7.5, 13.5),
+        price_band=(78, 96),
+        take_profit=98,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "late-scalp": Strategy(
+        "late_window_scalp",
+        late_window_scalp_signal,
+        entry_window=(7.5, 13.5),
+        price_band=(78, 96),
+        take_profit=98,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
 }
 
 
@@ -470,13 +754,33 @@ def should_stop_loss(
     if stop_minute is None:
         if strat_str in ("random", "last_9", "last_21", "trend") or "random" in strat_str or "last" in strat_str:
             stop_minute = 5.0
+        elif "late" in strat_str or "scalp" in strat_str:
+            stop_minute = 7.5
+        elif "spot_lag" in strat_str or "latency" in strat_str or "spot-lag" in strat_str:
+            stop_minute = 2.0
+        elif "panic" in strat_str:
+            stop_minute = 3.0
         elif "regime" in strat_str:
             stop_minute = 11.5  # Protect against early-to-mid candle noise
         else:
             stop_minute = 10.0
 
-    # For regime-aware strategies, widen stop loss thresholds to absorb intra-bar volatility
-    if "regime" in strat_str:
+    # Adjust thresholds based on strategy risk profile
+    if "late" in strat_str or "scalp" in strat_str:
+        # High entry price ($0.80-$0.98), asymmetric tail risk: stop out if contract drops below 65c or loses >= 15c
+        if "stop_price_threshold" not in kwargs and stop_price_threshold == 25:
+            stop_price_threshold = 65
+        if "stop_ratio_threshold" not in kwargs and stop_ratio_threshold == 0.5:
+            stop_ratio_threshold = 0.75
+        # Benchmark settlement protection: exit if minute >= 14.0 (final 60s benchmark average window) and not winning near 99c
+        if minute is not None and minute >= 14.0 and current < 98:
+            return True
+    elif "panic" in strat_str:
+        if "stop_price_threshold" not in kwargs and stop_price_threshold == 25:
+            stop_price_threshold = 10
+        if "stop_ratio_threshold" not in kwargs and stop_ratio_threshold == 0.5:
+            stop_ratio_threshold = 0.35
+    elif "regime" in strat_str:
         if "stop_price_threshold" not in kwargs and stop_price_threshold == 25:
             stop_price_threshold = 15
         if "stop_ratio_threshold" not in kwargs and stop_ratio_threshold == 0.5:
@@ -487,6 +791,8 @@ def should_stop_loss(
     if current <= stop_price_threshold:
         return True
     if current < (entry * stop_ratio_threshold):
+        return True
+    if ("late" in strat_str or "scalp" in strat_str) and (entry - current >= 15):
         return True
     return False
 
@@ -1499,6 +1805,20 @@ def is_entry_time_10m(market: dict, now: Any = None) -> bool:
 
 
 def is_entry_time(market: dict, strategy: Any = None, now: Any = None) -> bool:
+    if hasattr(strategy, "entry_window") and getattr(strategy, "entry_window"):
+        w_start, w_end = getattr(strategy, "entry_window")
+        minute = get_market_minute(market, now=now)
+        return minute is None or (w_start <= minute < w_end)
+    strat_str = str(getattr(strategy, "value", getattr(strategy, "name", strategy)) or "").lower().strip()
+    if "late" in strat_str or "scalp" in strat_str:
+        minute = get_market_minute(market, now=now)
+        return minute is None or (7.5 <= minute < 13.5)
+    if "spot_lag" in strat_str or "latency" in strat_str or "spot-lag" in strat_str:
+        minute = get_market_minute(market, now=now)
+        return minute is None or (1.0 <= minute < 12.0)
+    if "panic" in strat_str:
+        minute = get_market_minute(market, now=now)
+        return minute is None or (2.0 <= minute < 11.0)
     if is_last_n_strategy(strategy):
         minute = get_market_minute(market, now=now)
         return minute is None or (0.0 <= minute < 10.0)
