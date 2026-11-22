@@ -446,6 +446,30 @@
         requestWakeLock();
       }
     });
+
+    // Silent Audio Keep-Alive to prevent ChromeOS powerd from suspending CPU when display is detached
+    let audioCtx = null;
+    function enableAudioKeepAlive() {
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          gain.gain.value = 0.00001; // virtually inaudible
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start();
+          const ws = document.getElementById('wakelock-status');
+          if (ws) ws.textContent = 'Active (Screen & CPU Locked)';
+        }
+      } catch (e) {
+        console.warn('Audio keep-alive failed:', e);
+      }
+    }
+    window.addEventListener('click', enableAudioKeepAlive, { once: true });
+    window.addEventListener('keydown', enableAudioKeepAlive, { once: true });
+    // Attempt auto-start on load
+    try { enableAudioKeepAlive(); } catch(e) {}
   </script>
 </body>
 </html>
