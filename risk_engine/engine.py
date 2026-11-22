@@ -422,8 +422,8 @@ def panic_fade_signal(
     market: Optional[dict] = None,
     check_spot: bool = True,
     spot_client: Optional[Any] = None,
-    panic_threshold: int = 75,
-    max_fade_ask: int = 40,
+    panic_threshold: Optional[int] = None,
+    max_fade_ask: Optional[int] = None,
     max_spot_deviation_pct: float = 0.60,
     **kwargs: Any,
 ) -> Optional[PositionSide]:
@@ -433,12 +433,20 @@ def panic_fade_signal(
     to temporary volatility in 15-minute crypto markets.
     Buys the severely discounted side (<= max_fade_ask) when the other side has panicked
     up to >= panic_threshold, provided the underlying spot move is not a runaway breakout.
+    Specifically tuned for demo.kalshi.co liquidity while preserving prod structure.
     """
     target_market = market
     if isinstance(past_results, dict) and target_market is None:
         target_market = past_results
     if not target_market or not isinstance(target_market, dict):
         return None
+
+    # Environment detection: adapt thresholds for demo vs prod
+    env_str = str(kwargs.get("env") or target_market.get("environment") or "demo").lower()
+    is_demo = "demo" in env_str
+
+    actual_panic_thresh = panic_threshold if panic_threshold is not None else (62 if is_demo else 75)
+    actual_max_fade = max_fade_ask if max_fade_ask is not None else (48 if is_demo else 40)
 
     yes_ask = extract_contract_price(target_market, PositionSide.YES)
     no_ask = extract_contract_price(target_market, PositionSide.NO)
@@ -461,11 +469,11 @@ def panic_fade_signal(
                     return None
 
     # Panic condition 1: YES spiked up (panic buy YES / dump NO), NO is cheap -> buy NO
-    if yes_ask >= panic_threshold and no_ask <= max_fade_ask:
+    if yes_ask >= actual_panic_thresh and no_ask <= actual_max_fade:
         return PositionSide.NO
 
     # Panic condition 2: NO spiked up (panic buy NO / dump YES), YES is cheap -> buy YES
-    if no_ask >= panic_threshold and yes_ask <= max_fade_ask:
+    if no_ask >= actual_panic_thresh and yes_ask <= actual_max_fade:
         return PositionSide.YES
 
     return None
@@ -476,24 +484,29 @@ def late_window_scalp_signal(
     market: Optional[dict] = None,
     check_spot: bool = True,
     spot_client: Optional[Any] = None,
-    min_prob_ask: int = 78,
+    min_prob_ask: Optional[int] = None,
     max_prob_ask: int = 96,
-    min_spot_buffer_pct: float = 0.08,
+    min_spot_buffer_pct: Optional[float] = None,
     **kwargs: Any,
 ) -> Optional[PositionSide]:
     """
     Late-Window High-Probability Scalp Signal.
     Waits until the final minutes (e.g. minutes 7.5 to 13.5, <= 7.5 mins remaining)
-    when the leading side trades around $0.80-$0.96 and price has sufficient room/buffer
-    from strike.
-    Protects against asymmetric tail risk by validating spot room from strike and avoiding
-    the final 60-second settlement benchmark average calculation.
+    when the leading side trades around high-probability odds and price has room from strike.
+    Specifically tuned for demo.kalshi.co liquidity while preserving prod structure.
     """
     target_market = market
     if isinstance(past_results, dict) and target_market is None:
         target_market = past_results
     if not target_market or not isinstance(target_market, dict):
         return None
+
+    # Environment detection: adapt price bounds and buffer for demo vs prod
+    env_str = str(kwargs.get("env") or target_market.get("environment") or "demo").lower()
+    is_demo = "demo" in env_str
+
+    actual_min_prob = min_prob_ask if min_prob_ask is not None else (58 if is_demo else 78)
+    actual_min_buffer = min_spot_buffer_pct if min_spot_buffer_pct is not None else (0.04 if is_demo else 0.08)
 
     minute = kwargs.get("minute")
     if minute is None:
@@ -519,15 +532,15 @@ def late_window_scalp_signal(
     buffer_pct = (spot - strike) / strike * 100.0
 
     # Spot is safely above strike by at least min_spot_buffer_pct
-    if buffer_pct >= min_spot_buffer_pct:
+    if buffer_pct >= actual_min_buffer:
         yes_ask = extract_contract_price(target_market, PositionSide.YES)
-        if yes_ask is not None and min_prob_ask <= yes_ask <= max_prob_ask:
+        if yes_ask is not None and actual_min_prob <= yes_ask <= max_prob_ask:
             return PositionSide.YES
 
     # Spot is safely below strike by at least min_spot_buffer_pct
-    elif buffer_pct <= -min_spot_buffer_pct:
+    elif buffer_pct <= -actual_min_buffer:
         no_ask = extract_contract_price(target_market, PositionSide.NO)
-        if no_ask is not None and min_prob_ask <= no_ask <= max_prob_ask:
+        if no_ask is not None and actual_min_prob <= no_ask <= max_prob_ask:
             return PositionSide.NO
 
     return None
@@ -686,7 +699,7 @@ STRATEGIES: dict[str, Strategy] = {
 }
 
 
-def get_strategy(spec: Any, **overrides: Any) -> Strategy:
+def get_strategy(spec: Any, env: Optional[str] = None, **overrides: Any) -> Strategy:
     """Resolve a strategy by name, Strategy object, or callable, applying runtime overrides."""
     base: Optional[Strategy] = None
 
@@ -719,6 +732,17 @@ def get_strategy(spec: Any, **overrides: Any) -> Strategy:
 
     if base is None:
         base = STRATEGIES["trend"]
+
+    env_clean = str(env or overrides.get("env") or "").lower()
+    is_demo = "demo" in env_clean or "demo.kalshi.co" in env_clean
+
+    # Environment-specific tuning: adapt price_band for demo specifically if not explicitly overridden
+    if is_demo and "price_band" not in overrides:
+        strat_key = base.name.lower()
+        if "late" in strat_key or "scalp" in strat_key:
+            overrides["price_band"] = (58, 96)
+        elif "panic" in strat_key:
+            overrides["price_band"] = (15, 48)
 
     filtered_overrides = {k: v for k, v in overrides.items() if v is not None and hasattr(base, k)}
     if filtered_overrides:
@@ -1096,7 +1120,8 @@ class TradeEngine:
             overrides["entry_timeout"] = entry_timeout_seconds
 
         target_strat = strategy if strategy is not None else (strategy_name if strategy_name is not None else strategy_fn)
-        self.strategy = get_strategy(target_strat or DBStrategy.LAST_9, **overrides)
+        env_val = getattr(self.config, "env", "demo")
+        self.strategy = get_strategy(target_strat or DBStrategy.LAST_9, env=env_val, **overrides)
         if strategy_fn is not None and callable(strategy_fn):
             from dataclasses import replace
             self.strategy = replace(self.strategy, signal=strategy_fn)
@@ -1261,6 +1286,7 @@ class TradeEngine:
                     spot_client=self.spot_client,
                     min_entry_price=self.strategy.price_band[0],
                     max_entry_price=self.strategy.price_band[1],
+                    env=getattr(self.config, "env", "demo"),
                 )
             except TypeError:
                 side = self.strategy.signal(past_results=past_results)

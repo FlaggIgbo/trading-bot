@@ -388,3 +388,44 @@ def test_database_strategy_enum_and_persistence(tmp_path):
     persisted_strats = {p["strategy"] for p in all_pos}
     assert persisted_strats == {"spot_lag", "panic_fade", "late_window_scalp"}
     db.close()
+
+
+def test_demo_vs_prod_tuning_late_window_scalp():
+    # Contract with ask = 64c (typical demo maker quote), buffer = +0.05%
+    market = {
+        "ticker": "KXBTC15M-TEST-DEMO",
+        "floor_strike": 90000.0,
+        "yes_ask": 64,
+        "no_ask": 40,
+        "minute": 10.0,
+    }
+    mock_spot = MagicMock(spec=SpotClient)
+    mock_spot.get_spot_price.return_value = 90045.0  # +0.05% buffer
+
+    # In demo: should trigger YES (64c >= 58c, buffer 0.05% >= 0.04%)
+    sig_demo = late_window_scalp_signal(market=market, spot_client=mock_spot, env="demo")
+    assert sig_demo == PositionSide.YES
+
+    # In prod: should reject (64c < 78c floor, buffer 0.05% < 0.08% floor)
+    sig_prod = late_window_scalp_signal(market=market, spot_client=mock_spot, env="production")
+    assert sig_prod is None
+
+
+def test_demo_vs_prod_tuning_panic_fade():
+    # Contract with YES ask = 64c (demo spike), NO ask = 40c
+    market = {
+        "ticker": "KXBTC15M-TEST-DEMO-2",
+        "floor_strike": 90000.0,
+        "yes_ask": 64,
+        "no_ask": 40,
+    }
+    mock_spot = MagicMock(spec=SpotClient)
+    mock_spot.get_spot_price.return_value = 90020.0
+
+    # In demo: should trigger NO (64c >= 62c demo panic threshold, NO ask <= 48c)
+    sig_demo = panic_fade_signal(market=market, spot_client=mock_spot, env="demo")
+    assert sig_demo == PositionSide.NO
+
+    # In prod: should reject (64c < 75c prod panic threshold)
+    sig_prod = panic_fade_signal(market=market, spot_client=mock_spot, env="production")
+    assert sig_prod is None

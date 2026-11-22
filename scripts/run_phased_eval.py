@@ -1,13 +1,13 @@
 """
-4-Hour Phased Strategy Evaluation Orchestrator
+3-Hour Phased Strategy Evaluation Orchestrator
 ==============================================
-Runs 4 strategies in parallel in the demo environment for 4 hours total,
+Runs 4 strategies in parallel in the demo environment for 3 hours total,
 rotating the single live-executing strategy each hour:
 
-- Hour 1 (Phase 1): spot_lag (LIVE against demo.kalshi.co) | Others Simulated
+- Hour 1 (Phase 1): late_window_scalp (LIVE against demo.kalshi.co) | Others Simulated
 - Hour 2 (Phase 2): panic_fade (LIVE against demo.kalshi.co) | Others Simulated
-- Hour 3 (Phase 3): late_window_scalp (LIVE against demo.kalshi.co) | Others Simulated
-- Hour 4 (Phase 4): random (LIVE against demo.kalshi.co) | Others Simulated
+- Hour 3 (Phase 3): spot_lag (LIVE against demo.kalshi.co) | Others Simulated
+- Random: Simulated (not live) across all 3 hours
 
 Continuously writes status and telemetry to `.parallel_run_meta.json` and `log/parallel_run.log`,
 which feeds real-time updates to `localhost.html` (served on port 8000).
@@ -36,8 +36,8 @@ from ingestion.api.client import KalshiClient
 PHASE_CONFIG = [
     {
         "phase": 1,
-        "name": "Hour 1: spot_lag LIVE",
-        "live_strat": "spot_lag",
+        "name": "Hour 1: late_window_scalp LIVE",
+        "live_strat": "late_window_scalp",
     },
     {
         "phase": 2,
@@ -46,22 +46,17 @@ PHASE_CONFIG = [
     },
     {
         "phase": 3,
-        "name": "Hour 3: late_window_scalp LIVE",
-        "live_strat": "late_window_scalp",
-    },
-    {
-        "phase": 4,
-        "name": "Hour 4: random LIVE",
-        "live_strat": "random",
+        "name": "Hour 3: spot_lag LIVE",
+        "live_strat": "spot_lag",
     },
 ]
 
 STRATEGIES_BASE = [
     {
-        "strategy": "spot_lag",
+        "strategy": "late_window_scalp",
         "env": "demo",
-        "db_path": "db/trading_bot_spot_lag_demo.db",
-        "log_path": "log/trading_bot_spot_lag_demo.log",
+        "db_path": "db/trading_bot_late_window_scalp_demo.db",
+        "log_path": "log/trading_bot_late_window_scalp_demo.log",
         "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
     },
     {
@@ -72,10 +67,10 @@ STRATEGIES_BASE = [
         "flags": ["--stop-loss", "--check-spot"],
     },
     {
-        "strategy": "late_window_scalp",
+        "strategy": "spot_lag",
         "env": "demo",
-        "db_path": "db/trading_bot_late_window_scalp_demo.db",
-        "log_path": "log/trading_bot_late_window_scalp_demo.log",
+        "db_path": "db/trading_bot_spot_lag_demo.db",
+        "log_path": "log/trading_bot_spot_lag_demo.log",
         "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
     },
     {
@@ -122,7 +117,7 @@ def get_performance(db_path: str):
 
 def print_report(instances: list[dict]):
     print("\n" + "=" * 76, flush=True)
-    print("4-HOUR PHASED RUN: CUMULATIVE STRATEGY PERFORMANCE", flush=True)
+    print("3-HOUR PHASED RUN: CUMULATIVE STRATEGY PERFORMANCE", flush=True)
     print("=" * 76, flush=True)
     header = f"{'Strategy Instance':<30} | {'Trades':<8} | {'Open':<6} | {'Settled':<8} | {'W/L':<8} | {'Win Rate':<10} | {'PnL ($)':<10}"
     print(header, flush=True)
@@ -207,7 +202,7 @@ def run_phased_eval(phase_duration: int = 3600, poll_interval: int = 60, upload_
     python_bin = sys.executable
 
     print("\n" + "=" * 76, flush=True)
-    print("STARTING 4-HOUR PHASED TRADING BOT EVALUATION RUN", flush=True)
+    print("STARTING 3-HOUR PHASED TRADING BOT EVALUATION RUN", flush=True)
     print(f"Target Total Duration: {total_duration / 3600:.1f} hours ({total_phases} x {phase_duration / 60:.0f}m phases)", flush=True)
     print(f"Start Time (UTC): {datetime.fromtimestamp(run_start_time, tz=timezone.utc).isoformat()}", flush=True)
     print(f"Target End Time (UTC): {datetime.fromtimestamp(run_end_time, tz=timezone.utc).isoformat()}", flush=True)
