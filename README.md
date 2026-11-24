@@ -187,3 +187,21 @@ To stream structured warning (`log.warn`) and error (`log.error`) events into Cl
 ## Deployment
 
 The bot runs as a single worker process on platforms like Render or any Linux host. When deploying to containerized or cloud environments, attach a persistent volume to mount your SQLite database file (e.g. `/var/data/trading_bot.db`) to ensure state persists across redeploys.
+
+---
+
+## Performance & Bottlenecks
+
+Track throughput, cycle latency, and database lock contention identified and resolved across scanner, trade engine, reconciler, and settler loops:
+
+- **Detailed Investigation Template & Log**: [`docs/PERFORMANCE.md`](./docs/PERFORMANCE.md)
+- **Architecture Decision Records**: [`docs/adr/`](./docs/adr/)
+- **Load & Chaos Harness**: [`load-tests/k6-test.js`](./load-tests/k6-test.js)
+
+### Bottleneck Log
+
+| Subsystem / Routine | Baseline (P95 / Timing) | Identified Bottleneck | Fix / Optimization | Post-Fix (P95 / Timing) | Status |
+|---------------------|-------------------------|-----------------------|--------------------|-------------------------|--------|
+| `Market Scanner Upsert` | *TODO: e.g. 2,800ms / 200 mkts* | *TODO: Autocommit per row in SQLite* | *TODO: Single executemany transaction + WAL* | *TODO: 45ms / 200 mkts* | *Pending* |
+| `TradeEngine Order Eval` | *TODO* | *TODO* | *TODO* | *TODO* | *Pending* |
+
