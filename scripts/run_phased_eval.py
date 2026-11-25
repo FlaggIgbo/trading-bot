@@ -82,109 +82,43 @@ DEMO_ROTATION_STRATEGIES = [
 
 def get_strategy_instances(phase_num: int = 1) -> list[dict]:
     """
-    All strategies run against PRODUCTION environment for true apples-to-apples comparison:
+    3-Strategy Evaluation Suite:
     - spot_lag_strict: PROD, LIVE (Maker execution: passive limit orders at bid/midpoint with 0.15% buffer)
-    - All other 6 strategies: PROD, Simulated (zero capital risk, no order book collisions)
+    - crypto_lead_spillover: DEMO, LIVE (Taker execution: BTC macro momentum spillover onto ETH/SOL)
+    - early_candle_momentum: PROD, Simulated (Taker execution: minutes 1.0-4.5 breakout momentum)
     """
-    instances = []
-
-    # 1. spot_lag_strict prod (LIVE Maker execution)
-    instances.append({
-        "name": "spot_lag_strict prod",
-        "strategy": "spot_lag_strict",
-        "env": "prod",
-        "live": True,
-        "tag": "spot_lag_strict (prod, LIVE, Maker)",
-        "db_path": "db/trading_bot_spot_lag_prod.db",
-        "log_path": "log/trading_bot_spot_lag_prod.log",
-        "flags": ["--stop-loss", "--check-spot"],
-    })
-
-    # 2. spot_lag_strict demo (LIVE Maker execution against demo exchange)
-    instances.append({
-        "name": "spot_lag_strict demo",
-        "strategy": "spot_lag_strict",
-        "env": "demo",
-        "live": True,
-        "tag": "spot_lag_strict (demo, LIVE, Maker)",
-        "db_path": "db/trading_bot_spot_lag_strict_demo.db",
-        "log_path": "log/trading_bot_spot_lag_strict_demo.log",
-        "flags": ["--stop-loss", "--check-spot"],
-    })
-
-    # 3. baseline spot_lag prod (Simulated taker baseline with 0.05% buffer)
-    instances.append({
-        "name": "spot_lag baseline",
-        "strategy": "spot_lag",
-        "env": "prod",
-        "live": False,
-        "tag": "spot_lag (prod, Sim, Taker)",
-        "db_path": "db/trading_bot_spot_lag_sim_prod.db",
-        "log_path": "log/trading_bot_spot_lag_sim_prod.log",
-        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
-    })
-
-    # 4. binary_fair_value_arb prod (Simulated Black-Scholes Delta model)
-    instances.append({
-        "name": "binary_fair_value_arb",
-        "strategy": "binary_fair_value_arb",
-        "env": "prod",
-        "live": False,
-        "tag": "binary_fair_value_arb (prod, Sim)",
-        "db_path": "db/trading_bot_binary_fair_value_arb_prod.db",
-        "log_path": "log/trading_bot_binary_fair_value_arb_prod.log",
-        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
-    })
-
-    # 5. crypto_lead_spillover prod (Simulated BTC macro spillover)
-    instances.append({
-        "name": "crypto_lead_spillover",
-        "strategy": "crypto_lead_spillover",
-        "env": "prod",
-        "live": False,
-        "tag": "crypto_lead_spillover (prod, Sim)",
-        "db_path": "db/trading_bot_crypto_lead_spillover_prod.db",
-        "log_path": "log/trading_bot_crypto_lead_spillover_prod.log",
-        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
-    })
-
-    # 6. spot_lag_maker prod (Simulated Maker on standard buffer)
-    instances.append({
-        "name": "spot_lag_maker",
-        "strategy": "spot_lag_maker",
-        "env": "prod",
-        "live": False,
-        "tag": "spot_lag_maker (prod, Sim)",
-        "db_path": "db/trading_bot_spot_lag_maker_prod.db",
-        "log_path": "log/trading_bot_spot_lag_maker_prod.log",
-        "flags": ["--stop-loss", "--check-spot"],
-    })
-
-    # 7. early_candle_momentum prod (Simulated Mins 1.0-4.5 momentum)
-    instances.append({
-        "name": "early_candle_momentum",
-        "strategy": "early_candle_momentum",
-        "env": "prod",
-        "live": False,
-        "tag": "early_candle_momentum (prod, Sim)",
-        "db_path": "db/trading_bot_early_candle_momentum_prod.db",
-        "log_path": "log/trading_bot_early_candle_momentum_prod.log",
-        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
-    })
-
-    # 8. random prod (Simulated Zero-alpha baseline)
-    instances.append({
-        "name": "random",
-        "strategy": "random",
-        "env": "prod",
-        "live": False,
-        "tag": "random (prod, Sim)",
-        "db_path": "db/trading_bot_random_prod.db",
-        "log_path": "log/trading_bot_random_prod.log",
-        "flags": [],
-    })
-
-    return instances
+    return [
+        {
+            "name": "spot_lag_strict prod",
+            "strategy": "spot_lag_strict",
+            "env": "prod",
+            "live": True,
+            "tag": "spot_lag_strict (prod, LIVE, Maker)",
+            "db_path": "db/trading_bot_spot_lag_prod.db",
+            "log_path": "log/trading_bot_spot_lag_prod.log",
+            "flags": ["--stop-loss", "--check-spot"],
+        },
+        {
+            "name": "crypto_lead_spillover demo",
+            "strategy": "crypto_lead_spillover",
+            "env": "demo",
+            "live": True,
+            "tag": "crypto_lead_spillover (demo, LIVE)",
+            "db_path": "db/trading_bot_crypto_lead_spillover_demo.db",
+            "log_path": "log/trading_bot_crypto_lead_spillover_demo.log",
+            "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
+        },
+        {
+            "name": "early_candle_momentum prod",
+            "strategy": "early_candle_momentum",
+            "env": "prod",
+            "live": False,
+            "tag": "early_candle_momentum (prod, Sim)",
+            "db_path": "db/trading_bot_early_candle_momentum_prod.db",
+            "log_path": "log/trading_bot_early_candle_momentum_prod.log",
+            "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
+        },
+    ]
 
 
 ALL_STRATEGIES = [
@@ -197,60 +131,20 @@ ALL_STRATEGIES = [
         "log_path": "log/trading_bot_spot_lag_prod.log",
     },
     {
-        "name": "spot_lag_strict demo",
-        "strategy": "spot_lag_strict",
-        "env": "demo",
-        "tag": "spot_lag_strict (demo, LIVE, Maker)",
-        "db_path": "db/trading_bot_spot_lag_strict_demo.db",
-        "log_path": "log/trading_bot_spot_lag_strict_demo.log",
-    },
-    {
-        "name": "spot_lag baseline",
-        "strategy": "spot_lag",
-        "env": "prod",
-        "tag": "spot_lag (prod, Sim, Taker)",
-        "db_path": "db/trading_bot_spot_lag_sim_prod.db",
-        "log_path": "log/trading_bot_spot_lag_sim_prod.log",
-    },
-    {
-        "name": "binary_fair_value_arb",
-        "strategy": "binary_fair_value_arb",
-        "env": "prod",
-        "tag": "binary_fair_value_arb (prod, Sim)",
-        "db_path": "db/trading_bot_binary_fair_value_arb_prod.db",
-        "log_path": "log/trading_bot_binary_fair_value_arb_prod.log",
-    },
-    {
-        "name": "crypto_lead_spillover",
+        "name": "crypto_lead_spillover demo",
         "strategy": "crypto_lead_spillover",
-        "env": "prod",
-        "tag": "crypto_lead_spillover (prod, Sim)",
-        "db_path": "db/trading_bot_crypto_lead_spillover_prod.db",
-        "log_path": "log/trading_bot_crypto_lead_spillover_prod.log",
+        "env": "demo",
+        "tag": "crypto_lead_spillover (demo, LIVE)",
+        "db_path": "db/trading_bot_crypto_lead_spillover_demo.db",
+        "log_path": "log/trading_bot_crypto_lead_spillover_demo.log",
     },
     {
-        "name": "spot_lag_maker",
-        "strategy": "spot_lag_maker",
-        "env": "prod",
-        "tag": "spot_lag_maker (prod, Sim)",
-        "db_path": "db/trading_bot_spot_lag_maker_prod.db",
-        "log_path": "log/trading_bot_spot_lag_maker_prod.log",
-    },
-    {
-        "name": "early_candle_momentum",
+        "name": "early_candle_momentum prod",
         "strategy": "early_candle_momentum",
         "env": "prod",
         "tag": "early_candle_momentum (prod, Sim)",
         "db_path": "db/trading_bot_early_candle_momentum_prod.db",
         "log_path": "log/trading_bot_early_candle_momentum_prod.log",
-    },
-    {
-        "name": "random prod",
-        "strategy": "random",
-        "env": "prod",
-        "tag": "random (prod, Sim)",
-        "db_path": "db/trading_bot_random_prod.db",
-        "log_path": "log/trading_bot_random_prod.log",
     },
 ]
 
@@ -397,12 +291,10 @@ def run_phased_eval(
     # Dynamically build phases to reach target_end_time
     dynamic_phases = []
     for p in range(1, num_phases + 1):
-        strat_info = DEMO_ROTATION_STRATEGIES[(p - 1) % len(DEMO_ROTATION_STRATEGIES)]
-        strat_name = strat_info["strategy"]
         dynamic_phases.append({
             "phase": p,
-            "name": f"Hour {p}: spot_lag_strict PROD (LIVE, Maker) & spot_lag_strict DEMO (LIVE, Maker)",
-            "live_demo_strat": "spot_lag_strict",
+            "name": "Live Evaluation: spot_lag_strict PROD (LIVE, Maker) | crypto_lead_spillover DEMO (LIVE) | early_candle_momentum PROD (Sim)",
+            "live_demo_strat": "crypto_lead_spillover",
         })
 
     total_phases = len(dynamic_phases)
@@ -474,7 +366,7 @@ def run_phased_eval(
             "phase": phase_num,
             "total_phases": total_phases,
             "phase_name": phase_name,
-            "phase_live_strategy": "spot_lag_strict prod (LIVE, Maker) & spot_lag_strict demo (LIVE, Maker)",
+            "phase_live_strategy": "spot_lag_strict prod (LIVE, Maker) & crypto_lead_spillover demo (LIVE)",
             "phase_end_time": phase_end,
             "instances": current_instances,
         }
@@ -592,7 +484,7 @@ def run_phased_eval(
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-Hour Phased Strategy Evaluation Orchestrator")
-    parser.add_argument("--until", type=str, default="2026-11-25T14:00:00Z", help="Target completion timestamp ISO (default: 2026-11-25T14:00:00Z = 9am ET)")
+    parser.add_argument("--until", type=str, default="2026-11-25T19:45:00Z", help="Target completion timestamp ISO (default: 2026-11-25T19:45:00Z = 2:45pm ET)")
     parser.add_argument("--phase-duration", type=int, default=3600, help="Duration of each phase in seconds (default: 3600 = 1 hour)")
     parser.add_argument("--interval", type=int, default=60, help="Strategy poll interval in seconds (default: 60)")
     parser.add_argument("--no-upload-logs", dest="upload_logs", action="store_false", help="Skip remote object storage upload")

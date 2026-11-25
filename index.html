@@ -180,8 +180,18 @@
   </div>
 
   <div class="metric-grid">
+    <div class="card" style="border: 1px solid #d29922; background: rgba(210, 153, 34, 0.08);">
+      <div class="card-title" style="color: #d29922; font-weight: 700;">🟢 PROD LIVE PnL (kalshi.com)</div>
+      <div class="card-value" id="prod-pnl">$0.00</div>
+      <div class="card-sub" id="prod-sub">0W / 0L | Win Rate: 0.0%</div>
+    </div>
+    <div class="card" style="border: 1px solid #58a6ff; background: rgba(88, 166, 255, 0.08);">
+      <div class="card-title" style="color: #58a6ff; font-weight: 700;">🔵 DEMO LIVE PnL (demo.kalshi.co)</div>
+      <div class="card-value" id="demo-pnl">$0.00</div>
+      <div class="card-sub" id="demo-sub">0W / 0L | Win Rate: 0.0%</div>
+    </div>
     <div class="card">
-      <div class="card-title">Aggregated PnL</div>
+      <div class="card-title">Aggregated PnL (All Strats)</div>
       <div class="card-value" id="agg-pnl">$0.00</div>
       <div class="card-sub" id="pnl-sub">Settled trades (excl. random baseline)</div>
     </div>
@@ -345,6 +355,32 @@
         }
 
         // Summary cards
+        if (data.prod_live) {
+          const ppnl = data.prod_live.pnl_dollars || 0;
+          const prodEl = document.getElementById('prod-pnl');
+          if (prodEl) {
+            prodEl.textContent = (ppnl >= 0 ? '+$' : '-$') + Math.abs(ppnl).toFixed(2);
+            prodEl.className = 'card-value ' + (ppnl > 0 ? 'pnl-pos' : (ppnl < 0 ? 'pnl-neg' : 'pnl-zero'));
+          }
+          const prodSub = document.getElementById('prod-sub');
+          if (prodSub) {
+            prodSub.textContent = `${data.prod_live.wins || 0}W / ${data.prod_live.losses || 0}L | WR: ${(data.prod_live.win_rate || 0).toFixed(1)}% | Settled: ${data.prod_live.settled || 0}`;
+          }
+        }
+
+        if (data.demo_live) {
+          const dpnl = data.demo_live.pnl_dollars || 0;
+          const demoEl = document.getElementById('demo-pnl');
+          if (demoEl) {
+            demoEl.textContent = (dpnl >= 0 ? '+$' : '-$') + Math.abs(dpnl).toFixed(2);
+            demoEl.className = 'card-value ' + (dpnl > 0 ? 'pnl-pos' : (dpnl < 0 ? 'pnl-neg' : 'pnl-zero'));
+          }
+          const demoSub = document.getElementById('demo-sub');
+          if (demoSub) {
+            demoSub.textContent = `${data.demo_live.wins || 0}W / ${data.demo_live.losses || 0}L | WR: ${(data.demo_live.win_rate || 0).toFixed(1)}% | Settled: ${data.demo_live.settled || 0}`;
+          }
+        }
+
         const pnl = data.summary.pnl_dollars || 0;
         const pnlEl = document.getElementById('agg-pnl');
         pnlEl.textContent = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);

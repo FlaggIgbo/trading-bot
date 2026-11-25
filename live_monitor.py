@@ -11,13 +11,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 
 INSTANCES = [
     {"tag": "spot_lag_strict (prod, LIVE, Maker)", "db": "trading_bot_spot_lag_prod.db", "log": "trading_bot_spot_lag_prod.log", "env": "prod", "live": True},
-    {"tag": "spot_lag_strict (demo, LIVE, Maker)", "db": "trading_bot_spot_lag_strict_demo.db", "log": "trading_bot_spot_lag_strict_demo.log", "env": "demo", "live": True},
-    {"tag": "spot_lag (prod, Sim, Taker)", "db": "trading_bot_spot_lag_sim_prod.db", "log": "trading_bot_spot_lag_sim_prod.log", "env": "prod", "live": False},
-    {"tag": "binary_fair_value_arb (prod, Sim)", "db": "trading_bot_binary_fair_value_arb_prod.db", "log": "trading_bot_binary_fair_value_arb_prod.log", "env": "prod", "live": False},
-    {"tag": "crypto_lead_spillover (prod, Sim)", "db": "trading_bot_crypto_lead_spillover_prod.db", "log": "trading_bot_crypto_lead_spillover_prod.log", "env": "prod", "live": False},
-    {"tag": "spot_lag_maker (prod, Sim)", "db": "trading_bot_spot_lag_maker_prod.db", "log": "trading_bot_spot_lag_maker_prod.log", "env": "prod", "live": False},
+    {"tag": "crypto_lead_spillover (demo, LIVE)", "db": "trading_bot_crypto_lead_spillover_demo.db", "log": "trading_bot_crypto_lead_spillover_demo.log", "env": "demo", "live": True},
     {"tag": "early_candle_momentum (prod, Sim)", "db": "trading_bot_early_candle_momentum_prod.db", "log": "trading_bot_early_candle_momentum_prod.log", "env": "prod", "live": False},
-    {"tag": "random (prod, Sim)", "db": "trading_bot_random_prod.db", "log": "trading_bot_random_prod.log", "env": "prod", "live": False},
 ]
 
 def get_stats():
@@ -259,12 +254,15 @@ def main():
                 json.dump(data, f, indent=2)
             os.replace(tmp_path, target_path)
 
-            # Ensure localhost.html exists and is kept in sync
+            # Ensure index.html and localhost.html exist and remain in sync
             lh_path = ROOT_DIR / "localhost.html"
             idx_path = ROOT_DIR / "index.html"
             if idx_path.exists() and not lh_path.exists():
-                import shutil
-                shutil.copyfile(idx_path, lh_path)
+                try:
+                    os.symlink("index.html", str(lh_path))
+                except Exception:
+                    import shutil
+                    shutil.copyfile(idx_path, lh_path)
 
             # Sync active positions to MacBook PostgreSQL every 10 seconds
             if time.time() - last_pg_sync >= 10:
