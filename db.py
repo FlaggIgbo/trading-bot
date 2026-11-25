@@ -91,6 +91,11 @@ class Strategy(StrEnum):
     SPOT_LAG = "spot_lag"
     PANIC_FADE = "panic_fade"
     LATE_WINDOW_SCALP = "late_window_scalp"
+    SPOT_LAG_STRICT = "spot_lag_strict"
+    BINARY_FAIR_VALUE_ARB = "binary_fair_value_arb"
+    CRYPTO_LEAD_SPILLOVER = "crypto_lead_spillover"
+    SPOT_LAG_MAKER = "spot_lag_maker"
+    EARLY_CANDLE_MOMENTUM = "early_candle_momentum"
 
 
 def normalize_environment(environment: Optional[str] = None) -> Environment:
@@ -253,7 +258,20 @@ def normalize_strategy(strategy: Optional[str] = None) -> Strategy:
         return Strategy.PANIC_FADE
     if strat_clean in ("late_window_scalp", "late_scalp", "late-window-scalp", "late-scalp", "latescalp", "late_window"):
         return Strategy.LATE_WINDOW_SCALP
-    return Strategy(strat_clean)
+    if strat_clean in ("spot_lag_strict", "spot-lag-strict", "spotlag_strict"):
+        return Strategy.SPOT_LAG_STRICT
+    if strat_clean in ("binary_fair_value_arb", "fair_value_arb", "binary_arb", "fair_value"):
+        return Strategy.BINARY_FAIR_VALUE_ARB
+    if strat_clean in ("crypto_lead_spillover", "crypto_spillover", "lead_spillover", "spillover"):
+        return Strategy.CRYPTO_LEAD_SPILLOVER
+    if strat_clean in ("spot_lag_maker", "spot-lag-maker", "spotlag_maker"):
+        return Strategy.SPOT_LAG_MAKER
+    if strat_clean in ("early_candle_momentum", "early_momentum", "candle_momentum"):
+        return Strategy.EARLY_CANDLE_MOMENTUM
+    try:
+        return Strategy(strat_clean)
+    except Exception:
+        return strat_clean
 
 
 class Database:

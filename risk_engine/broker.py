@@ -157,12 +157,52 @@ class BaseBroker:
             fill_count = 1.0 if status == "executed" else 0.0
 
         is_filled = (not self.is_live) or (status == "executed") or (fill_count > 0)
+        is_ioc = (time_in_force == "immediate_or_cancel")
 
         if self.is_live and not is_filled:
-            timeout = entry_timeout if entry_timeout is not None else 0.5
-            start_poll = time.time()
-            while (time.time() - start_poll) < timeout:
-                time.sleep(0.05)
+            if is_ioc:
+                timeout = entry_timeout if entry_timeout is not None else 0.5
+                start_poll = time.time()
+                while (time.time() - start_poll) < timeout:
+                    time.sleep(0.05)
+                    refreshed = self.get_order(order_id)
+                    if refreshed and isinstance(refreshed, dict):
+                        ref_data = refreshed.get("order", refreshed)
+                        ref_status = str(ref_data.get("status", "")).lower()
+                        ref_fc_val = ref_data.get("fill_count_fp") or ref_data.get("fill_count") or 0.0
+                        try:
+                            ref_fc = float(ref_fc_val)
+                        except (ValueError, TypeError):
+                            ref_fc = 1.0 if ref_status == "executed" else 0.0
+                        if ref_status == "executed" or ref_fc > 0:
+                            order_data = ref_data
+                            status = "executed"
+                            fill_count = ref_fc
+                            is_filled = True
+                            break
+                        elif ref_status == "canceled":
+                            break
+
+                if not is_filled:
+                    self.cancel_order(order_id)
+                    if repo and hasattr(repo, "conn"):
+                        cursor = repo.conn.cursor()
+                        cursor.execute(
+                            "DELETE FROM positions WHERE client_order_id = ?",
+                            (client_order_id,),
+                        )
+                        repo.conn.commit()
+                    return {
+                        "order_id": order_id,
+                        "client_order_id": client_order_id,
+                        "ticker": ticker,
+                        "side": side,
+                        "status": "unfilled",
+                        "entry_filled": False,
+                    }
+            else:
+                # Maker / passive limit order: sits on Kalshi's book!
+                time.sleep(0.15)
                 refreshed = self.get_order(order_id)
                 if refreshed and isinstance(refreshed, dict):
                     ref_data = refreshed.get("order", refreshed)
@@ -177,27 +217,14 @@ class BaseBroker:
                         status = "executed"
                         fill_count = ref_fc
                         is_filled = True
-                        break
-                    elif ref_status == "canceled":
-                        break
-
-            if not is_filled:
-                self.cancel_order(order_id)
-                if repo and hasattr(repo, "conn"):
-                    cursor = repo.conn.cursor()
-                    cursor.execute(
-                        "DELETE FROM positions WHERE client_order_id = ?",
-                        (client_order_id,),
-                    )
-                    repo.conn.commit()
-                return {
-                    "order_id": order_id,
-                    "client_order_id": client_order_id,
-                    "ticker": ticker,
-                    "side": side,
-                    "status": "unfilled",
-                    "entry_filled": False,
-                }
+                    elif ref_status in ("resting", "open"):
+                        order_data = ref_data
+                        status = "resting"
+                        is_filled = False
+                else:
+                    # Order accepted by exchange but resting
+                    status = "resting"
+                    is_filled = False
 
         # 5. Extract actual execution fill price
         fill_price = price_cents
@@ -211,9 +238,9 @@ class BaseBroker:
                 except (ValueError, TypeError):
                     pass
 
-        # 6. Place resting take-profit order if configured
+        # 6. Place resting take-profit order ONLY if entry order actually executed
         resting_order_id = ""
-        if resting_price_cents is not None:
+        if resting_price_cents is not None and is_filled and status == "executed":
             safe_strat = re.sub(r"[^a-zA-Z0-9_-]", "_", str(getattr(strategy_name, "value", strategy_name)).lower())
             safe_tick = re.sub(r"[^a-zA-Z0-9_-]", "_", ticker)
             rest_cid = f"{safe_strat}_rest_{safe_tick}_{int(time.time() * 1000)}"[:64]
@@ -236,9 +263,10 @@ class BaseBroker:
             except Exception as e:
                 analytics.warning(f"Could not place resting order for {ticker}: {e}")
 
-        # 7. Update to OPEN in SQLite
+        # 7. Update to OPEN in SQLite only if executed; otherwise remains PENDING
         if repo and hasattr(repo, "update_position_status"):
-            repo.update_position_status(client_order_id, PositionStatus.OPEN, resting_order_id=resting_order_id)
+            target_status = PositionStatus.OPEN if (is_filled and status == "executed") else PositionStatus.PENDING
+            repo.update_position_status(client_order_id, target_status, resting_order_id=resting_order_id)
             if fill_price != price_cents and hasattr(repo, "conn"):
                 try:
                     repo.conn.execute(
@@ -395,10 +423,13 @@ class KalshiBroker(BaseBroker):
                 action=action,
             )
 
-    def get_order(self, order_id: str) -> Optional[dict[str, Any]]:
+    def get_order(self, order_id: str, ticker: Optional[str] = None) -> Optional[dict[str, Any]]:
         """Look up order details from Kalshi."""
         if hasattr(self.client, "get_order"):
-            return self.client.get_order(order_id)
+            try:
+                return self.client.get_order(order_id, ticker=ticker)
+            except TypeError:
+                return self.client.get_order(order_id)
         return None
 
     def cancel_order(self, order_id: str, ticker: Optional[str] = None) -> Optional[dict[str, Any]]:

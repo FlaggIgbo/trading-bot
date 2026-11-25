@@ -77,12 +77,27 @@ class Settler:
             if ticker in live_settlements:
                 s_info = live_settlements[ticker]
                 result = normalize_market_result(s_info.get("market_result", ""))
-                pnl_cents = self.compute_pnl_cents(
-                    side=pos["side"],
-                    price_cents=pos["price_cents"],
-                    count=pos["count"],
-                    result=result,
-                )
+                # If Kalshi provides official portfolio settlement costs & revenue, compute exact PnL
+                if "yes_total_cost_dollars" in s_info or "no_total_cost_dollars" in s_info:
+                    try:
+                        cost = float(s_info.get("yes_total_cost_dollars", 0.0)) + float(s_info.get("no_total_cost_dollars", 0.0)) + float(s_info.get("fee_cost", 0.0))
+                        raw_rev = float(s_info.get("revenue", s_info.get("value", 0.0)))
+                        rev = (raw_rev / 100.0) if raw_rev > 1.0 else raw_rev
+                        pnl_cents = int(round((rev - cost) * 100))
+                    except Exception:
+                        pnl_cents = self.compute_pnl_cents(
+                            side=pos["side"],
+                            price_cents=pos["price_cents"],
+                            count=pos["count"],
+                            result=result,
+                        )
+                else:
+                    pnl_cents = self.compute_pnl_cents(
+                        side=pos["side"],
+                        price_cents=pos["price_cents"],
+                        count=pos["count"],
+                        result=result,
+                    )
             else:
                 # 2. GET market resolution from Kalshi
                 market = self.client.get_market(ticker)

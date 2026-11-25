@@ -10,12 +10,14 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
 
 INSTANCES = [
-    {"tag": "regime_aware (demo, LIVE, SL, TP85c)", "db": "trading_bot_regime_aware_demo_sl_tp85.db", "log": "trading_bot_regime_aware_demo_sl_tp85.log", "env": "demo", "live": True},
-    {"tag": "regime_aware (demo, TP85c)", "db": "trading_bot_regime_aware_demo_tp85.db", "log": "trading_bot_regime_aware_demo_tp85.log", "env": "demo", "live": False},
-    {"tag": "regime_aware (demo, SL)", "db": "trading_bot_regime_aware_demo_sl.db", "log": "trading_bot_regime_aware_demo_sl.log", "env": "demo", "live": False},
-    {"tag": "sell_1.5n (demo)", "db": "trading_bot_sell_1.5n_demo.db", "log": "trading_bot_sell_1.5n_demo.log", "env": "demo", "live": False},
-    {"tag": "last_21_spot (demo)", "db": "trading_bot_last_21_spot_demo.db", "log": "trading_bot_last_21_spot_demo.log", "env": "demo", "live": False},
-    {"tag": "random (demo)", "db": "trading_bot_random_demo.db", "log": "trading_bot_random_demo.log", "env": "demo", "live": False},
+    {"tag": "spot_lag_strict (prod, LIVE, Maker)", "db": "trading_bot_spot_lag_prod.db", "log": "trading_bot_spot_lag_prod.log", "env": "prod", "live": True},
+    {"tag": "spot_lag_strict (demo, LIVE, Maker)", "db": "trading_bot_spot_lag_strict_demo.db", "log": "trading_bot_spot_lag_strict_demo.log", "env": "demo", "live": True},
+    {"tag": "spot_lag (prod, Sim, Taker)", "db": "trading_bot_spot_lag_sim_prod.db", "log": "trading_bot_spot_lag_sim_prod.log", "env": "prod", "live": False},
+    {"tag": "binary_fair_value_arb (prod, Sim)", "db": "trading_bot_binary_fair_value_arb_prod.db", "log": "trading_bot_binary_fair_value_arb_prod.log", "env": "prod", "live": False},
+    {"tag": "crypto_lead_spillover (prod, Sim)", "db": "trading_bot_crypto_lead_spillover_prod.db", "log": "trading_bot_crypto_lead_spillover_prod.log", "env": "prod", "live": False},
+    {"tag": "spot_lag_maker (prod, Sim)", "db": "trading_bot_spot_lag_maker_prod.db", "log": "trading_bot_spot_lag_maker_prod.log", "env": "prod", "live": False},
+    {"tag": "early_candle_momentum (prod, Sim)", "db": "trading_bot_early_candle_momentum_prod.db", "log": "trading_bot_early_candle_momentum_prod.log", "env": "prod", "live": False},
+    {"tag": "random (prod, Sim)", "db": "trading_bot_random_prod.db", "log": "trading_bot_random_prod.log", "env": "prod", "live": False},
 ]
 
 def get_stats():
@@ -170,6 +172,9 @@ def get_stats():
         except Exception:
             pass
 
+    prod_live_stat = next((s for s in strategy_stats if s.get("env") == "prod" and s.get("live")), {})
+    demo_live_stat = next((s for s in strategy_stats if s.get("env") == "demo" and s.get("live")), {})
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "time_remaining_seconds": remaining_sec,
@@ -178,6 +183,8 @@ def get_stats():
         "total_phases": total_phases,
         "phase_name": phase_name,
         "phase_live_strategy": phase_live_strat,
+        "prod_live": prod_live_stat,
+        "demo_live": demo_live_stat,
         "summary": {
             "total_trades": overall_trades,
             "settled_trades": overall_settled,

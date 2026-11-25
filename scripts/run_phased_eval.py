@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Optional, Any
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -36,89 +37,142 @@ from ingestion.api.client import KalshiClient
 PHASE_CONFIG = [
     {
         "phase": 1,
-        "name": "Hour 1: spot_lag PROD (LIVE) & spot_lag DEMO (LIVE)",
-        "live_demo_strat": "spot_lag",
+        "name": "Hour 1: spot_lag PROD (LIVE) & spot_lag_strict DEMO (LIVE)",
+        "live_demo_strat": "spot_lag_strict",
     },
     {
         "phase": 2,
-        "name": "Hour 2: spot_lag PROD (LIVE) & late_window_scalp DEMO (LIVE)",
-        "live_demo_strat": "late_window_scalp",
+        "name": "Hour 2: spot_lag PROD (LIVE) & binary_fair_value_arb DEMO (LIVE)",
+        "live_demo_strat": "binary_fair_value_arb",
     },
     {
         "phase": 3,
-        "name": "Hour 3: spot_lag PROD (LIVE) & panic_fade DEMO (LIVE)",
-        "live_demo_strat": "panic_fade",
+        "name": "Hour 3: spot_lag PROD (LIVE) & crypto_lead_spillover DEMO (LIVE)",
+        "live_demo_strat": "crypto_lead_spillover",
     },
 ]
 
 DEMO_ROTATION_STRATEGIES = [
     {
-        "name": "spot_lag demo",
-        "strategy": "spot_lag",
+        "name": "spot_lag_strict",
+        "strategy": "spot_lag_strict",
         "env": "demo",
-        "db_path": "db/trading_bot_spot_lag_demo.db",
-        "log_path": "log/trading_bot_spot_lag_demo.log",
+        "db_path": "db/trading_bot_spot_lag_strict_demo.db",
+        "log_path": "log/trading_bot_spot_lag_strict_demo.log",
         "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
     },
     {
-        "name": "late_window_scalp",
-        "strategy": "late_window_scalp",
+        "name": "binary_fair_value_arb",
+        "strategy": "binary_fair_value_arb",
         "env": "demo",
-        "db_path": "db/trading_bot_late_window_scalp_demo.db",
-        "log_path": "log/trading_bot_late_window_scalp_demo.log",
+        "db_path": "db/trading_bot_binary_fair_value_arb_demo.db",
+        "log_path": "log/trading_bot_binary_fair_value_arb_demo.log",
         "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
     },
     {
-        "name": "panic_fade",
-        "strategy": "panic_fade",
+        "name": "crypto_lead_spillover",
+        "strategy": "crypto_lead_spillover",
         "env": "demo",
-        "db_path": "db/trading_bot_panic_fade_demo.db",
-        "log_path": "log/trading_bot_panic_fade_demo.log",
-        "flags": ["--stop-loss", "--check-spot"],
+        "db_path": "db/trading_bot_crypto_lead_spillover_demo.db",
+        "log_path": "log/trading_bot_crypto_lead_spillover_demo.log",
+        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
     },
 ]
 
-def get_strategy_instances(phase_num: int) -> list[dict]:
+
+def get_strategy_instances(phase_num: int = 1) -> list[dict]:
     """
-    strategyDetails(hour in (1, 2, 3)):
-    - random: demo and not live
-    - spot_lag prod: prod and LIVE
-    - remaining strategies ['spot_lag demo', 'late_window_scalp', 'panic_fade']:
-      for i in range(3):
-        if i == hour - 1: return live demo
-        else: return simulated demo
+    All strategies run against PRODUCTION environment for true apples-to-apples comparison:
+    - spot_lag_strict: PROD, LIVE (Maker execution: passive limit orders at bid/midpoint with 0.15% buffer)
+    - All other 6 strategies: PROD, Simulated (zero capital risk, no order book collisions)
     """
     instances = []
 
-    # 1. spot_lag prod (always prod and live across all hours)
+    # 1. spot_lag_strict prod (LIVE Maker execution)
     instances.append({
-        "name": "spot_lag prod",
-        "strategy": "spot_lag",
+        "name": "spot_lag_strict prod",
+        "strategy": "spot_lag_strict",
         "env": "prod",
         "live": True,
-        "tag": "spot_lag (prod, LIVE)",
+        "tag": "spot_lag_strict (prod, LIVE, Maker)",
         "db_path": "db/trading_bot_spot_lag_prod.db",
         "log_path": "log/trading_bot_spot_lag_prod.log",
+        "flags": ["--stop-loss", "--check-spot"],
+    })
+
+    # 2. spot_lag_strict demo (LIVE Maker execution against demo exchange)
+    instances.append({
+        "name": "spot_lag_strict demo",
+        "strategy": "spot_lag_strict",
+        "env": "demo",
+        "live": True,
+        "tag": "spot_lag_strict (demo, LIVE, Maker)",
+        "db_path": "db/trading_bot_spot_lag_strict_demo.db",
+        "log_path": "log/trading_bot_spot_lag_strict_demo.log",
+        "flags": ["--stop-loss", "--check-spot"],
+    })
+
+    # 3. baseline spot_lag prod (Simulated taker baseline with 0.05% buffer)
+    instances.append({
+        "name": "spot_lag baseline",
+        "strategy": "spot_lag",
+        "env": "prod",
+        "live": False,
+        "tag": "spot_lag (prod, Sim, Taker)",
+        "db_path": "db/trading_bot_spot_lag_sim_prod.db",
+        "log_path": "log/trading_bot_spot_lag_sim_prod.log",
         "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
     })
 
-    # 2. Remaining demo strategies: rotated live demo
-    active_idx = phase_num - 1
-    for i, base in enumerate(DEMO_ROTATION_STRATEGIES):
-        is_live = (i == active_idx)
-        live_label = "LIVE" if is_live else "Sim"
-        instances.append({
-            "name": base["name"],
-            "strategy": base["strategy"],
-            "env": base["env"],
-            "live": is_live,
-            "tag": f"{base['strategy']} (demo, {live_label})",
-            "db_path": base["db_path"],
-            "log_path": base["log_path"],
-            "flags": base["flags"],
-        })
+    # 4. binary_fair_value_arb prod (Simulated Black-Scholes Delta model)
+    instances.append({
+        "name": "binary_fair_value_arb",
+        "strategy": "binary_fair_value_arb",
+        "env": "prod",
+        "live": False,
+        "tag": "binary_fair_value_arb (prod, Sim)",
+        "db_path": "db/trading_bot_binary_fair_value_arb_prod.db",
+        "log_path": "log/trading_bot_binary_fair_value_arb_prod.log",
+        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
+    })
 
-    # 3. random (always prod and not live across all hours - simulated on real prod orderbook)
+    # 5. crypto_lead_spillover prod (Simulated BTC macro spillover)
+    instances.append({
+        "name": "crypto_lead_spillover",
+        "strategy": "crypto_lead_spillover",
+        "env": "prod",
+        "live": False,
+        "tag": "crypto_lead_spillover (prod, Sim)",
+        "db_path": "db/trading_bot_crypto_lead_spillover_prod.db",
+        "log_path": "log/trading_bot_crypto_lead_spillover_prod.log",
+        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
+    })
+
+    # 6. spot_lag_maker prod (Simulated Maker on standard buffer)
+    instances.append({
+        "name": "spot_lag_maker",
+        "strategy": "spot_lag_maker",
+        "env": "prod",
+        "live": False,
+        "tag": "spot_lag_maker (prod, Sim)",
+        "db_path": "db/trading_bot_spot_lag_maker_prod.db",
+        "log_path": "log/trading_bot_spot_lag_maker_prod.log",
+        "flags": ["--stop-loss", "--check-spot"],
+    })
+
+    # 7. early_candle_momentum prod (Simulated Mins 1.0-4.5 momentum)
+    instances.append({
+        "name": "early_candle_momentum",
+        "strategy": "early_candle_momentum",
+        "env": "prod",
+        "live": False,
+        "tag": "early_candle_momentum (prod, Sim)",
+        "db_path": "db/trading_bot_early_candle_momentum_prod.db",
+        "log_path": "log/trading_bot_early_candle_momentum_prod.log",
+        "flags": ["--stop-loss", "--check-spot", "--taker-ioc"],
+    })
+
+    # 8. random prod (Simulated Zero-alpha baseline)
     instances.append({
         "name": "random",
         "strategy": "random",
@@ -132,38 +186,63 @@ def get_strategy_instances(phase_num: int) -> list[dict]:
 
     return instances
 
+
 ALL_STRATEGIES = [
     {
-        "name": "spot_lag prod",
-        "strategy": "spot_lag",
+        "name": "spot_lag_strict prod",
+        "strategy": "spot_lag_strict",
         "env": "prod",
-        "tag": "spot_lag (prod, LIVE)",
+        "tag": "spot_lag_strict (prod, LIVE, Maker)",
         "db_path": "db/trading_bot_spot_lag_prod.db",
         "log_path": "log/trading_bot_spot_lag_prod.log",
     },
     {
-        "name": "spot_lag demo",
+        "name": "spot_lag_strict demo",
+        "strategy": "spot_lag_strict",
+        "env": "demo",
+        "tag": "spot_lag_strict (demo, LIVE, Maker)",
+        "db_path": "db/trading_bot_spot_lag_strict_demo.db",
+        "log_path": "log/trading_bot_spot_lag_strict_demo.log",
+    },
+    {
+        "name": "spot_lag baseline",
         "strategy": "spot_lag",
-        "env": "demo",
-        "tag": "spot_lag (demo)",
-        "db_path": "db/trading_bot_spot_lag_demo.db",
-        "log_path": "log/trading_bot_spot_lag_demo.log",
+        "env": "prod",
+        "tag": "spot_lag (prod, Sim, Taker)",
+        "db_path": "db/trading_bot_spot_lag_sim_prod.db",
+        "log_path": "log/trading_bot_spot_lag_sim_prod.log",
     },
     {
-        "name": "late_window_scalp",
-        "strategy": "late_window_scalp",
-        "env": "demo",
-        "tag": "late_window_scalp (demo)",
-        "db_path": "db/trading_bot_late_window_scalp_demo.db",
-        "log_path": "log/trading_bot_late_window_scalp_demo.log",
+        "name": "binary_fair_value_arb",
+        "strategy": "binary_fair_value_arb",
+        "env": "prod",
+        "tag": "binary_fair_value_arb (prod, Sim)",
+        "db_path": "db/trading_bot_binary_fair_value_arb_prod.db",
+        "log_path": "log/trading_bot_binary_fair_value_arb_prod.log",
     },
     {
-        "name": "panic_fade",
-        "strategy": "panic_fade",
-        "env": "demo",
-        "tag": "panic_fade (demo)",
-        "db_path": "db/trading_bot_panic_fade_demo.db",
-        "log_path": "log/trading_bot_panic_fade_demo.log",
+        "name": "crypto_lead_spillover",
+        "strategy": "crypto_lead_spillover",
+        "env": "prod",
+        "tag": "crypto_lead_spillover (prod, Sim)",
+        "db_path": "db/trading_bot_crypto_lead_spillover_prod.db",
+        "log_path": "log/trading_bot_crypto_lead_spillover_prod.log",
+    },
+    {
+        "name": "spot_lag_maker",
+        "strategy": "spot_lag_maker",
+        "env": "prod",
+        "tag": "spot_lag_maker (prod, Sim)",
+        "db_path": "db/trading_bot_spot_lag_maker_prod.db",
+        "log_path": "log/trading_bot_spot_lag_maker_prod.log",
+    },
+    {
+        "name": "early_candle_momentum",
+        "strategy": "early_candle_momentum",
+        "env": "prod",
+        "tag": "early_candle_momentum (prod, Sim)",
+        "db_path": "db/trading_bot_early_candle_momentum_prod.db",
+        "log_path": "log/trading_bot_early_candle_momentum_prod.log",
     },
     {
         "name": "random prod",
@@ -172,14 +251,6 @@ ALL_STRATEGIES = [
         "tag": "random (prod, Sim)",
         "db_path": "db/trading_bot_random_prod.db",
         "log_path": "log/trading_bot_random_prod.log",
-    },
-    {
-        "name": "random demo",
-        "strategy": "random",
-        "env": "demo",
-        "tag": "random (demo, Sim)",
-        "db_path": "db/trading_bot_random_demo.db",
-        "log_path": "log/trading_bot_random_demo.log",
     },
 ]
 
@@ -298,13 +369,12 @@ def run_phased_eval(
     upload_logs: bool = True,
     start_phase: int = 1,
     resume: bool = False,
+    target_end_time_iso: Optional[str] = "2026-11-25T14:00:00Z",
 ):
+    import math
     os.makedirs(ROOT_DIR / "db", exist_ok=True)
     os.makedirs(ROOT_DIR / "log", exist_ok=True)
 
-    total_phases = len(PHASE_CONFIG)
-    phases_to_run = [cfg for cfg in PHASE_CONFIG if cfg["phase"] >= start_phase]
-    total_remaining_duration = phase_duration * len(phases_to_run)
     run_start_time = time.time()
     old_meta = None
     if resume and (ROOT_DIR / ".parallel_run_meta.json").exists():
@@ -314,7 +384,29 @@ def run_phased_eval(
                 run_start_time = old_meta.get("start_time", run_start_time)
         except Exception:
             pass
-    run_end_time = (old_meta.get("end_time") if (resume and old_meta and old_meta.get("end_time")) else (time.time() + total_remaining_duration))
+
+    if target_end_time_iso:
+        dt = datetime.fromisoformat(target_end_time_iso.replace("Z", "+00:00"))
+        run_end_time = dt.timestamp()
+    else:
+        run_end_time = run_start_time + 3 * 3600
+
+    total_remaining_duration = max(300, int(run_end_time - time.time()))
+    num_phases = max(1, int(math.ceil((run_end_time - run_start_time) / phase_duration)))
+
+    # Dynamically build phases to reach target_end_time
+    dynamic_phases = []
+    for p in range(1, num_phases + 1):
+        strat_info = DEMO_ROTATION_STRATEGIES[(p - 1) % len(DEMO_ROTATION_STRATEGIES)]
+        strat_name = strat_info["strategy"]
+        dynamic_phases.append({
+            "phase": p,
+            "name": f"Hour {p}: spot_lag_strict PROD (LIVE, Maker) & spot_lag_strict DEMO (LIVE, Maker)",
+            "live_demo_strat": "spot_lag_strict",
+        })
+
+    total_phases = len(dynamic_phases)
+    phases_to_run = [cfg for cfg in dynamic_phases if cfg["phase"] >= start_phase]
 
     combined_log_path = ROOT_DIR / "log" / "parallel_run.log"
     combined_log = open(combined_log_path, "a", buffering=1)
@@ -323,14 +415,14 @@ def run_phased_eval(
 
     print("\n" + "=" * 76, flush=True)
     if resume or start_phase > 1:
-        print(f"RESUMING 3-HOUR PHASED TRADING BOT EVALUATION RUN (Starting at Phase {start_phase})", flush=True)
+        print(f"RESUMING MULTI-HOUR PHASED EVALUATION RUN (Starting at Phase {start_phase})", flush=True)
     else:
-        print("STARTING 3-HOUR PHASED TRADING BOT EVALUATION RUN (PROD vs DEMO)", flush=True)
+        print("STARTING MULTI-HOUR PHASED EVALUATION RUN (Target: 9:00 AM ET)", flush=True)
     print(f"Total Evaluation Duration: {total_remaining_duration / 3600:.2f} hours ({len(phases_to_run)} phase(s) x {phase_duration / 60:.0f}m)", flush=True)
     print(f"Start Time (UTC): {datetime.fromtimestamp(run_start_time, tz=timezone.utc).isoformat()}", flush=True)
     print(f"Target End Time (UTC): {datetime.fromtimestamp(run_end_time, tz=timezone.utc).isoformat()}", flush=True)
     print("Live Strategy Rotation Schedule:")
-    print("  - Continuous: spot_lag (PROD, LIVE) & random (PROD, Sim)")
+    print("  - Continuous: spot_lag_strict (PROD, LIVE, Maker) & random (PROD, Sim)")
     for cfg in phases_to_run:
         print(f"  - Phase {cfg['phase']}: {cfg['name']}", flush=True)
     print("=" * 76 + "\n", flush=True)
@@ -353,16 +445,21 @@ def run_phased_eval(
         if stop_requested:
             break
 
+        now_ts = time.time()
+        if now_ts >= run_end_time - 10:
+            print("Target end time reached! Concluding run.", flush=True)
+            break
+
         phase_num = phase_info["phase"]
         phase_name = phase_info["name"]
 
-        phase_start = time.time()
+        phase_start = now_ts
         if resume and old_meta and old_meta.get("phase") == phase_num and old_meta.get("phase_end_time", 0) > phase_start:
-            phase_end = old_meta["phase_end_time"]
+            phase_end = min(run_end_time, old_meta["phase_end_time"])
             current_phase_duration = max(30, int(phase_end - phase_start))
         else:
-            phase_end = phase_start + phase_duration
-            current_phase_duration = phase_duration
+            phase_end = min(run_end_time, phase_start + phase_duration)
+            current_phase_duration = max(30, int(phase_end - phase_start))
 
         print("\n" + "#" * 76, flush=True)
         print(f"ENTER {phase_name.upper()} (Phase {phase_num}/{total_phases})", flush=True)
@@ -377,7 +474,7 @@ def run_phased_eval(
             "phase": phase_num,
             "total_phases": total_phases,
             "phase_name": phase_name,
-            "phase_live_strategy": f"spot_lag (prod) & {phase_info.get('live_demo_strat', '')} (demo)",
+            "phase_live_strategy": "spot_lag_strict prod (LIVE, Maker) & spot_lag_strict demo (LIVE, Maker)",
             "phase_end_time": phase_end,
             "instances": current_instances,
         }
@@ -393,7 +490,8 @@ def run_phased_eval(
             log_f = open(log_path, "a", buffering=1)
             log_handles[tag] = log_f
 
-            offset = (i * 12) % poll_interval
+            step = max(5, int(poll_interval // len(current_instances)))
+            offset = (i * step) % poll_interval
             cmd = [
                 python_bin,
                 "-u",
@@ -493,11 +591,12 @@ def run_phased_eval(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="3-Hour Phased Strategy Evaluation Orchestrator")
+    parser = argparse.ArgumentParser(description="Multi-Hour Phased Strategy Evaluation Orchestrator")
+    parser.add_argument("--until", type=str, default="2026-11-25T14:00:00Z", help="Target completion timestamp ISO (default: 2026-11-25T14:00:00Z = 9am ET)")
     parser.add_argument("--phase-duration", type=int, default=3600, help="Duration of each phase in seconds (default: 3600 = 1 hour)")
     parser.add_argument("--interval", type=int, default=60, help="Strategy poll interval in seconds (default: 60)")
     parser.add_argument("--no-upload-logs", dest="upload_logs", action="store_false", help="Skip remote object storage upload")
-    parser.add_argument("--start-phase", type=int, default=1, choices=[1, 2, 3], help="Phase to start/resume from (default: 1)")
+    parser.add_argument("--start-phase", type=int, default=1, help="Phase to start/resume from (default: 1)")
     parser.add_argument("--resume", action="store_true", help="Resume previous run preserving start_time telemetry")
     args = parser.parse_args()
 
@@ -507,6 +606,7 @@ def main():
         upload_logs=args.upload_logs,
         start_phase=args.start_phase,
         resume=args.resume,
+        target_end_time_iso=args.until,
     )
 
 

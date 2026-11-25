@@ -45,43 +45,56 @@ class Reconciler:
             # Query the broker/exchange for this order
             order_info = None
             try:
-                order_info = self.broker.get_order(client_order_id)
+                order_info = self.broker.get_order(client_order_id, ticker=ticker)
             except Exception as e:
                 analytics.warning(f"[RECONCILER] Error checking order {client_order_id}: {e}")
 
-            order_payload = order_info.get("order", order_info) if isinstance(order_info, dict) else {}
+            if not order_info or not isinstance(order_info, dict):
+                # Temporary network issue or order not yet indexed: remain PENDING
+                continue
+
+            order_payload = order_info.get("order", order_info)
             status = str(order_payload.get("status") or "").lower()
 
-            # If the broker has record of the order being executed or resting
-            if status in ("executed", "resting", "open"):
+            ref_fc_val = order_payload.get("fill_count_fp") or order_payload.get("fill_count") or 0.0
+            try:
+                ref_fc = float(ref_fc_val)
+            except (ValueError, TypeError):
+                ref_fc = 1.0 if status == "executed" else 0.0
+
+            # Only transition to OPEN if order actually executed/filled
+            if status == "executed" or ref_fc > 0:
                 self.db.update_position_status(client_order_id, PositionStatus.OPEN)
                 self.db.log_event(
                     stage="reconciler",
                     level="INFO",
-                    message=f"Reconciled {client_order_id} ({ticker}) as OPEN (found on exchange status='{status}').",
+                    message=f"Reconciled {client_order_id} ({ticker}) as OPEN (filled on exchange).",
                     ticker=ticker,
                     strategy=pos.get("strategy"),
                 )
                 analytics.info(
-                    f"[RECONCILER] Position {client_order_id} for {ticker} transitioned from PENDING -> OPEN.",
+                    f"[RECONCILER] Position {client_order_id} for {ticker} transitioned from PENDING -> OPEN (filled).",
                     event="reconciled_open",
                     ticker=ticker,
                     client_order_id=client_order_id,
                 )
                 pos["status"] = PositionStatus.OPEN
                 reconciled.append(pos)
-            else:
-                # Order not on exchange or rejected/canceled -> transition to FAILED
+            elif status in ("resting", "open"):
+                # Maker order still resting on exchange book waiting for fill - remain PENDING
+                continue
+            elif status in ("canceled", "rejected"):
+                # Explicitly canceled or rejected by exchange
                 self.db.update_position_status(client_order_id, PositionStatus.FAILED)
                 self.db.log_event(
                     stage="reconciler",
                     level="WARNING",
-                    message=f"Reconciled {client_order_id} ({ticker}) as FAILED (not executed on exchange).",
+                    message=f"Reconciled {client_order_id} ({ticker}) as FAILED (status='{status}').",
                     ticker=ticker,
                     strategy=pos.get("strategy"),
                 )
                 analytics.info(
-                    f"[RECONCILER] Position {client_order_id} for {ticker} transitioned from PENDING -> FAILED.",
+                    f"[RECONCILER] Position {client_order_id} for {ticker} transitioned from PENDING -> FAILED ({status}).",
                     event="reconciled_failed",
                     ticker=ticker,
                     client_order_id=client_order_id,

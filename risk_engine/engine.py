@@ -69,6 +69,7 @@ class Strategy:
     regime_filter: bool = False
     taker_ioc: bool = False
     entry_timeout: Optional[float] = None
+    is_maker: bool = False
 
 
 @dataclass
@@ -89,6 +90,7 @@ class Config:
     regime_filter: bool = False
     taker_ioc: bool = False
     entry_timeout: Optional[float] = None
+    is_maker: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +548,219 @@ def late_window_scalp_signal(
     return None
 
 
+def spot_lag_strict_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    min_buffer_pct: float = 0.15,
+    max_contract_ask: int = 65,
+    min_contract_ask: int = 25,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    High-Conviction Spot Lag Signal.
+    Requires at least 0.15% spot buffer from strike (3x stricter than standard spot_lag)
+    and restricts entries to 25c - 65c to eliminate false near-strike chop flips.
+    """
+    return spot_lag_signal(
+        past_results=past_results,
+        market=market,
+        check_spot=check_spot,
+        spot_client=spot_client,
+        min_buffer_pct=min_buffer_pct,
+        max_contract_ask=max_contract_ask,
+        min_contract_ask=min_contract_ask,
+        **kwargs,
+    )
+
+
+def binary_fair_value_arb_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    min_edge_cents: int = 8,
+    iv: float = 0.65,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    Black-Scholes Binary Delta Implied Arbitrage Signal.
+    Calculates theoretical probability P(S_T > K) from live spot, strike, and time remaining.
+    Buys when Kalshi contract is underpriced relative to theoretical fair value by >= min_edge_cents.
+    """
+    import math
+
+    target_market = market
+    if isinstance(past_results, dict) and target_market is None:
+        target_market = past_results
+    if not target_market or not isinstance(target_market, dict):
+        return None
+
+    minute = kwargs.get("minute")
+    if minute is None:
+        minute = get_market_minute(target_market, now=kwargs.get("now"))
+
+    if minute is not None and (minute < 1.0 or minute >= 13.5):
+        return None
+
+    from ingestion.spot import SpotClient, extract_market_strike
+    strike = extract_market_strike(target_market)
+    if strike is None or strike <= 0:
+        return None
+
+    if spot_client is None:
+        spot_client = SpotClient()
+
+    ticker = target_market.get("ticker", "")
+    spot = spot_client.get_spot_price(ticker)
+    if spot is None or spot <= 0:
+        return None
+
+    # Time remaining in years
+    mins_left = max(0.5, 15.0 - (minute if minute is not None else 5.0))
+    t_years = mins_left / (365.25 * 24.0 * 60.0)
+
+    # Black-Scholes binary digital call delta d2
+    sigma_root_t = iv * math.sqrt(t_years)
+    if sigma_root_t <= 0:
+        return None
+
+    d2 = (math.log(spot / strike) - 0.5 * (iv ** 2) * t_years) / sigma_root_t
+    prob_yes = 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
+    prob_yes = min(0.99, max(0.01, prob_yes))
+
+    fair_yes_cents = int(round(prob_yes * 100))
+    fair_no_cents = 100 - fair_yes_cents
+
+    yes_ask = extract_contract_price(target_market, PositionSide.YES)
+    no_ask = extract_contract_price(target_market, PositionSide.NO)
+
+    if yes_ask is not None and (fair_yes_cents - yes_ask) >= min_edge_cents and 20 <= yes_ask <= 75:
+        return PositionSide.YES
+    if no_ask is not None and (fair_no_cents - no_ask) >= min_edge_cents and 20 <= no_ask <= 75:
+        return PositionSide.NO
+
+    return None
+
+
+def crypto_lead_spillover_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    min_lead_buffer_pct: float = 0.15,
+    max_alt_ask: int = 58,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    Cross-Crypto Lead Spillover Signal.
+    Monitors Bitcoin (BTC) as the macro lead asset. When BTC establishes a decisive
+    directional buffer (>= min_lead_buffer_pct), trades the lagging response onto
+    correlated altcoins (SOL, XRP, DOGE, BNB) or BTC itself before their books reprice.
+    """
+    target_market = market
+    if isinstance(past_results, dict) and target_market is None:
+        target_market = past_results
+    if not target_market or not isinstance(target_market, dict):
+        return None
+
+    from ingestion.spot import SpotClient, extract_asset_symbol, extract_market_strike
+    ticker = target_market.get("ticker", "")
+    asset = extract_asset_symbol(ticker) or "BTC"
+
+    if spot_client is None:
+        spot_client = SpotClient()
+
+    # If the target market is BTC itself, use standard spot lag with lead buffer
+    if asset == "BTC":
+        return spot_lag_signal(
+            past_results=past_results,
+            market=target_market,
+            check_spot=check_spot,
+            spot_client=spot_client,
+            min_buffer_pct=min_lead_buffer_pct,
+            max_contract_ask=max_alt_ask,
+            **kwargs,
+        )
+
+    # For altcoins: check target altcoin spot vs its own strike
+    alt_strike = extract_market_strike(target_market)
+    alt_spot = spot_client.get_spot_price(ticker)
+    if alt_strike is None or alt_spot is None or alt_strike <= 0 or alt_spot <= 0:
+        return None
+
+    alt_buffer_pct = (alt_spot - alt_strike) / alt_strike * 100.0
+
+    # Altcoin is trending in direction of spot and still cheap
+    if alt_buffer_pct >= 0.05:
+        yes_ask = extract_contract_price(target_market, PositionSide.YES)
+        if yes_ask is not None and 20 <= yes_ask <= max_alt_ask:
+            return PositionSide.YES
+    elif alt_buffer_pct <= -0.05:
+        no_ask = extract_contract_price(target_market, PositionSide.NO)
+        if no_ask is not None and 20 <= no_ask <= max_alt_ask:
+            return PositionSide.NO
+
+    return None
+
+
+def early_candle_momentum_signal(
+    past_results: Any = None,
+    market: Optional[dict] = None,
+    check_spot: bool = True,
+    spot_client: Optional[Any] = None,
+    min_momentum_buffer_pct: float = 0.08,
+    min_ask: int = 35,
+    max_ask: int = 58,
+    **kwargs: Any,
+) -> Optional[PositionSide]:
+    """
+    Early-Candle Momentum Signal.
+    Trades in minutes 1.0 to 4.5 of the 15-minute window if spot demonstrates early
+    directional displacement (>= 0.08% buffer from strike) while contracts trade near 50c
+    (35c to 58c), yielding favorable ~1:1 risk/reward with 10+ minutes to compound.
+    """
+    target_market = market
+    if isinstance(past_results, dict) and target_market is None:
+        target_market = past_results
+    if not target_market or not isinstance(target_market, dict):
+        return None
+
+    minute = kwargs.get("minute")
+    if minute is None:
+        minute = get_market_minute(target_market, now=kwargs.get("now"))
+
+    if minute is not None and (minute < 1.0 or minute >= 4.5):
+        return None
+
+    from ingestion.spot import SpotClient, extract_market_strike
+    strike = extract_market_strike(target_market)
+    if strike is None or strike <= 0:
+        return None
+
+    if spot_client is None:
+        spot_client = SpotClient()
+
+    ticker = target_market.get("ticker", "")
+    spot = spot_client.get_spot_price(ticker)
+    if spot is None or spot <= 0:
+        return None
+
+    buffer_pct = (spot - strike) / strike * 100.0
+
+    if buffer_pct >= min_momentum_buffer_pct:
+        yes_ask = extract_contract_price(target_market, PositionSide.YES)
+        if yes_ask is not None and min_ask <= yes_ask <= max_ask:
+            return PositionSide.YES
+    elif buffer_pct <= -min_momentum_buffer_pct:
+        no_ask = extract_contract_price(target_market, PositionSide.NO)
+        if no_ask is not None and min_ask <= no_ask <= max_ask:
+            return PositionSide.NO
+
+    return None
+
+
 def choose_side_spot_lag(past_results: Any = None, market: Optional[dict] = None, **kwargs: Any) -> Optional[PositionSide]:
     return spot_lag_signal(past_results=past_results, market=market, **kwargs)
 
@@ -692,6 +907,58 @@ STRATEGIES: dict[str, Strategy] = {
         entry_window=(7.5, 13.5),
         price_band=(78, 96),
         take_profit=98,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "spot_lag_strict": Strategy(
+        "spot_lag_strict",
+        spot_lag_strict_signal,
+        entry_window=(1.0, 11.0),
+        price_band=(25, 65),
+        take_profit=88,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=False,
+        is_maker=True,
+    ),
+    "binary_fair_value_arb": Strategy(
+        "binary_fair_value_arb",
+        binary_fair_value_arb_signal,
+        entry_window=(1.5, 12.5),
+        price_band=(20, 75),
+        take_profit=90,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "crypto_lead_spillover": Strategy(
+        "crypto_lead_spillover",
+        crypto_lead_spillover_signal,
+        entry_window=(1.0, 11.0),
+        price_band=(20, 65),
+        take_profit=88,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=True,
+    ),
+    "spot_lag_maker": Strategy(
+        "spot_lag_maker",
+        spot_lag_signal,
+        entry_window=(1.0, 10.0),
+        price_band=(20, 65),
+        take_profit=85,
+        stop_loss=True,
+        check_spot=True,
+        taker_ioc=False,
+        is_maker=True,
+    ),
+    "early_candle_momentum": Strategy(
+        "early_candle_momentum",
+        early_candle_momentum_signal,
+        entry_window=(1.0, 4.5),
+        price_band=(35, 60),
+        take_profit=85,
         stop_loss=True,
         check_spot=True,
         taker_ioc=True,
@@ -1302,6 +1569,18 @@ class TradeEngine:
         else:
             price_cents = ask_cents
 
+        if getattr(self.strategy, "is_maker", False):
+            bid_cents = extract_contract_price(market, side, book_side="bid")
+            if bid_cents and 0 < bid_cents < 100:
+                if ask_cents and (ask_cents - bid_cents) > 1:
+                    # Place passive limit order at midpoint to capture the spread while staying maker
+                    mid_cents = int(round((bid_cents + ask_cents) / 2.0))
+                    price_cents = min(ask_cents - 1, mid_cents)
+                else:
+                    price_cents = bid_cents
+            else:
+                price_cents = max(1, (ask_cents or 50) - 2)
+
         if not in_band(price_cents, self.strategy.price_band):
             return None
 
@@ -1309,7 +1588,7 @@ class TradeEngine:
             return None
 
         resting_px = self._get_resting_sell_price(price_cents)
-        tif = "immediate_or_cancel" if self.strategy.taker_ioc else None
+        tif = "immediate_or_cancel" if (self.strategy.taker_ioc and not getattr(self.strategy, "is_maker", False)) else None
         order_res = self.broker.buy(
             market=market,
             side=side,
@@ -1341,6 +1620,11 @@ class TradeEngine:
         check_timing: bool = True,
     ) -> list[dict[str, Any]]:
         """Run exit management and evaluate candidates, returning list of placed orders."""
+        if hasattr(self, "reconciler") and self.reconciler:
+            try:
+                self.reconciler.reconcile()
+            except Exception as e:
+                analytics.warning(f"Reconciler error during trade cycle: {e}")
         self.manage_exits(markets=markets, now=now)
         candidates = markets
         if candidates is None and self.repo:

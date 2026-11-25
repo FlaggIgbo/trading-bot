@@ -356,21 +356,46 @@ class KalshiClient:
             )
             return []
 
-    def get_order(self, order_id):
-        """Query Kalshi API for order execution status."""
+    def get_order(self, order_id, ticker=None):
+        """Query Kalshi API for order execution status (supports both UUID order_id and client_order_id)."""
         if not order_id:
             return None
 
         if not self.live_orders:
             return {"order_id": order_id, "status": "simulated"}
 
-        url = f"{self.base_url}/portfolio/orders/{order_id}"
-        headers = self._build_auth_headers("GET", url)
+        import uuid
+        is_uuid = False
         try:
-            response = self._request("GET", url, headers=headers, timeout=10)
+            uuid.UUID(str(order_id))
+            is_uuid = True
+        except (ValueError, TypeError, AttributeError):
+            is_uuid = False
+
+        if is_uuid:
+            url = f"{self.base_url}/portfolio/orders/{order_id}"
+            headers = self._build_auth_headers("GET", url)
+            try:
+                response = self._request("GET", url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("order", data)
+            except Exception as error:
+                analytics.warning(f"Error fetching order {order_id} directly: {error}")
+
+        # Fallback or client_order_id lookup: query /portfolio/orders
+        url = f"{self.base_url}/portfolio/orders"
+        headers = self._build_auth_headers("GET", url)
+        params = {"limit": 100}
+        if ticker:
+            params["ticker"] = ticker
+        try:
+            response = self._request("GET", url, headers=headers, params=params, timeout=10)
             if response.status_code == 200:
-                data = response.json()
-                return data.get("order", data)
+                orders = response.json().get("orders", [])
+                for o in orders:
+                    if o.get("client_order_id") == order_id or o.get("order_id") == order_id:
+                        return o
             return None
         except Exception as error:
             analytics.error(
