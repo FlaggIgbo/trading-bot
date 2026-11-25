@@ -1098,6 +1098,7 @@ def sell_position(
     db = getattr(ctx, "db", getattr(ctx, "repo", None))
     broker = getattr(ctx, "broker", None)
     client = getattr(ctx, "client", getattr(broker, "client", None))
+    is_live = getattr(broker, "is_live", getattr(client, "live_orders", False))
     ticker = position["ticker"]
     side = position["side"]
     count = int(position.get("count", 1))
@@ -1158,12 +1159,21 @@ def sell_position(
     status = str(order_data.get("status") if isinstance(order_data, dict) else "executed").lower()
     fill_count = 0.0
     if isinstance(order_data, dict):
-        try:
-            fill_count = float(order_data.get("fill_count_fp", 1.0))
-        except (ValueError, TypeError):
-            fill_count = 1.0
+        fc_val = order_data.get("fill_count_fp") or order_data.get("fill_count")
+        if fc_val is not None:
+            try:
+                fill_count = float(fc_val)
+            except (ValueError, TypeError):
+                fill_count = 1.0 if status == "executed" else 0.0
+        else:
+            fill_count = 1.0 if (not is_live or status == "executed") else 0.0
+    else:
+        fill_count = 1.0 if not is_live else 0.0
 
-    if status == "canceled" or fill_count == 0.0:
+    if is_live and (status != "executed" and fill_count <= 0.0):
+        analytics.info(f"Sell order for {ticker} did not immediately fill (status={status}, fill_count={fill_count}). Position remains open.")
+        return None
+    elif status == "canceled" or fill_count == 0.0:
         return None
 
     pnl_cents = (current_price_cents - entry_price) * count

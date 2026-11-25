@@ -81,9 +81,10 @@ class Settler:
                 if "yes_total_cost_dollars" in s_info or "no_total_cost_dollars" in s_info:
                     try:
                         cost = float(s_info.get("yes_total_cost_dollars", 0.0)) + float(s_info.get("no_total_cost_dollars", 0.0)) + float(s_info.get("fee_cost", 0.0))
-                        raw_rev = float(s_info.get("revenue", s_info.get("value", 0.0)))
-                        rev = (raw_rev / 100.0) if raw_rev > 1.0 else raw_rev
-                        pnl_cents = int(round((rev - cost) * 100))
+                        val = float(s_info.get("value", 0.0))
+                        raw_rev = float(s_info.get("revenue") or 0.0)
+                        effective_payout = raw_rev if raw_rev > 0 else (val / 100.0)
+                        pnl_cents = int(round((effective_payout - cost) * 100))
                     except Exception:
                         pnl_cents = self.compute_pnl_cents(
                             side=pos["side"],
@@ -149,5 +150,25 @@ class Settler:
                 "pnl_cents": pnl_cents,
                 "status": PositionStatus.SETTLED,
             })
+
+        # 4. In live mode, reconcile all previously settled positions against Kalshi official records
+        if getattr(self.client, "live_orders", False) and live_settlements and hasattr(self.db, "conn"):
+            try:
+                cursor = self.db.conn.cursor()
+                cursor.execute("SELECT client_order_id, ticker, pnl_cents FROM positions WHERE status='SETTLED'")
+                for cid, t, db_pnl in cursor.fetchall():
+                    if t in live_settlements:
+                        s = live_settlements[t]
+                        if "yes_total_cost_dollars" in s or "no_total_cost_dollars" in s:
+                            c = float(s.get("yes_total_cost_dollars", 0.0)) + float(s.get("no_total_cost_dollars", 0.0)) + float(s.get("fee_cost", 0.0))
+                            v = float(s.get("value", 0.0))
+                            r = float(s.get("revenue") or 0.0)
+                            payout = r if r > 0 else (v / 100.0)
+                            official_pnl = int(round((payout - c) * 100))
+                            if db_pnl != official_pnl:
+                                cursor.execute("UPDATE positions SET pnl_cents = ? WHERE client_order_id = ?", (official_pnl, cid))
+                                self.db.conn.commit()
+            except Exception:
+                pass
 
         return settled_positions
